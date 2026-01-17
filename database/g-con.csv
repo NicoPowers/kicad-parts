@@ -1,3 +1,3 @@
-IPN,MPN,Manufacturer,Value,Description,Symbol,Footprint,Pins,Datasheet,LCSC
-CON-0000-0002,S2B-PH-SM4-TB,JST Sales America Inc.,JST PH,CONN HEADER SMD R/A 2POS 2MM,g-con:Conn_01x02_MountingPin,g-con:JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal,2,https://www.jst-mfg.com/product/pdf/eng/ePH.pdf,C295747
-CON-0001-0000,U.FL-R-SMT-1(10),Hirose Electric Co Ltd,U.FL,CONN U.FL RCPT STR 50 OHM SMD,g-con:Conn_Coaxial,g-con:U.FL_Hirose_U.FL-R-SMT-1_Vertical,2,https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/4832/EDC3-302540-10.tif.pdf,C88373
+"IPN","MPN","Manufacturer","Value","Description","Symbol","Footprint","Pins","Datasheet","LCSC"
+"CON-0000-0002","S2B-PH-SM4-TB","JST Sales America Inc.","JST PH","CONN HEADER SMD R/A 2POS 2MM","g-con:Conn_01x02_MountingPin","g-con:JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal",2,"https://www.jst-mfg.com/product/pdf/eng/ePH.pdf","C295747"
+"CON-0001-0000","U.FL-R-SMT-1(10)","Hirose Electric Co Ltd","U.FL","CONN U.FL RCPT STR 50 OHM SMD","g-con:Conn_Coaxial","g-con:U.FL_Hirose_U.FL-R-SMT-1_Vertical",2,"https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/4832/EDC3-302540-10.tif.pdf","C5137195"
