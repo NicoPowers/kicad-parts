@@ -1,2 +1,5 @@
-IPN,MPN,Manufacturer,Description,Symbol,Footprint,Inductance,Current,Datasheet,LCSC
-IND-0000-0221,744918222,Würth Elektronik,FIXED IND 222NH 3A 35 MOHM SMD,g-pas:L,g-ind:L_Wurth_WE-CAIR-5910,222n,3A,https://www.we-online.com/components/products/datasheet/744918222.pdf,C2043319
+"IPN","MPN","Manufacturer","Description","Symbol","Footprint","Inductance","Current","Datasheet","LCSC"
+"IND-0000-0221",744918222,"Würth Elektronik","FIXED IND 222NH 3A 35 MOHM SMD","g-pas:L","g-ind:L_Wurth_WE-CAIR-5910","222n","3A","https://www.we-online.com/components/products/datasheet/744918222.pdf","C2043319"
+"IND-0000-0820",744912182,"Würth Elektronik","FIXED IND 82NH 2.5A 9.4 MOHM SMD","g-pas:L","g-ind:L_Wurth_WE-CAIR-4248","82n","2.5A","https://www.we-online.com/components/products/datasheet/744912182.pdf","C5178935"
+"IND-0000-0101",744912210,"Würth Elektronik","FIXED IND 100NH 1.7A 12.3 MOHM","g-pas:L","g-ind:L_Wurth_WE-CAIR-4248","100n","1.7A","https://www.we-online.com/components/products/datasheet/744912210.pdf","C5182193"
+"IND-0000-0151","SCA1812HR15GTT","Sunltech Tech","1.2A 100@150MHz 150nH 33mΩ 750MHz ±3% SMD,3.8x4.9mm Inductors (SMD) ROHS","g-pas:L","g-ind:L_Wurth_WE-CAIR-4248","150n","1.2A","https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8590440899370258432","C5178936"

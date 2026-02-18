@@ -1,13 +1,19 @@
-IPN,MPN,Manufacturer,Description,Resistance,Symbol,Footprint,Tolerance,Datasheet,LCSC
-RES-0000-3302,RC0603FR-0733KL,Yageo,RES 33K OHM 1% 1/10W 0603,33K,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C4216
-RES-0000-6202,RC0603FR-1362KL,Yageo,RES 62K OHM 1% 1/10W 0603,62K,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C23221
-RES-0000-0470,RC0603FR-0747RL,Yageo,RES 47 OHM 1% 1/10W 0603,47,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C23182
-RES-0000-4701,RC0603FR-074K7L,Yageo,RES 4.7K OHM 1% 1/10W 0603,4K7,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C23162
-RES-0000-3002,RC0603FR-0730KL,Yageo,RES 30K OHM 1% 1/10W 0603,30K,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C22984
-RES-0000-1802,RC0603FR-0718KL,Yageo,RES 18K OHM 1% 1/10W 0603,18K,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C25810
-RES-0000-1801,RC0603FR-071K8L,Yageo,RES 1.8K OHM 1% 1/10W 0603,1K8,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C4177
-RES-0000-5100,RC0603FR-07510RL,Yageo,RES 510 OHM 1% 1/10W 0603,510,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C23193
-RES-0000-1001,RC0603FR-071KL,Yageo,RES 1K OHM 1% 1/10W 0603,1K,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C21190
-RES-0000-1500,RC0603FR-07150RL,Yageo,RES 150 OHM 1% 1/10W 0603,150,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C22808
-RES-0000-1002,RC0603FR-0710KL,Yageo,RES 10K OHM 1% 1/10W 0603,10K,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C25804
-RES-0000-1003,RC0603FR-07100KL,Yageo,RES 100K OHM 1% 1/10W 0603,100K,g-pas:R_US,g-res:R_0603_1608Metric,1%,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,C25803
+"IPN","MPN","Manufacturer","Description","Resistance","Symbol","Footprint","Tolerance","Datasheet","LCSC"
+"RES-0000-3302","RC0603FR-0733KL","Yageo","RES 33K OHM 1% 1/10W 0603","33K","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C4216"
+"RES-0000-6202","RC0603FR-1362KL","Yageo","RES 62K OHM 1% 1/10W 0603","62K","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C23221"
+"RES-0000-0470","RC0603FR-0747RL","Yageo","RES 47 OHM 1% 1/10W 0603","47E","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C23182"
+"RES-0000-4701","RC0603FR-074K7L","Yageo","RES 4.7K OHM 1% 1/10W 0603","4K7","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C23162"
+"RES-0000-3002","RC0603FR-0730KL","Yageo","RES 30K OHM 1% 1/10W 0603","30K","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C22984"
+"RES-0000-1802","RC0603FR-0718KL","Yageo","RES 18K OHM 1% 1/10W 0603","18K","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C25810"
+"RES-0000-1801","RC0603FR-071K8L","Yageo","RES 1.8K OHM 1% 1/10W 0603","1K8","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C4177"
+"RES-0000-5100","RC0603FR-07510RL","Yageo","RES 510 OHM 1% 1/10W 0603","510E","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C23193"
+"RES-0000-1001","RC0603FR-071KL","Yageo","RES 1K OHM 1% 1/10W 0603","1K","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C21190"
+"RES-0000-1500","RC0603FR-07150RL","Yageo","RES 150 OHM 1% 1/10W 0603","150E","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C22808"
+"RES-0000-1002","RC0603FR-0710KL","Yageo","RES 10K OHM 1% 1/10W 0603","10K","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C25804"
+"RES-0000-1003","RC0603FR-07100KL","Yageo","RES 100K OHM 1% 1/10W 0603","100K","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C25803"
+"RES-0000-1202","RC0603FR-0712KL","Yageo","RES 12K OHM 1% 1/10W 0603","12K","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C22790"
+"RES-0000-2001","RC0603FR-072KL","Yageo","RES 2K OHM 1% 1/10W 0603","2K","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C22975"
+"RES-0000-1000","RC0603FR-07100RL","Yageo","RES 100 OHM 1% 1/10W 0603","100E","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C22775"
+"RES-0000-3901","RC0603FR-133K9L","Yageo","RES 3.9K OHM 1% 1/10W 0603","3K9","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C23018"
+"RES-0000-8200","RC0603FR-13820RL","Yageo","RES 820 OHM 1% 1/10W 0603","820E","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C23253"
+"RES-0000-1800","RC0603FR-07180RL","Yageo","RES 180 OHM 1% 1/10W 0603","180E","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C22828"

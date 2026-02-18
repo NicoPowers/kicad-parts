@@ -1,5 +1,8 @@
-IPN,MPN,Manufacturer,Description,Symbol,Footprint,Capacitance,Voltage,Material,Tolerance,Datasheet,LCSC
-CAP-0000-0103,GCM188R71H103KA37D,Murata Electronics,CAP CER 10NF 50V X7R 0603,g-pas:C,g-cap:C_0603_1608Metric,10n,50V,X7R,10%,https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM188R71H103KA37-01.pdf,C57112
-CAP-0000-02F0,CL10C020CB8NNNC,Samsung Electro-Mechanics,CAP CER 2PF 50V C0G/NP0 0603,g-pas:C,g-cap:C_0603_1608Metric,2p,50V,NP0,±0.25pF,https://weblib.samsungsem.com/mlcc/mlcc-ec-data-sheet.do?partNumber=CL05Y105KP6VPN,C1650
-CAP-0000-0390,C0603C390J5GACTU,KEMET,CAP CER 39PF 50V C0G/NP0 0603,g-pas:C,g-cap:C_0603_1608Metric,39p,50V,NP0,±5%,https://www.yageogroup.com/content/datasheet/asset/file/KEM_C1003_C0G_SMD,C107049
-CAP-0000-0180,C0603C180J5GACTU,KEMET,CAP CER 18PF 50V C0G/NP0 0603,g-pas:C,g-cap:C_0603_1608Metric,18p,50V,NP0,±5%,https://www.yageogroup.com/content/datasheet/asset/file/KEM_C1003_C0G_SMD,C1647
+"IPN","MPN","Manufacturer","Description","Symbol","Footprint","Capacitance","Voltage","Material","Tolerance","Datasheet","LCSC"
+"CAP-0000-0103","GCM188R71H103KA37D","Murata Electronics","CAP CER 10NF 50V X7R 0603","g-pas:C","g-cap:C_0603_1608Metric","10n","50V","X7R","±10%","https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM188R71H103KA37-01.pdf","C57112"
+"CAP-0000-0020","CL10C020CB8NNNC","Samsung Electro-Mechanics","CAP CER 2PF 50V C0G/NP0 0603","g-pas:C","g-cap:C_0603_1608Metric","2p","50V","NP0","±0.25pF","https://weblib.samsungsem.com/mlcc/mlcc-ec-data-sheet.do?partNumber=CL05Y105KP6VPN","C1650"
+"CAP-0000-0390","C0603C390J5GACTU","KEMET","CAP CER 39PF 50V C0G/NP0 0603","g-pas:C","g-cap:C_0603_1608Metric","39p","50V","NP0","±5%","https://www.yageogroup.com/content/datasheet/asset/file/KEM_C1003_C0G_SMD","C107049"
+"CAP-0000-0180","C0603C180J5GACTU","KEMET","CAP CER 18PF 50V C0G/NP0 0603","g-pas:C","g-cap:C_0603_1608Metric","18p","50V","NP0","±5%","https://www.yageogroup.com/content/datasheet/asset/file/KEM_C1003_C0G_SMD","C1647"
+"CAP-0000-0270","C0603C270J5GACTU","KEMET","CAP CER 27PF 50V C0G/NP0 0603","g-pas:C","g-cap:C_0603_1608Metric","27p","50V","NP0","±5%","https://www.yageogroup.com/content/datasheet/asset/file/KEM_C1003_C0G_SMD","C107045"
+"CAP-0000-0102","CL10B102KB8NNNC","Samsung Electro-Mechanics","CAP CER 1NF 50V X7R 0603","g-pas:C","g-cap:C_0603_1608Metric","1n","50V","NP0","±10%","https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8579706978448228352","C1588"
+"CAP-0000-0040","0603CG4R0C500NT","FH (Guangdong Fenghua Advanced Tech)","CAP CER 4PF 50V C0G/NP0 0603","g-pas:C","g-cap:C_0603_1608Metric","4p","50V","NP0","±0.25pF","https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588900709887070208","C1668"
