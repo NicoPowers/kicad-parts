@@ -16,7 +16,7 @@
 			)
 		)
 	)
-	(property "Value" ""
+	(property "Value" "Val**"
 		(at 0.1 1.9 0)
 		(layer "F.Fab")
 		(hide yes)

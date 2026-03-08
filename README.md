@@ -34,7 +34,7 @@ Initially, this part database will be optimized for low-cost rapid prototyping a
 - https://jlcpcb.com/Parts
 - https://www.seeedstudio.com/opl.html
 
-(this may not be work out so the approach may change)
+(this may not work out so the approach may change)
 
 ## Directories
 - `database` - CSV files and the SQLite3 database file

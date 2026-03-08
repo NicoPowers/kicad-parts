@@ -1,0 +1,116 @@
+(footprint "L_Coilcraft_1008HQ_2520Metric"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(descr "Inductor, Coilcraft, 1008HQ_2520Metric, 2.92x2.79x2.03mm, (https://www.coilcraft.com/getmedia/d309e334-bba7-474c-baad-e9acd748f87a/1008hq.pdf), generated with kicad-footprint-generator gen_inductor.py")
+	(tags "hq")
+	(property "Reference" "REF**"
+		(at 0 -2.35 0)
+		(layer "F.Fab")
+		(uuid "32c7f51f-a1af-45c9-b684-c06303bbaeb7")
+		(effects
+			(font
+				(size 0.5 0.5)
+				(thickness 0.1)
+			)
+		)
+	)
+	(property "Value" "L_Coilcraft_1008HQ_2520Metric"
+		(at 0 2.35 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "b058cc23-899e-4976-b7b5-12a60302128e")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "3881faf8-d8e2-4664-a24b-feb211764e5d")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "3e3f9749-aa40-4bb8-8f80-40b333637352")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(fp_rect
+		(start -2 -1.5)
+		(end 2 1.5)
+		(stroke
+			(width 0.05)
+			(type default)
+		)
+		(fill no)
+		(layer "F.CrtYd")
+		(uuid "3bdb8b84-85fe-4db4-b6e7-87952e3d1bba")
+	)
+	(fp_rect
+		(start -1.5 -1)
+		(end 1.5 1)
+		(stroke
+			(width 0.1)
+			(type default)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "a069c183-9ea1-4c13-87dd-64eebeffc82c")
+	)
+	(fp_text user "REF**"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(uuid "9825b93e-3f48-47e8-8789-3028085d5610")
+		(effects
+			(font
+				(size 0.5 0.5)
+				(thickness 0.1)
+				(bold yes)
+			)
+		)
+	)
+	(pad "1" smd roundrect
+		(at -1.145 0)
+		(size 1.02 2.54)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.245098)
+		(uuid "657945d7-3983-4116-aed1-c9e8e0adf622")
+	)
+	(pad "2" smd roundrect
+		(at 1.145 0)
+		(size 1.02 2.54)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.245098)
+		(uuid "2fb610c9-24e4-461b-8137-89ddad48b01c")
+	)
+	(embedded_fonts no)
+	(model "${GITPLM_PARTS}/3d-models/L_Coilcraft_1008HQ.stp"
+		(offset
+			(xyz 0 0 0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz -90 -0 -90)
+		)
+	)
+)
