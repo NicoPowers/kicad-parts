@@ -17,7 +17,7 @@ If the symbol and footprint already exist, adding a new part is simple as:
 If you need to add a symbol or footprint, add to the matching `g-XXX.kicad_sym`, or `g-XXX.pretty` libraries.
 
 ## Implementation details
-The IPN (Internal Part Number) format used is specified in [this document](https://github.com/git-plm/parts/blob/main/partnumbers.md).
+The IPN (Internal Part Number) format used is specified in [this document](partnumbers.md).
 
 So we use the following flow:
 
