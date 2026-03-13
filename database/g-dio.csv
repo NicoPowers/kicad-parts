@@ -1,4 +1,4 @@
-"IPN","MPN","Value","Manufacturer","Description","Symbol","Footprint","Current","Voltage","Datasheet","LCSC","DigiKey_PN","Mouser_PN"
+"IPN","MPN","Value","Manufacturer","Description","Symbol","Footprint","Current","Voltage","Datasheet","LCSC","DigiKey_PN","Mouser_PN","DigiKey_Price","Mouser_Price","Price_Range","Price_LastSynced_UTC"
 "DIO-0000-0000","1SV324TPH3F","1SV324","Toshiba Semiconductor and Storage","DIODE VARACTOR 10V SINGLE USC","g-dis:D_Capacitance_Filled","g-dio:D_SOD-323","/","10V","https://toshiba.semicon-storage.com/info/1SV324_datasheet_en_20140301.pdf?did=2856&prodName=1SV324","C3272930"
 "DIO-0000-0001","1SV325,H3F(T","1SV325","Toshiba Semiconductor and Storage","DIODE VARACTOR 10V SINGLE ESC","g-dis:D_Capacitance_Filled","g-dio:D_SOD-523","/","10V","https://toshiba.semicon-storage.com/info/docget.jsp?did=2860&prodName=1SV325","C4153758"
 "DIO-0000-0002","BB133","BB133","Shikues","Diode VARACTOR 30V SINGLE ","g-dis:D_Capacitance_Filled","g-dio:D_SOD-323","/","30V","https://www.lcsc.com/datasheet/C5334579.pdf","C5334579"

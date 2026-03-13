@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 URL_COLUMNS = {"Datasheet", "LCSC", "DigiKey_PN", "Mouser_PN"}
+PRICE_COLUMNS = {"DigiKey_Price", "Mouser_Price", "Price_Range", "Price_LastSynced_UTC"}
 REQUIRED_COLUMNS = {"IPN", "Description", "Symbol", "Footprint"}
 NUMERIC_HINTS = {
     "Value",
@@ -61,5 +62,7 @@ def default_row_for_headers(headers: list[str]) -> dict[str, str]:
     for fixed in ("Symbol", "Footprint", "Manufacturer"):
         if fixed in row:
             row[fixed] = ""
+    if "Price_Range" in row and not row["Price_Range"]:
+        row["Price_Range"] = "?"
     return row
 

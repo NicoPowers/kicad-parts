@@ -1,4 +1,4 @@
-"IPN","MPN","Manufacturer","Description","Value","Symbol","Footprint","Tolerance","Datasheet","LCSC","DigiKey_PN","Mouser_PN"
+"IPN","MPN","Manufacturer","Description","Value","Symbol","Footprint","Tolerance","Datasheet","LCSC","DigiKey_PN","Mouser_PN","DigiKey_Price","Mouser_Price","Price_Range","Price_LastSynced_UTC"
 "RES-0000-0000","0603WAF0000T5E","UNI-ROYAL(Uniroyal Elec)","RES  0 OHM 1% 1/10W 0603","0","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8578255895094087680","C21189","",""
 "RES-0000-0470","RC0603FR-0747RL","Yageo","RES 47 OHM 1% 1/10W 0603","47","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C23182","",""
 "RES-0000-1000","RC0603FR-07100RL","Yageo","RES 100 OHM 1% 1/10W 0603","100","g-pas:R_US","g-res:R_0603_1608Metric","1%","https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L","C22775","",""

@@ -1,4 +1,4 @@
-"IPN","MPN","Manufacturer","Description","Symbol","Footprint","Value","Current","Datasheet","LCSC","DigiKey_PN","Mouser_PN"
+"IPN","MPN","Manufacturer","Description","Symbol","Footprint","Value","Current","Datasheet","LCSC","DigiKey_PN","Mouser_PN","DigiKey_Price","Mouser_Price","Price_Range","Price_LastSynced_UTC"
 "IND-0000-0221","744918222","Würth Elektronik","FIXED IND 222NH 3A 35 MOHM SMD","g-pas:L","g-ind:L_Wurth_WE-CAIR-5910","222n","3","https://www.we-online.com/components/products/datasheet/744918222.pdf","C2043319","",""
 "IND-0001-0820","744912182","Würth Elektronik","FIXED IND 82NH 2.5A 9.4 MOHM SMD","g-pas:L","g-ind:L_Wurth_WE-CAIR-4248","82n","2.5","https://www.we-online.com/components/products/datasheet/744912182.pdf","C5178935","",""
 "IND-0001-0101","744912210","Würth Elektronik","FIXED IND 100NH 1.7A 12.3 MOHM","g-pas:L","g-ind:L_Wurth_WE-CAIR-4248","100n","1.7","https://www.we-online.com/components/products/datasheet/744912210.pdf","C5182193","",""

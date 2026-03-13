@@ -1,4 +1,4 @@
-"IPN","Value","MPN","Manufacturer","Type","max(Vce)","max(Ic)","Description","Symbol","Footprint","Datasheet","LCSC","DigiKey_PN","Mouser_PN"
+"IPN","Value","MPN","Manufacturer","Type","max(Vce)","max(Ic)","Description","Symbol","Footprint","Datasheet","LCSC","DigiKey_PN","Mouser_PN","DigiKey_Price","Mouser_Price","Price_Range","Price_LastSynced_UTC"
 "TRS-0000-0000","MMBT5179","MMBT5179","onsemi","NPN",12,0.05,"RF TRANS NPN 12V 2GHZ SOT-23-3","g-dis:Q_NPN","g-SOT:SOT-23-3","https://www.onsemi.com/pub/Collateral/MMBT5179-D.PDF","C416012"
 "TRS-0000-0001","MMBT3904","MMBT3904-7-F","Diodes Incorporated","NPN",40,0.2,"Bipolar (BJT) Transistor NPN 40 V 200 mA 300MHz 300 mW Surface Mount SOT-23-3","g-dis:Q_NPN","g-SOT:SOT-23-3","https://www.diodes.com/assets/Datasheets/MMBT3904.pdf","C20526"
 "TRS-0001-0000","BSS138","BSS138","R+O","NMOS",50,0.34,"MOSFET N-CH 50V 340mA SOT-23","g-dis:Q_NMOS_GSD","g-SOT:SOT-23-3","https://www.lcsc.com/datasheet/C7420339.pdf","C7420339"

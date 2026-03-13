@@ -4,3 +4,4 @@ parts.sqlite
 secrets.env
 secrets.env
 __pycache__/
+logs/

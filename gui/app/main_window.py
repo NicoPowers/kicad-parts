@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QAction, QDesktopServices, QKeySequence, QUndoCommand, QUndoStack
+from PyQt6.QtGui import QAction, QColor, QDesktopServices, QKeySequence, QUndoCommand, QUndoStack
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QCompleter,
     QDockWidget,
     QFileDialog,
+    QHeaderView,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -18,7 +20,9 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
+    QProgressBar,
     QProgressDialog,
     QPushButton,
     QSplitter,
@@ -42,16 +46,31 @@ from .kicad_lib import KiCadLibraryIndex, reference_from_footprint_path, referen
 from .lib_sync import copy_footprint, copy_symbol
 from .lib_viewer import FootprintViewer, SymbolViewer
 from .schema import default_row_for_headers, discover_category_schemas
+from .search import search_local_inventory
 from .si_parser import parse_si_value
 from .smart_form import SmartAddPartDialog
 from .submodule_manager import SubmoduleWorker, submodule_heads
 from .substitutes import SubstituteRecord, SubstitutesStore
 from .supplier_api import SupplierApiClient
-from .supplier_dialog import SupplierSearchDialog
+from .supplier_dialog import (
+    PnAssignProgressDialog,
+    PriceSyncProgressDialog,
+    PriceSyncWorker,
+    SupplierSearchDialog,
+)
 
 
 OPEN_URL_COLUMNS = {"Datasheet", "LCSC"}
-HEADER_DISPLAY_NAMES = {"DigiKey_PN": "DigiKey PN", "Mouser_PN": "Mouser PN"}
+HEADER_DISPLAY_NAMES = {
+    "DigiKey_PN": "DigiKey PN",
+    "Mouser_PN": "Mouser PN",
+    "DigiKey_Price": "DigiKey Price",
+    "Mouser_Price": "Mouser Price",
+    "Price_Range": "Price Range",
+    "Price_LastSynced_UTC": "Price Last Synced (UTC)",
+}
+PRICE_COLUMNS = ("DigiKey_Price", "Mouser_Price", "Price_Range", "Price_LastSynced_UTC")
+HIDDEN_UI_COLUMNS = {"DigiKey_Price", "Mouser_Price", "Price_LastSynced_UTC"}
 IPN_TOOLTIPS = {
     "res": "IPN format: RES-NNNN-VVVV where VVVV encodes the resistance value using E96 standard",
     "cap": "IPN format: CAP-NNNN-VVVV where VVVV encodes capacitance in pF notation",
@@ -218,6 +237,7 @@ class MainWindow(QMainWindow):
 
         self.substitutes = SubstitutesStore(self.database_dir / "substitutes.csv")
         self.supplier_api = SupplierApiClient(self.workspace_root / "secrets.env")
+        self._price_sync_worker: PriceSyncWorker | None = None
         self.library_index = KiCadLibraryIndex(self.workspace_root)
 
         self._build_ui()
@@ -234,6 +254,8 @@ class MainWindow(QMainWindow):
 
         self.table = QTableWidget()
         self.table.setSortingEnabled(True)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed
         )
@@ -249,6 +271,8 @@ class MainWindow(QMainWindow):
         self.table.itemChanged.connect(self._on_table_item_changed)
         self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._open_main_table_context_menu)
 
         self.sub_table = QTableWidget(0, 6)
         self.sub_table.setHorizontalHeaderLabels(["IPN", "MPN", "Manufacturer", "Datasheet", "Supplier", "SupplierPN"])
@@ -318,7 +342,8 @@ class MainWindow(QMainWindow):
 
         search_action = QAction("Search", self)
         search_action.setShortcut(QKeySequence.StandardKey.Find)
-        search_action.triggered.connect(self.search_all)
+        search_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        search_action.triggered.connect(self._handle_find_shortcut)
         self.toolbar.addAction(search_action)
 
         filter_action = QAction("Filter Column", self)
@@ -453,6 +478,7 @@ class MainWindow(QMainWindow):
     def _load_categories(self) -> None:
         for schema in self.schemas:
             doc = read_csv(schema.csv_path)
+            self._ensure_price_columns(doc)
             model = CsvTableModel(doc.headers, doc.rows)
             model.dirtyChanged.connect(lambda dirty, key=schema.key: self._set_dirty(key, dirty))
             self.categories[schema.key] = CategoryState(document=doc, model=model)
@@ -463,6 +489,20 @@ class MainWindow(QMainWindow):
             self.sidebar.addItem(item)
         if self.sidebar.count():
             self.sidebar.setCurrentRow(0)
+
+    def _ensure_price_columns(self, document: CsvDocument) -> None:
+        changed = False
+        for column in PRICE_COLUMNS:
+            if column not in document.headers:
+                document.headers.append(column)
+                changed = True
+        if not changed:
+            return
+        for row in document.rows:
+            for column in PRICE_COLUMNS:
+                row.setdefault(column, "")
+            if not row.get("Price_Range", "").strip():
+                row["Price_Range"] = "?"
 
     def _category_label(self, key: str, dirty: bool) -> str:
         base = key.upper()
@@ -519,7 +559,14 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(model.rows[row_idx].get(header, ""))
                 if header in OPEN_URL_COLUMNS:
                     item.setForeground(Qt.GlobalColor.blue)
+                if header == "Price_Range":
+                    self._decorate_price_range_item(item, model.rows[row_idx])
                 self.table.setItem(row_idx, col_idx, item)
+        header_view = self.table.horizontalHeader()
+        for col_idx, header in enumerate(model.headers):
+            if header in {"Symbol", "Footprint"}:
+                header_view.setSectionResizeMode(col_idx, QHeaderView.ResizeMode.ResizeToContents)
+            self.table.setColumnHidden(col_idx, header in HIDDEN_UI_COLUMNS)
         self.table.blockSignals(False)
         if model.rowCount() > 0:
             self.table.setCurrentCell(0, 0)
@@ -554,6 +601,9 @@ class MainWindow(QMainWindow):
         if not self.current_category:
             return
         header = self.categories[self.current_category].model.headers[item.column()]
+        if header == "Price_Range":
+            self._start_async_price_sync(item)
+            return
         if header in {"Symbol", "Footprint"}:
             self._update_preview_for_value(header, item.text().strip())
             return
@@ -714,6 +764,18 @@ class MainWindow(QMainWindow):
         item = self.table.item(selected, ipn_col)
         return item.text().strip() if item else ""
 
+    def _selected_rows(self) -> list[int]:
+        selection_model = self.table.selectionModel()
+        if selection_model:
+            rows = sorted({idx.row() for idx in selection_model.selectedRows()})
+            if rows:
+                return rows
+            rows = sorted({idx.row() for idx in selection_model.selectedIndexes()})
+            if rows:
+                return rows
+        current = self.table.currentRow()
+        return [current] if current >= 0 else []
+
     def _refresh_substitutes_panel(self) -> None:
         ipn = self._selected_ipn()
         records = self.substitutes.by_ipn(ipn) if ipn else []
@@ -769,6 +831,368 @@ class MainWindow(QMainWindow):
 
     def _supplier_dialog_factory(self, parent):
         return SupplierSearchDialog(self.supplier_api, parent)
+
+    def _active_supplier_dialog(self) -> SupplierSearchDialog | None:
+        active = QApplication.activeModalWidget() or QApplication.activeWindow()
+        if isinstance(active, SupplierSearchDialog):
+            return active
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, SupplierSearchDialog) and widget.isVisible() and widget.isActiveWindow():
+                return widget
+        return None
+
+    def _handle_find_shortcut(self) -> None:
+        active_supplier = self._active_supplier_dialog()
+        if active_supplier is not None:
+            active_supplier.focus_query()
+            return
+        self.search_all()
+
+    def _local_search_summary(self, query: str):
+        categories = {category: state.model.rows for category, state in self.categories.items()}
+        return search_local_inventory(categories, query, limit=60)
+
+    def _find_row_by_ipn(self, category: str, ipn: str) -> int:
+        state = self.categories.get(category)
+        if state is None:
+            return -1
+        for idx, row in enumerate(state.model.rows):
+            if row.get("IPN", "").strip() == ipn:
+                return idx
+        return -1
+
+    def _apply_row_updates(
+        self,
+        category: str,
+        ipn: str,
+        updates: dict[str, str],
+        *,
+        render: bool = True,
+    ) -> dict[str, str] | None:
+        state = self.categories.get(category)
+        if state is None:
+            return None
+        row_idx = self._find_row_by_ipn(category, ipn)
+        if row_idx < 0:
+            return None
+        model = state.model
+        changed_pairs: list[tuple[int, str, str]] = []
+        for header, new_value in updates.items():
+            if header not in model.headers:
+                continue
+            col = model.headers.index(header)
+            old_value = model.rows[row_idx].get(header, "")
+            if old_value == new_value:
+                continue
+            changed_pairs.append((col, old_value, new_value))
+        if not changed_pairs:
+            return model.rows[row_idx].copy()
+        self.undo_stack.beginMacro("Update local part from search")
+        try:
+            for col, old_value, new_value in changed_pairs:
+                self.undo_stack.push(SetCellCommand(model, row_idx, col, old_value, new_value))
+        finally:
+            self.undo_stack.endMacro()
+        if render and self.current_category == category:
+            self._render_current_table()
+        return model.rows[row_idx].copy()
+
+    def _apply_supplier_assignment_row(self, category: str, ipn: str, updates: dict[str, str]) -> bool:
+        return self._apply_row_updates(category, ipn, updates, render=False) is not None
+
+    def _sync_local_price_range(self, category: str, ipn: str) -> dict[str, str] | None:
+        state = self.categories.get(category)
+        if state is None:
+            return None
+        row_idx = self._find_row_by_ipn(category, ipn)
+        if row_idx < 0:
+            return None
+        row = state.model.rows[row_idx]
+        digikey_pn = row.get("DigiKey_PN", "").strip()
+        mouser_pn = row.get("Mouser_PN", "").strip()
+        mpn_hint = row.get("MPN", "").strip()
+        if not digikey_pn and not mouser_pn:
+            updates = {
+                "DigiKey_Price": "",
+                "Mouser_Price": "",
+                "Price_Range": "?",
+                "Price_LastSynced_UTC": "",
+            }
+            return self._apply_row_updates(category, ipn, updates)
+        prices = self.supplier_api.fetch_supplier_prices(digikey_pn, mouser_pn, mpn_hint=mpn_hint)
+        updates = {
+            "DigiKey_Price": prices.get("DigiKey_Price", ""),
+            "Mouser_Price": prices.get("Mouser_Price", ""),
+            "Price_Range": prices.get("Price_Range", "?") or "?",
+            "Price_LastSynced_UTC": datetime.now(timezone.utc).isoformat(),
+        }
+        return self._apply_row_updates(category, ipn, updates)
+
+    def _start_async_price_sync(self, table_item: QTableWidgetItem) -> None:
+        if not self.current_category:
+            return
+        ipn = self._selected_ipn()
+        if not ipn:
+            return
+        state = self.categories.get(self.current_category)
+        if state is None:
+            return
+        row_idx = self._find_row_by_ipn(self.current_category, ipn)
+        if row_idx < 0:
+            return
+        row = state.model.rows[row_idx]
+        dk_pn = row.get("DigiKey_PN", "").strip()
+        mouser_pn = row.get("Mouser_PN", "").strip()
+        if not dk_pn and not mouser_pn:
+            return
+        if self._price_sync_worker and self._price_sync_worker.isRunning():
+            return
+        loading = QProgressBar()
+        loading.setRange(0, 0)
+        loading.setTextVisible(False)
+        loading.setMaximumHeight(20)
+        self.table.setCellWidget(table_item.row(), table_item.column(), loading)
+
+        self._price_sync_worker = PriceSyncWorker(
+            self.supplier_api, dk_pn, mouser_pn,
+            row.get("MPN", "").strip(),
+            self.current_category, ipn,
+        )
+        self._price_sync_worker.finished_prices.connect(self._on_main_price_sync_done)
+        self._price_sync_worker.failed.connect(self._on_main_price_sync_failed)
+        self._price_sync_worker.start()
+
+    def _on_main_price_sync_done(self, prices: dict) -> None:
+        category = prices.pop("_category", "")
+        ipn = prices.pop("_ipn", "")
+        timestamp = prices.pop("_timestamp", "")
+        updates = {
+            "DigiKey_Price": prices.get("DigiKey_Price", ""),
+            "Mouser_Price": prices.get("Mouser_Price", ""),
+            "Price_Range": prices.get("Price_Range", "?") or "?",
+            "Price_LastSynced_UTC": timestamp,
+        }
+        self._apply_row_updates(category, ipn, updates)
+        if self.current_category == category:
+            self._render_current_table()
+
+    def _on_main_price_sync_failed(self, message: str) -> None:
+        self._render_current_table()
+        self.status.showMessage(f"Price sync failed: {message[:80]}", 5000)
+
+    def _local_row_update_from_search(self, category: str, ipn: str, updates: dict[str, str]) -> dict[str, str] | None:
+        return self._apply_row_updates(category, ipn, updates)
+
+    def _decorate_price_range_item(self, item: QTableWidgetItem, row: dict[str, str]) -> None:
+        price_range = (row.get("Price_Range", "") or "").strip() or "?"
+        item.setText(price_range)
+        last_sync = (row.get("Price_LastSynced_UTC", "") or "").strip()
+        digikey_price = (row.get("DigiKey_Price", "") or "").strip() or "Not Specified"
+        mouser_price = (row.get("Mouser_Price", "") or "").strip() or "Not Specified"
+        item.setToolTip(
+            "\n".join(
+                [
+                    f"DigiKey: {digikey_price}",
+                    f"Mouser: {mouser_price}",
+                    f"Last Synced: {last_sync or 'Never'}",
+                ]
+            )
+        )
+        if not last_sync:
+            item.setBackground(QColor("#4a2f2f"))
+            return
+        try:
+            parsed = datetime.fromisoformat(last_sync.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            stale = (datetime.now(timezone.utc) - parsed) > timedelta(days=7)
+        except ValueError:
+            stale = True
+        item.setBackground(QColor("#4a4930") if stale else QColor(Qt.GlobalColor.transparent))
+
+    def _open_search_dialog(self, query: str, *, force_remote: bool = False, exact_mpn: bool = False) -> None:
+        query_text = query.strip()
+        dialog = SupplierSearchDialog(
+            self.supplier_api,
+            self,
+            local_search=self._local_search_summary,
+            local_row_update=self._local_row_update_from_search,
+        )
+        if query_text:
+            dialog.query.setText(query_text)
+            dialog.run_search(force_remote=force_remote, exact_mpn=exact_mpn)
+        else:
+            dialog.focus_query()
+        dialog.exec()
+
+    def _row_text_by_header(self, row: int, header: str) -> str:
+        if not self.current_category:
+            return ""
+        headers = self.categories[self.current_category].model.headers
+        if header not in headers:
+            return ""
+        col = headers.index(header)
+        item = self.table.item(row, col)
+        return item.text().strip() if item else ""
+
+    @staticmethod
+    def _looks_like_url(value: str) -> bool:
+        return value.startswith("http://") or value.startswith("https://")
+
+    def _open_main_table_context_menu(self, pos) -> None:
+        if not self.current_category:
+            return
+        item = self.table.itemAt(pos)
+        if item is None:
+            return
+        row = item.row()
+        selected_rows = self._selected_rows()
+        if row not in selected_rows:
+            self.table.setCurrentCell(row, item.column())
+            selected_rows = [row]
+
+        if len(selected_rows) > 1:
+            self._open_multi_row_context_menu(pos, selected_rows)
+        else:
+            self._open_single_row_context_menu(pos, row)
+
+    def _open_single_row_context_menu(self, pos, row: int) -> None:
+        datasheet_url = self._row_text_by_header(row, "Datasheet")
+        browser_url = ""
+        for header in ("DigiKey_PN", "Mouser_PN", "LCSC", "Datasheet"):
+            candidate = self._row_text_by_header(row, header)
+            if self._looks_like_url(candidate):
+                browser_url = candidate
+                break
+        description = self._row_text_by_header(row, "Description")
+        value = self._row_text_by_header(row, "Value")
+        mpn = self._row_text_by_header(row, "MPN")
+        similar_query = " ".join(part for part in (description, value) if part).strip()
+
+        menu = QMenu(self)
+        open_datasheet_action = QAction("Open datasheet", self)
+        open_browser_action = QAction("Open in browser", self)
+        search_similar_action = QAction("Search similar specs", self)
+        search_same_mpn_action = QAction("Search same MPN", self)
+        assign_supplier_action = QAction("Assign DigiKey + Mouser PN", self)
+        sync_prices_action = QAction("Sync Prices", self)
+
+        open_datasheet_action.setEnabled(self._looks_like_url(datasheet_url))
+        open_browser_action.setEnabled(self._looks_like_url(browser_url))
+        search_similar_action.setEnabled(bool(similar_query))
+        search_same_mpn_action.setEnabled(bool(mpn))
+        assign_supplier_action.setEnabled(bool(mpn))
+        dk_pn = self._row_text_by_header(row, "DigiKey_PN")
+        mouser_pn = self._row_text_by_header(row, "Mouser_PN")
+        sync_prices_action.setEnabled(bool(dk_pn or mouser_pn))
+
+        open_datasheet_action.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(datasheet_url)))
+        open_browser_action.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(browser_url)))
+        search_similar_action.triggered.connect(lambda: self._open_search_dialog(similar_query, force_remote=False))
+        search_same_mpn_action.triggered.connect(lambda: self._open_search_dialog(mpn, exact_mpn=True))
+        assign_supplier_action.triggered.connect(
+            lambda _checked=False, rows=[row]: self._assign_supplier_pns_for_rows(rows),
+        )
+        sync_prices_action.triggered.connect(
+            lambda _checked=False, rows=[row]: self._sync_prices_for_rows(rows),
+        )
+
+        menu.addAction(open_datasheet_action)
+        menu.addAction(open_browser_action)
+        menu.addSeparator()
+        menu.addAction(search_similar_action)
+        menu.addAction(search_same_mpn_action)
+        menu.addSeparator()
+        menu.addAction(assign_supplier_action)
+        menu.addAction(sync_prices_action)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _open_multi_row_context_menu(self, pos, selected_rows: list[int]) -> None:
+        has_mpn = all(bool(self._row_text_by_header(r, "MPN")) for r in selected_rows)
+        has_pn = any(
+            self._row_text_by_header(r, "DigiKey_PN") or self._row_text_by_header(r, "Mouser_PN")
+            for r in selected_rows
+        )
+
+        menu = QMenu(self)
+        count = len(selected_rows)
+
+        assign_action = QAction(f"Assign DigiKey + Mouser PN ({count} items)", self)
+        assign_action.setEnabled(has_mpn)
+        assign_action.triggered.connect(
+            lambda _checked=False, rows=selected_rows.copy(): self._assign_supplier_pns_for_rows(rows),
+        )
+
+        sync_action = QAction(f"Sync Prices ({count} items)", self)
+        sync_action.setEnabled(has_pn)
+        sync_action.triggered.connect(
+            lambda _checked=False, rows=selected_rows.copy(): self._sync_prices_for_rows(rows),
+        )
+
+        menu.addAction(assign_action)
+        menu.addAction(sync_action)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _assign_supplier_pns_for_rows(self, rows: list[int]) -> None:
+        if not self.current_category or not rows:
+            return
+        assignments: list[tuple[str, str, str]] = []
+        for row in rows:
+            ipn = self._row_text_by_header(row, "IPN")
+            mpn = self._row_text_by_header(row, "MPN")
+            if not ipn or not mpn:
+                continue
+            assignments.append((self.current_category, ipn, mpn))
+        if not assignments:
+            QMessageBox.information(self, "Assign DigiKey + Mouser PN", "No valid rows selected for assignment.")
+            return
+        dialog = PnAssignProgressDialog(
+            self.supplier_api,
+            assignments,
+            on_row_update=self._apply_supplier_assignment_row,
+            parent=self,
+        )
+        dialog.exec()
+        if self.current_category:
+            self._render_current_table()
+
+    def _sync_prices_for_rows(self, rows: list[int]) -> None:
+        if not self.current_category or not rows:
+            return
+        state = self.categories.get(self.current_category)
+        if state is None:
+            return
+        assignments: list[tuple[str, str, str]] = []
+        label_lookup: dict[tuple[str, str], str] = {}
+        for row in rows:
+            ipn = self._row_text_by_header(row, "IPN")
+            if not ipn:
+                continue
+            row_idx = self._find_row_by_ipn(self.current_category, ipn)
+            if row_idx < 0:
+                continue
+            row_data = state.model.rows[row_idx]
+            dk_pn = row_data.get("DigiKey_PN", "").strip()
+            mouser_pn = row_data.get("Mouser_PN", "").strip()
+            if not dk_pn and not mouser_pn:
+                continue
+            mpn_hint = row_data.get("MPN", "").strip()
+            packed = f"{dk_pn}\t{mouser_pn}\t{mpn_hint}"
+            assignments.append((self.current_category, ipn, packed))
+            label_lookup[(self.current_category, ipn)] = mpn_hint or ipn
+        if not assignments:
+            QMessageBox.information(self, "Sync Prices", "No rows with supplier PNs to sync.")
+            return
+        dialog = PriceSyncProgressDialog(
+            self.supplier_api,
+            assignments,
+            label_lookup,
+            on_row_update=self._apply_supplier_assignment_row,
+            parent=self,
+        )
+        dialog.exec()
+        if self.current_category:
+            self._render_current_table()
 
     def add_part(self) -> None:
         if not self.current_category:
@@ -830,29 +1254,8 @@ class MainWindow(QMainWindow):
         self._render_current_table()
 
     def search_all(self) -> None:
-        query, ok = QInputDialog.getText(self, "Search", "Search IPN / MPN / Description / Value")
-        if not ok or not query.strip():
-            return
-        lines: list[str] = []
-        query_text = query.strip()
-        needle = query_text.lower()
-        parsed_query = None
-        try:
-            parsed_query = parse_si_value(query_text)
-        except Exception:
-            parsed_query = None
-        for category, state in self.categories.items():
-            for row in state.model.rows:
-                value_text = row.get("Value", "")
-                hay = " ".join((row.get("IPN", ""), row.get("MPN", ""), row.get("Description", ""), value_text)).lower()
-                if needle in hay or (
-                    parsed_query is not None and value_text and self._si_values_equivalent(parsed_query, value_text)
-                ):
-                    lines.append(f"{category}: {row.get('IPN', '')} | {row.get('MPN', '')} | {row.get('Description', '')}")
-        if not lines:
-            QMessageBox.information(self, "Search", "No matches")
-            return
-        QMessageBox.information(self, "Search results", "\n".join(lines[:200]))
+        ipn = self._selected_ipn()
+        self._open_search_dialog(ipn, force_remote=False)
 
     def filter_column(self) -> None:
         if not self.current_category:

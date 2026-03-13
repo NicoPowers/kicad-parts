@@ -1,4 +1,4 @@
-IPN,MPN,Manufacturer,Description,Symbol,Footprint,Datasheet,LCSC,DigiKey_PN,Mouser_PN
+IPN,MPN,Manufacturer,Description,Symbol,Footprint,Datasheet,LCSC,DigiKey_PN,Mouser_PN,DigiKey_Price,Mouser_Price,Price_Range,Price_LastSynced_UTC
 CPD-0001-0005,D5V0L1B2S9-7,Diodes Inc.,"Bi-dir TVS Diode, 5V",Device:D_TVS_Filled,Diode_SMD:D_SOD-923,https://www.diodes.com/assets/Datasheets/D5V0L1B2S9.pdf
 CPD-0002-0005,ESD9101P2T5G,On Semiconductor,"ESD Diode, 5V",g-cpd:D_ESD,Diode_SMD:D_SOD-923,https://www.onsemi.com/pdf/datasheet/esd9101-d.pdf
 CPD-0003-01R1,SMD100F-2,Littelfuse Inc.,PTC RESET FUSE 30V 1.1A 2SMD,Device:Polyfuse,g-cpd:RAYCHEM_SMD100F,https://www.littelfuse.com/~/media/electronics/product_specifications/resettable_ptcs/littelfuse_ptc_smd100f_2_product_specification.pdf.pdf

@@ -1,2 +1,2 @@
-IPN,MPN,Manufacturer,Description,Symbol,Footprint,Color,I-forward-max,V-forward,Wavelength,Datasheet,LCSC,DigiKey_PN,Mouser_PN
+IPN,MPN,Manufacturer,Description,Symbol,Footprint,Color,I-forward-max,V-forward,Wavelength,Datasheet,LCSC,DigiKey_PN,Mouser_PN,DigiKey_Price,Mouser_Price,Price_Range,Price_LastSynced_UTC
 OPT-0000-0000,KT-0805G,Hubei KENTO Elec,Emerald Green 0805 LED Indication – Discrete,g-dis:D_LED_Filled,g-opt:LED_0805_2012Metric,GRN,30mA,2.6V,525nm,https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8639582106239348736,C2297

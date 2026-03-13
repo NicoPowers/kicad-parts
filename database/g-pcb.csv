@@ -1,2 +1,2 @@
-"IPN","Description","Project link","LCSC","DigiKey_PN","Mouser_PN"
+"IPN","Description","Project link","LCSC","DigiKey_PN","Mouser_PN","DigiKey_Price","Mouser_Price","Price_Range","Price_LastSynced_UTC"
 "PCB-0000-0001","Oscillator for Broadcast FM","https://github.com/LieBtrau/MegawattKS_Radio_Design_101/tree/main/oscillator"
