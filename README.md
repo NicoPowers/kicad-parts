@@ -1,6 +1,58 @@
 # GitPLM Parts Project
 This repository has been forked from [git-plm/parts](https://github.com/git-plm/parts).  Check it out for excellent info on IPN numbering schemes.  All that info has been stripped out in this fork to focus on the KiCad parts database and its day-to-day usage.
 
+## API credentials (optional)
+Some scripts use DigiKey and Mouser APIs. To use them, copy the example secrets file and add your keys:
+
+```bash
+cp secrets.env.example secrets.env
+```
+
+Then edit `secrets.env` and replace the placeholders with your DigiKey client ID/secret and Mouser API key. Do not commit `secrets.env`; it is gitignored.
+
+## KiCad Parts Manager GUI
+The repository now includes a cross-platform desktop GUI for editing part CSVs, managing alternates, and generating the SQLite database.
+
+### Features
+- Category browser for all `database/g-*.csv` files
+- Spreadsheet-like editing with undo/redo
+- Smart add-part form for RES/CAP/IND (closest standard-value snapping + IPN generation)
+- Supplier search against DigiKey and Mouser
+- Per-part substitutes stored in `database/substitutes.csv`
+- BOM export (wide and long formats)
+- SQLite database generation from all CSV categories
+
+### Setup
+From the repository root:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate  # On Windows PowerShell use: .venv\\Scripts\\Activate.ps1
+pip install -r gui/requirements.txt
+```
+
+### Run
+
+```bash
+python gui/main.py
+```
+
+### Tests
+The GUI includes a test suite covering the SI parser, standard-value snapping, IPN generation, validators, CSV round-trip, SQLite generation, substitutes, and search logic. To run:
+
+```bash
+pip install pytest
+cd gui
+python -m pytest tests/ -v
+```
+
+### Supplier columns
+All `database/g-*.csv` category files include:
+- `DigiKey_PN`
+- `Mouser_PN`
+
+These can be set manually or populated from the Supplier Search dialog in the GUI.
+
 ## Debugging broken `*.kicad_dbl` files
 Sometimes when you modify the `#gplm.kicad_dbl` file, there is a typo and KiCad will no longer load it and does not give you any helpful debugging messages. You can use the [`jq`](https://github.com/jqlang/jq) command line utility to quickly find errors in the file, since the `kicad_dbl` format appears to be JSON.
 
@@ -11,7 +63,7 @@ If the symbol and footprint already exist, adding a new part is simple as:
 
 1. If you are adding a new part category, create a new `csv` file, then edit `update_db.sh` to add to the list of imports.
 2. Add a line to one of the `csv` files. The `csv` files should be sorted by `IPN`. This ensures the `IPN` is unique (which is the lib/db key), and merge operations are simpler if the file is always sorted.
-3. run `update_db.sh`
+3. run `update_db.sh` (or use the GUI "Generate DB" button)
 4. No need to restart KiCad 9
 
 If you need to add a symbol or footprint, add to the matching `g-XXX.kicad_sym`, or `g-XXX.pretty` libraries.

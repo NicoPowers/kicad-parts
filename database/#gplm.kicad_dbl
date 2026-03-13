@@ -107,7 +107,7 @@
                     "show_name": false
                 },
                 {
-                    "column": "Capacitance",
+                    "column": "Value",
                     "name": "Value",
                     "visible_on_add": true,
                     "visible_in_chooser": false,
@@ -135,8 +135,8 @@
                     "show_name": false
                 },
                 {
-                    "column": "Capacitance",
-                    "name": "Capacitance",
+                    "column": "Value",
+                    "name": "Value",
                     "visible_on_add": false,
                     "visible_in_chooser": true,
                     "show_name": false
@@ -265,7 +265,7 @@
                     "show_name": false
                 },
                 {
-                    "column": "Inductance",
+                    "column": "Value",
                     "name": "Value",
                     "visible_on_add": true,
                     "visible_in_chooser": false,
@@ -293,8 +293,8 @@
                     "show_name": false
                 },
                 {
-                    "column": "Inductance",
-                    "name": "Inductance",
+                    "column": "Value",
+                    "name": "Value",
                     "visible_on_add": false,
                     "visible_in_chooser": true,
                     "show_name": false
@@ -615,7 +615,7 @@
                     "show_name": false
                 },
                 {
-                    "column": "Resistance",
+                    "column": "Value",
                     "name": "Value",
                     "visible_on_add": true,
                     "visible_in_chooser": false,
@@ -643,8 +643,8 @@
                     "show_name": false
                 },
                 {
-                    "column": "Resistance",
-                    "name": "Resistance",
+                    "column": "Value",
+                    "name": "Value",
                     "visible_on_add": false,
                     "visible_in_chooser": true,
                     "show_name": false

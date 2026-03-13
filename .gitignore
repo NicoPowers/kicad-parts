@@ -1,3 +1,6 @@
 .~lock*.csv#
 *.bak
 parts.sqlite
+secrets.env
+secrets.env
+__pycache__/

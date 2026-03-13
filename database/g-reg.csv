@@ -1,4 +1,4 @@
-IPN,MPN,Manufacturer,Description,Voltage,Current,Symbol,Footprint,Datasheet
+IPN,MPN,Manufacturer,Description,Voltage,Current,Symbol,Footprint,Datasheet,LCSC,DigiKey_PN,Mouser_PN
 REG-0000-0005,TPS5430DDAR,TI,Switching Voltage Regulators 5.5 to 36V Input 3A Step Down Converter,ADJ,3A,g-reg:tps5430,Package_SO:TI_SO-PowerPAD-8,https://www.ti.com/lit/ds/symlink/tps5430.pdf
 REG-0001-0000,TLV709A01DBVR,TI,"Linear Reg, Adjustable 150mA",ADJ,150mA,g-reg:TLV709ADJ,Package_TO_SOT_SMD:SOT-23-5,https://www.ti.com/lit/ds/symlink/tlv709.pdf
 REG-0002-01V8,ADP7142AUJZ-1.8-R7,Analog Devices,"Linear Reg, 1.8V, 200mA, Adjustable",1.8V,200mA,g-reg:ADP7142,Package_TO_SOT_SMD:SOT-23-5,https://www.analog.com/media/en/technical-documentation/data-sheets/ADP7142.pdf

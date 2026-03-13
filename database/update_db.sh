@@ -4,7 +4,7 @@
 
 
 # define all of your libs here -- should be a CSV file for each lib
-GPLMLIBS="cap con dio ind opt res rfm rvr trs"
+GPLMLIBS="ana art cap con cpd dio ics ind mcu mec mpu opt osc pwr reg res rfm rvr swi trs"
 
 DBFILE=./parts.sqlite
 
