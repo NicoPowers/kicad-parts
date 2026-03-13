@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QAction, QColor, QDesktopServices, QKeySequence, QUndoCommand, QUndoStack
 from PyQt6.QtWidgets import (
@@ -128,6 +129,9 @@ class CompleterDelegate(QStyledItemDelegate):
         header = self.header_provider(index.column())
         if header in {"Symbol", "Footprint"}:
             editor_widget = QWidget(parent)
+            editor_widget.setAutoFillBackground(True)
+            editor_widget.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+            editor_widget.setStyleSheet("background-color: palette(base);")
             row = QHBoxLayout(editor_widget)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(4)
@@ -144,6 +148,9 @@ class CompleterDelegate(QStyledItemDelegate):
         editor = QLineEdit(parent)
         self._apply_completer(editor, index.column())
         return editor
+
+    def updateEditorGeometry(self, editor, option, index):  # type: ignore[override]
+        editor.setGeometry(option.rect)
 
     def _on_browse_clicked(self, header: str, editor: QLineEdit, parent) -> None:
         picked = self.browse_provider(header, editor.text().strip(), parent)
@@ -329,7 +336,7 @@ class MainWindow(QMainWindow):
 
         save_action = QAction("Save", self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
-        save_action.triggered.connect(self.save_current)
+        save_action.triggered.connect(self.save_all)
         self.toolbar.addAction(save_action)
 
         gen_db_action = QAction("Generate DB", self)
@@ -419,20 +426,20 @@ class MainWindow(QMainWindow):
     def _browse_reference_for_column(self, header: str, current_value: str, parent) -> str | None:
         if header not in {"Symbol", "Footprint"}:
             return None
-        start_dir = self.workspace_root / ("symbols" if header == "Symbol" else "footprints")
+        start_path = self.workspace_root / ("symbols" if header == "Symbol" else "footprints")
         if ":" in current_value:
             kind = "symbol" if header == "Symbol" else "footprint"
             entry = self.library_index.resolve(current_value, kind)
             if entry and entry.file_path.exists():
-                start_dir = entry.file_path.parent
-        if not start_dir.exists():
-            start_dir = self.workspace_root / "libs" / ("kicad-symbols" if header == "Symbol" else "kicad-footprints")
+                start_path = entry.file_path
+        if not start_path.exists():
+            start_path = self.workspace_root / "libs" / ("kicad-symbols" if header == "Symbol" else "kicad-footprints")
 
         if header == "Symbol":
             selected, _ = QFileDialog.getOpenFileName(
                 parent,
                 "Select Symbol Library",
-                str(start_dir),
+                str(start_path),
                 "KiCad Symbol (*.kicad_sym)",
             )
             if not selected:
@@ -457,7 +464,7 @@ class MainWindow(QMainWindow):
         selected, _ = QFileDialog.getOpenFileName(
             parent,
             "Select Footprint",
-            str(start_dir),
+            str(start_path),
             "KiCad Footprint (*.kicad_mod)",
         )
         if not selected:
@@ -557,10 +564,10 @@ class MainWindow(QMainWindow):
         for row_idx in range(model.rowCount()):
             for col_idx, header in enumerate(model.headers):
                 item = QTableWidgetItem(model.rows[row_idx].get(header, ""))
-                if header in OPEN_URL_COLUMNS:
-                    item.setForeground(Qt.GlobalColor.blue)
                 if header == "Price_Range":
                     self._decorate_price_range_item(item, model.rows[row_idx])
+                elif header in {"Symbol", "Footprint"}:
+                    self._decorate_library_reference_item(item, header, model.rows[row_idx].get(header, ""))
                 self.table.setItem(row_idx, col_idx, item)
         header_view = self.table.horizontalHeader()
         for col_idx, header in enumerate(model.headers):
@@ -1010,6 +1017,125 @@ class MainWindow(QMainWindow):
             stale = True
         item.setBackground(QColor("#4a4930") if stale else QColor(Qt.GlobalColor.transparent))
 
+    @staticmethod
+    def _reference_kind_for_header(header: str) -> str | None:
+        if header == "Symbol":
+            return "symbol"
+        if header == "Footprint":
+            return "footprint"
+        return None
+
+    def _reference_missing_local_reason(self, header: str, value: str) -> str | None:
+        kind = self._reference_kind_for_header(header)
+        ref = value.strip()
+        if kind is None or not ref:
+            return None
+        if ":" not in ref:
+            return "Invalid reference format (expected Library:Name)."
+        entry = self.library_index.resolve(ref, kind)
+        if entry is None:
+            return "Reference not found in indexed libraries."
+        if entry.source != "local":
+            return "Reference exists only in KiCad libraries (not local)."
+        return None
+
+    def _decorate_library_reference_item(self, item: QTableWidgetItem, header: str, value: str) -> None:
+        reason = self._reference_missing_local_reason(header, value)
+        if not reason:
+            return
+        item.setBackground(QColor("#4a2f2f"))
+        existing_tooltip = item.toolTip().strip()
+        if existing_tooltip:
+            item.setToolTip(f"{existing_tooltip}\n{reason}")
+        else:
+            item.setToolTip(reason)
+
+    def _kicad_reference_candidates(self, kind: str, query: str, limit: int = 300) -> list[str]:
+        seen: set[str] = set()
+        candidates: list[str] = []
+
+        def add(entries) -> bool:
+            for entry in entries:
+                if entry.source != "kicad":
+                    continue
+                key = entry.name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(entry.name)
+                if len(candidates) >= limit:
+                    return True
+            return False
+
+        search_text = query.strip()
+        if search_text:
+            if add(self.library_index.search(search_text, kind, limit=limit)):
+                return candidates
+            short_text = search_text.split(":", 1)[-1] if ":" in search_text else search_text
+            if short_text != search_text and add(self.library_index.search(short_text, kind, limit=limit)):
+                return candidates
+            tokens = [tok for tok in short_text.replace(":", " ").replace("_", " ").replace("-", " ").split() if tok]
+            if add(self.library_index.fuzzy_match(tokens, kind, limit=limit)):
+                return candidates
+        else:
+            add(self.library_index.entries(kind))
+        return candidates
+
+    def _set_cell_value(self, row: int, col: int, new_value: str) -> None:
+        if not self.current_category:
+            return
+        state = self.categories[self.current_category]
+        model = state.model
+        if row < 0 or row >= len(model.rows) or col < 0 or col >= len(model.headers):
+            return
+        header = model.headers[col]
+        old_value = model.rows[row].get(header, "")
+        if old_value == new_value:
+            return
+        self.undo_stack.push(SetCellCommand(model, row, col, old_value, new_value))
+        self._render_current_table()
+        self.table.setCurrentCell(row, col)
+
+    def _search_in_kicad_libs_for_cell(self, row: int, col: int) -> None:
+        if not self.current_category:
+            return
+        headers = self.categories[self.current_category].model.headers
+        if col < 0 or col >= len(headers):
+            return
+        header = headers[col]
+        kind = self._reference_kind_for_header(header)
+        if kind is None:
+            return
+        item = self.table.item(row, col)
+        current_value = item.text().strip() if item else ""
+        candidates = self._kicad_reference_candidates(kind, current_value)
+        if not candidates:
+            QMessageBox.information(
+                self,
+                "Search in KiCad libs",
+                f"No KiCad {header.lower()} matches found for '{current_value}'.",
+            )
+            return
+        preferred_index = 0
+        if current_value:
+            wanted = current_value.lower()
+            for idx, candidate in enumerate(candidates):
+                if candidate.lower() == wanted:
+                    preferred_index = idx
+                    break
+        picked, ok = QInputDialog.getItem(
+            self,
+            "Search in KiCad libs",
+            f"{header} reference",
+            candidates,
+            preferred_index,
+            False,
+        )
+        if not ok or not picked:
+            return
+        resolved = self._maybe_copy_external_reference(header, picked)
+        self._set_cell_value(row, col, resolved)
+
     def _open_search_dialog(self, query: str, *, force_remote: bool = False, exact_mpn: bool = False) -> None:
         query_text = query.strip()
         dialog = SupplierSearchDialog(
@@ -1039,6 +1165,30 @@ class MainWindow(QMainWindow):
     def _looks_like_url(value: str) -> bool:
         return value.startswith("http://") or value.startswith("https://")
 
+    @staticmethod
+    def _has_supplier_pn_value(value: str) -> bool:
+        text = value.strip().lower()
+        return bool(text) and text not in {"n/a", "na", "not specified", "not found", "none", "null", "-", "--"}
+
+    def _supplier_url_for_row(self, row: int, supplier: str) -> str:
+        if supplier == "digikey":
+            value = self._row_text_by_header(row, "DigiKey_PN")
+            if self._looks_like_url(value):
+                return value
+            pn = value.strip()
+            if not self._has_supplier_pn_value(pn):
+                return ""
+            return f"https://www.digikey.com/en/products/result?keywords={quote(pn)}" if pn else ""
+        if supplier == "mouser":
+            value = self._row_text_by_header(row, "Mouser_PN")
+            if self._looks_like_url(value):
+                return value
+            pn = value.strip()
+            if not self._has_supplier_pn_value(pn):
+                return ""
+            return f"https://www.mouser.com/c/?q={quote(pn)}" if pn else ""
+        return ""
+
     def _open_main_table_context_menu(self, pos) -> None:
         if not self.current_category:
             return
@@ -1054,16 +1204,17 @@ class MainWindow(QMainWindow):
         if len(selected_rows) > 1:
             self._open_multi_row_context_menu(pos, selected_rows)
         else:
-            self._open_single_row_context_menu(pos, row)
+            self._open_single_row_context_menu(pos, row, item.column())
 
-    def _open_single_row_context_menu(self, pos, row: int) -> None:
+    def _open_single_row_context_menu(self, pos, row: int, clicked_col: int) -> None:
+        headers = self.categories[self.current_category].model.headers
+        clicked_header = headers[clicked_col] if 0 <= clicked_col < len(headers) else ""
+        clicked_item = self.table.item(row, clicked_col)
+        clicked_value = clicked_item.text().strip() if clicked_item else ""
+        library_reference_reason = self._reference_missing_local_reason(clicked_header, clicked_value)
         datasheet_url = self._row_text_by_header(row, "Datasheet")
-        browser_url = ""
-        for header in ("DigiKey_PN", "Mouser_PN", "LCSC", "Datasheet"):
-            candidate = self._row_text_by_header(row, header)
-            if self._looks_like_url(candidate):
-                browser_url = candidate
-                break
+        digikey_url = self._supplier_url_for_row(row, "digikey")
+        mouser_url = self._supplier_url_for_row(row, "mouser")
         description = self._row_text_by_header(row, "Description")
         value = self._row_text_by_header(row, "Value")
         mpn = self._row_text_by_header(row, "MPN")
@@ -1071,25 +1222,35 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         open_datasheet_action = QAction("Open datasheet", self)
-        open_browser_action = QAction("Open in browser", self)
+        open_digikey_action = QAction("Open in DigiKey", self)
+        open_mouser_action = QAction("Open in Mouser", self)
         search_similar_action = QAction("Search similar specs", self)
         search_same_mpn_action = QAction("Search same MPN", self)
         assign_supplier_action = QAction("Assign DigiKey + Mouser PN", self)
         sync_prices_action = QAction("Sync Prices", self)
+        search_kicad_libs_action = QAction("Search in KiCad libs", self)
+        dk_pn = self._row_text_by_header(row, "DigiKey_PN").strip()
+        mouser_pn = self._row_text_by_header(row, "Mouser_PN").strip()
+        has_dk_pn = self._has_supplier_pn_value(dk_pn)
+        has_mouser_pn = self._has_supplier_pn_value(mouser_pn)
 
         open_datasheet_action.setEnabled(self._looks_like_url(datasheet_url))
-        open_browser_action.setEnabled(self._looks_like_url(browser_url))
+        open_digikey_action.setEnabled(has_dk_pn and self._looks_like_url(digikey_url))
+        open_mouser_action.setEnabled(has_mouser_pn and self._looks_like_url(mouser_url))
         search_similar_action.setEnabled(bool(similar_query))
         search_same_mpn_action.setEnabled(bool(mpn))
         assign_supplier_action.setEnabled(bool(mpn))
-        dk_pn = self._row_text_by_header(row, "DigiKey_PN")
-        mouser_pn = self._row_text_by_header(row, "Mouser_PN")
-        sync_prices_action.setEnabled(bool(dk_pn or mouser_pn))
+        sync_prices_action.setEnabled(has_dk_pn or has_mouser_pn)
+        search_kicad_libs_action.setEnabled(bool(library_reference_reason))
 
         open_datasheet_action.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(datasheet_url)))
-        open_browser_action.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(browser_url)))
+        open_digikey_action.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(digikey_url)))
+        open_mouser_action.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(mouser_url)))
         search_similar_action.triggered.connect(lambda: self._open_search_dialog(similar_query, force_remote=False))
         search_same_mpn_action.triggered.connect(lambda: self._open_search_dialog(mpn, exact_mpn=True))
+        search_kicad_libs_action.triggered.connect(
+            lambda _checked=False, r=row, c=clicked_col: self._search_in_kicad_libs_for_cell(r, c),
+        )
         assign_supplier_action.triggered.connect(
             lambda _checked=False, rows=[row]: self._assign_supplier_pns_for_rows(rows),
         )
@@ -1098,10 +1259,13 @@ class MainWindow(QMainWindow):
         )
 
         menu.addAction(open_datasheet_action)
-        menu.addAction(open_browser_action)
+        menu.addAction(open_digikey_action)
+        menu.addAction(open_mouser_action)
         menu.addSeparator()
         menu.addAction(search_similar_action)
         menu.addAction(search_same_mpn_action)
+        if library_reference_reason:
+            menu.addAction(search_kicad_libs_action)
         menu.addSeparator()
         menu.addAction(assign_supplier_action)
         menu.addAction(sync_prices_action)
@@ -1253,6 +1417,18 @@ class MainWindow(QMainWindow):
         state.model.set_dirty(False)
         self._render_current_table()
 
+    def save_all(self) -> None:
+        saved_any = False
+        for state in self.categories.values():
+            if not state.dirty:
+                continue
+            state.document.rows = state.model.rows
+            write_csv(state.document, make_backup=True)
+            state.model.set_dirty(False)
+            saved_any = True
+        if saved_any and self.current_category:
+            self._render_current_table()
+
     def search_all(self) -> None:
         ipn = self._selected_ipn()
         self._open_search_dialog(ipn, force_remote=False)
@@ -1362,8 +1538,6 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         if result == QMessageBox.StandardButton.Save:
-            for key in list(self.categories.keys()):
-                self.current_category = key
-                self.save_current()
+            self.save_all()
         event.accept()
 

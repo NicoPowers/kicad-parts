@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import traceback
 import webbrowser
 from collections.abc import Callable
+from urllib.parse import quote
 
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor
@@ -580,12 +581,25 @@ class SupplierSearchDialog(QDialog):
         value = item.data(0, ROLE_DATASHEET)
         return value if isinstance(value, str) else ""
 
-    def _item_product_url(self, item: QTreeWidgetItem) -> str:
-        for link_col in (4, 5):
-            url = item.data(link_col, Qt.ItemDataRole.UserRole)
-            if isinstance(url, str) and url.startswith(("http://", "https://")):
-                return url
+    def _item_supplier_url(self, item: QTreeWidgetItem, supplier: str) -> str:
+        link_col = 4 if supplier == "digikey" else 5
+        url = item.data(link_col, Qt.ItemDataRole.UserRole)
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            return url
+        pn = item.text(link_col).strip()
+        if not pn or pn.lower() == "not specified":
+            return ""
+        if supplier == "digikey":
+            return f"https://www.digikey.com/en/products/result?keywords={quote(pn)}"
+        if supplier == "mouser":
+            return f"https://www.mouser.com/c/?q={quote(pn)}"
         return ""
+
+    @staticmethod
+    def _has_supplier_pn(item: QTreeWidgetItem, supplier: str) -> bool:
+        col = 4 if supplier == "digikey" else 5
+        pn = item.text(col).strip().lower()
+        return bool(pn) and pn not in {"not specified", "not found", "n/a", "na", "none", "null", "-", "--"}
 
     def _open_url_in_browser(self, url: str) -> None:
         if not url.startswith(("http://", "https://")):
@@ -608,18 +622,21 @@ class SupplierSearchDialog(QDialog):
         self.results.setCurrentItem(item)
 
         datasheet_url = self._item_datasheet_url(item)
-        product_url = self._item_product_url(item)
+        digikey_url = self._item_supplier_url(item, "digikey")
+        mouser_url = self._item_supplier_url(item, "mouser")
 
         menu = QMenu(self)
         use_selected_action = QAction("Use selected", self)
         open_datasheet_action = QAction("Open datasheet", self)
-        open_browser_action = QAction("Open in browser", self)
+        open_digikey_action = QAction("Open in DigiKey", self)
+        open_mouser_action = QAction("Open in Mouser", self)
         search_similar_action = QAction("Search similar specs", self)
         search_same_mpn_action = QAction("Search same MPN", self)
 
         use_selected_action.triggered.connect(self.accept_selected)
         open_datasheet_action.triggered.connect(lambda: self._open_url_in_browser(datasheet_url))
-        open_browser_action.triggered.connect(lambda: self._open_url_in_browser(product_url))
+        open_digikey_action.triggered.connect(lambda: self._open_url_in_browser(digikey_url))
+        open_mouser_action.triggered.connect(lambda: self._open_url_in_browser(mouser_url))
         search_similar_action.triggered.connect(lambda: self._search_similar_specs(item))
         search_same_mpn_action.triggered.connect(lambda: self._search_same_mpn(item))
 
@@ -627,11 +644,13 @@ class SupplierSearchDialog(QDialog):
         if is_local:
             use_selected_action.setEnabled(False)
         open_datasheet_action.setEnabled(datasheet_url.startswith(("http://", "https://")))
-        open_browser_action.setEnabled(product_url.startswith(("http://", "https://")))
+        open_digikey_action.setEnabled(self._has_supplier_pn(item, "digikey") and digikey_url.startswith(("http://", "https://")))
+        open_mouser_action.setEnabled(self._has_supplier_pn(item, "mouser") and mouser_url.startswith(("http://", "https://")))
 
         menu.addAction(use_selected_action)
         menu.addAction(open_datasheet_action)
-        menu.addAction(open_browser_action)
+        menu.addAction(open_digikey_action)
+        menu.addAction(open_mouser_action)
         menu.addSeparator()
         menu.addAction(search_similar_action)
         menu.addAction(search_same_mpn_action)

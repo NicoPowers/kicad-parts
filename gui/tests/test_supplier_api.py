@@ -201,6 +201,30 @@ class TestMouserPartNumberParser:
         results = client._mouser_results_from_payload({})
         assert results == []
 
+    def test_parse_mouser_na_part_number_falls_back_to_mpn(self):
+        client = _mock_client()
+        payload = {
+            "Errors": [],
+            "SearchResults": {
+                "NumberOfResult": 1,
+                "Parts": [
+                    {
+                        "ManufacturerPartNumber": "FW2500042Z",
+                        "Manufacturer": "Diodes Incorporated",
+                        "Description": "Crystals",
+                        "DataSheetUrl": "https://www.mouser.com/datasheet/3/175/1/FW.pdf",
+                        "MouserPartNumber": "N/A",
+                        "PriceBreaks": [],
+                        "AvailabilityInStock": "0",
+                        "ProductDetailUrl": "https://www.mouser.com/ProductDetail/Diodes-Incorporated/FW2500042Z",
+                    }
+                ],
+            },
+        }
+        results = client._mouser_results_from_payload(payload)
+        assert len(results) == 1
+        assert results[0].mouser_pn == "FW2500042Z"
+
 
 # ===================================================================
 # UNIT TESTS – search_by_mpn orchestration

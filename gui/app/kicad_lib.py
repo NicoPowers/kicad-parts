@@ -153,6 +153,10 @@ class KiCadLibraryIndex:
                 return entry
         return None
 
+    def is_local(self, name: str, kind: str) -> bool:
+        entry = self.resolve(name, kind)
+        return entry is not None and entry.source == "local"
+
     def local_symbol_libraries(self) -> list[str]:
         return sorted(p.stem for p in (self.workspace_root / "symbols").glob("*.kicad_sym"))
 

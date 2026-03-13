@@ -105,6 +105,15 @@ class SupplierApiClient:
     def _normalize_query(query: str) -> str:
         return " ".join(query.strip().split())
 
+    @staticmethod
+    def _clean_supplier_pn(value: str) -> str:
+        text = (value or "").strip()
+        if not text:
+            return ""
+        if text.lower() in {"n/a", "na", "none", "null", "not available", "not found", "-", "--"}:
+            return ""
+        return text
+
     def _digikey_headers(self, token: str, client_id: str) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {token}",
@@ -172,15 +181,21 @@ class SupplierApiClient:
         parts = (((payload.get("SearchResults") or {}).get("Parts")) or [])
         results: list[SupplierPart] = []
         for item in parts:
+            manufacturer_pn = (item.get("ManufacturerPartNumber", "") or "").strip()
+            mouser_pn = self._clean_supplier_pn(item.get("MouserPartNumber", ""))
+            if not mouser_pn:
+                # Some Mouser records return "N/A" for MouserPartNumber.
+                # Fall back to MPN so assignment/open/sync workflows stay usable.
+                mouser_pn = self._clean_supplier_pn(manufacturer_pn)
             results.append(
                 SupplierPart(
                     source="Mouser",
-                    mpn=item.get("ManufacturerPartNumber", ""),
+                    mpn=manufacturer_pn,
                     manufacturer=item.get("Manufacturer", ""),
                     description=item.get("Description", ""),
                     datasheet=item.get("DataSheetUrl", ""),
                     digikey_pn="",
-                    mouser_pn=item.get("MouserPartNumber", ""),
+                    mouser_pn=mouser_pn,
                     price=item.get("PriceBreaks", [{}])[0].get("Price", "") if item.get("PriceBreaks") else "",
                     quantity_available=self._safe_int(item.get("AvailabilityInStock", 0))
                     or self._parse_quantity_from_text(item.get("Availability", "")),
@@ -567,11 +582,14 @@ class SupplierApiClient:
             mouser_exact = mouser_parts
         digikey_pick = self._pick_best_part(digikey_exact or digikey_parts, query_text, mpn_hint=query_text)
         mouser_pick = self._pick_best_part(mouser_exact or mouser_parts, query_text, mpn_hint=query_text)
+        mouser_pn = self._clean_supplier_pn(mouser_pick.mouser_pn if mouser_pick else "")
+        if not mouser_pn and mouser_pick:
+            mouser_pn = self._clean_supplier_pn(mouser_pick.mpn)
         digikey_price = self._clean_price_text(digikey_pick.price if digikey_pick else "")
         mouser_price = self._clean_price_text(mouser_pick.price if mouser_pick else "")
         return {
             "DigiKey_PN": (digikey_pick.digikey_pn if digikey_pick else "").strip(),
-            "Mouser_PN": (mouser_pick.mouser_pn if mouser_pick else "").strip(),
+            "Mouser_PN": mouser_pn,
             "DigiKey_Price": digikey_price,
             "Mouser_Price": mouser_price,
             "Price_Range": self.build_price_range(digikey_price, mouser_price),
