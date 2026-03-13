@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import traceback
 import webbrowser
@@ -123,14 +125,26 @@ class _BatchWorkerBase(QThread):
 class PnAssignWorker(_BatchWorkerBase):
     def run(self) -> None:
         total = len(self.assignments)
-        for index, (category, ipn, mpn) in enumerate(self.assignments, start=1):
-            self.progress.emit(index, total, mpn)
+        counter = threading.Lock()
+        completed = [0]
+
+        def _process(item: tuple[str, str, str]) -> None:
+            category, ipn, mpn = item
+            with counter:
+                completed[0] += 1
+                idx = completed[0]
+            self.progress.emit(idx, total, mpn)
             try:
                 updates = self.client.resolve_supplier_pns(mpn)
                 updates["Price_LastSynced_UTC"] = datetime.now(timezone.utc).isoformat()
             except Exception as exc:  # pragma: no cover
                 updates = {"_error": str(exc)}
             self.row_done.emit(category, ipn, updates)
+
+        with ThreadPoolExecutor(max_workers=min(total, 4)) as pool:
+            futures = [pool.submit(_process, a) for a in self.assignments]
+            for f in as_completed(futures):
+                f.result()
         self.all_done.emit()
 
 
@@ -143,12 +157,19 @@ class PriceSyncBatchWorker(_BatchWorkerBase):
 
     def run(self) -> None:
         total = len(self.assignments)
-        for index, (category, ipn, packed) in enumerate(self.assignments, start=1):
+        counter = threading.Lock()
+        completed = [0]
+
+        def _process(item: tuple[str, str, str]) -> None:
+            category, ipn, packed = item
             parts = packed.split("\t")
             dk_pn = parts[0] if len(parts) > 0 else ""
             mouser_pn = parts[1] if len(parts) > 1 else ""
             mpn_hint = parts[2] if len(parts) > 2 else ""
-            self.progress.emit(index, total, mpn_hint or dk_pn or mouser_pn)
+            with counter:
+                completed[0] += 1
+                idx = completed[0]
+            self.progress.emit(idx, total, mpn_hint or dk_pn or mouser_pn)
             try:
                 prices = self.client.fetch_supplier_prices(dk_pn, mouser_pn, mpn_hint=mpn_hint)
                 updates: dict[str, str] = {
@@ -160,6 +181,11 @@ class PriceSyncBatchWorker(_BatchWorkerBase):
             except Exception as exc:  # pragma: no cover
                 updates = {"_error": str(exc)}
             self.row_done.emit(category, ipn, updates)
+
+        with ThreadPoolExecutor(max_workers=min(total, 4)) as pool:
+            futures = [pool.submit(_process, a) for a in self.assignments]
+            for f in as_completed(futures):
+                f.result()
         self.all_done.emit()
 
 

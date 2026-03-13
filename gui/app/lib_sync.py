@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,7 +85,7 @@ def copy_symbol(src_sym_path: Path, symbol_name: str, dest_sym_path: Path) -> Co
     return CopyResult(True, dest_sym_path)
 
 
-def fetch_3d_model(model_ref: str, local_3d_dir: Path) -> CopyResult:
+def fetch_3d_model(model_ref: str, local_3d_dir: Path, workspace_root: Path | None = None) -> CopyResult:
     m = MODEL_REF_RE.search(model_ref)
     if not m:
         return CopyResult(False, local_3d_dir, "Unsupported 3D model reference")
@@ -94,20 +95,29 @@ def fetch_3d_model(model_ref: str, local_3d_dir: Path) -> CopyResult:
     if target.exists():
         return CopyResult(False, target, "3D model already exists")
 
+    if workspace_root is not None:
+        local_source = workspace_root / "libs" / "kicad-packages3D" / lib_3d / model_name
+        if local_source.exists():
+            shutil.copy2(local_source, target)
+            return CopyResult(True, target)
+
     url = f"https://gitlab.com/kicad/libraries/kicad-packages3D/-/raw/master/{lib_3d}/{model_name}"
-    with urllib.request.urlopen(url) as response:  # nosec B310
-        payload = response.read()
+    try:
+        with urllib.request.urlopen(url) as response:  # nosec B310
+            payload = response.read()
+    except (urllib.error.URLError, OSError):
+        return CopyResult(False, local_3d_dir, f"3D model not available at {url}")
     target.write_bytes(payload)
     return CopyResult(True, target)
 
 
-def _rewrite_model_refs(text: str, local_3d_dir: Path) -> tuple[str, list[CopyResult]]:
+def _rewrite_model_refs(text: str, local_3d_dir: Path, workspace_root: Path | None = None) -> tuple[str, list[CopyResult]]:
     results: list[CopyResult] = []
 
     def replace(match: re.Match[str]) -> str:
         full_ref = match.group(0)
         _, model_name = match.groups()
-        fetch_result = fetch_3d_model(full_ref, local_3d_dir)
+        fetch_result = fetch_3d_model(full_ref, local_3d_dir, workspace_root=workspace_root)
         results.append(fetch_result)
         return "${GITPLM_PARTS}/3d-models/" + Path(model_name).name
 
@@ -115,14 +125,19 @@ def _rewrite_model_refs(text: str, local_3d_dir: Path) -> tuple[str, list[CopyRe
     return rewritten, results
 
 
-def copy_footprint(src_mod_path: Path, dest_pretty_dir: Path, local_3d_dir: Path) -> tuple[CopyResult, list[CopyResult]]:
+def copy_footprint(
+    src_mod_path: Path,
+    dest_pretty_dir: Path,
+    local_3d_dir: Path,
+    workspace_root: Path | None = None,
+) -> tuple[CopyResult, list[CopyResult]]:
     dest_pretty_dir.mkdir(parents=True, exist_ok=True)
     dest_mod = dest_pretty_dir / src_mod_path.name
     if dest_mod.exists():
         return CopyResult(False, dest_mod, "Footprint already exists in local library"), []
 
     text = src_mod_path.read_text(encoding="utf-8", errors="ignore")
-    rewritten_text, model_results = _rewrite_model_refs(text, local_3d_dir)
+    rewritten_text, model_results = _rewrite_model_refs(text, local_3d_dir, workspace_root=workspace_root)
     dest_mod.write_text(rewritten_text, encoding="utf-8")
     return CopyResult(True, dest_mod), model_results
 

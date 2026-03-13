@@ -375,6 +375,11 @@ class MainWindow(QMainWindow):
         redo_action.setShortcut(QKeySequence.StandardKey.Redo)
         self.toolbar.addAction(undo_action)
         self.toolbar.addAction(redo_action)
+        self.undo_stack.indexChanged.connect(self._on_undo_index_changed)
+
+    def _on_undo_index_changed(self) -> None:
+        if self.current_category:
+            self._render_current_table()
 
     def _start_submodule_task(self, mode: str) -> None:
         if self._submodule_worker and self._submodule_worker.isRunning():
@@ -748,12 +753,17 @@ class MainWindow(QMainWindow):
                     self.library_index.rebuild()
                     return f"{target_lib}:{symbol_name}"
             else:
-                result, _model_results = copy_footprint(
+                result, model_results = copy_footprint(
                     src_mod_path=entry.file_path,
                     dest_pretty_dir=self.workspace_root / "footprints" / f"{target_lib}.pretty",
                     local_3d_dir=self.workspace_root / "3d-models",
+                    workspace_root=self.workspace_root,
                 )
                 if result.copied or "already exists" in result.message.lower():
+                    failed_models = [r for r in model_results if not r.copied and r.message and "already exists" not in r.message.lower()]
+                    if failed_models:
+                        msgs = "\n".join(r.message for r in failed_models)
+                        QMessageBox.warning(self, "3D model(s) unavailable", msgs)
                     self.library_index.rebuild()
                     return f"{target_lib}:{entry.file_path.stem}"
         except Exception as exc:
