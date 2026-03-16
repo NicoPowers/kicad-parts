@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "kicad",
+      "display_name": "KiCad Reference (read-only)",
+      "prefix": "",
+      "visibility": "public",
+      "priority": 100,
+      "repo_url": "https://gitlab.com/kicad/libraries/kicad-symbols.git",
+      "repo_path": "libs/kicad-symbols",
+      "symbols_path": "libs/kicad-symbols",
+      "footprints_path": "libs/kicad-footprints",
+      "models3d_path": "libs/kicad-packages3D",
+      "design_blocks_path": "",
+      "database_path": "",
+      "auth_method_last_success": "",
+      "last_verified_at": "",
+      "use_submodule": true,
+      "source": "kicad"
+    },
+    {
+      "id": "client-a",
+      "display_name": "Client A",
+      "prefix": "CA",
+      "visibility": "private",
+      "priority": 500,
+      "repo_url": "git@github.com:org/client-a-kicad.git",
+      "repo_path": "libs/providers/client-a",
+      "symbols_path": "libs/providers/client-a/Symbols",
+      "footprints_path": "libs/providers/client-a/Footprints",
+      "models3d_path": "libs/providers/client-a/3D Models",
+      "design_blocks_path": "libs/providers/client-a/design_blocks",
+      "database_path": "libs/providers/client-a/database",
+      "auth_method_last_success": "",
+      "last_verified_at": "",
+      "use_submodule": false,
+      "source": "provider"
+    }
+  ],
+  "_comment": "Copy to library-providers.yaml for local/private mappings."
+}

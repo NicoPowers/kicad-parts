@@ -36,16 +36,26 @@ from PyQt6.QtWidgets import (
 )
 
 from .bom_export import export_bom_long, export_bom_wide
+from .aggregate import check_write_access, rebuild_aggregate, write_kicad_table_fragments
 from .copy_prompt_dialog import CopyPromptDialog
 from .csv_manager import CsvDocument, read_csv, write_csv
 from .csv_model import CsvTableModel
-from .db_generator import generate_sqlite
-from .dialogs import GenericAddPartDialog
+from .dialogs import GenericAddPartDialog, ProviderManagerDialog, ProviderMappingDialog, SharePartsDialog
 from .error_handler import show_error_dialog
-from .ipn import collect_all_ipns, generate_sequential_ipn
+from .ipn import collect_all_ipns, generate_sequential_ipn, parse_ipn
 from .kicad_lib import KiCadLibraryIndex, reference_from_footprint_path, references_from_symbol_file
 from .lib_sync import copy_footprint, copy_symbol
 from .lib_viewer import FootprintViewer, SymbolViewer
+from .provider_config import (
+    Provider,
+    config_path,
+    load_provider_registry,
+    save_provider_registry,
+    with_verified_auth,
+    write_example_config,
+)
+from .provider_sync import ensure_provider_checkout, probe_repo_access, sanitize_provider_id, suggest_library_mapping
+from .part_sharing import share_parts_between_providers
 from .schema import default_row_for_headers, discover_category_schemas
 from .search import search_local_inventory
 from .si_parser import parse_si_value
@@ -73,9 +83,9 @@ HEADER_DISPLAY_NAMES = {
 PRICE_COLUMNS = ("DigiKey_Price", "Mouser_Price", "Price_Range", "Price_LastSynced_UTC")
 HIDDEN_UI_COLUMNS = {"DigiKey_Price", "Mouser_Price", "Price_LastSynced_UTC"}
 IPN_TOOLTIPS = {
-    "res": "IPN format: RES-NNNN-VVVV where VVVV encodes the resistance value using E96 standard",
-    "cap": "IPN format: CAP-NNNN-VVVV where VVVV encodes capacitance in pF notation",
-    "ind": "IPN format: IND-NNNN-VVVV (sequential)",
+    "res": "IPN format: PP-RES-NNNN-VVVV where PP is provider prefix and VVVV encodes resistance",
+    "cap": "IPN format: PP-CAP-NNNN-VVVV where PP is provider prefix and VVVV encodes capacitance",
+    "ind": "IPN format: PP-IND-NNNN-VVVV where PP is provider prefix",
 }
 CATEGORY_DESCRIPTIONS = {
     "ana": "Analog ICs: op-amps, comparators, ADC/DAC",
@@ -246,10 +256,17 @@ class MainWindow(QMainWindow):
         self.supplier_api = SupplierApiClient(self.workspace_root / "secrets.env")
         self._price_sync_worker: PriceSyncWorker | None = None
         self.library_index = KiCadLibraryIndex(self.workspace_root)
+        self.provider_registry = load_provider_registry(self.workspace_root)
 
+        write_example_config(self.workspace_root)
+        self._ensure_provider_config_bootstrap()
+        self._check_missing_provider_checkouts()
+        self._rebuild_aggregate_startup()
+        self.schemas = discover_category_schemas(self.database_dir)
         self._build_ui()
         self._load_categories()
         self._setup_actions()
+        self._reload_library_index()
         self._start_submodule_task("ensure")
 
     def _build_ui(self) -> None:
@@ -325,7 +342,7 @@ class MainWindow(QMainWindow):
         self._refresh_symbol_unit_picker()
 
         self.status = self.statusBar()
-        self.libs_indicator = QLabel("KiCad refs: pending")
+        self.libs_indicator = QLabel("Providers: pending")
         self.status.addPermanentWidget(self.libs_indicator)
         self.status.showMessage("Ready")
 
@@ -343,9 +360,17 @@ class MainWindow(QMainWindow):
         gen_db_action.triggered.connect(self.generate_db)
         self.toolbar.addAction(gen_db_action)
 
-        update_libs_action = QAction("Update Libraries", self)
+        update_libs_action = QAction("Sync Providers", self)
         update_libs_action.triggered.connect(lambda: self._start_submodule_task("update"))
         self.toolbar.addAction(update_libs_action)
+
+        providers_action = QAction("Providers", self)
+        providers_action.triggered.connect(self.manage_providers)
+        self.toolbar.addAction(providers_action)
+
+        share_action = QAction("Share Parts", self)
+        share_action.triggered.connect(self.share_parts_between_providers)
+        self.toolbar.addAction(share_action)
 
         search_action = QAction("Search", self)
         search_action.setShortcut(QKeySequence.StandardKey.Find)
@@ -381,31 +406,334 @@ class MainWindow(QMainWindow):
         if self.current_category:
             self._render_current_table()
 
+    def _reload_library_index(self) -> None:
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        self.library_index.rebuild()
+
+    def _ensure_provider_config_bootstrap(self) -> None:
+        if config_path(self.workspace_root).exists():
+            return
+        QMessageBox.information(
+            self,
+            "Provider setup",
+            "No library-providers.yaml found.\n"
+            "Only reference libraries will be available until you add providers.",
+        )
+
+    def _check_missing_provider_checkouts(self) -> None:
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        missing = [
+            provider
+            for provider in self.provider_registry.writable_providers()
+            if not (self.workspace_root / provider.repo_path).exists()
+        ]
+        if not missing:
+            return
+
+        lines = "\n".join(f"- {provider.display_name}: {provider.repo_path}" for provider in missing)
+        choice = QMessageBox.question(
+            self,
+            "Missing provider repositories",
+            "Some configured provider repositories are not checked out locally:\n\n"
+            f"{lines}\n\nClone them now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+
+        progress = QProgressDialog("Preparing provider checkouts...", "", 0, len(missing), self)
+        progress.setWindowTitle("Provider setup")
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(True)
+        progress.setAutoReset(True)
+        progress.show()
+
+        failures: list[str] = []
+        for idx, provider in enumerate(missing, start=1):
+            progress.setValue(idx - 1)
+            progress.setLabelText(f"Syncing {provider.display_name}...")
+            QApplication.processEvents()
+            if not provider.repo_url.strip():
+                failures.append(f"{provider.id}: missing repo_url in provider config")
+                continue
+            try:
+                ensure_provider_checkout(
+                    self.workspace_root,
+                    provider.id,
+                    provider.repo_url,
+                    progress_cb=lambda message, name=provider.display_name: progress.setLabelText(f"{name}: {message}"),
+                )
+            except Exception as exc:
+                failures.append(f"{provider.id}: {self._short_error_excerpt(str(exc))}")
+
+        progress.setValue(len(missing))
+        if failures:
+            show_error_dialog(
+                self,
+                "Provider checkout warnings",
+                "Some provider repositories could not be cloned or updated.",
+                "\n".join(failures),
+            )
+
+    def _rebuild_aggregate_startup(self) -> None:
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        try:
+            result = rebuild_aggregate(self.workspace_root, self.provider_registry)
+        except Exception as exc:
+            show_error_dialog(
+                self,
+                "Aggregate rebuild failed",
+                "Unable to initialize aggregate provider libraries.",
+                str(exc),
+            )
+            return
+        if not result.ok:
+            show_error_dialog(
+                self,
+                "Aggregate validation failed",
+                "Fix provider mappings before using merged libraries.",
+                "\n".join(result.errors),
+            )
+
+    def _provider_summary_rows(self) -> list[tuple[str, str, str, str]]:
+        rows: list[tuple[str, str, str, str]] = []
+        for provider in self.provider_registry.writable_providers():
+            rows.append(
+                (
+                    provider.id,
+                    f"{provider.display_name} ({provider.prefix})",
+                    provider.repo_url,
+                    provider.auth_method_last_success,
+                )
+            )
+        return rows
+
+    def _save_provider_registry(self, providers: list[Provider]) -> None:
+        save_provider_registry(self.workspace_root, providers)
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        result = rebuild_aggregate(self.workspace_root, self.provider_registry)
+        if not result.ok:
+            show_error_dialog(
+                self,
+                "Provider configuration error",
+                "Failed to rebuild aggregate after saving providers.",
+                "\n".join(result.errors),
+            )
+        self._reload_library_index()
+
+    def manage_providers(self) -> None:
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        dialog = ProviderManagerDialog(self._provider_summary_rows(), self)
+        if dialog.exec() == dialog.DialogCode.Accepted and dialog.add_new:
+            self._onboard_provider()
+            return
+        if dialog.removed_provider_ids:
+            providers = [p for p in self.provider_registry.providers if p.id not in set(dialog.removed_provider_ids)]
+            self._save_provider_registry(providers)
+
+    def share_parts_between_providers(self) -> None:
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        writable = self.provider_registry.writable_providers()
+        if len(writable) < 2:
+            QMessageBox.information(self, "Share parts", "At least two writable providers are required.")
+            return
+        providers = [(provider.id, provider.display_name, provider.prefix) for provider in writable]
+        categories = sorted(self.categories.keys())
+        dialog = SharePartsDialog(providers, categories, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        source = self.provider_registry.by_id(dialog.source_provider_id)
+        destination = self.provider_registry.by_id(dialog.destination_provider_id)
+        if source is None or destination is None:
+            QMessageBox.warning(self, "Share parts", "Unable to resolve source/destination provider.")
+            return
+        if not check_write_access(destination, self.workspace_root):
+            QMessageBox.warning(self, "Share parts", "Destination provider is not writable.")
+            return
+        result = share_parts_between_providers(
+            self.workspace_root,
+            dialog.category,
+            source,
+            destination,
+            dialog.ipns,
+        )
+        rebuild = rebuild_aggregate(self.workspace_root, self.provider_registry)
+        if not rebuild.ok:
+            show_error_dialog(self, "Share parts failed", "Aggregate rebuild failed.", "\n".join(rebuild.errors))
+            return
+        self._reload_library_index()
+        QMessageBox.information(self, "Share parts", "\n".join(result.messages))
+
+    def _onboarding_progress_dialog(self) -> QProgressDialog:
+        dialog = QProgressDialog("Starting provider onboarding...", "", 0, 5, self)
+        dialog.setWindowTitle("Provider Onboarding")
+        dialog.setCancelButton(None)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setValue(0)
+        return dialog
+
+    def _set_onboarding_stage(self, dialog: QProgressDialog, step: int, message: str) -> None:
+        dialog.setValue(max(0, min(step, dialog.maximum())))
+        dialog.setLabelText(message)
+        self.status.showMessage(message)
+        QApplication.processEvents()
+
+    @staticmethod
+    def _short_error_excerpt(text: str, limit: int = 240) -> str:
+        clean = " ".join((text or "").split())
+        return clean[:limit] + ("..." if len(clean) > limit else "")
+
+    def _probe_provider_access_step(self, repo_url: str, dialog: QProgressDialog):
+        def on_progress(message: str) -> None:
+            if "ssh" in message.lower():
+                self._set_onboarding_stage(dialog, 1, message)
+            elif "https" in message.lower():
+                self._set_onboarding_stage(dialog, 2, message)
+            else:
+                self._set_onboarding_stage(dialog, 1, message)
+
+        return probe_repo_access(repo_url, progress_cb=on_progress)
+
+    def _checkout_provider_step(self, provider_id: str, repo_url: str, dialog: QProgressDialog) -> tuple[Path, str]:
+        self._set_onboarding_stage(dialog, 3, "Syncing provider checkout...")
+        return ensure_provider_checkout(
+            self.workspace_root,
+            provider_id,
+            repo_url,
+            progress_cb=lambda message: self._set_onboarding_stage(dialog, 3, message),
+        )
+
+    def _suggest_mapping_step(self, checkout_dir: Path, dialog: QProgressDialog):
+        self._set_onboarding_stage(dialog, 4, "Scanning repository folders...")
+        suggestion = suggest_library_mapping(checkout_dir)
+        self._set_onboarding_stage(dialog, 5, "Preparing mapping dialog...")
+        return suggestion
+
+    def _onboard_provider(self) -> None:
+        repo_url, ok = QInputDialog.getText(self, "Add Provider", "Git repository URL:")
+        if not ok or not repo_url.strip():
+            return
+        provider_name, ok_name = QInputDialog.getText(
+            self,
+            "Provider Name",
+            "Display name:",
+            text=Path(repo_url.strip().rstrip("/")).stem or "Provider",
+        )
+        if not ok_name or not provider_name.strip():
+            return
+
+        provider_id = sanitize_provider_id(provider_name)
+        progress = self._onboarding_progress_dialog()
+        progress.show()
+        try:
+            probe = self._probe_provider_access_step(repo_url, progress)
+            if not probe.ok:
+                show_error_dialog(
+                    self,
+                    "Provider connection failed",
+                    "SSH and HTTPS access both failed.",
+                    self._short_error_excerpt(probe.output),
+                )
+                return
+            try:
+                checkout_dir, checkout_msg = self._checkout_provider_step(provider_id, probe.effective_url, progress)
+            except Exception as exc:
+                show_error_dialog(
+                    self,
+                    "Provider checkout failed",
+                    "Unable to clone or update provider repo.",
+                    self._short_error_excerpt(str(exc)),
+                )
+                return
+            suggestion = self._suggest_mapping_step(checkout_dir, progress)
+        finally:
+            progress.close()
+
+        mapping_dialog = ProviderMappingDialog(
+            repo_url=probe.effective_url,
+            provider_name=provider_name.strip(),
+            repo_path=str(checkout_dir.relative_to(self.workspace_root)).replace("\\", "/"),
+            suggestion=suggestion,
+            parent=self,
+        )
+        if mapping_dialog.exec() != mapping_dialog.DialogCode.Accepted:
+            return
+
+        repo_rel = Path(mapping_dialog.repo_path)
+        mapping = mapping_dialog.mapping
+        prefix = mapping_dialog.provider_prefix
+        if prefix in self.provider_registry.prefixes():
+            QMessageBox.warning(self, "Duplicate provider prefix", f"Prefix '{prefix}' is already in use.")
+            return
+        new_provider = Provider(
+            id=mapping_dialog.provider_id,
+            display_name=mapping_dialog.provider_name,
+            prefix=prefix,
+            visibility="private",
+            priority=500,
+            repo_url=probe.effective_url,
+            repo_path=repo_rel,
+            symbols_path=repo_rel / mapping["symbols_path"],
+            footprints_path=repo_rel / mapping["footprints_path"],
+            models3d_path=repo_rel / mapping["models3d_path"],
+            design_blocks_path=repo_rel / mapping["design_blocks_path"],
+            database_path=repo_rel / mapping["database_path"],
+            source="provider",
+        )
+        if not check_write_access(new_provider, self.workspace_root):
+            QMessageBox.warning(
+                self,
+                "Provider write access",
+                "Provider repository appears read-only. Shared-part operations may be unavailable.",
+            )
+        new_provider = with_verified_auth(new_provider, probe.auth_method)
+
+        providers = [p for p in self.provider_registry.providers if p.id != new_provider.id]
+        providers.append(new_provider)
+        self._save_provider_registry(providers)
+        self.status.showMessage(f"Provider '{new_provider.display_name}' {checkout_msg}")
+
     def _start_submodule_task(self, mode: str) -> None:
         if self._submodule_worker and self._submodule_worker.isRunning():
             return
-        self.status.showMessage("Syncing KiCad reference libraries...")
-        self.libs_indicator.setText("KiCad refs: syncing...")
-        self._submodule_worker = SubmoduleWorker(self.workspace_root, mode=mode)
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        self.status.showMessage("Syncing provider submodules...")
+        self.libs_indicator.setText("Providers: syncing...")
+        self._submodule_worker = SubmoduleWorker(
+            self.workspace_root,
+            mode=mode,
+            submodule_paths=self.provider_registry.submodule_paths(),
+        )
         self._submodule_worker.completed.connect(self._on_submodule_task_done)
         self._submodule_worker.start()
 
     def _on_submodule_task_done(self, ok: bool, output: str) -> None:
         if not ok:
-            show_error_dialog(self, "Library sync failed", "Unable to sync KiCad submodules", output)
-            self.status.showMessage("Library sync failed")
-            self.libs_indicator.setText("KiCad refs: sync failed")
+            show_error_dialog(self, "Library sync failed", "Unable to sync provider submodules", output)
+            self.status.showMessage("Provider sync failed")
+            self.libs_indicator.setText("Providers: sync failed")
             return
-        self.library_index.rebuild()
-        heads = submodule_heads(self.workspace_root)
-        short = (
-            f"S:{heads.get('libs/kicad-symbols', 'n/a')} "
-            f"F:{heads.get('libs/kicad-footprints', 'n/a')} "
-            f"U:{heads.get('libs/kicad-library-utils', 'n/a')}"
-        )
+        rebuild = rebuild_aggregate(self.workspace_root, self.provider_registry)
+        if not rebuild.ok:
+            show_error_dialog(
+                self,
+                "Aggregate rebuild failed",
+                "Submodules synced but aggregate rebuild failed.",
+                "\n".join(rebuild.errors),
+            )
+            self.libs_indicator.setText("Providers: aggregate failed")
+            return
+        write_kicad_table_fragments(self.workspace_root, self.provider_registry)
+        self._reload_library_index()
+        heads = submodule_heads(self.workspace_root, self.provider_registry.submodule_paths())
+        short = " ".join(f"{Path(rel).name}:{sha}" for rel, sha in heads.items())
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        self.libs_indicator.setText(f"KiCad refs [{short}] @ {stamp}")
-        self.status.showMessage("KiCad reference libraries ready")
+        self.libs_indicator.setText(f"Providers [{short}] @ {stamp}")
+        self.status.showMessage("Provider libraries ready")
 
     def _column_completer_values(self, column_index: int) -> list[str]:
         if not self.current_category:
@@ -428,6 +756,23 @@ class MainWindow(QMainWindow):
             return ""
         return headers[column_index]
 
+    def _first_external_library_dir(self, header: str) -> Path | None:
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        for provider in self.provider_registry.non_reference():
+            rel = provider.symbols_path if header == "Symbol" else provider.footprints_path
+            path = self.workspace_root / rel
+            if path.exists():
+                return path
+        return None
+
+    def _provider_models_root_for_entry(self, provider_id: str) -> Path | None:
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        provider = self.provider_registry.by_id(provider_id)
+        if provider is None:
+            return None
+        path = self.workspace_root / provider.models3d_path
+        return path if path.exists() else None
+
     def _browse_reference_for_column(self, header: str, current_value: str, parent) -> str | None:
         if header not in {"Symbol", "Footprint"}:
             return None
@@ -438,7 +783,9 @@ class MainWindow(QMainWindow):
             if entry and entry.file_path.exists():
                 start_path = entry.file_path
         if not start_path.exists():
-            start_path = self.workspace_root / "libs" / ("kicad-symbols" if header == "Symbol" else "kicad-footprints")
+            fallback = self._first_external_library_dir(header)
+            if fallback is not None:
+                start_path = fallback
 
         if header == "Symbol":
             selected, _ = QFileDialog.getOpenFileName(
@@ -731,6 +1078,7 @@ class MainWindow(QMainWindow):
             kind,
             entry.name,
             str(entry.file_path),
+            entry.provider_name,
             local_libraries,
             preview_widget=preview_widget,
             parent=self,
@@ -758,6 +1106,7 @@ class MainWindow(QMainWindow):
                     dest_pretty_dir=self.workspace_root / "footprints" / f"{target_lib}.pretty",
                     local_3d_dir=self.workspace_root / "3d-models",
                     workspace_root=self.workspace_root,
+                    provider_models_root=self._provider_models_root_for_entry(entry.provider_id),
                 )
                 if result.copied or "already exists" in result.message.lower():
                     failed_models = [r for r in model_results if not r.copied and r.message and "already exists" not in r.message.lower()]
@@ -1045,8 +1394,8 @@ class MainWindow(QMainWindow):
         entry = self.library_index.resolve(ref, kind)
         if entry is None:
             return "Reference not found in indexed libraries."
-        if entry.source != "local":
-            return "Reference exists only in KiCad libraries (not local)."
+        if entry.source == "kicad":
+            return f"Reference currently resolves to '{entry.provider_name}' (external)."
         return None
 
     def _decorate_library_reference_item(self, item: QTableWidgetItem, header: str, value: str) -> None:
@@ -1122,8 +1471,8 @@ class MainWindow(QMainWindow):
         if not candidates:
             QMessageBox.information(
                 self,
-                "Search in KiCad libs",
-                f"No KiCad {header.lower()} matches found for '{current_value}'.",
+                "Search external libs",
+                f"No external {header.lower()} matches found for '{current_value}'.",
             )
             return
         preferred_index = 0
@@ -1135,7 +1484,7 @@ class MainWindow(QMainWindow):
                     break
         picked, ok = QInputDialog.getItem(
             self,
-            "Search in KiCad libs",
+            "Search external libs",
             f"{header} reference",
             candidates,
             preferred_index,
@@ -1238,7 +1587,7 @@ class MainWindow(QMainWindow):
         search_same_mpn_action = QAction("Search same MPN", self)
         assign_supplier_action = QAction("Assign DigiKey + Mouser PN", self)
         sync_prices_action = QAction("Sync Prices", self)
-        search_kicad_libs_action = QAction("Search in KiCad libs", self)
+        search_kicad_libs_action = QAction("Search in External Libs", self)
         dk_pn = self._row_text_by_header(row, "DigiKey_PN").strip()
         mouser_pn = self._row_text_by_header(row, "Mouser_PN").strip()
         has_dk_pn = self._has_supplier_pn_value(dk_pn)
@@ -1368,8 +1717,64 @@ class MainWindow(QMainWindow):
         if self.current_category:
             self._render_current_table()
 
+    def _choose_provider_for_new_part(self) -> Provider | None:
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        writable = self.provider_registry.writable_providers()
+        if not writable:
+            QMessageBox.warning(self, "No providers", "Add at least one writable provider before adding parts.")
+            return None
+        labels = [f"{provider.prefix} - {provider.display_name}" for provider in writable]
+        picked, ok = QInputDialog.getItem(self, "Select Provider", "Part owner provider", labels, 0, False)
+        if not ok or not picked:
+            return None
+        prefix = picked.split(" - ", 1)[0]
+        for provider in writable:
+            if provider.prefix == prefix:
+                return provider
+        return None
+
+    @staticmethod
+    def _strip_provider_reference(prefix: str, value: str) -> str:
+        if ":" not in value:
+            return value
+        lib, name = value.split(":", 1)
+        wanted = f"{prefix}-"
+        if lib.startswith(wanted):
+            lib = lib[len(wanted) :]
+        return f"{lib}:{name}"
+
+    def _write_category_rows_to_provider_csvs(self, category: str, headers: list[str], rows: list[dict[str, str]]) -> None:
+        providers_by_prefix = {provider.prefix: provider for provider in self.provider_registry.writable_providers()}
+        grouped: dict[str, list[dict[str, str]]] = {prefix: [] for prefix in providers_by_prefix}
+
+        for row in rows:
+            parsed = parse_ipn(row.get("IPN", ""))
+            if parsed is None:
+                continue
+            provider = providers_by_prefix.get(parsed.prefix)
+            if provider is None:
+                continue
+            mapped = dict(row)
+            mapped["IPN"] = f"{parsed.ccc}-{parsed.nnnn}-{parsed.vvvv}"
+            if "Symbol" in mapped:
+                mapped["Symbol"] = self._strip_provider_reference(parsed.prefix, mapped["Symbol"])
+            if "Footprint" in mapped:
+                mapped["Footprint"] = self._strip_provider_reference(parsed.prefix, mapped["Footprint"])
+            grouped[parsed.prefix].append(mapped)
+
+        for prefix, provider_rows in grouped.items():
+            provider = providers_by_prefix[prefix]
+            csv_dir = self.workspace_root / provider.database_path
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = csv_dir / f"g-{category}.csv"
+            document = CsvDocument(path=csv_path, headers=headers.copy(), rows=provider_rows, quote_all=False)
+            write_csv(document, make_backup=True)
+
     def add_part(self) -> None:
         if not self.current_category:
+            return
+        provider = self._choose_provider_for_new_part()
+        if provider is None:
             return
         state = self.categories[self.current_category]
         headers = state.model.headers
@@ -1379,6 +1784,7 @@ class MainWindow(QMainWindow):
             dialog = SmartAddPartDialog(
                 self.current_category,
                 existing,
+                provider.prefix,
                 self._supplier_dialog_factory,
                 self.library_index,
                 self.workspace_root,
@@ -1391,7 +1797,7 @@ class MainWindow(QMainWindow):
             row_data.update(dialog.row_data())
         else:
             ccc = self.current_category.upper()
-            defaults = {"IPN": generate_sequential_ipn(ccc, existing)}
+            defaults = {"IPN": generate_sequential_ipn(provider.prefix, ccc, existing)}
             completer_values = {
                 "Symbol": [entry.name for entry in self.library_index.entries("symbol")],
                 "Footprint": [entry.name for entry in self.library_index.entries("footprint")],
@@ -1422,20 +1828,29 @@ class MainWindow(QMainWindow):
         if not self.current_category:
             return
         state = self.categories[self.current_category]
-        state.document.rows = state.model.rows
-        write_csv(state.document, make_backup=True)
+        self._write_category_rows_to_provider_csvs(self.current_category, state.model.headers, state.model.rows)
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        result = rebuild_aggregate(self.workspace_root, self.provider_registry)
+        if not result.ok:
+            show_error_dialog(self, "Save failed", "Unable to rebuild aggregate data.", "\n".join(result.errors))
+            return
         state.model.set_dirty(False)
         self._render_current_table()
 
     def save_all(self) -> None:
         saved_any = False
-        for state in self.categories.values():
+        for category, state in self.categories.items():
             if not state.dirty:
                 continue
-            state.document.rows = state.model.rows
-            write_csv(state.document, make_backup=True)
+            self._write_category_rows_to_provider_csvs(category, state.model.headers, state.model.rows)
             state.model.set_dirty(False)
             saved_any = True
+        if saved_any:
+            self.provider_registry = load_provider_registry(self.workspace_root)
+            result = rebuild_aggregate(self.workspace_root, self.provider_registry)
+            if not result.ok:
+                show_error_dialog(self, "Save failed", "Unable to rebuild aggregate data.", "\n".join(result.errors))
+                return
         if saved_any and self.current_category:
             self._render_current_table()
 
@@ -1482,11 +1897,17 @@ class MainWindow(QMainWindow):
     def delete_selected_row(self) -> None:
         if not self.current_category:
             return
-        row = self.table.currentRow()
-        if row < 0:
+        rows = self._selected_rows()
+        if not rows:
             return
         state = self.categories[self.current_category]
-        self.undo_stack.push(DeleteRowCommand(state.model, row))
+        self.undo_stack.beginMacro("Delete rows" if len(rows) > 1 else "Delete row")
+        try:
+            # Delete from bottom to top so row indexes stay stable.
+            for row in sorted(rows, reverse=True):
+                self.undo_stack.push(DeleteRowCommand(state.model, row))
+        finally:
+            self.undo_stack.endMacro()
         self._render_current_table()
 
     def duplicate_selected_row(self) -> None:
@@ -1501,18 +1922,17 @@ class MainWindow(QMainWindow):
         self._render_current_table()
 
     def generate_db(self) -> None:
-        progress = QProgressDialog("Generating database...", "Cancel", 0, len(self.schemas), self)
+        progress = QProgressDialog("Rebuilding aggregate...", "Cancel", 0, 4, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
-        out_db = self.database_dir / "parts.sqlite"
-
-        def on_progress(idx: int, total: int, table: str) -> None:
-            progress.setMaximum(total)
-            progress.setValue(idx)
-            progress.setLabelText(f"Importing {table} ({idx}/{total})")
-
-        generate_sqlite(self.database_dir, out_db, progress_cb=on_progress)
-        progress.setValue(len(self.schemas))
-        QMessageBox.information(self, "Done", f"Generated {out_db}")
+        progress.setMaximum(0)
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        result = rebuild_aggregate(self.workspace_root, self.provider_registry)
+        progress.close()
+        if not result.ok:
+            show_error_dialog(self, "Generate DB failed", "Aggregate rebuild failed.", "\n".join(result.errors))
+            return
+        write_kicad_table_fragments(self.workspace_root, self.provider_registry)
+        QMessageBox.information(self, "Done", f"Generated {self.database_dir / 'parts.sqlite'}")
 
     def export_bom(self) -> None:
         if not self.current_category:

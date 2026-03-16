@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .provider_config import ProviderRegistry, load_provider_registry
+
 
 SYMBOL_DEF_RE = re.compile(r'\(symbol\s+"([^"]+)"')
 
@@ -12,6 +14,8 @@ SYMBOL_DEF_RE = re.compile(r'\(symbol\s+"([^"]+)"')
 class LibraryEntry:
     name: str
     source: str
+    provider_id: str
+    provider_name: str
     kind: str
     lib_path: Path
     file_path: Path
@@ -36,17 +40,25 @@ def _iter_symbol_names(sym_file: Path) -> set[str]:
     return names
 
 
-def index_symbol_libraries(symbols_dir: Path, source: str) -> list[LibraryEntry]:
+def index_symbol_libraries(
+    symbols_dir: Path,
+    source: str,
+    provider_id: str = "",
+    provider_name: str = "",
+    library_prefix: str = "",
+) -> list[LibraryEntry]:
     entries: list[LibraryEntry] = []
     if not symbols_dir.exists():
         return entries
     for sym_file in sorted(symbols_dir.glob("*.kicad_sym")):
-        lib_name = sym_file.stem
+        lib_name = f"{library_prefix}-{sym_file.stem}" if library_prefix else sym_file.stem
         for symbol_name in sorted(_iter_symbol_names(sym_file)):
             entries.append(
                 LibraryEntry(
                     name=f"{lib_name}:{symbol_name}",
                     source=source,
+                    provider_id=provider_id or source,
+                    provider_name=provider_name or source,
                     kind="symbol",
                     lib_path=sym_file,
                     file_path=sym_file,
@@ -55,17 +67,25 @@ def index_symbol_libraries(symbols_dir: Path, source: str) -> list[LibraryEntry]
     return entries
 
 
-def index_footprint_libraries(footprints_dir: Path, source: str) -> list[LibraryEntry]:
+def index_footprint_libraries(
+    footprints_dir: Path,
+    source: str,
+    provider_id: str = "",
+    provider_name: str = "",
+    library_prefix: str = "",
+) -> list[LibraryEntry]:
     entries: list[LibraryEntry] = []
     if not footprints_dir.exists():
         return entries
     for pretty_dir in sorted(footprints_dir.glob("*.pretty")):
-        lib_name = pretty_dir.stem
+        lib_name = f"{library_prefix}-{pretty_dir.stem}" if library_prefix else pretty_dir.stem
         for footprint_file in sorted(pretty_dir.glob("*.kicad_mod")):
             entries.append(
                 LibraryEntry(
                     name=f"{lib_name}:{footprint_file.stem}",
                     source=source,
+                    provider_id=provider_id or source,
+                    provider_name=provider_name or source,
                     kind="footprint",
                     lib_path=pretty_dir,
                     file_path=footprint_file,
@@ -94,24 +114,48 @@ class KiCadLibraryIndex:
         self.workspace_root = workspace_root
         self._symbols: list[LibraryEntry] = []
         self._footprints: list[LibraryEntry] = []
+        self.provider_registry: ProviderRegistry = load_provider_registry(workspace_root)
 
     def rebuild(self) -> None:
-        local_symbols = index_symbol_libraries(self.workspace_root / "symbols", source="local")
-        local_footprints = index_footprint_libraries(self.workspace_root / "footprints", source="local")
-        kicad_symbols = index_symbol_libraries(self.workspace_root / "libs" / "kicad-symbols", source="kicad")
-        kicad_footprints = index_footprint_libraries(
-            self.workspace_root / "libs" / "kicad-footprints",
-            source="kicad",
-        )
-
-        self._symbols = self._dedupe(local_symbols + kicad_symbols)
-        self._footprints = self._dedupe(local_footprints + kicad_footprints)
+        self.provider_registry = load_provider_registry(self.workspace_root)
+        symbols: list[LibraryEntry] = []
+        footprints: list[LibraryEntry] = []
+        for provider in self.provider_registry.providers:
+            lib_prefix = provider.prefix if provider.has_parts() else ""
+            symbols.extend(
+                index_symbol_libraries(
+                    self.workspace_root / provider.symbols_path,
+                    source=provider.source,
+                    provider_id=provider.id,
+                    provider_name=provider.display_name,
+                    library_prefix=lib_prefix,
+                )
+            )
+            footprints.extend(
+                index_footprint_libraries(
+                    self.workspace_root / provider.footprints_path,
+                    source=provider.source,
+                    provider_id=provider.id,
+                    provider_name=provider.display_name,
+                    library_prefix=lib_prefix,
+                )
+            )
+        self._symbols = self._dedupe(symbols)
+        self._footprints = self._dedupe(footprints)
 
     def _dedupe(self, entries: list[LibraryEntry]) -> list[LibraryEntry]:
         out: list[LibraryEntry] = []
         seen: set[tuple[str, str]] = set()
-        # Local-first behavior: preserve first occurrence, local is indexed first.
-        for entry in entries:
+        priority_by_provider = {provider.id: provider.priority for provider in self.provider_registry.providers}
+        ranked = sorted(
+            entries,
+            key=lambda entry: (
+                priority_by_provider.get(entry.provider_id, -9999),
+                entry.provider_name.lower(),
+            ),
+            reverse=True,
+        )
+        for entry in ranked:
             key = (entry.kind, entry.name.lower())
             if key in seen:
                 continue
@@ -155,10 +199,22 @@ class KiCadLibraryIndex:
 
     def is_local(self, name: str, kind: str) -> bool:
         entry = self.resolve(name, kind)
-        return entry is not None and entry.source == "local"
+        return entry is not None and entry.source == "provider"
 
     def local_symbol_libraries(self) -> list[str]:
-        return sorted(p.stem for p in (self.workspace_root / "symbols").glob("*.kicad_sym"))
+        names: list[str] = []
+        for prefix_dir in sorted((self.workspace_root / "symbols").glob("*")):
+            if not prefix_dir.is_dir():
+                continue
+            for sym_file in sorted(prefix_dir.glob("*.kicad_sym")):
+                names.append(f"{prefix_dir.name}-{sym_file.stem}")
+        return sorted(names)
 
     def local_footprint_libraries(self) -> list[str]:
-        return sorted(p.stem for p in (self.workspace_root / "footprints").glob("*.pretty"))
+        names: list[str] = []
+        for prefix_dir in sorted((self.workspace_root / "footprints").glob("*")):
+            if not prefix_dir.is_dir():
+                continue
+            for pretty_dir in sorted(prefix_dir.glob("*.pretty")):
+                names.append(f"{prefix_dir.name}-{pretty_dir.stem}")
+        return sorted(names)

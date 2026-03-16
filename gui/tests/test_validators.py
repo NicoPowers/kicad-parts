@@ -36,12 +36,12 @@ class TestIsValidUrl:
 
 class TestValidateCell:
     def test_valid_ipn(self):
-        assert validate_cell("IPN", "RES-0001-1004") is None
+        assert validate_cell("IPN", "SL-RES-0001-1004") is None
 
     def test_invalid_ipn(self):
         err = validate_cell("IPN", "bad")
         assert err is not None
-        assert "CCC-NNNN-VVVV" in err
+        assert "PP-CCC-NNNN-VVVV" in err
 
     def test_valid_datasheet_url(self):
         assert validate_cell("Datasheet", "https://example.com") is None

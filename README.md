@@ -10,17 +10,51 @@ cp secrets.env.example secrets.env
 
 Then edit `secrets.env` and replace the placeholders with your DigiKey client ID/secret and Mouser API key. Do not commit `secrets.env`; it is gitignored.
 
+## Library providers (provider-owned aggregate)
+The GUI supports multiple provider-owned repositories (symbols, footprints, 3D models, design blocks, and `g-*.csv` data), then generates one aggregate workspace:
+
+- `library-providers.example.yaml` is committed as a template.
+- `library-providers.yaml` is local and gitignored.
+- `kicad` is a read-only reference source (default symbols/footprints), not an IPN-owning provider.
+- Aggregate folders are generated from provider mappings:
+  - `symbols/`
+  - `footprints/`
+  - `3d-models/`
+  - `design-blocks/`
+  - `database/g-*.csv`
+  - `database/provider-lib-table-fragments.txt`
+
+Provider onboarding flow in the GUI:
+
+1. Click `Providers` in the toolbar.
+2. Add a provider Git URL.
+3. App tries SSH first (`git ls-remote`), then HTTPS fallback using system Git credentials / Git Credential Manager.
+4. App scans the repo and suggests symbol/footprint/3D/design-block/database folders.
+5. Set a unique 2-3 letter provider prefix (for IPN ownership), confirm mappings, then save.
+6. App rebuilds aggregate links and merged CSVs, then regenerates `database/parts.sqlite`.
+
+### Multi-user workflow (open source + per-user providers)
+
+Each clone/fork of this repository uses the same open-source app code, but keeps provider data local per user:
+
+- Committed/shared files: app code, tests, docs, templates (`library-providers.example.yaml`), and KiCad reference submodule declarations.
+- Local/per-user files: `library-providers.yaml`, `libs/providers/` checkouts, aggregate folders (`symbols/`, `footprints/`, `3d-models/`, `design-blocks/`), merged `database/g-*.csv`, and `database/provider-lib-table-fragments.txt`.
+- On startup, if configured provider checkouts are missing, the app prompts to clone them or continue with available providers.
+- Result: anyone can clone/fork this repo and maintain their own provider list without leaking private client repositories or merged part data.
+
 ## KiCad Parts Manager GUI
 The repository now includes a cross-platform desktop GUI for editing part CSVs, managing alternates, and generating the SQLite database.
 
 ### Features
 - Category browser for all `database/g-*.csv` files
 - Spreadsheet-like editing with undo/redo
-- Smart add-part form for RES/CAP/IND (closest standard-value snapping + IPN generation)
+- Smart add-part form for RES/CAP/IND (closest standard-value snapping + provider-prefixed IPN generation)
 - Supplier search against DigiKey and Mouser
 - Per-part substitutes stored in `database/substitutes.csv`
 - BOM export (wide and long formats)
-- SQLite database generation from all CSV categories
+- Aggregate SQLite generation from merged provider CSV categories
+- Provider-based library indexing with provider-prefixed library nicknames
+- Cross-provider part sharing utility (with write-access checks)
 
 ### Setup
 From the repository root:
@@ -89,9 +123,12 @@ Initially, this part database will be optimized for low-cost rapid prototyping a
 (this may not work out so the approach may change)
 
 ## Directories
-- `database` - CSV files and the SQLite3 database file
-- `symbols` - custom KiCad symbols
-- `footprints` - custom KiCad footprints
+- `database` - committed DB config/scripts plus per-user generated merged CSVs and SQLite output
+- `symbols` - generated per-user provider aggregate symbol libraries (gitignored)
+- `footprints` - generated per-user provider aggregate footprint libraries (gitignored)
+- `3d-models` - generated per-user provider aggregate 3D model links (gitignored)
+- `design-blocks` - generated per-user provider aggregate KiCad design blocks (gitignored)
+- `libs/providers` - per-user provider repo checkouts (gitignored)
 
 ## Guidelines
 ### Reference designators

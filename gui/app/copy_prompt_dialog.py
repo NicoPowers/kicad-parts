@@ -17,6 +17,7 @@ class CopyPromptDialog(QDialog):
         kind: str,
         item_name: str,
         source_path: str,
+        source_provider: str,
         local_libraries: list[str],
         preview_widget: QWidget | None = None,
         parent=None,
@@ -26,7 +27,7 @@ class CopyPromptDialog(QDialog):
         self._target_lib = ""
 
         info = QLabel(
-            f"The selected {kind} is from KiCad's reference library.\n"
+            f"The selected {kind} is from '{source_provider}'.\n"
             "Copy it into a local library now?"
         )
         info.setWordWrap(True)

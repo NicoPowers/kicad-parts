@@ -34,6 +34,7 @@ class SmartAddPartDialog(QDialog):
         self,
         category: str,
         existing_ipns: set[str],
+        provider_prefix: str,
         supplier_dialog_factory,
         library_index: KiCadLibraryIndex,
         workspace_root: Path,
@@ -43,6 +44,7 @@ class SmartAddPartDialog(QDialog):
         super().__init__(parent)
         self.category = category
         self.existing_ipns = existing_ipns
+        self.provider_prefix = provider_prefix.strip().upper()
         self.supplier_dialog_factory = supplier_dialog_factory
         self.library_index = library_index
         self.workspace_root = workspace_root
@@ -269,7 +271,7 @@ class SmartAddPartDialog(QDialog):
 
             if self.category == "res":
                 snap = snap_resistor(value, self.tolerance.currentText())
-                ipn = generate_resistor_ipn(self.existing_ipns, snap.value)
+                ipn = generate_resistor_ipn(self.provider_prefix, self.existing_ipns, snap.value)
                 desc = (
                     f"RES {snap.value:g} OHM {self.tolerance.currentText()} {rating_segment} "
                     f"{self.package.currentText()}"
@@ -282,7 +284,7 @@ class SmartAddPartDialog(QDialog):
                 value_field = format_si_value(snap.value)
             elif self.category == "cap":
                 snap = snap_capacitor(value, self.tolerance.currentText())
-                ipn = generate_capacitor_ipn(self.existing_ipns, snap.value)
+                ipn = generate_capacitor_ipn(self.provider_prefix, self.existing_ipns, snap.value)
                 desc = (
                     f"CAP {snap.value:g}F {self.tolerance.currentText()} {rating_segment} "
                     f"{self.package.currentText()}"
@@ -295,7 +297,7 @@ class SmartAddPartDialog(QDialog):
                 value_field = format_si_value(snap.value)
             else:
                 snap = snap_inductor(value)
-                ipn = generate_inductor_ipn(self.existing_ipns)
+                ipn = generate_inductor_ipn(self.provider_prefix, self.existing_ipns)
                 desc = f"IND {snap.value:g}H {rating_segment} {self.package.currentText()}".strip()
                 symbol = "g-ind:L"
                 if self.mounting_type.currentText() == "SMT":

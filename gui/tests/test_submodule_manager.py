@@ -13,7 +13,7 @@ def test_submodules_ready_false_for_missing_paths(tmp_path: Path) -> None:
 
 
 def test_submodules_ready_true_when_dirs_exist(tmp_path: Path) -> None:
-    for rel in submodule_manager.SUBMODULE_PATHS:
+    for rel in submodule_manager.DEFAULT_SUBMODULE_PATHS:
         (tmp_path / rel).mkdir(parents=True, exist_ok=True)
     assert submodule_manager.submodules_ready(tmp_path) is True
 
@@ -55,3 +55,27 @@ def test_submodule_heads_reports_missing_and_sha(monkeypatch: pytest.MonkeyPatch
     heads = submodule_manager.submodule_heads(tmp_path)
     assert heads["libs/kicad-symbols"] == "abc123"
     assert heads["libs/kicad-footprints"] == "missing"
+
+
+def test_update_submodules_filters_unknown_paths_by_gitmodules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / ".gitmodules").write_text(
+        '[submodule "libs/kicad-symbols"]\n'
+        "  path = libs/kicad-symbols\n"
+        '  url = https://example.com/kicad-symbols.git\n',
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, cwd, capture_output, text, check):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("app.submodule_manager.subprocess.run", fake_run)
+    result = submodule_manager.update_submodules(
+        tmp_path,
+        submodule_paths=["libs/kicad-symbols", "libs/kicad-packages3D"],
+    )
+    assert result.ok is True
+    assert calls
+    assert "libs/kicad-symbols" in calls[0]
+    assert "libs/kicad-packages3D" not in calls[0]

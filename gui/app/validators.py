@@ -18,7 +18,7 @@ def is_valid_url(value: str) -> bool:
 
 def validate_cell(column: str, value: str) -> str | None:
     if column == "IPN" and not is_valid_ipn(value):
-        return "Invalid IPN format; expected CCC-NNNN-VVVV"
+        return "Invalid IPN format; expected PP-CCC-NNNN-VVVV"
     if column in {"Datasheet"} and not is_valid_url(value):
         return "Invalid URL"
     if column in REQUIRED_COLUMNS and not value.strip():

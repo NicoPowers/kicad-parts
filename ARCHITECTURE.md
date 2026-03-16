@@ -75,26 +75,33 @@ CSV files  -->  GUI (edit / add / search)  -->  SQLite  -->  KiCad ODBC
 
 ```
 kicad-parts/
-├── database/                   # All CSV data + SQLite + KiCad DB config
-│   ├── g-*.csv                 # One CSV per part category
+├── database/                   # Shared DB config + per-user generated aggregate outputs
+│   ├── g-*.csv                 # Generated merged categories (gitignored)
 │   ├── substitutes.csv         # Alternate MPN records
 │   ├── #gplm.kicad_dbl        # KiCad database library descriptor
 │   ├── update_db.sh            # Shell script for SQLite generation
+│   ├── provider-lib-table-fragments.txt  # Generated KiCad table helper text (gitignored)
 │   └── parts.sqlite            # Generated SQLite database (gitignored)
 │
-├── symbols/                    # Local KiCad symbol libraries (.kicad_sym)
-│   └── g-*.kicad_sym
+├── symbols/                    # Generated per-user provider aggregate symbol links (gitignored)
+│   └── <PREFIX>/*.kicad_sym
 │
-├── footprints/                 # Local KiCad footprint libraries (.pretty/)
-│   └── g-*.pretty/
+├── footprints/                 # Generated per-user provider aggregate footprint links (gitignored)
+│   └── <PREFIX>/*.pretty/
 │       └── *.kicad_mod
 │
-├── 3d-models/                  # Local 3D models (.step files)
+├── 3d-models/                  # Generated per-user provider aggregate 3D links (gitignored)
+├── design-blocks/              # Generated per-user provider aggregate design blocks (gitignored)
+│
+├── logos/                      # Supplier logos used by GUI assets
+│
+├── references/                 # API response reference payloads / fixtures
 │
 ├── libs/                       # Git submodules (reference libraries)
 │   ├── kicad-symbols/          # KiCad official symbol libraries
 │   ├── kicad-footprints/       # KiCad official footprint libraries
-│   └── kicad-library-utils/    # KiCad s-expression parsing utilities
+│   ├── kicad-library-utils/    # KiCad s-expression parsing utilities
+│   └── providers/              # Per-user provider repo checkouts (gitignored)
 │
 ├── gui/                        # PyQt6 GUI application
 │   ├── main.py                 # Application entry point
@@ -138,6 +145,7 @@ kicad-parts/
 │       ├── test_si_parser.py
 │       ├── test_standard_values.py
 │       ├── test_submodule_manager.py
+│       ├── test_supplier_api.py
 │       ├── test_substitutes.py
 │       └── test_validators.py
 │
@@ -193,6 +201,11 @@ kicad-parts/
 Each category has a file named `g-{code}.csv`. Every CSV has at minimum an
 `IPN` column. Most also include `MPN`, `Manufacturer`, `Description`, `Symbol`,
 `Footprint`, `Datasheet`, `LCSC`, `DigiKey_PN`, and `Mouser_PN`.
+
+Many categories now also include supplier pricing fields:
+`DigiKey_Price`, `Mouser_Price`, `Price_Range`, and `Price_LastSynced_UTC`.
+These columns are populated by supplier assignment/price-sync workflows in the
+GUI and persisted directly in category CSVs.
 
 Category-specific columns:
 
@@ -275,7 +288,7 @@ sub-panel below the main table.
 
 ### Git Submodules
 
-Three submodules under `libs/` provide reference libraries:
+Built-in reference libraries are still available through submodules under `libs/`:
 
 | Submodule | Source |
 |-----------|--------|
@@ -284,12 +297,26 @@ Three submodules under `libs/` provide reference libraries:
 | `libs/kicad-library-utils` | `https://gitlab.com/kicad/libraries/kicad-library-utils.git` |
 
 These are shallow-cloned (`--depth 1`) and updated on app start via
-`SubmoduleWorker`. The `kicad-library-utils` submodule provides Python modules
-for parsing `.kicad_sym` and `.kicad_mod` s-expression files, used by the 2D
-preview widgets.
+`SubmoduleWorker` using provider-config-driven submodule path resolution.
+The `kicad-library-utils` submodule provides Python modules for parsing
+`.kicad_sym` and `.kicad_mod` s-expression files, used by the 2D preview widgets.
 
 3D models (`kicad-packages3D`) are **not** submoduled due to size. They are
-fetched on-demand when copying a footprint to local.
+resolved in this order when copying a footprint to local:
+1. local `libs/kicad-packages3D` (if present in the workspace)
+2. remote KiCad GitLab raw URL fallback.
+
+### Provider Model
+
+- Provider mappings are loaded from local `library-providers.yaml` when present.
+- `library-providers.example.yaml` is committed as a template/default reference.
+- `kicad` is a read-only reference source and does not own IPNs.
+- Providers include path mappings for symbols/footprints/3D and optional git
+  metadata (`repo_url`, auth mode, verification timestamp).
+- On startup, missing provider checkouts are detected; the app can clone them
+  immediately or continue in a degraded mode with warnings.
+- This keeps the project open-source and multi-user friendly: each user can
+  clone/fork the app and maintain their own provider list/checkouts locally.
 
 ### Local Libraries
 
@@ -303,8 +330,8 @@ stability across KiCad updates.
 
 ### Library Indexing
 
-`KiCadLibraryIndex` (in `kicad_lib.py`) indexes both local and reference
-libraries. It provides:
+`KiCadLibraryIndex` (in `kicad_lib.py`) indexes local + all configured external
+providers. It provides:
 
 - `rebuild()` -- re-scans all library directories
 - `entries(kind)` -- returns all `LibraryEntry` items for "symbol" or "footprint"
@@ -312,17 +339,18 @@ libraries. It provides:
 - `fuzzy_match(tokens, kind)` -- multi-keyword scored search
 - `resolve(name, kind)` -- exact `lib:name` lookup returning file path
 
-Each `LibraryEntry` has: `name` (e.g. `"g-pas:R_US"`), `source` (`"local"` or
-`"kicad"`), `kind`, `lib_path`, `file_path`.
+Each `LibraryEntry` has: `name` (e.g. `"g-pas:R_US"`), `source`, provider
+metadata (`provider_id`, `provider_name`), `kind`, `lib_path`, `file_path`.
 
 ### Copy-to-Local Flow
 
-When a user selects a symbol or footprint from a KiCad reference library:
+When a user selects a symbol or footprint from a non-local provider:
 
-1. `_maybe_copy_external_reference()` in `main_window.py` detects `source == "kicad"`.
+1. `_maybe_copy_external_reference()` in `main_window.py` detects non-local source.
 2. `CopyPromptDialog` lets the user pick a target local library.
 3. `copy_symbol()` or `copy_footprint()` in `lib_sync.py` performs the copy.
-4. For footprints, associated 3D models are fetched via `fetch_3d_model()`.
+4. For footprints, associated 3D models are fetched via `fetch_3d_model()`,
+   first checking provider-mapped 3D roots, then built-in KiCad fallback.
 5. Symbol namespaces are rewritten to the target library name.
 6. The library index is rebuilt.
 
@@ -381,6 +409,9 @@ The central orchestrator. Key responsibilities:
 - **Preview dock**: `SymbolViewer` + `FootprintViewer` + unit picker combo box
 - **Toolbar actions**: Add Part, Save, Generate DB, Update Libraries, Search,
   Filter Column, Duplicate Row, Delete Row, Export BOM, Undo, Redo
+- **Supplier pricing columns**: `DigiKey_Price`, `Mouser_Price`,
+  `Price_LastSynced_UTC` are stored in CSV but hidden in the main table;
+  `Price_Range` is visible and color-coded for stale/missing sync state
 - **Search**: SI-aware search across all categories (parses SI values for
   numeric equivalence)
 - **Filter**: per-column filter with SI-aware comparison for the `Value` column
@@ -389,6 +420,12 @@ The central orchestrator. Key responsibilities:
 - **IPN tooltips**: `IPN_TOOLTIPS` provides category-specific IPN format
   explanations on the column header
 - **Read-only IPN**: for `res`, `cap`, `ind` categories the IPN column is locked
+- **Context menu workflows**: single-row and multi-row actions support:
+  - Open datasheet / supplier links
+  - Search similar specs / exact MPN
+  - Batch "Assign DigiKey + Mouser PN"
+  - Batch "Sync Prices"
+  - "Search in KiCad libs" when a symbol/footprint reference is not local
 
 `CompleterDelegate` creates composite editors for Symbol/Footprint columns:
 a `QLineEdit` with autocomplete plus a "..." browse button that opens a
@@ -450,7 +487,8 @@ Contains E12, E24, and E96 series base values. Key functions:
 
 ### IPN Generation (`ipn.py`)
 
-IPN format: `CCC-NNNN-VVVV` where:
+IPN format: `PP-CCC-NNNN-VVVV` where:
+- `PP` = 2-3 letter provider prefix
 - `CCC` = 3-letter uppercase category code
 - `NNNN` = 4-digit sequence number (zero-padded)
 - `VVVV` = 4-character value/variant code
@@ -459,10 +497,10 @@ Functions:
 - `parse_ipn(value) -> ParsedIPN | None`
 - `is_valid_ipn(value) -> bool`
 - `collect_all_ipns(database_dir) -> set[str]`
-- `generate_resistor_ipn(existing, ohms)`: encodes resistance into VVVV
-- `generate_capacitor_ipn(existing, farads)`: encodes capacitance into VVVV
-- `generate_inductor_ipn(existing)`: sequential
-- `generate_sequential_ipn(ccc, existing)`: for all other categories
+- `generate_resistor_ipn(prefix, existing, ohms)`: encodes resistance into VVVV
+- `generate_capacitor_ipn(prefix, existing, farads)`: encodes capacitance into VVVV
+- `generate_inductor_ipn(prefix, existing)`: sequential
+- `generate_sequential_ipn(prefix, ccc, existing)`: for all other categories
 
 ### CSV I/O (`csv_manager.py`, `csv_model.py`)
 
@@ -488,6 +526,8 @@ Functions:
   (`Value`, `Current`, `Voltage`, etc.)
 - `URL_COLUMNS`: set of column names rendered as links
   (`Datasheet`, `LCSC`, `DigiKey_PN`, `Mouser_PN`)
+- `PRICE_COLUMNS`: supplier pricing/sync metadata fields
+  (`DigiKey_Price`, `Mouser_Price`, `Price_Range`, `Price_LastSynced_UTC`)
 - `REQUIRED_COLUMNS`: `IPN`, `Description`, `Symbol`, `Footprint`
 
 ### Supplier API Integration (`supplier_api.py`, `supplier_dialog.py`)
@@ -497,17 +537,34 @@ Functions:
   description, datasheet, digikey_pn, mouser_pn, price, quantity_available,
   product_url)
 - `SupplierApiClient`: loads credentials from `secrets.env`, handles OAuth2
-  for DigiKey and API key auth for Mouser
+  for DigiKey and API key auth for Mouser (`MOUSER_SEARCH_API_KEY`)
+- API calls are logged to `logs/supplier_api.log` for diagnostics
 - `search_digikey_keyword()`: keyword search via DigiKey Product Information API
+- `search_digikey_product_details()` and `search_digikey_product_pricing()`:
+  exact MPN-oriented DigiKey lookups
 - `search_mouser_keyword()`: keyword search via Mouser Search API
-- `search_all()`: combines results from both providers
+- `search_mouser_partnumber()`: exact/relaxed Mouser part-number lookup
+- `search_by_mpn()`: parallel DigiKey + Mouser MPN lookup
+- `resolve_supplier_pns()`: derives `DigiKey_PN`, `Mouser_PN`, and price fields
+  from an MPN
+- `fetch_supplier_prices()`: refreshes price fields using existing supplier PNs
+- `search_all()`: parallelized keyword search across both providers
 
 **`supplier_dialog.py`**:
-- `SupplierSearchDialog`: collapsible `QTreeWidget` with DigiKey and Mouser
-  groups, sorted by quantity available (descending)
-- `SearchWorker(QThread)`: runs API calls in background for UI responsiveness
-- Part numbers (DigiKey PN, Mouser PN) are hyperlinked to their product pages
-- Datasheet is stored internally but not shown in the results tree
+- `SupplierSearchDialog`: hybrid search dialog with:
+  - local inventory group (`My Parts`) ranked by confidence score
+  - optional remote fallback (DigiKey/Mouser) when local confidence is not high
+  - explicit "Search DigiKey + Mouser" override
+  - editable local-result cells for quick in-dialog correction of
+    MPN/Manufacturer/Description/supplier PN fields
+- `SearchWorker(QThread)`: async supplier lookup for UI responsiveness
+- `PriceSyncWorker(QThread)`: async price refresh for one selected local row
+- `PnAssignWorker` and `PriceSyncBatchWorker`: parallelized batch workflows
+  (up to 4 workers) for assigning supplier PNs and syncing prices
+- `PnAssignProgressDialog` and `PriceSyncProgressDialog`: modal batch progress
+  dialogs with per-row update logs
+- Context menu actions include open links, "Search similar specs", and
+  "Search same MPN"
 
 ### Library Viewer (`lib_viewer.py`)
 
@@ -575,9 +632,15 @@ Both use `SubstitutesStore` to include alternate MPNs.
 - `SearchHit`: dataclass with `category`, `ipn`, `mpn`, `description`
 - `search_rows(category, rows, query)`: substring search across IPN, MPN,
   Description fields
+- `LocalSearchHit` / `LocalSearchSummary`: scored local search result model with
+  confidence tiers (`none`, `low`, `medium`, `high`)
+- `rank_rows()` and `search_local_inventory()`: score rows using exact/partial
+  string match, token overlap, similarity ratio, and SI-value equivalence
+- `should_search_remote()`: controls remote fallback based on local confidence
+- `search_components()`: orchestrates unified local+remote search flow
 
-The main window's `search_all()` additionally performs SI-aware numeric
-comparison on the `Value` column.
+`main_window.py` and `supplier_dialog.py` use this module to decide when to
+show local-only results versus when to fetch supplier APIs.
 
 ### Substitutes Store (`substitutes.py`)
 
@@ -616,7 +679,8 @@ cd gui
 python -m pytest tests/ -v
 ```
 
-**`conftest.py`** adds `gui/` to `sys.path` so tests can import `app.*`.
+**`conftest.py`** adds `gui/` to `sys.path` so tests can import `app.*`, and
+declares a `live` pytest marker for opt-in supplier API integration tests.
 
 | Test File | Module Under Test | What It Tests |
 |-----------|-------------------|---------------|
@@ -631,6 +695,7 @@ python -m pytest tests/ -v
 | `test_si_parser.py` | `si_parser` | SI value parsing (all notations), power ratings |
 | `test_standard_values.py` | `standard_values` | E-series snapping, encoding |
 | `test_submodule_manager.py` | `submodule_manager` | Submodule readiness checks |
+| `test_supplier_api.py` | `supplier_api` | API parsing, provider-specific edge cases, MPN resolution, optional live supplier integration |
 | `test_substitutes.py` | `substitutes` | Store load/save, by_ipn lookup |
 | `test_validators.py` | `validators` | URL validation, cell validation, duplicates |
 
@@ -644,17 +709,20 @@ mocked. The `conftest.py` handles import path setup.
 | File | Purpose |
 |------|---------|
 | `secrets.env` | API credentials (gitignored). Copy from `secrets.env.example`. |
-| `secrets.env.example` | Template showing required keys: `DIGIKEY_CLIENT_ID`, `DIGIKEY_CLIENT_SECRET`, `MOUSER_API_KEY` |
+| `secrets.env.example` | Template showing required keys: `DIGIKEY_CLIENT_ID`, `DIGIKEY_CLIENT_SECRET`, `MOUSER_SEARCH_API_KEY` |
+| `library-providers.yaml` | Local provider mappings (gitignored), including provider prefix, symbols/footprints/3D/design-block/database paths. Each user keeps their own file. |
+| `library-providers.example.yaml` | Committed provider mapping template (includes `kicad` read-only reference source plus sample IPN-owning provider layout). |
 | `.gitmodules` | Declares the three KiCad library submodules |
-| `.gitignore` | Ignores `.bak`, `parts.sqlite`, `secrets.env`, `__pycache__/`, lock files |
+| `.gitignore` | Ignores per-user generated/provider paths (`libs/providers/`, `symbols/`, `footprints/`, `3d-models/`, `design-blocks/`, `database/g-*.csv`, `database/provider-lib-table-fragments.txt`, `database/parts.sqlite`), `secrets.env`, `library-providers.yaml`, caches and logs |
 | `gui/requirements.txt` | `PyQt6`, `requests`, `python-dotenv`, `openpyxl`, `pytest` |
 
 ---
 
 ## IPN Format Reference
 
-Format: `CCC-NNNN-VVVV`
+Format: `PP-CCC-NNNN-VVVV`
 
+- **PP**: provider prefix (2-3 uppercase letters, e.g., `SL`, `MA`)
 - **CCC**: 3-letter uppercase category code (e.g., `RES`, `CAP`, `IND`, `TRS`)
 - **NNNN**: 4-digit sequence number, zero-padded (e.g., `0001`)
 - **VVVV**: 4-character value/variant code
@@ -674,7 +742,9 @@ See `partnumbers.md` for the full specification.
 
 1. **Create the CSV**: `database/g-{code}.csv` with at minimum:
    `IPN,MPN,Manufacturer,Description,Symbol,Footprint,Datasheet,LCSC,DigiKey_PN,Mouser_PN`
-   Add category-specific columns as needed.
+   Add category-specific columns as needed. If the category participates in the
+   supplier pricing workflow, also include:
+   `DigiKey_Price,Mouser_Price,Price_Range,Price_LastSynced_UTC`.
 
 2. **Update `update_db.sh`**: Add the code to the `GPLMLIBS` variable
    (alphabetical order).

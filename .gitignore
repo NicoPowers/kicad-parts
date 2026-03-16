@@ -2,6 +2,14 @@
 *.bak
 parts.sqlite
 secrets.env
-secrets.env
+library-providers.yaml
+libs/providers/
+symbols/
+footprints/
+3d-models/
+design-blocks/
+database/g-*.csv
+database/provider-lib-table-fragments.txt
+database/parts.sqlite
 __pycache__/
 logs/

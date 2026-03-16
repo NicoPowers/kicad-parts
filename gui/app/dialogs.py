@@ -13,14 +13,18 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QInputDialog,
     QLineEdit,
+    QListWidget,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from .kicad_lib import KiCadLibraryIndex, reference_from_footprint_path, references_from_symbol_file
+from .provider_sync import MappingSuggestion, sanitize_provider_id
 from .supplier_dialog import SupplierSearchDialog
 
 
@@ -168,7 +172,11 @@ class GenericAddPartDialog(QDialog):
             return
         start_dir = self.workspace_root / "symbols"
         if not start_dir.exists():
-            start_dir = self.workspace_root / "libs" / "kicad-symbols"
+            if self.library_index:
+                for entry in self.library_index.entries("symbol"):
+                    if entry.source != "local":
+                        start_dir = entry.file_path.parent
+                        break
         selected, _ = QFileDialog.getOpenFileName(
             self,
             "Select Symbol Library",
@@ -192,7 +200,11 @@ class GenericAddPartDialog(QDialog):
             return
         start_dir = self.workspace_root / "footprints"
         if not start_dir.exists():
-            start_dir = self.workspace_root / "libs" / "kicad-footprints"
+            if self.library_index:
+                for entry in self.library_index.entries("footprint"):
+                    if entry.source != "local":
+                        start_dir = entry.file_path.parent
+                        break
         selected, _ = QFileDialog.getOpenFileName(
             self,
             "Select Footprint",
@@ -234,4 +246,252 @@ class GenericAddPartDialog(QDialog):
             self._fields["DigiKey_PN"].setText(part.digikey_pn)
         if "Mouser_PN" in self._fields:
             self._fields["Mouser_PN"].setText(part.mouser_pn)
+
+
+class ProviderMappingDialog(QDialog):
+    def __init__(
+        self,
+        *,
+        repo_url: str,
+        provider_name: str,
+        repo_path: str,
+        suggestion: MappingSuggestion,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Provider Folder Mapping")
+        self._repo_url = QLineEdit(repo_url)
+        self._repo_url.setReadOnly(True)
+        self._provider_name = QLineEdit(provider_name)
+        self._prefix = QLineEdit("")
+        self._prefix.setPlaceholderText("2-3 uppercase letters (e.g. SL)")
+        suggested_prefix = "".join(part[:1] for part in re.split(r"[^A-Za-z]+", provider_name) if part)[:3].upper()
+        self._prefix.setText((suggested_prefix or provider_name[:3]).upper())
+        self._repo_path = QLineEdit(repo_path)
+        self._repo_path.setReadOnly(True)
+
+        self._symbols = QComboBox(self)
+        self._symbols.setEditable(True)
+        self._symbols.addItems(suggestion.symbols.candidates)
+        self._symbols.setCurrentText(suggestion.symbols.selected)
+
+        self._footprints = QComboBox(self)
+        self._footprints.setEditable(True)
+        self._footprints.addItems(suggestion.footprints.candidates)
+        self._footprints.setCurrentText(suggestion.footprints.selected)
+
+        self._models = QComboBox(self)
+        self._models.setEditable(True)
+        self._models.addItems(suggestion.models3d.candidates)
+        self._models.setCurrentText(suggestion.models3d.selected)
+
+        self._design_blocks = QComboBox(self)
+        self._design_blocks.setEditable(True)
+        self._design_blocks.addItems(suggestion.design_blocks.candidates)
+        self._design_blocks.setCurrentText(suggestion.design_blocks.selected)
+
+        self._database = QComboBox(self)
+        self._database.setEditable(True)
+        self._database.addItems(suggestion.database.candidates)
+        self._database.setCurrentText(suggestion.database.selected)
+
+        symbols_hint = QLabel(self)
+        symbols_hint.setWordWrap(True)
+        symbols_hint.setText(
+            "Symbol folder auto-detection has low confidence; verify selection."
+            if suggestion.symbols.low_confidence
+            else "Symbol folder auto-detected."
+        )
+        footprints_hint = QLabel(self)
+        footprints_hint.setWordWrap(True)
+        footprints_hint.setText(
+            "Footprint folder auto-detection has low confidence; verify selection."
+            if suggestion.footprints.low_confidence
+            else "Footprint folder auto-detected."
+        )
+        models_hint = QLabel(self)
+        models_hint.setWordWrap(True)
+        models_hint.setText(
+            "3D folder auto-detection has low confidence; verify selection."
+            if suggestion.models3d.low_confidence
+            else "3D folder auto-detected."
+        )
+        design_blocks_hint = QLabel(self)
+        design_blocks_hint.setWordWrap(True)
+        design_blocks_hint.setText(
+            "Design blocks folder auto-detection has low confidence; verify selection."
+            if suggestion.design_blocks.low_confidence
+            else "Design blocks folder auto-detected."
+        )
+        database_hint = QLabel(self)
+        database_hint.setWordWrap(True)
+        database_hint.setText(
+            "Database folder auto-detection has low confidence; verify selection."
+            if suggestion.database.low_confidence
+            else "Database folder auto-detected."
+        )
+
+        form = QFormLayout()
+        form.addRow("Provider name", self._provider_name)
+        form.addRow("Provider prefix", self._prefix)
+        form.addRow("Repo URL", self._repo_url)
+        form.addRow("Local checkout", self._repo_path)
+        form.addRow("Symbols folder", self._symbols)
+        form.addRow("", symbols_hint)
+        form.addRow("Footprints folder", self._footprints)
+        form.addRow("", footprints_hint)
+        form.addRow("3D models folder", self._models)
+        form.addRow("", models_hint)
+        form.addRow("Design blocks folder", self._design_blocks)
+        form.addRow("", design_blocks_hint)
+        form.addRow("Database folder", self._database)
+        form.addRow("", database_hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Review the auto-detected folders and adjust if needed.", self))
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider_name.text().strip()
+
+    @property
+    def repo_path(self) -> str:
+        return self._repo_path.text().strip()
+
+    @property
+    def provider_prefix(self) -> str:
+        return self._prefix.text().strip().upper()
+
+    @property
+    def mapping(self) -> dict[str, str]:
+        return {
+            "symbols_path": self._symbols.currentText().strip(),
+            "footprints_path": self._footprints.currentText().strip(),
+            "models3d_path": self._models.currentText().strip(),
+            "design_blocks_path": self._design_blocks.currentText().strip(),
+            "database_path": self._database.currentText().strip(),
+        }
+
+    @property
+    def provider_id(self) -> str:
+        return sanitize_provider_id(self.provider_name)
+
+    def accept(self) -> None:  # type: ignore[override]
+        prefix = self.provider_prefix
+        if not re.fullmatch(r"[A-Z]{2,3}", prefix):
+            QMessageBox.warning(self, "Invalid prefix", "Provider prefix must be 2-3 uppercase letters.")
+            return
+        super().accept()
+
+
+class ProviderManagerDialog(QDialog):
+    def __init__(self, providers: list[tuple[str, str, str, str]], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Library Providers")
+        self._providers = providers
+        self._list = QListWidget(self)
+        for provider_id, name, repo_url, auth in providers:
+            self._list.addItem(f"{name} [{provider_id}]  {auth or 'unverified'}  {repo_url}")
+
+        add_btn = QPushButton("Add Provider", self)
+        remove_btn = QPushButton("Remove Selected", self)
+        add_btn.clicked.connect(self.accept)
+        remove_btn.clicked.connect(self._remove_selected)
+
+        row = QHBoxLayout()
+        row.addWidget(add_btn)
+        row.addWidget(remove_btn)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Add or remove provider mappings.", self))
+        layout.addWidget(self._list, 1)
+        layout.addLayout(row)
+        layout.addWidget(buttons)
+
+        self.removed_provider_ids: list[str] = []
+        self.add_new = False
+
+    def _remove_selected(self) -> None:
+        row = self._list.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Remove Provider", "Select a provider first.")
+            return
+        provider_id = self._providers[row][0]
+        self.removed_provider_ids.append(provider_id)
+        self._providers.pop(row)
+        self._list.takeItem(row)
+
+    def accept(self) -> None:  # type: ignore[override]
+        self.add_new = True
+        super().accept()
+
+
+class SharePartsDialog(QDialog):
+    def __init__(self, providers: list[tuple[str, str, str]], categories: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Share Parts Across Providers")
+        self._providers = providers
+
+        self._category = QComboBox(self)
+        self._category.addItems(categories)
+
+        self._source = QComboBox(self)
+        self._destination = QComboBox(self)
+        for provider_id, name, prefix in providers:
+            label = f"{prefix} - {name} [{provider_id}]"
+            self._source.addItem(label, provider_id)
+            self._destination.addItem(label, provider_id)
+
+        self._ipns = QLineEdit(self)
+        self._ipns.setPlaceholderText("Optional: comma-separated IPNs (leave empty to share all in category)")
+
+        form = QFormLayout()
+        form.addRow("Category", self._category)
+        form.addRow("Source provider", self._source)
+        form.addRow("Destination provider", self._destination)
+        form.addRow("IPNs", self._ipns)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Copy parts from one provider to another.", self))
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    @property
+    def category(self) -> str:
+        return self._category.currentText().strip().lower()
+
+    @property
+    def source_provider_id(self) -> str:
+        return str(self._source.currentData())
+
+    @property
+    def destination_provider_id(self) -> str:
+        return str(self._destination.currentData())
+
+    @property
+    def ipns(self) -> set[str]:
+        raw = self._ipns.text().strip()
+        if not raw:
+            return set()
+        return {item.strip() for item in raw.split(",") if item.strip()}
+
+    def accept(self) -> None:  # type: ignore[override]
+        if self.source_provider_id == self.destination_provider_id:
+            QMessageBox.warning(self, "Invalid selection", "Choose different source and destination providers.")
+            return
+        super().accept()
 
