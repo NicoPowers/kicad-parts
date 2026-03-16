@@ -387,6 +387,7 @@ class MainWindow(QMainWindow):
         self.toolbar.addAction(dup_action)
 
         del_action = QAction("Delete Row", self)
+        del_action.setShortcut(QKeySequence(Qt.Key.Key_Delete))
         del_action.triggered.connect(self.delete_selected_row)
         self.toolbar.addAction(del_action)
 
@@ -1142,6 +1143,24 @@ class MainWindow(QMainWindow):
         current = self.table.currentRow()
         return [current] if current >= 0 else []
 
+    def _model_rows_for_view_rows(self, view_rows: list[int]) -> list[int]:
+        if not self.current_category or not view_rows:
+            return []
+        state = self.categories[self.current_category]
+        if "IPN" not in state.model.headers:
+            return [row for row in view_rows if 0 <= row < len(state.model.rows)]
+        ipn_col = state.model.headers.index("IPN")
+        model_rows: list[int] = []
+        for view_row in view_rows:
+            ipn_item = self.table.item(view_row, ipn_col)
+            ipn = ipn_item.text().strip() if ipn_item else ""
+            if not ipn:
+                continue
+            model_row = self._find_row_by_ipn(self.current_category, ipn)
+            if model_row >= 0:
+                model_rows.append(model_row)
+        return sorted(set(model_rows))
+
     def _refresh_substitutes_panel(self) -> None:
         ipn = self._selected_ipn()
         records = self.substitutes.by_ipn(ipn) if ipn else []
@@ -1824,16 +1843,17 @@ class MainWindow(QMainWindow):
         self.undo_stack.push(InsertRowCommand(state.model, row_data))
         self._render_current_table()
 
+    def _save_aggregate_csv(self, category: str, headers: list[str], rows: list[dict[str, str]]) -> None:
+        csv_path = self.database_dir / f"g-{category}.csv"
+        document = CsvDocument(path=csv_path, headers=headers.copy(), rows=list(rows), quote_all=False)
+        write_csv(document, make_backup=True)
+
     def save_current(self) -> None:
         if not self.current_category:
             return
         state = self.categories[self.current_category]
+        self._save_aggregate_csv(self.current_category, state.model.headers, state.model.rows)
         self._write_category_rows_to_provider_csvs(self.current_category, state.model.headers, state.model.rows)
-        self.provider_registry = load_provider_registry(self.workspace_root)
-        result = rebuild_aggregate(self.workspace_root, self.provider_registry)
-        if not result.ok:
-            show_error_dialog(self, "Save failed", "Unable to rebuild aggregate data.", "\n".join(result.errors))
-            return
         state.model.set_dirty(False)
         self._render_current_table()
 
@@ -1842,15 +1862,10 @@ class MainWindow(QMainWindow):
         for category, state in self.categories.items():
             if not state.dirty:
                 continue
+            self._save_aggregate_csv(category, state.model.headers, state.model.rows)
             self._write_category_rows_to_provider_csvs(category, state.model.headers, state.model.rows)
             state.model.set_dirty(False)
             saved_any = True
-        if saved_any:
-            self.provider_registry = load_provider_registry(self.workspace_root)
-            result = rebuild_aggregate(self.workspace_root, self.provider_registry)
-            if not result.ok:
-                show_error_dialog(self, "Save failed", "Unable to rebuild aggregate data.", "\n".join(result.errors))
-                return
         if saved_any and self.current_category:
             self._render_current_table()
 
@@ -1897,14 +1912,14 @@ class MainWindow(QMainWindow):
     def delete_selected_row(self) -> None:
         if not self.current_category:
             return
-        rows = self._selected_rows()
-        if not rows:
+        model_rows = self._model_rows_for_view_rows(self._selected_rows())
+        if not model_rows:
             return
         state = self.categories[self.current_category]
-        self.undo_stack.beginMacro("Delete rows" if len(rows) > 1 else "Delete row")
+        self.undo_stack.beginMacro("Delete rows" if len(model_rows) > 1 else "Delete row")
         try:
             # Delete from bottom to top so row indexes stay stable.
-            for row in sorted(rows, reverse=True):
+            for row in sorted(model_rows, reverse=True):
                 self.undo_stack.push(DeleteRowCommand(state.model, row))
         finally:
             self.undo_stack.endMacro()
@@ -1913,10 +1928,11 @@ class MainWindow(QMainWindow):
     def duplicate_selected_row(self) -> None:
         if not self.current_category:
             return
-        row = self.table.currentRow()
-        if row < 0:
+        model_rows = self._model_rows_for_view_rows([self.table.currentRow()])
+        if not model_rows:
             return
         state = self.categories[self.current_category]
+        row = model_rows[0]
         row_data = state.model.rows[row].copy()
         self.undo_stack.push(InsertRowCommand(state.model, row_data))
         self._render_current_table()
