@@ -69,11 +69,24 @@ jobs:
           sudo tar -xJf /tmp/node.tar.xz --strip-components=1 -C /usr/local
           curl --fail --location --silent --show-error "$TAURI_URL" --output /tmp/tauri-cli.tgz
           echo "$TAURI_SHA512  /tmp/tauri-cli.tgz" | sha512sum -c -
-          sudo npm install --global /tmp/tauri-cli.tgz
+          curl --fail --location --silent --show-error "$TAURI_LINUX_X64_GNU_URL" --output /tmp/tauri-cli-linux-x64-gnu.tgz
+          echo "$TAURI_LINUX_X64_GNU_SHA512  /tmp/tauri-cli-linux-x64-gnu.tgz" | sha512sum -c -
+          artifact_dir="$GITHUB_WORKSPACE/.afk/gui/artifacts"
+          npm_logs="$artifact_dir/npm-logs"
+          npm_home="$RUNNER_TEMP/kicad-gui-npm-home"
+          tauri_prefix="$RUNNER_TEMP/kicad-gui-tauri-$TAURI_VERSION"
+          mkdir -p "$npm_logs" "$npm_home"
+          test ! -e "$tauri_prefix"
+          env HOME="$npm_home" NPM_CONFIG_USERCONFIG=/dev/null npm install \
+            --global --prefix "$tauri_prefix" --offline --omit=optional --ignore-scripts \
+            --loglevel verbose --logs-dir "$npm_logs" --audit=false --fund=false \
+            --update-notifier=false /tmp/tauri-cli.tgz /tmp/tauri-cli-linux-x64-gnu.tgz \
+            2>&1 | tee "$artifact_dir/npm-tauri-install.log"
+          echo "$tauri_prefix/bin" >> "$GITHUB_PATH"
           test "$(rustc --version | awk '{print $2}')" = "$RUST_VERSION"
           test "$(node --version)" = "v$NODE_VERSION"
           test "$(npm --version)" = "$NPM_VERSION"
-          test "$(tauri --version)" = "tauri-cli $TAURI_VERSION"
+          test "$("$tauri_prefix/bin/tauri" --version)" = "tauri-cli $TAURI_VERSION"
 
       - name: Launch isolated KiCad GUI smoke and write lane evidence
         shell: bash

@@ -28,6 +28,9 @@ pub struct ToolchainLock {
     pub tauri_cli_integrity: String,
     pub tauri_cli_sha512: String,
     pub tauri_cli_url: String,
+    pub tauri_cli_linux_x64_gnu_integrity: String,
+    pub tauri_cli_linux_x64_gnu_sha512: String,
+    pub tauri_cli_linux_x64_gnu_url: String,
     pub debian_snapshot: String,
     pub webkit2gtk_driver: String,
     pub libwebkit2gtk: String,
@@ -177,6 +180,10 @@ impl VersionsLock {
                 self.toolchain.tauri_cli_sha512.as_str(),
             ),
             (
+                "toolchain.tauri_cli_linux_x64_gnu_sha512",
+                self.toolchain.tauri_cli_linux_x64_gnu_sha512.as_str(),
+            ),
+            (
                 "components.pocketbase.sha256",
                 self.components.pocketbase.sha256.as_str(),
             ),
@@ -278,17 +285,27 @@ impl VersionsLock {
                 "Ubuntu GUI package snapshot differs from authoritative Noble/PPA locks".into(),
             ));
         }
-        if !self.toolchain.tauri_cli_integrity.starts_with("sha512-") {
-            return Err(LabError("Tauri npm integrity must be sha512".into()));
-        }
-        let integrity = format!(
-            "sha512-{}",
-            base64_encode(&hex_bytes(&self.toolchain.tauri_cli_sha512)?)
-        );
-        if self.toolchain.tauri_cli_integrity != integrity {
-            return Err(LabError(
-                "Tauri npm integrity and SHA-512 hex disagree".into(),
-            ));
+        for (artifact, integrity, sha512) in [
+            (
+                "Tauri CLI wrapper",
+                self.toolchain.tauri_cli_integrity.as_str(),
+                self.toolchain.tauri_cli_sha512.as_str(),
+            ),
+            (
+                "Tauri CLI Linux x64 GNU binding",
+                self.toolchain.tauri_cli_linux_x64_gnu_integrity.as_str(),
+                self.toolchain.tauri_cli_linux_x64_gnu_sha512.as_str(),
+            ),
+        ] {
+            if !integrity.starts_with("sha512-") {
+                return Err(LabError(format!("{artifact} npm integrity must be sha512")));
+            }
+            let expected = format!("sha512-{}", base64_encode(&hex_bytes(sha512)?));
+            if integrity != expected {
+                return Err(LabError(format!(
+                    "{artifact} npm integrity and SHA-512 hex disagree"
+                )));
+            }
         }
         for (field, url, needle) in [
             (
@@ -300,6 +317,11 @@ impl VersionsLock {
                 "toolchain.tauri_cli_url",
                 self.toolchain.tauri_cli_url.as_str(),
                 format!("cli-{}.tgz", self.toolchain.tauri_cli),
+            ),
+            (
+                "toolchain.tauri_cli_linux_x64_gnu_url",
+                self.toolchain.tauri_cli_linux_x64_gnu_url.as_str(),
+                format!("cli-linux-x64-gnu-{}.tgz", self.toolchain.tauri_cli),
             ),
             (
                 "toolchain.go_url",
@@ -392,6 +414,10 @@ impl VersionsLock {
             (
                 "toolchain.tauri_cli_url",
                 self.toolchain.tauri_cli_url.as_str(),
+            ),
+            (
+                "toolchain.tauri_cli_linux_x64_gnu_url",
+                self.toolchain.tauri_cli_linux_x64_gnu_url.as_str(),
             ),
             (
                 "toolchain.debian_snapshot",
@@ -682,6 +708,30 @@ mod tests {
         )
         .unwrap();
         lock.toolchain.tauri_cli_integrity = "sha512-wrong".into();
+        assert!(lock.validate().is_err());
+        let mut lock = VersionsLock::load(
+            &root.join("infra/versions.lock"),
+            &root.join("rust-toolchain.toml"),
+        )
+        .unwrap();
+        lock.toolchain.tauri_cli_linux_x64_gnu_integrity = "sha512-wrong".into();
+        assert!(lock.validate().is_err());
+        let mut lock = VersionsLock::load(
+            &root.join("infra/versions.lock"),
+            &root.join("rust-toolchain.toml"),
+        )
+        .unwrap();
+        lock.toolchain.tauri_cli_linux_x64_gnu_sha512 = "short".into();
+        assert!(lock.validate().is_err());
+        let mut lock = VersionsLock::load(
+            &root.join("infra/versions.lock"),
+            &root.join("rust-toolchain.toml"),
+        )
+        .unwrap();
+        lock.toolchain.tauri_cli_linux_x64_gnu_url = lock
+            .toolchain
+            .tauri_cli_linux_x64_gnu_url
+            .replace("2.11.4", "2.11.3");
         assert!(lock.validate().is_err());
         let mut lock = VersionsLock::load(
             &root.join("infra/versions.lock"),
