@@ -52,7 +52,7 @@ jobs:
           apt-cache madison "$WEBKIT_LIBRARY_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$WEBKIT_LIBRARY_VERSION"
           apt-cache madison "$WEBKIT_DRIVER_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$WEBKIT_DRIVER_VERSION"
           apt-cache madison "$XVFB_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$XVFB_VERSION"
-          sudo apt-get install --yes \
+          sudo apt-get install --yes --allow-downgrades \
             "$KICAD_SPEC" "$KICAD_SYMBOLS_SPEC" "$KICAD_FOOTPRINTS_SPEC" \
             "$KICAD_PACKAGES3D_SPEC" "$WEBKIT_LIBRARY_SPEC" "$WEBKIT_DRIVER_SPEC" \
             "$XVFB_SPEC" x11-apps imagemagick xauth

@@ -26,6 +26,7 @@ enum WorkflowContractCategory {
     AlwaysUpload,
     Availability,
     DpkgAssertion,
+    DowngradePermission,
     Exporter,
     GuiLog,
     HashProof,
@@ -287,6 +288,12 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         Line,
         "apt-cache madison \"$XVFB_PACKAGE\" | awk '{print $3}' | grep -Fqx -- \"$XVFB_VERSION\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 26)))
+    ),
+    run_contract!(
+        DowngradePermission,
+        Line,
+        "sudo apt-get install --yes --allow-downgrades",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 29)))
     ),
     run_contract!(
         InstallSpec,
@@ -578,6 +585,7 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::AlwaysUpload, 3),
         (WorkflowContractCategory::Availability, 7),
         (WorkflowContractCategory::DpkgAssertion, 7),
+        (WorkflowContractCategory::DowngradePermission, 1),
         (WorkflowContractCategory::Exporter, 1),
         (WorkflowContractCategory::GuiLog, 2),
         (WorkflowContractCategory::HashProof, 3),
@@ -1818,7 +1826,7 @@ const PROTECTED_PROGRAM_DIGESTS: &[(WorkflowStep, &str)] = &[
     ),
     (
         WorkflowStep::Install,
-        "56fe525e83ef85b040fa6c6b10ed7bc6d567ab7f5bc6deb1d6be2f51bc162510",
+        "dbb36420ffa51fb032798d2d7e7adee19b51fb20436c42e4a8284bbae2c0caf1",
     ),
     (
         WorkflowStep::Smoke,
@@ -2865,7 +2873,7 @@ mod tests {
             },
         );
         assert_eq!(categories, expected_workflow_category_counts());
-        assert_eq!(WORKFLOW_CONTRACT.len(), 63);
+        assert_eq!(WORKFLOW_CONTRACT.len(), 64);
         for required in WORKFLOW_CONTRACT {
             match required.locator {
                 WorkflowContractLocator::Run { kind, locations } => {
@@ -2903,6 +2911,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn gui_workflow_scopes_downgrade_permission_to_exact_install() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let lock = VersionsLock::load(
+            &repository.join("infra/versions.lock"),
+            &repository.join("rust-toolchain.toml"),
+        )
+        .unwrap();
+        let workflow =
+            fs::read_to_string(repository.join(".github/workflows/kicad-gui-smoke.yml")).unwrap();
+        validate_gui_workflow_contract(&workflow, &lock).unwrap();
+
+        let exact_install = "sudo apt-get install --yes --allow-downgrades \\";
+        assert_eq!(workflow.matches(exact_install).count(), 1);
+        let omitted = workflow.replacen(exact_install, "sudo apt-get install --yes \\", 1);
+        assert!(validate_gui_workflow_contract(&omitted, &lock).is_err());
+
+        let misplaced = omitted.replacen(
+            "sudo apt-get update",
+            "sudo apt-get update --allow-downgrades",
+            1,
+        );
+        assert!(validate_gui_workflow_contract(&misplaced, &lock).is_err());
     }
 
     #[test]
