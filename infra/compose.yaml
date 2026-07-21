@@ -1,0 +1,212 @@
+name: ${AFK_COMPOSE_PROJECT}
+
+services:
+  pocketbase:
+    image: ${AFK_POCKETBASE_IMAGE}
+    build:
+      context: ./docker/pocketbase
+      dockerfile: Dockerfile
+      args:
+        BUSYBOX_IMAGE: ${AFK_BUSYBOX_IMAGE}
+        POCKETBASE_VERSION: ${AFK_POCKETBASE_VERSION}
+        POCKETBASE_URL: ${AFK_POCKETBASE_URL}
+        POCKETBASE_SHA256: ${AFK_POCKETBASE_SHA256}
+        AFK_UID: ${AFK_RUNNER_UID}
+        AFK_GID: ${AFK_RUNNER_GID}
+    environment:
+      HOME: /afk/home
+      XDG_CACHE_HOME: /afk/xdg/cache
+      XDG_CONFIG_HOME: /afk/xdg/config
+      XDG_DATA_HOME: /afk/xdg/data
+      XDG_STATE_HOME: /afk/xdg/state
+    command: ["serve", "--http=0.0.0.0:8090", "--dir=/afk/pb_data"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/api/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    networks: [afk]
+    mem_limit: 256m
+    pids_limit: 128
+    read_only: true
+    user: "${AFK_RUNNER_UID}:${AFK_RUNNER_GID}"
+    volumes:
+      - pocketbase-data:/afk/pb_data
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 134217728
+          mode: 01777
+      - type: tmpfs
+        target: /afk/home
+        tmpfs:
+          size: 67108864
+          mode: 01777
+      - type: tmpfs
+        target: /afk/xdg
+        tmpfs:
+          size: 67108864
+          mode: 01777
+
+  minio:
+    image: ${AFK_MINIO_IMAGE}
+    build:
+      context: ./docker/minio
+      dockerfile: Dockerfile
+      args:
+        BUSYBOX_IMAGE: ${AFK_BUSYBOX_IMAGE}
+        RUST_IMAGE: ${AFK_RUST_IMAGE}
+        MINIO_COMMIT: ${AFK_MINIO_COMMIT}
+        MINIO_SHORT_COMMIT: ${AFK_MINIO_SHORT_COMMIT}
+        MINIO_VERSION: ${AFK_MINIO_VERSION}
+        MINIO_BUILD_VERSION: ${AFK_MINIO_BUILD_VERSION}
+        MINIO_COPYRIGHT_YEAR: ${AFK_MINIO_COPYRIGHT_YEAR}
+        MINIO_SOURCE_URL: ${AFK_MINIO_SOURCE_URL}
+        MINIO_SOURCE_SHA256: ${AFK_MINIO_SOURCE_SHA256}
+        GO_URL: ${AFK_GO_URL}
+        GO_SHA256: ${AFK_GO_SHA256}
+        AFK_UID: ${AFK_RUNNER_UID}
+        AFK_GID: ${AFK_RUNNER_GID}
+    command: ["server", "/afk/minio-data", "--address", ":9000", "--console-address", ":9001"]
+    environment:
+      HOME: /afk/home
+      MINIO_ROOT_USER: ${AFK_MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${AFK_MINIO_PASSWORD}
+      MINIO_BROWSER: "off"
+      XDG_CACHE_HOME: /afk/xdg/cache
+      XDG_CONFIG_HOME: /afk/xdg/config
+      XDG_DATA_HOME: /afk/xdg/data
+      XDG_STATE_HOME: /afk/xdg/state
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    networks: [afk]
+    mem_limit: 1g
+    pids_limit: 256
+    read_only: true
+    user: "${AFK_RUNNER_UID}:${AFK_RUNNER_GID}"
+    volumes:
+      - minio-data:/afk/minio-data
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 134217728
+          mode: 01777
+      - type: tmpfs
+        target: /afk/home
+        tmpfs:
+          size: 67108864
+          mode: 01777
+      - type: tmpfs
+        target: /afk/xdg
+        tmpfs:
+          size: 67108864
+          mode: 01777
+
+  test-runner:
+    image: ${AFK_TEST_RUNNER_IMAGE}
+    build:
+      context: ./docker/test-runner
+      dockerfile: Dockerfile
+      args:
+        RUST_IMAGE: ${AFK_RUST_IMAGE}
+        RUST_TOOLCHAIN_DIR: ${AFK_RUST_TOOLCHAIN_DIR}
+        DEBIAN_SNAPSHOT: ${AFK_DEBIAN_SNAPSHOT}
+        NODE_VERSION: ${AFK_NODE_VERSION}
+        NODE_URL: ${AFK_NODE_URL}
+        NODE_SHA256: ${AFK_NODE_SHA256}
+        TAURI_CLI_VERSION: ${AFK_TAURI_VERSION}
+        TAURI_CLI_URL: ${AFK_TAURI_URL}
+        TAURI_CLI_SHA512: ${AFK_TAURI_SHA512}
+        AFK_UID: ${AFK_RUNNER_UID}
+        AFK_GID: ${AFK_RUNNER_GID}
+    environment:
+      HOME: /afk/home
+      XDG_CACHE_HOME: /afk/xdg/cache
+      XDG_CONFIG_HOME: /afk/xdg/config
+      XDG_DATA_HOME: /afk/xdg/data
+      XDG_STATE_HOME: /afk/xdg/state
+      KICAD_CONFIG_HOME: /afk/kicad/config
+    command: ["sleep", "infinity"]
+    networks: [afk]
+    mem_limit: 2g
+    pids_limit: 512
+    read_only: true
+    user: "${AFK_RUNNER_UID}:${AFK_RUNNER_GID}"
+    volumes:
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 134217728
+          mode: 01777
+      - type: tmpfs
+        target: /afk/home
+        tmpfs:
+          size: 67108864
+          mode: 01777
+      - type: tmpfs
+        target: /afk/xdg
+        tmpfs:
+          size: 67108864
+          mode: 01777
+      - type: tmpfs
+        target: /afk/kicad
+        tmpfs:
+          size: 67108864
+          mode: 01777
+  kicad-cli:
+    image: ${AFK_KICAD_IMAGE}
+    environment:
+      HOME: /afk/home
+      XDG_CACHE_HOME: /afk/xdg/cache
+      XDG_CONFIG_HOME: /afk/xdg/config
+      XDG_DATA_HOME: /afk/xdg/data
+      XDG_STATE_HOME: /afk/xdg/state
+      KICAD_CONFIG_HOME: /afk/kicad/config
+    entrypoint: []
+    command: ["kicad-cli", "version", "--format", "about"]
+    networks: [afk]
+    mem_limit: 2g
+    pids_limit: 512
+    read_only: true
+    user: "${AFK_RUNNER_UID}:${AFK_RUNNER_GID}"
+    volumes:
+      - type: bind
+        source: ${AFK_FIXTURE_DIR}
+        target: /fixture
+        read_only: true
+      - type: bind
+        source: ${AFK_ARTIFACT_DIR}
+        target: /artifacts
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 134217728
+          mode: 01777
+      - type: tmpfs
+        target: /afk/home
+        tmpfs:
+          size: 67108864
+          mode: 01777
+      - type: tmpfs
+        target: /afk/xdg
+        tmpfs:
+          size: 67108864
+          mode: 01777
+      - type: tmpfs
+        target: /afk/kicad
+        tmpfs:
+          size: 67108864
+          mode: 01777
+
+networks:
+  afk:
+    internal: true
+
+volumes:
+  pocketbase-data: {}
+  minio-data: {}

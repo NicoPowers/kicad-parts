@@ -5,3 +5,7 @@ secrets.env
 secrets.env
 __pycache__/
 logs/
+# Rust workspace build output
+/target/
+# Disposable AFK runtime state and evidence bundles
+/.afk/

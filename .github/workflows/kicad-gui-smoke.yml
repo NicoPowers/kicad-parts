@@ -1,0 +1,162 @@
+name: KiCad 10 Ubuntu X11 smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/kicad-gui-smoke.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "infra/versions.lock"
+      - "rust-toolchain.toml"
+      - "tooling/afk/**"
+      - "tooling/xtask/**"
+      - "fixtures/kicad-10/**"
+
+permissions:
+  contents: read
+
+jobs:
+  gui-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      RUST_VERSION: "1.85.1"
+      NODE_VERSION: "24.18.0"
+      NPM_VERSION: "11.16.0"
+      NODE_URL: "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz"
+      NODE_SHA256: "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742"
+      TAURI_VERSION: "2.11.4"
+      TAURI_URL: "https://registry.npmjs.org/@tauri-apps/cli/-/cli-2.11.4.tgz"
+      TAURI_SHA512: "47cc46b4ca70c9eb5ac12aa6f6460eb8c984aa48546ef714cbc9f468d5c8c689652812c4494bb97f8171fbae218004989b51fe8d25aaea3096eb3a939c7ea1a9"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Load exact Ubuntu GUI package contract from versions.lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          cargo xtask export-github-env >> "$GITHUB_ENV"
+
+      - name: Install exact KiCad and pinned Tauri/X11 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo add-apt-repository --yes "$KICAD_PPA"
+          sudo apt-get update
+          apt-cache madison "$KICAD_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$KICAD_VERSION"
+          apt-cache madison "$KICAD_SYMBOLS_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$KICAD_SYMBOLS_VERSION"
+          apt-cache madison "$KICAD_FOOTPRINTS_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$KICAD_FOOTPRINTS_VERSION"
+          apt-cache madison "$KICAD_PACKAGES3D_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$KICAD_PACKAGES3D_VERSION"
+          apt-cache madison "$WEBKIT_LIBRARY_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$WEBKIT_LIBRARY_VERSION"
+          apt-cache madison "$WEBKIT_DRIVER_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$WEBKIT_DRIVER_VERSION"
+          apt-cache madison "$XVFB_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$XVFB_VERSION"
+          sudo apt-get install --yes \
+            "$KICAD_SPEC" "$KICAD_SYMBOLS_SPEC" "$KICAD_FOOTPRINTS_SPEC" \
+            "$KICAD_PACKAGES3D_SPEC" "$WEBKIT_LIBRARY_SPEC" "$WEBKIT_DRIVER_SPEC" \
+            "$XVFB_SPEC" x11-apps imagemagick xauth
+          test "$(dpkg-query -W -f='${Version}' "$KICAD_PACKAGE")" = "$KICAD_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$KICAD_SYMBOLS_PACKAGE")" = "$KICAD_SYMBOLS_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$KICAD_FOOTPRINTS_PACKAGE")" = "$KICAD_FOOTPRINTS_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$KICAD_PACKAGES3D_PACKAGE")" = "$KICAD_PACKAGES3D_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$WEBKIT_LIBRARY_PACKAGE")" = "$WEBKIT_LIBRARY_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$WEBKIT_DRIVER_PACKAGE")" = "$WEBKIT_DRIVER_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$XVFB_PACKAGE")" = "$XVFB_VERSION"
+          rustup default "$RUST_VERSION"
+          curl --fail --location --silent --show-error "$NODE_URL" --output /tmp/node.tar.xz
+          echo "$NODE_SHA256  /tmp/node.tar.xz" | sha256sum -c -
+          sudo tar -xJf /tmp/node.tar.xz --strip-components=1 -C /usr/local
+          curl --fail --location --silent --show-error "$TAURI_URL" --output /tmp/tauri-cli.tgz
+          echo "$TAURI_SHA512  /tmp/tauri-cli.tgz" | sha512sum -c -
+          sudo npm install --global /tmp/tauri-cli.tgz
+          test "$(rustc --version | awk '{print $2}')" = "$RUST_VERSION"
+          test "$(node --version)" = "v$NODE_VERSION"
+          test "$(npm --version)" = "$NPM_VERSION"
+          test "$(tauri --version)" = "tauri-cli $TAURI_VERSION"
+
+      - name: Launch isolated KiCad GUI smoke and write lane evidence
+        shell: bash
+        env:
+          HOME: ${{ github.workspace }}/.afk/gui/home
+          XDG_CACHE_HOME: ${{ github.workspace }}/.afk/gui/xdg/cache
+          XDG_CONFIG_HOME: ${{ github.workspace }}/.afk/gui/xdg/config
+          XDG_DATA_HOME: ${{ github.workspace }}/.afk/gui/xdg/data
+          XDG_STATE_HOME: ${{ github.workspace }}/.afk/gui/xdg/state
+          KICAD_CONFIG_HOME: ${{ github.workspace }}/.afk/gui/kicad/config
+          DISPLAY: ":99"
+        run: |
+          set -euo pipefail
+          artifact_dir=.afk/gui/artifacts
+          fixture=fixtures/kicad-10/afk-smoke/afk-smoke.kicad_pcb
+          mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$KICAD_CONFIG_HOME" "$artifact_dir"
+          xvfb_pid=
+          kicad_pid=
+          finish() {
+            rc=$?
+            trap - EXIT
+            if [[ -n "$kicad_pid" ]]; then kill "$kicad_pid" 2>/dev/null || true; wait "$kicad_pid" 2>/dev/null || true; fi
+            if [[ -n "$xvfb_pid" ]]; then kill "$xvfb_pid" 2>/dev/null || true; wait "$xvfb_pid" 2>/dev/null || true; fi
+            if [[ $rc -eq 0 ]]; then status=passed; failures=0; failure_xml=; else status=failed; failures=1; failure_xml='<failure message="Ubuntu X11 GUI smoke failed; inspect uploaded logs"/>'; fi
+            printf '{"schema":1,"lane":"ubuntu-x11-gui","status":"%s","exit_code":%d,"kicad_package":"%s","window_asserted":%s,"fixture_unchanged":%s}\n' \
+              "$status" "$rc" "$KICAD_VERSION" "${window_asserted:-false}" "${fixture_unchanged:-false}" > "$artifact_dir/lane-result.json"
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="ubuntu-x11-gui" tests="1" failures="%d"><testcase name="kicad-10-window-smoke">%s</testcase></testsuite>\n' \
+              "$failures" "$failure_xml" > "$artifact_dir/results.xml"
+            exit "$rc"
+          }
+          trap finish EXIT
+          sha256sum "$fixture" > "$artifact_dir/source.before.sha256"
+          {
+            uname -a
+            dpkg-query -W "$KICAD_PACKAGE" "$KICAD_SYMBOLS_PACKAGE" "$KICAD_FOOTPRINTS_PACKAGE" "$KICAD_PACKAGES3D_PACKAGE" "$WEBKIT_LIBRARY_PACKAGE" "$WEBKIT_DRIVER_PACKAGE" "$XVFB_PACKAGE"
+            rustc --version
+            cargo --version
+            node --version
+            npm --version
+            tauri --version
+          } > "$artifact_dir/machine-manifest.txt"
+          test "$(dpkg-query -W -f='${Version}' "$KICAD_PACKAGE")" = "$KICAD_VERSION"
+          test -f "$STOCK_SYMBOL"
+          test -f "$STOCK_FOOTPRINT"
+          test -f "$STOCK_3D_MODEL"
+          kicad-cli version --format about | tee "$artifact_dir/kicad-version.txt"
+          grep -Fqx "Version: 10.0.4, release build" "$artifact_dir/kicad-version.txt"
+          Xvfb :99 -screen 0 1280x800x24 > "$artifact_dir/xvfb.log" 2>&1 &
+          xvfb_pid=$!
+          pcbnew "$fixture" > "$artifact_dir/kicad-gui.log" 2>&1 &
+          kicad_pid=$!
+          for _attempt in $(seq 1 30); do
+            if xwininfo -root -tree > "$artifact_dir/window-tree.txt" 2>&1 && grep -Fq KiCad "$artifact_dir/window-tree.txt"; then
+              window_asserted=true
+              break
+            fi
+            sleep 1
+          done
+          test "${window_asserted:-false}" = true
+          import -window root "$artifact_dir/kicad-gui.png"
+          sha256sum -c "$artifact_dir/source.before.sha256"
+          sha256sum "$fixture" > "$artifact_dir/source.after.sha256"
+          cmp "$artifact_dir/source.before.sha256" "$artifact_dir/source.after.sha256"
+          fixture_unchanged=true
+
+      - name: Ensure machine-readable failure evidence exists
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=.afk/gui/artifacts
+          mkdir -p "$artifact_dir"
+          if [[ ! -f "$artifact_dir/lane-result.json" ]]; then
+            printf '{"schema":1,"lane":"ubuntu-x11-gui","status":"failed","exit_code":1,"kicad_package":"%s","window_asserted":false,"fixture_unchanged":false}\n' \
+              "${KICAD_VERSION:-unavailable}" > "$artifact_dir/lane-result.json"
+            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?><testsuite name="ubuntu-x11-gui" tests="1" failures="1"><testcase name="kicad-10-window-smoke"><failure message="setup or smoke failed before lane evidence completed"/></testcase></testsuite>' \
+              > "$artifact_dir/results.xml"
+          fi
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kicad-10-ubuntu-x11-smoke
+          path: .afk/gui/artifacts
+          if-no-files-found: error
