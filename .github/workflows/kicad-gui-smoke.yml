@@ -52,10 +52,12 @@ jobs:
           apt-cache madison "$WEBKIT_LIBRARY_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$WEBKIT_LIBRARY_VERSION"
           apt-cache madison "$WEBKIT_DRIVER_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$WEBKIT_DRIVER_VERSION"
           apt-cache madison "$XVFB_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$XVFB_VERSION"
+          apt-cache madison "$X11_UTILS_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$X11_UTILS_VERSION"
+          apt-cache madison "$IMAGEMAGICK_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$IMAGEMAGICK_VERSION"
           sudo apt-get install --yes --allow-downgrades \
             "$KICAD_SPEC" "$KICAD_SYMBOLS_SPEC" "$KICAD_FOOTPRINTS_SPEC" \
             "$KICAD_PACKAGES3D_SPEC" "$WEBKIT_LIBRARY_SPEC" "$WEBKIT_DRIVER_SPEC" \
-            "$XVFB_SPEC" x11-apps imagemagick xauth
+            "$XVFB_SPEC" "$X11_UTILS_SPEC" "$IMAGEMAGICK_SPEC"
           test "$(dpkg-query -W -f='${Version}' "$KICAD_PACKAGE")" = "$KICAD_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$KICAD_SYMBOLS_PACKAGE")" = "$KICAD_SYMBOLS_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$KICAD_FOOTPRINTS_PACKAGE")" = "$KICAD_FOOTPRINTS_VERSION"
@@ -63,6 +65,13 @@ jobs:
           test "$(dpkg-query -W -f='${Version}' "$WEBKIT_LIBRARY_PACKAGE")" = "$WEBKIT_LIBRARY_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$WEBKIT_DRIVER_PACKAGE")" = "$WEBKIT_DRIVER_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$XVFB_PACKAGE")" = "$XVFB_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$X11_UTILS_PACKAGE")" = "$X11_UTILS_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$IMAGEMAGICK_PACKAGE")" = "$IMAGEMAGICK_VERSION"
+          test "$(command -v kicad-cli)" = /usr/bin/kicad-cli
+          test "$(command -v pcbnew)" = /usr/bin/pcbnew
+          test "$(command -v Xvfb)" = /usr/bin/Xvfb
+          test "$(command -v xwininfo)" = /usr/bin/xwininfo
+          test "$(command -v import)" = /usr/bin/import
           rustup default "$RUST_VERSION"
           curl --fail --location --silent --show-error "$NODE_URL" --output /tmp/node.tar.xz
           echo "$NODE_SHA256  /tmp/node.tar.xz" | sha256sum -c -
@@ -123,7 +132,7 @@ jobs:
           sha256sum "$fixture" > "$artifact_dir/source.before.sha256"
           {
             uname -a
-            dpkg-query -W "$KICAD_PACKAGE" "$KICAD_SYMBOLS_PACKAGE" "$KICAD_FOOTPRINTS_PACKAGE" "$KICAD_PACKAGES3D_PACKAGE" "$WEBKIT_LIBRARY_PACKAGE" "$WEBKIT_DRIVER_PACKAGE" "$XVFB_PACKAGE"
+            dpkg-query -W "$KICAD_PACKAGE" "$KICAD_SYMBOLS_PACKAGE" "$KICAD_FOOTPRINTS_PACKAGE" "$KICAD_PACKAGES3D_PACKAGE" "$WEBKIT_LIBRARY_PACKAGE" "$WEBKIT_DRIVER_PACKAGE" "$XVFB_PACKAGE" "$X11_UTILS_PACKAGE" "$IMAGEMAGICK_PACKAGE"
             rustc --version
             cargo --version
             node --version

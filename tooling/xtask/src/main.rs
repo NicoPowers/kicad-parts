@@ -29,6 +29,7 @@ enum WorkflowContractCategory {
     DiagnosticLog,
     DpkgAssertion,
     DowngradePermission,
+    ExecutablePreflight,
     Exporter,
     GuiLog,
     HashProof,
@@ -38,6 +39,7 @@ enum WorkflowContractCategory {
     LaneEvidence,
     LockReference,
     Ppa,
+    PackageManifest,
     PrivateToolchain,
     Screenshot,
     StockPath,
@@ -294,6 +296,18 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 26)))
     ),
     run_contract!(
+        Availability,
+        Line,
+        "apt-cache madison \"$X11_UTILS_PACKAGE\" | awk '{print $3}' | grep -Fqx -- \"$X11_UTILS_VERSION\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 27)))
+    ),
+    run_contract!(
+        Availability,
+        Line,
+        "apt-cache madison \"$IMAGEMAGICK_PACKAGE\" | awk '{print $3}' | grep -Fqx -- \"$IMAGEMAGICK_VERSION\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 28)))
+    ),
+    run_contract!(
         DowngradePermission,
         Line,
         "sudo apt-get install --yes --allow-downgrades",
@@ -342,6 +356,18 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 36)))
     ),
     run_contract!(
+        InstallSpec,
+        Token,
+        "\"$X11_UTILS_SPEC\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 37)))
+    ),
+    run_contract!(
+        InstallSpec,
+        Token,
+        "\"$IMAGEMAGICK_SPEC\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 38)))
+    ),
+    run_contract!(
         DpkgAssertion,
         Line,
         "test \"$(dpkg-query -W -f='${Version}' \"$KICAD_PACKAGE\")\" = \"$KICAD_VERSION\"",
@@ -385,124 +411,166 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 46)))
     ),
     run_contract!(
+        DpkgAssertion,
+        Line,
+        "test \"$(dpkg-query -W -f='${Version}' \"$X11_UTILS_PACKAGE\")\" = \"$X11_UTILS_VERSION\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 47)))
+    ),
+    run_contract!(
+        DpkgAssertion,
+        Line,
+        "test \"$(dpkg-query -W -f='${Version}' \"$IMAGEMAGICK_PACKAGE\")\" = \"$IMAGEMAGICK_VERSION\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 48)))
+    ),
+    run_contract!(
+        ExecutablePreflight,
+        Line,
+        "test \"$(command -v kicad-cli)\" = /usr/bin/kicad-cli",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 50)))
+    ),
+    run_contract!(
+        ExecutablePreflight,
+        Line,
+        "test \"$(command -v pcbnew)\" = /usr/bin/pcbnew",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 51)))
+    ),
+    run_contract!(
+        ExecutablePreflight,
+        Line,
+        "test \"$(command -v Xvfb)\" = /usr/bin/Xvfb",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 52)))
+    ),
+    run_contract!(
+        ExecutablePreflight,
+        Line,
+        "test \"$(command -v xwininfo)\" = /usr/bin/xwininfo",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 53)))
+    ),
+    run_contract!(
+        ExecutablePreflight,
+        Line,
+        "test \"$(command -v import)\" = /usr/bin/import",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 54)))
+    ),
+    run_contract!(
         PrivateToolchain,
         Line,
         "toolchain_prefix=\"$RUNNER_TEMP/kicad-gui-toolchain-$NODE_VERSION-$TAURI_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 47)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 60)))
     ),
     run_contract!(
         PrivateToolchain,
         Line,
         "test ! -e \"$toolchain_prefix\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 48)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "mkdir \"$toolchain_prefix\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 49)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "tar -xJf /tmp/node.tar.xz --strip-components=1 -C \"$toolchain_prefix\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 50)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "export PATH=\"$toolchain_prefix/bin:$PATH\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 51)))
-    ),
-    run_contract!(
-        TauriArtifact,
-        Line,
-        "curl --fail --location --silent --show-error \"$TAURI_LINUX_X64_GNU_URL\" --output /tmp/tauri-cli-linux-x64-gnu.tgz",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 52)))
-    ),
-    run_contract!(
-        TauriArtifact,
-        Line,
-        "echo \"$TAURI_LINUX_X64_GNU_SHA512  /tmp/tauri-cli-linux-x64-gnu.tgz\" | sha512sum -c -",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 53)))
-    ),
-    run_contract!(
-        DiagnosticLog,
-        Line,
-        "artifact_dir=\"$GITHUB_WORKSPACE/.afk/gui/artifacts\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 54)))
-    ),
-    run_contract!(
-        DiagnosticLog,
-        Line,
-        "npm_logs=\"$artifact_dir/npm-logs\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 55)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "npm_home=\"$RUNNER_TEMP/kicad-gui-npm-home\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 56)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "env HOME=\"$npm_home\" NPM_CONFIG_USERCONFIG=/dev/null \"$toolchain_prefix/bin/npm\" install",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 57)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "--global --prefix \"$toolchain_prefix\" --offline --omit=optional --ignore-scripts",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 58)))
-    ),
-    run_contract!(
-        DiagnosticLog,
-        Line,
-        "--loglevel verbose --logs-dir \"$npm_logs\" --audit=false --fund=false",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 59)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "--update-notifier=false /tmp/tauri-cli.tgz /tmp/tauri-cli-linux-x64-gnu.tgz",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 60)))
-    ),
-    run_contract!(
-        DiagnosticLog,
-        Line,
-        "2>&1 | tee \"$artifact_dir/npm-tauri-install.log\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 61)))
     ),
     run_contract!(
         PrivateToolchain,
         Line,
-        "echo \"$toolchain_prefix/bin\" >> \"$GITHUB_PATH\"",
+        "mkdir \"$toolchain_prefix\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 62)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "tar -xJf /tmp/node.tar.xz --strip-components=1 -C \"$toolchain_prefix\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 63)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "export PATH=\"$toolchain_prefix/bin:$PATH\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 64)))
+    ),
+    run_contract!(
+        TauriArtifact,
+        Line,
+        "curl --fail --location --silent --show-error \"$TAURI_LINUX_X64_GNU_URL\" --output /tmp/tauri-cli-linux-x64-gnu.tgz",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 65)))
+    ),
+    run_contract!(
+        TauriArtifact,
+        Line,
+        "echo \"$TAURI_LINUX_X64_GNU_SHA512  /tmp/tauri-cli-linux-x64-gnu.tgz\" | sha512sum -c -",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 66)))
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "artifact_dir=\"$GITHUB_WORKSPACE/.afk/gui/artifacts\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 67)))
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "npm_logs=\"$artifact_dir/npm-logs\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 68)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "npm_home=\"$RUNNER_TEMP/kicad-gui-npm-home\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 69)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "env HOME=\"$npm_home\" NPM_CONFIG_USERCONFIG=/dev/null \"$toolchain_prefix/bin/npm\" install",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 70)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "--global --prefix \"$toolchain_prefix\" --offline --omit=optional --ignore-scripts",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 71)))
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "--loglevel verbose --logs-dir \"$npm_logs\" --audit=false --fund=false",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 72)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "--update-notifier=false /tmp/tauri-cli.tgz /tmp/tauri-cli-linux-x64-gnu.tgz",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 73)))
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "2>&1 | tee \"$artifact_dir/npm-tauri-install.log\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 74)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "echo \"$toolchain_prefix/bin\" >> \"$GITHUB_PATH\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 75)))
     ),
     run_contract!(
         ToolchainProbe,
         Line,
         "test \"$(rustc --version | awk '{print $2}')\" = \"$RUST_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 70)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 80)))
     ),
     run_contract!(
         ToolchainProbe,
         Line,
         "test \"$(\"$toolchain_prefix/bin/node\" --version)\" = \"v$NODE_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 71)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 81)))
     ),
     run_contract!(
         ToolchainProbe,
         Line,
         "test \"$(\"$toolchain_prefix/bin/npm\" --version)\" = \"$NPM_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 72)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 82)))
     ),
     run_contract!(
         ToolchainProbe,
         Line,
         "test \"$(\"$toolchain_prefix/bin/tauri\" --version)\" = \"tauri-cli $TAURI_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 73)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 83)))
     ),
     field_contract!(
         Isolation,
@@ -565,6 +633,12 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         Line,
         "sha256sum \"$fixture\" > \"$artifact_dir/source.before.sha256\"",
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 10)))
+    ),
+    run_contract!(
+        PackageManifest,
+        Line,
+        "dpkg-query -W \"$KICAD_PACKAGE\" \"$KICAD_SYMBOLS_PACKAGE\" \"$KICAD_FOOTPRINTS_PACKAGE\" \"$KICAD_PACKAGES3D_PACKAGE\" \"$WEBKIT_LIBRARY_PACKAGE\" \"$WEBKIT_DRIVER_PACKAGE\" \"$XVFB_PACKAGE\" \"$X11_UTILS_PACKAGE\" \"$IMAGEMAGICK_PACKAGE\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 15)))
     ),
     run_contract!(
         CliVersion,
@@ -701,20 +775,22 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
     BTreeMap::from([
         (WorkflowContractCategory::ActionPin, 2),
         (WorkflowContractCategory::AlwaysUpload, 3),
-        (WorkflowContractCategory::Availability, 7),
+        (WorkflowContractCategory::Availability, 9),
         (WorkflowContractCategory::CliVersion, 3),
         (WorkflowContractCategory::DiagnosticLog, 4),
-        (WorkflowContractCategory::DpkgAssertion, 7),
+        (WorkflowContractCategory::DpkgAssertion, 9),
         (WorkflowContractCategory::DowngradePermission, 1),
+        (WorkflowContractCategory::ExecutablePreflight, 5),
         (WorkflowContractCategory::Exporter, 1),
         (WorkflowContractCategory::GuiLog, 2),
         (WorkflowContractCategory::HashProof, 3),
-        (WorkflowContractCategory::InstallSpec, 7),
+        (WorkflowContractCategory::InstallSpec, 9),
         (WorkflowContractCategory::Isolation, 7),
         (WorkflowContractCategory::Junit, 1),
         (WorkflowContractCategory::LaneEvidence, 1),
         (WorkflowContractCategory::LockReference, 10),
         (WorkflowContractCategory::Ppa, 1),
+        (WorkflowContractCategory::PackageManifest, 1),
         (WorkflowContractCategory::Screenshot, 1),
         (WorkflowContractCategory::StockPath, 3),
         (WorkflowContractCategory::PrivateToolchain, 10),
@@ -842,6 +918,8 @@ fn github_env_export(lock: &VersionsLock) -> LabResult<String> {
         ("WEBKIT_LIBRARY", &lock.ubuntu_gui.webkit_library),
         ("WEBKIT_DRIVER", &lock.ubuntu_gui.webkit_driver),
         ("XVFB", &lock.ubuntu_gui.xvfb),
+        ("X11_UTILS", &lock.ubuntu_gui.x11_utils),
+        ("IMAGEMAGICK", &lock.ubuntu_gui.imagemagick),
     ];
     let mut values = BTreeMap::from([
         ("KICAD_PPA".to_owned(), lock.ubuntu_gui.ppa.clone()),
@@ -1956,11 +2034,11 @@ const PROTECTED_PROGRAM_DIGESTS: &[(WorkflowStep, &str)] = &[
     ),
     (
         WorkflowStep::Install,
-        "e55030ea5f21e9fb073fe8c0e54067676bc63763941a1ec2e4f7d7ae9ce20017",
+        "281ad6a30c973fc7ff2b36522e33643ee13d934884de25c4ecd0bff04eb11580",
     ),
     (
         WorkflowStep::Smoke,
-        "ef8c4e31f6f990070ba29357f5fe229314e866ee8b77c9136d66b49e309e4025",
+        "8e188bed7fb4157a7e7a278f4fd877e9cd9a51ff4b4ed05582c724f4ea0ebac9",
     ),
     (
         WorkflowStep::EnsureEvidence,
@@ -2289,6 +2367,8 @@ fn validate_gui_workflow_value(workflow: &Yaml, lock: &VersionsLock) -> LabResul
             &lock.ubuntu_gui.webkit_library,
             &lock.ubuntu_gui.webkit_driver,
             &lock.ubuntu_gui.xvfb,
+            &lock.ubuntu_gui.x11_utils,
+            &lock.ubuntu_gui.imagemagick,
         ])
     {
         if parsed_semantics_contains(workflow, &package.version) {
@@ -3003,7 +3083,7 @@ mod tests {
             },
         );
         assert_eq!(categories, expected_workflow_category_counts());
-        assert_eq!(WORKFLOW_CONTRACT.len(), 83);
+        assert_eq!(WORKFLOW_CONTRACT.len(), 95);
         for required in WORKFLOW_CONTRACT {
             match required.locator {
                 WorkflowContractLocator::Run { kind, locations } => {
@@ -3136,6 +3216,60 @@ mod tests {
         let misplaced =
             without_check.replacen(output_line, &format!("{check_line}{output_line}"), 1);
         assert!(validate_gui_workflow_contract(&misplaced, &lock).is_err());
+    }
+
+    #[test]
+    fn gui_workflow_requires_locked_gui_helpers_and_exact_preflights() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let lock = VersionsLock::load(
+            &repository.join("infra/versions.lock"),
+            &repository.join("rust-toolchain.toml"),
+        )
+        .unwrap();
+        let workflow =
+            fs::read_to_string(repository.join(".github/workflows/kicad-gui-smoke.yml")).unwrap();
+
+        assert!(!workflow.contains("x11-apps"));
+        assert!(!workflow.contains("xauth"));
+        for (spec, floating) in [
+            ("\"$X11_UTILS_SPEC\"", "\"$X11_UTILS_PACKAGE\""),
+            ("\"$IMAGEMAGICK_SPEC\"", "\"$IMAGEMAGICK_PACKAGE\""),
+        ] {
+            assert_eq!(workflow.matches(spec).count(), 1);
+            for replacement in ["", floating] {
+                let changed = workflow.replacen(spec, replacement, 1);
+                assert!(
+                    validate_gui_workflow_contract(&changed, &lock).is_err(),
+                    "accepted removed or floating GUI helper package `{spec}`"
+                );
+            }
+        }
+
+        for (command, path) in [
+            ("kicad-cli", "/usr/bin/kicad-cli"),
+            ("pcbnew", "/usr/bin/pcbnew"),
+            ("Xvfb", "/usr/bin/Xvfb"),
+            ("xwininfo", "/usr/bin/xwininfo"),
+            ("import", "/usr/bin/import"),
+        ] {
+            let preflight = format!("test \"$(command -v {command})\" = {path}");
+            assert_eq!(workflow.matches(&preflight).count(), 1);
+            for replacement in [":".to_owned(), preflight.replace(path, "/usr/bin/false")] {
+                let changed = workflow.replacen(&preflight, &replacement, 1);
+                assert!(
+                    validate_gui_workflow_contract(&changed, &lock).is_err(),
+                    "accepted removed or substituted `{command}` preflight"
+                );
+            }
+        }
+
+        let manifest_tail = " \"$XVFB_PACKAGE\" \"$X11_UTILS_PACKAGE\" \"$IMAGEMAGICK_PACKAGE\"";
+        assert_eq!(workflow.matches(manifest_tail).count(), 1);
+        let incomplete_manifest = workflow.replacen(manifest_tail, " \"$XVFB_PACKAGE\"", 1);
+        assert!(validate_gui_workflow_contract(&incomplete_manifest, &lock).is_err());
     }
 
     #[test]
@@ -3403,6 +3537,8 @@ mod tests {
             ("\"$WEBKIT_LIBRARY_SPEC\"", "\"$WEBKIT_LIBRARY_PACKAGE\""),
             ("\"$WEBKIT_DRIVER_SPEC\"", "\"$WEBKIT_DRIVER_PACKAGE\""),
             ("\"$XVFB_SPEC\"", "\"$XVFB_PACKAGE\""),
+            ("\"$X11_UTILS_SPEC\"", "\"$X11_UTILS_PACKAGE\""),
+            ("\"$IMAGEMAGICK_SPEC\"", "\"$IMAGEMAGICK_PACKAGE\""),
         ];
         for (spec, unpinned) in install_specs {
             for payload in [
@@ -3498,7 +3634,7 @@ mod tests {
         let first = github_env_export(&lock).unwrap();
         let second = github_env_export(&lock).unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.lines().count(), 27);
+        assert_eq!(first.lines().count(), 33);
         assert!(first.lines().any(|line| {
             line == format!(
                 "TAURI_LINUX_X64_GNU_URL={}",
@@ -3519,6 +3655,8 @@ mod tests {
             "WEBKIT_LIBRARY",
             "WEBKIT_DRIVER",
             "XVFB",
+            "X11_UTILS",
+            "IMAGEMAGICK",
         ] {
             assert!(
                 first

@@ -105,6 +105,8 @@ pub struct UbuntuGuiLock {
     pub webkit_library: UbuntuPackagePin,
     pub webkit_driver: UbuntuPackagePin,
     pub xvfb: UbuntuPackagePin,
+    pub x11_utils: UbuntuPackagePin,
+    pub imagemagick: UbuntuPackagePin,
     pub stock_symbol: String,
     pub stock_footprint: String,
     pub stock_3d_model: String,
@@ -252,6 +254,8 @@ impl VersionsLock {
             ("libwebkit2gtk-4.1-0", &self.ubuntu_gui.webkit_library),
             ("webkit2gtk-driver", &self.ubuntu_gui.webkit_driver),
             ("xvfb", &self.ubuntu_gui.xvfb),
+            ("x11-utils", &self.ubuntu_gui.x11_utils),
+            ("imagemagick-6.q16", &self.ubuntu_gui.imagemagick),
         ];
         for (expected_name, package) in expected_packages {
             validate_ubuntu_package(package, expected_name)?;
@@ -279,6 +283,8 @@ impl VersionsLock {
         if self.ubuntu_gui.kicad_package.version != expected_kicad_gui
             || self.ubuntu_gui.webkit_library.version != "2.52.3-0ubuntu0.24.04.1"
             || self.ubuntu_gui.xvfb.version != "2:21.1.12-1ubuntu1.5"
+            || self.ubuntu_gui.x11_utils.version != "7.7+6build2"
+            || self.ubuntu_gui.imagemagick.version != "8:6.9.12.98+dfsg1-5.2build2"
             || self.ubuntu_gui.ubuntu_packages_source != "https://packages.ubuntu.com/noble/amd64"
         {
             return Err(LabError(
@@ -522,6 +528,22 @@ impl VersionsLock {
                 self.ubuntu_gui.xvfb.version.as_str(),
             ),
             (
+                "ubuntu_gui.x11_utils.name",
+                self.ubuntu_gui.x11_utils.name.as_str(),
+            ),
+            (
+                "ubuntu_gui.x11_utils.version",
+                self.ubuntu_gui.x11_utils.version.as_str(),
+            ),
+            (
+                "ubuntu_gui.imagemagick.name",
+                self.ubuntu_gui.imagemagick.name.as_str(),
+            ),
+            (
+                "ubuntu_gui.imagemagick.version",
+                self.ubuntu_gui.imagemagick.version.as_str(),
+            ),
+            (
                 "ubuntu_gui.stock_symbol",
                 self.ubuntu_gui.stock_symbol.as_str(),
             ),
@@ -654,6 +676,8 @@ mod tests {
             "webkit_library = ",
             "webkit_driver = ",
             "xvfb = ",
+            "x11_utils = ",
+            "imagemagick = ",
         ] {
             let filtered = text
                 .lines()
@@ -683,6 +707,11 @@ mod tests {
             (
                 "version = \"2:21.1.12-1ubuntu1.5\"",
                 "version = \"2:21.1.12-1ubuntu1\"",
+            ),
+            ("version = \"7.7+6build2\"", "version = \"7.7+5build2\""),
+            (
+                "version = \"8:6.9.12.98+dfsg1-5.2build2\"",
+                "version = \"8:6.9.12.98+dfsg1-5.2build1\"",
             ),
             ("name = \"kicad-symbols\"", "name = \"kicad-symbol\""),
         ] {
