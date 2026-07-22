@@ -120,6 +120,12 @@ jobs:
           set -euo pipefail
           artifact_dir=.afk/gui/artifacts
           fixture=fixtures/kicad-10/afk-smoke/afk-smoke.kicad_pcb
+          startup_config_source=fixtures/kicad-10/gui-config
+          startup_config_manifest="$startup_config_source/SHA256SUMS"
+          startup_config_dir="$KICAD_CONFIG_HOME/10.0"
+          startup_config_files=(kicad_common.json sym-lib-table fp-lib-table design-block-lib-table)
+          stock_symbol_table=/usr/share/kicad/template/sym-lib-table
+          stock_footprint_table=/usr/share/kicad/template/fp-lib-table
           mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$KICAD_CONFIG_HOME" "$artifact_dir"
           xvfb_pid=
           wm_pid=
@@ -130,6 +136,12 @@ jobs:
             if [[ -n "$kicad_pid" ]]; then kill "$kicad_pid" 2>/dev/null || true; wait "$kicad_pid" 2>/dev/null || true; fi
             if [[ -n "$wm_pid" ]]; then kill "$wm_pid" 2>/dev/null || true; wait "$wm_pid" 2>/dev/null || true; fi
             if [[ -n "$xvfb_pid" ]]; then kill "$xvfb_pid" 2>/dev/null || true; wait "$xvfb_pid" 2>/dev/null || true; fi
+            if [[ -n "${startup_config_dir:-}" && -d "$startup_config_dir" ]]; then
+              (
+                cd "$startup_config_dir"
+                sha256sum "${startup_config_files[@]}"
+              ) > "$artifact_dir/startup-config-post-run.sha256" 2>> "$artifact_dir/startup-config-readiness.txt" || true
+            fi
             if [[ $rc -eq 0 ]]; then status=passed; failures=0; failure_xml=; else status=failed; failures=1; failure_xml='<failure message="Ubuntu X11 GUI smoke failed; inspect uploaded logs"/>'; fi
             printf '{"schema":1,"lane":"ubuntu-x11-gui","status":"%s","exit_code":%d,"kicad_package":"%s","window_asserted":%s,"fixture_unchanged":%s}\n' \
               "$status" "$rc" "$KICAD_VERSION" "${window_asserted:-false}" "${fixture_unchanged:-false}" > "$artifact_dir/lane-result.json"
@@ -139,6 +151,43 @@ jobs:
           }
           trap finish EXIT
           sha256sum "$fixture" > "$artifact_dir/source.before.sha256"
+          {
+            printf 'startup_config_source=%s\n' "$startup_config_source"
+            printf 'startup_config_dir=%s\n' "$startup_config_dir"
+            printf 'startup_config_files=%s\n' "${startup_config_files[*]}"
+            test "$startup_config_dir" = "$GITHUB_WORKSPACE/.afk/gui/kicad/config/10.0"
+            test -f "$startup_config_manifest"
+            test -f "$stock_symbol_table"
+            test -f "$stock_footprint_table"
+            (
+              cd "$startup_config_source"
+              sha256sum "${startup_config_files[@]}" > "$GITHUB_WORKSPACE/$artifact_dir/startup-config-source.sha256"
+              sha256sum -c SHA256SUMS
+            )
+            cmp "$startup_config_manifest" "$artifact_dir/startup-config-source.sha256"
+            chmod a-w "$startup_config_manifest"
+            test ! -w "$startup_config_manifest"
+            for startup_config_file in "${startup_config_files[@]}"; do
+              chmod a-w "$startup_config_source/$startup_config_file"
+              test ! -w "$startup_config_source/$startup_config_file"
+            done
+            chmod a-w "$startup_config_source"
+            test ! -w "$startup_config_source"
+            test ! -e "$startup_config_dir"
+            mkdir "$startup_config_dir"
+            for startup_config_file in "${startup_config_files[@]}"; do
+              cp "$startup_config_source/$startup_config_file" "$startup_config_dir/$startup_config_file"
+              chmod u+w "$startup_config_dir/$startup_config_file"
+              cmp "$startup_config_source/$startup_config_file" "$startup_config_dir/$startup_config_file"
+            done
+            (
+              cd "$startup_config_dir"
+              sha256sum "${startup_config_files[@]}" > "$GITHUB_WORKSPACE/$artifact_dir/startup-config-copy.sha256"
+              sha256sum -c "$GITHUB_WORKSPACE/$startup_config_manifest"
+            )
+            cmp "$startup_config_manifest" "$artifact_dir/startup-config-copy.sha256"
+            printf 'KiCad 10 first-run config ready; source is read-only and run-scoped copy is writable\n'
+          } > "$artifact_dir/startup-config-readiness.txt" 2>&1
           {
             uname -a
             dpkg-query -W "$KICAD_PACKAGE" "$KICAD_SYMBOLS_PACKAGE" "$KICAD_FOOTPRINTS_PACKAGE" "$KICAD_PACKAGES3D_PACKAGE" "$WEBKIT_LIBRARY_PACKAGE" "$WEBKIT_DRIVER_PACKAGE" "$XVFB_PACKAGE" "$X11_UTILS_PACKAGE" "$IMAGEMAGICK_PACKAGE" "$WINDOW_MANAGER_PACKAGE"
@@ -210,6 +259,7 @@ jobs:
             fi
             sleep 0.1
           done
+          : > "$artifact_dir/pcbnew-process-status.txt"
           test "${wm_ready:-false}" = true
           kill -0 "$wm_pid" 2>/dev/null
           pcbnew "$fixture" > "$artifact_dir/kicad-gui.log" 2>&1 &
@@ -230,6 +280,8 @@ jobs:
           : > "$artifact_dir/window-tree.txt"
           : > "$artifact_dir/window-details.txt"
           for _attempt in $(seq 1 60); do
+            printf -- '--- attempt=%d ---\n' "$_attempt" >> "$artifact_dir/pcbnew-process-status.txt"
+            ps -o pid=,ppid=,stat=,etime=,args= -p "$kicad_pid" >> "$artifact_dir/pcbnew-process-status.txt" 2>&1 || true
             printf -- '--- attempt=%d ---\n' "$_attempt" >> "$artifact_dir/window-tree.txt"
             printf -- '--- attempt=%d candidates ---\n' "$_attempt" >> "$artifact_dir/window-details.txt"
             : > "$candidate_file"

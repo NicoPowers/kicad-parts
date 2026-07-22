@@ -1,0 +1,9 @@
+{
+  "meta": {
+    "version": 6
+  },
+  "do_not_show_again": {
+    "data_collection_prompt": true,
+    "update_check_prompt": true
+  }
+}

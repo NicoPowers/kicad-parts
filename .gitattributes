@@ -2,3 +2,4 @@
 .seeds/templates.jsonl merge=union
 .seeds/plans.jsonl merge=union
 .mulch/expertise/*.jsonl merge=union
+fixtures/kicad-10/gui-config/** text eol=lf

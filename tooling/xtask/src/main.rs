@@ -47,6 +47,7 @@ enum WorkflowContractCategory {
     PostCapture,
     Screenshot,
     StockPath,
+    StartupConfig,
     TauriArtifact,
     ToolchainProbe,
     UploadPath,
@@ -107,6 +108,29 @@ const PCBNEW_POST_SELECTION_ASSERTION_LINE: &str = r#"if [[ "$post_candidate_id"
 const PCBNEW_IMAGE_ASSERTION_LINE: &str = r#"if [[ "$image_width" =~ ^[1-9][0-9]*$ && "$image_height" =~ ^[1-9][0-9]*$ && "$image_colors" =~ ^[1-9][0-9]*$ ]] && (( image_width == tree_width && image_height == tree_height && image_colors > 1 )); then"#;
 const OPENBOX_ROOT_OWNER_LINE: &str = r##"if wm_window_id=$(awk '$1 == "_NET_SUPPORTING_WM_CHECK:" && $2 == "window" && $3 == "id" && $4 == "#" && $5 ~ /^0x[[:xdigit:]]+$/ && NF == 5 { count++; id=$5 } END { if (count == 1) print id; else exit 1 }' "$wm_root_current"); then"##;
 const OPENBOX_SELF_ASSERTION_LINE: &str = r##"if awk -v expected_id="$wm_window_id" '$1 == "_NET_SUPPORTING_WM_CHECK:" && $2 == "window" && $3 == "id" && $4 == "#" && $5 == expected_id && NF == 5 { self_count++ } $1 == "_NET_WM_NAME" && $2 == "=" && $3 == "\"Openbox\"" && NF == 3 { name_count++ } END { exit(self_count == 1 && name_count == 1 ? 0 : 1) }' "$wm_window_current"; then"##;
+
+const KICAD_STARTUP_CONFIG_FIXTURES: &[(&str, &str, &str)] = &[
+    (
+        "kicad_common.json",
+        "edbc850ac786788240d8b3cbc615e04e14fd88989a2e1b3ee483f2e78382e3fe",
+        "{\n  \"meta\": {\n    \"version\": 6\n  },\n  \"do_not_show_again\": {\n    \"data_collection_prompt\": true,\n    \"update_check_prompt\": true\n  }\n}\n",
+    ),
+    (
+        "sym-lib-table",
+        "021f548b878355df34b238e04d45044a18274b09f13afc3a17345a69294091e2",
+        "(sym_lib_table\n  (version 7)\n  (lib (name \"KiCad\")(type \"Table\")(uri \"/usr/share/kicad/template/sym-lib-table\")(options \"\")(descr \"KiCad Default Libraries\"))\n)\n",
+    ),
+    (
+        "fp-lib-table",
+        "c2b36e8ef53291bfbf3e8373ed8870b5f4abcbbb5a60b2810cb56b5fe6bd3885",
+        "(fp_lib_table\n  (version 7)\n  (lib (name \"KiCad\")(type \"Table\")(uri \"/usr/share/kicad/template/fp-lib-table\")(options \"\")(descr \"KiCad Default Libraries\"))\n)\n",
+    ),
+    (
+        "design-block-lib-table",
+        "c1a8f8fe41a64c0c49cf0d7e397a656c3f6fab32fdb8be41f5c4cbc5842654fb",
+        "(design_block_lib_table\n  (version 7)\n)\n",
+    ),
+];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum WorkflowOrderGroup {
@@ -688,6 +712,162 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         ":99"
     ),
     run_contract!(
+        StartupConfig,
+        Line,
+        "startup_config_source=fixtures/kicad-10/gui-config",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "startup_config_manifest=\"$startup_config_source/SHA256SUMS\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "startup_config_dir=\"$KICAD_CONFIG_HOME/10.0\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "startup_config_files=(kicad_common.json sym-lib-table fp-lib-table design-block-lib-table)",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "stock_symbol_table=/usr/share/kicad/template/sym-lib-table",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "stock_footprint_table=/usr/share/kicad/template/fp-lib-table",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "test \"$startup_config_dir\" = \"$GITHUB_WORKSPACE/.afk/gui/kicad/config/10.0\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 1)))
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "test -f \"$startup_config_manifest\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "test -f \"$stock_symbol_table\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 2)))
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "test -f \"$stock_footprint_table\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 3)))
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "sha256sum \"${startup_config_files[@]}\" > \"$GITHUB_WORKSPACE/$artifact_dir/startup-config-source.sha256\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "sha256sum -c SHA256SUMS",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 5)))
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "cmp \"$startup_config_manifest\" \"$artifact_dir/startup-config-source.sha256\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "test ! -w \"$startup_config_source/$startup_config_file\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "test ! -w \"$startup_config_source\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "test ! -e \"$startup_config_dir\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "mkdir \"$startup_config_dir\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 6)))
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "cp \"$startup_config_source/$startup_config_file\" \"$startup_config_dir/$startup_config_file\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 7)))
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "chmod u+w \"$startup_config_dir/$startup_config_file\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "cmp \"$startup_config_source/$startup_config_file\" \"$startup_config_dir/$startup_config_file\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "sha256sum \"${startup_config_files[@]}\" > \"$GITHUB_WORKSPACE/$artifact_dir/startup-config-copy.sha256\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "sha256sum -c \"$GITHUB_WORKSPACE/$startup_config_manifest\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 8)))
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "cmp \"$startup_config_manifest\" \"$artifact_dir/startup-config-copy.sha256\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "printf 'KiCad 10 first-run config ready; source is read-only and run-scoped copy is writable\\n'",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 9)))
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "if [[ -n \"${startup_config_dir:-}\" && -d \"$startup_config_dir\" ]]; then",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "sha256sum \"${startup_config_files[@]}\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
         HashProof,
         Line,
         "sha256sum \"$fixture\" > \"$artifact_dir/source.before.sha256\"",
@@ -930,6 +1110,18 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         Line,
         "pcbnew \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
         (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 70)))
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        ": > \"$artifact_dir/pcbnew-process-status.txt\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "ps -o pid=,ppid=,stat=,etime=,args= -p \"$kicad_pid\" >> \"$artifact_dir/pcbnew-process-status.txt\" 2>&1 || true",
+        (Smoke, 1, None)
     ),
     run_contract!(
         Window,
@@ -1375,7 +1567,7 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::Availability, 10),
         (WorkflowContractCategory::CandidateCardinality, 11),
         (WorkflowContractCategory::CliVersion, 3),
-        (WorkflowContractCategory::DiagnosticLog, 4),
+        (WorkflowContractCategory::DiagnosticLog, 6),
         (WorkflowContractCategory::DpkgAssertion, 10),
         (WorkflowContractCategory::DowngradePermission, 1),
         (WorkflowContractCategory::ExecutablePreflight, 8),
@@ -1394,6 +1586,7 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::PostCapture, 23),
         (WorkflowContractCategory::Screenshot, 1),
         (WorkflowContractCategory::StockPath, 3),
+        (WorkflowContractCategory::StartupConfig, 26),
         (WorkflowContractCategory::PrivateToolchain, 10),
         (WorkflowContractCategory::TauriArtifact, 2),
         (WorkflowContractCategory::ToolchainProbe, 4),
@@ -2507,6 +2700,7 @@ fn runtime_environment(
 
 fn validate_contract_files(repository: &Path, lock: &VersionsLock) -> LabResult<()> {
     validate_no_script_runtime(repository)?;
+    validate_kicad_startup_config_fixture(repository)?;
     let compose = fs::read_to_string(repository.join("infra/compose.yaml"))?;
     for variable in [
         "AFK_POCKETBASE_IMAGE",
@@ -2563,6 +2757,52 @@ fn validate_contract_files(repository: &Path, lock: &VersionsLock) -> LabResult<
     }
     let workflow = fs::read_to_string(repository.join(".github/workflows/kicad-gui-smoke.yml"))?;
     validate_gui_workflow_contract(&workflow, lock)
+}
+
+fn validate_kicad_startup_config_fixture(repository: &Path) -> LabResult<()> {
+    let root = repository.join("fixtures/kicad-10/gui-config");
+    let mut actual_names = fs::read_dir(&root)?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let expected_names = KICAD_STARTUP_CONFIG_FIXTURES
+        .iter()
+        .map(|(name, _, _)| (*name).to_owned())
+        .chain(std::iter::once("SHA256SUMS".to_owned()))
+        .collect::<BTreeSet<_>>();
+    if actual_names != expected_names {
+        return Err(LabError(format!(
+            "KiCad startup config fixture file set changed: actual={actual_names:?}, expected={expected_names:?}"
+        )));
+    }
+
+    let mut expected_manifest = String::new();
+    for (name, expected_sha256, expected_content) in KICAD_STARTUP_CONFIG_FIXTURES {
+        let bytes = fs::read(root.join(name))?;
+        if bytes != expected_content.as_bytes() {
+            return Err(LabError(format!(
+                "KiCad startup config fixture `{name}` content changed"
+            )));
+        }
+        let actual_sha256 = artifact_integrity_for_bytes(&bytes).sha256;
+        if actual_sha256 != *expected_sha256 {
+            return Err(LabError(format!(
+                "KiCad startup config fixture `{name}` hash changed: actual={actual_sha256}, expected={expected_sha256}"
+            )));
+        }
+        expected_manifest.push_str(expected_sha256);
+        expected_manifest.push_str("  ");
+        expected_manifest.push_str(name);
+        expected_manifest.push('\n');
+        actual_names.remove(*name);
+    }
+
+    let manifest = fs::read_to_string(root.join("SHA256SUMS"))?;
+    if manifest != expected_manifest {
+        return Err(LabError(
+            "KiCad startup config SHA256SUMS content or order changed".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_no_script_runtime(repository: &Path) -> LabResult<()> {
@@ -2642,7 +2882,7 @@ const PROTECTED_PROGRAM_DIGESTS: &[(WorkflowStep, &str)] = &[
     ),
     (
         WorkflowStep::Smoke,
-        "ea7ba339cd265731f39fa8a8ee96c77547a37c7c5e67261987ca114246fcbd99",
+        "bc4c38a85c18b409c3d91bd6bab7158eb8272118b20ad45bbbbb8dac788cde7f",
     ),
     (
         WorkflowStep::EnsureEvidence,
@@ -3688,7 +3928,7 @@ mod tests {
             },
         );
         assert_eq!(categories, expected_workflow_category_counts());
-        assert_eq!(WORKFLOW_CONTRACT.len(), 195);
+        assert_eq!(WORKFLOW_CONTRACT.len(), 223);
         for required in WORKFLOW_CONTRACT {
             match required.locator {
                 WorkflowContractLocator::Run { kind, locations } => {
@@ -3726,6 +3966,129 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn copy_kicad_startup_config_fixture(repository: &Path, target: &Path) {
+        let source = repository.join("fixtures/kicad-10/gui-config");
+        let destination = target.join("fixtures/kicad-10/gui-config");
+        fs::create_dir_all(&destination).unwrap();
+        for name in KICAD_STARTUP_CONFIG_FIXTURES
+            .iter()
+            .map(|(name, _, _)| *name)
+            .chain(std::iter::once("SHA256SUMS"))
+        {
+            fs::copy(source.join(name), destination.join(name)).unwrap();
+        }
+    }
+
+    #[test]
+    fn kicad_startup_config_fixture_rejects_flags_tables_hashes_and_order_mutations() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+
+        let staged = tempdir().unwrap();
+        copy_kicad_startup_config_fixture(&repository, staged.path());
+        validate_kicad_startup_config_fixture(staged.path()).unwrap();
+
+        let config = staged
+            .path()
+            .join("fixtures/kicad-10/gui-config/kicad_common.json");
+        let valid_config = fs::read_to_string(&config).unwrap();
+        for flag in ["data_collection_prompt", "update_check_prompt"] {
+            fs::write(
+                &config,
+                valid_config.replacen(
+                    &format!("\"{flag}\": true"),
+                    &format!("\"{flag}\": false"),
+                    1,
+                ),
+            )
+            .unwrap();
+            assert!(validate_kicad_startup_config_fixture(staged.path()).is_err());
+            fs::write(&config, &valid_config).unwrap();
+        }
+
+        let design_block = staged
+            .path()
+            .join("fixtures/kicad-10/gui-config/design-block-lib-table");
+        fs::remove_file(&design_block).unwrap();
+        assert!(validate_kicad_startup_config_fixture(staged.path()).is_err());
+        fs::copy(
+            repository.join("fixtures/kicad-10/gui-config/design-block-lib-table"),
+            &design_block,
+        )
+        .unwrap();
+
+        let manifest = staged
+            .path()
+            .join("fixtures/kicad-10/gui-config/SHA256SUMS");
+        let valid_manifest = fs::read_to_string(&manifest).unwrap();
+        let mut reordered = valid_manifest.lines().collect::<Vec<_>>();
+        reordered.swap(0, 1);
+        fs::write(&manifest, reordered.join("\n") + "\n").unwrap();
+        assert!(validate_kicad_startup_config_fixture(staged.path()).is_err());
+        fs::write(
+            &manifest,
+            valid_manifest.replacen(
+                "edbc850ac786788240d8b3cbc615e04e14fd88989a2e1b3ee483f2e78382e3fe",
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                1,
+            ),
+        )
+        .unwrap();
+        assert!(validate_kicad_startup_config_fixture(staged.path()).is_err());
+    }
+
+    #[test]
+    fn gui_workflow_rejects_startup_config_path_table_set_hash_and_order_mutations() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let lock = VersionsLock::load(
+            &repository.join("infra/versions.lock"),
+            &repository.join("rust-toolchain.toml"),
+        )
+        .unwrap();
+        let workflow =
+            fs::read_to_string(repository.join(".github/workflows/kicad-gui-smoke.yml")).unwrap();
+        validate_gui_workflow_contract(&workflow, &lock).unwrap();
+
+        for (from, to, case) in [
+            (
+                "startup_config_dir=\"$KICAD_CONFIG_HOME/10.0\"",
+                "startup_config_dir=\"$KICAD_CONFIG_HOME/9.0\"",
+                "changed the KiCad major/minor config path",
+            ),
+            (
+                "startup_config_files=(kicad_common.json sym-lib-table fp-lib-table design-block-lib-table)",
+                "startup_config_files=(kicad_common.json sym-lib-table fp-lib-table)",
+                "removed a required global table",
+            ),
+            (
+                "sha256sum -c \"$GITHUB_WORKSPACE/$startup_config_manifest\"",
+                ":",
+                "removed copied-config hash verification",
+            ),
+        ] {
+            assert_eq!(workflow.matches(from).count(), 1, "fixture drift: {case}");
+            let changed = workflow.replacen(from, to, 1);
+            assert!(
+                validate_gui_workflow_contract(&changed, &lock).is_err(),
+                "accepted workflow that {case}"
+            );
+        }
+
+        let mut reordered = parse_gui_workflow(&workflow).unwrap();
+        swap_active_lines(
+            &mut reordered,
+            WorkflowStep::Smoke,
+            "sha256sum -c \"$GITHUB_WORKSPACE/$startup_config_manifest\"",
+            "Xvfb :99 -screen 0 1280x800x24 > \"$artifact_dir/xvfb.log\" 2>&1 &",
+        );
+        assert!(validate_gui_workflow_value(&reordered, &lock).is_err());
     }
 
     #[test]
