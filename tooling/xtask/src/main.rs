@@ -51,7 +51,9 @@ enum WorkflowContractCategory {
     ToolchainProbe,
     UploadPath,
     Window,
+    WindowManager,
     Xvfb,
+    XServerReadiness,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -80,7 +82,7 @@ impl WorkflowStep {
         match self {
             Self::Checkout => None,
             Self::Export => Some("Load exact Ubuntu GUI package contract from versions.lock"),
-            Self::Install => Some("Install exact KiCad and pinned Tauri/X11 runner"),
+            Self::Install => Some("Install exact KiCad and pinned Tauri/X11/Openbox runner"),
             Self::Smoke => Some("Launch isolated KiCad GUI smoke and write lane evidence"),
             Self::EnsureEvidence => Some("Ensure machine-readable failure evidence exists"),
             Self::Upload => Some("Upload diagnostics"),
@@ -103,9 +105,12 @@ const PCBNEW_POST_CANDIDATE_EXTRACTION_LINE: &str = r#"awk '$0 ~ /^[[:space:]]+0
 const PCBNEW_POST_CAPTURE_DETAIL_ASSERTION_LINE: &str = r#"if awk -v expected_id="$post_candidate_id" -v expected_width="$post_tree_width" -v expected_height="$post_tree_height" -v min_width="$min_window_width" -v min_height="$min_window_height" '$1 == "xwininfo:" && $2 == "Window" && $3 == "id:" && $4 == expected_id { id_count++ } $1 == "Width:" && NF == 2 && $2 ~ /^[0-9]+$/ { width_count++; width=$2+0 } $1 == "Height:" && NF == 2 && $2 ~ /^[0-9]+$/ { height_count++; height=$2+0 } $1 == "Map" && $2 == "State:" { map_count++; if (NF == 3 && $3 == "IsViewable") viewable_count++ } END { exit(id_count == 1 && width_count == 1 && height_count == 1 && map_count == 1 && viewable_count == 1 && width == expected_width && height == expected_height && width >= min_width && height >= min_height ? 0 : 1) }' "$post_detail"; then"#;
 const PCBNEW_POST_SELECTION_ASSERTION_LINE: &str = r#"if [[ "$post_candidate_id" == "$candidate_id" && "$post_tree_width" -eq "$tree_width" && "$post_tree_height" -eq "$tree_height" ]]; then"#;
 const PCBNEW_IMAGE_ASSERTION_LINE: &str = r#"if [[ "$image_width" =~ ^[1-9][0-9]*$ && "$image_height" =~ ^[1-9][0-9]*$ && "$image_colors" =~ ^[1-9][0-9]*$ ]] && (( image_width == tree_width && image_height == tree_height && image_colors > 1 )); then"#;
+const OPENBOX_ROOT_OWNER_LINE: &str = r##"if wm_window_id=$(awk '$1 == "_NET_SUPPORTING_WM_CHECK:" && $2 == "window" && $3 == "id" && $4 == "#" && $5 ~ /^0x[[:xdigit:]]+$/ && NF == 5 { count++; id=$5 } END { if (count == 1) print id; else exit 1 }' "$wm_root_current"); then"##;
+const OPENBOX_SELF_ASSERTION_LINE: &str = r##"if awk -v expected_id="$wm_window_id" '$1 == "_NET_SUPPORTING_WM_CHECK:" && $2 == "window" && $3 == "id" && $4 == "#" && $5 == expected_id && NF == 5 { self_count++ } $1 == "_NET_WM_NAME" && $2 == "=" && $3 == "\"Openbox\"" && NF == 3 { name_count++ } END { exit(self_count == 1 && name_count == 1 ? 0 : 1) }' "$wm_window_current"; then"##;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum WorkflowOrderGroup {
+    GuiLifecycle,
     InstallPipeline,
     SmokePipeline,
 }
@@ -319,275 +324,312 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 28)))
     ),
     run_contract!(
-        DowngradePermission,
+        Availability,
         Line,
-        "sudo apt-get install --yes --allow-downgrades",
+        "apt-cache madison \"$WINDOW_MANAGER_PACKAGE\" | awk '{print $3}' | grep -Fqx -- \"$WINDOW_MANAGER_VERSION\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 29)))
     ),
     run_contract!(
-        InstallSpec,
-        Token,
-        "\"$KICAD_SPEC\"",
+        DowngradePermission,
+        Line,
+        "sudo apt-get install --yes --allow-downgrades",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 30)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$KICAD_SYMBOLS_SPEC\"",
+        "\"$KICAD_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 31)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$KICAD_FOOTPRINTS_SPEC\"",
+        "\"$KICAD_SYMBOLS_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 32)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$KICAD_PACKAGES3D_SPEC\"",
+        "\"$KICAD_FOOTPRINTS_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 33)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$WEBKIT_LIBRARY_SPEC\"",
+        "\"$KICAD_PACKAGES3D_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 34)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$WEBKIT_DRIVER_SPEC\"",
+        "\"$WEBKIT_LIBRARY_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 35)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$XVFB_SPEC\"",
+        "\"$WEBKIT_DRIVER_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 36)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$X11_UTILS_SPEC\"",
+        "\"$XVFB_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 37)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$IMAGEMAGICK_SPEC\"",
+        "\"$X11_UTILS_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 38)))
+    ),
+    run_contract!(
+        InstallSpec,
+        Token,
+        "\"$IMAGEMAGICK_SPEC\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 39)))
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "sudo apt-get install --yes --no-install-recommends --allow-downgrades",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 40)))
+    ),
+    run_contract!(
+        InstallSpec,
+        Token,
+        "\"$WINDOW_MANAGER_SPEC\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 41)))
     ),
     run_contract!(
         DpkgAssertion,
         Line,
         "test \"$(dpkg-query -W -f='${Version}' \"$KICAD_PACKAGE\")\" = \"$KICAD_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 40))),
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 50))),
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 20)))
     ),
     run_contract!(
         DpkgAssertion,
         Line,
         "test \"$(dpkg-query -W -f='${Version}' \"$KICAD_SYMBOLS_PACKAGE\")\" = \"$KICAD_SYMBOLS_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 41)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 51)))
     ),
     run_contract!(
         DpkgAssertion,
         Line,
         "test \"$(dpkg-query -W -f='${Version}' \"$KICAD_FOOTPRINTS_PACKAGE\")\" = \"$KICAD_FOOTPRINTS_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 42)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 52)))
     ),
     run_contract!(
         DpkgAssertion,
         Line,
         "test \"$(dpkg-query -W -f='${Version}' \"$KICAD_PACKAGES3D_PACKAGE\")\" = \"$KICAD_PACKAGES3D_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 43)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 53)))
     ),
     run_contract!(
         DpkgAssertion,
         Line,
         "test \"$(dpkg-query -W -f='${Version}' \"$WEBKIT_LIBRARY_PACKAGE\")\" = \"$WEBKIT_LIBRARY_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 44)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 54)))
     ),
     run_contract!(
         DpkgAssertion,
         Line,
         "test \"$(dpkg-query -W -f='${Version}' \"$WEBKIT_DRIVER_PACKAGE\")\" = \"$WEBKIT_DRIVER_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 45)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 55)))
     ),
     run_contract!(
         DpkgAssertion,
         Line,
         "test \"$(dpkg-query -W -f='${Version}' \"$XVFB_PACKAGE\")\" = \"$XVFB_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 46)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 56)))
     ),
     run_contract!(
         DpkgAssertion,
         Line,
         "test \"$(dpkg-query -W -f='${Version}' \"$X11_UTILS_PACKAGE\")\" = \"$X11_UTILS_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 47)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 57)))
     ),
     run_contract!(
         DpkgAssertion,
         Line,
         "test \"$(dpkg-query -W -f='${Version}' \"$IMAGEMAGICK_PACKAGE\")\" = \"$IMAGEMAGICK_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 48)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 58)))
+    ),
+    run_contract!(
+        DpkgAssertion,
+        Line,
+        "test \"$(dpkg-query -W -f='${Version}' \"$WINDOW_MANAGER_PACKAGE\")\" = \"$WINDOW_MANAGER_VERSION\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 59))),
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 21)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
         "test \"$(command -v kicad-cli)\" = /usr/bin/kicad-cli",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 50)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 60)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
         "test \"$(command -v pcbnew)\" = /usr/bin/pcbnew",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 51)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 61)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
         "test \"$(command -v Xvfb)\" = /usr/bin/Xvfb",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 52)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 62)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
         "test \"$(command -v xwininfo)\" = /usr/bin/xwininfo",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 53)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 63)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
         "test \"$(command -v import)\" = /usr/bin/import",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 54)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 64)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
         "test \"$(command -v identify)\" = /usr/bin/identify",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 55)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 65)))
+    ),
+    run_contract!(
+        ExecutablePreflight,
+        Line,
+        "test \"$(command -v openbox)\" = /usr/bin/openbox",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 66)))
+    ),
+    run_contract!(
+        ExecutablePreflight,
+        Line,
+        "test \"$(command -v xprop)\" = /usr/bin/xprop",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 67)))
     ),
     run_contract!(
         PrivateToolchain,
         Line,
         "toolchain_prefix=\"$RUNNER_TEMP/kicad-gui-toolchain-$NODE_VERSION-$TAURI_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 60)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "test ! -e \"$toolchain_prefix\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 61)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "mkdir \"$toolchain_prefix\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 62)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "tar -xJf /tmp/node.tar.xz --strip-components=1 -C \"$toolchain_prefix\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 63)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "export PATH=\"$toolchain_prefix/bin:$PATH\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 64)))
-    ),
-    run_contract!(
-        TauriArtifact,
-        Line,
-        "curl --fail --location --silent --show-error \"$TAURI_LINUX_X64_GNU_URL\" --output /tmp/tauri-cli-linux-x64-gnu.tgz",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 65)))
-    ),
-    run_contract!(
-        TauriArtifact,
-        Line,
-        "echo \"$TAURI_LINUX_X64_GNU_SHA512  /tmp/tauri-cli-linux-x64-gnu.tgz\" | sha512sum -c -",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 66)))
-    ),
-    run_contract!(
-        DiagnosticLog,
-        Line,
-        "artifact_dir=\"$GITHUB_WORKSPACE/.afk/gui/artifacts\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 67)))
-    ),
-    run_contract!(
-        DiagnosticLog,
-        Line,
-        "npm_logs=\"$artifact_dir/npm-logs\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 68)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "npm_home=\"$RUNNER_TEMP/kicad-gui-npm-home\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 69)))
-    ),
-    run_contract!(
-        PrivateToolchain,
-        Line,
-        "env HOME=\"$npm_home\" NPM_CONFIG_USERCONFIG=/dev/null \"$toolchain_prefix/bin/npm\" install",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 70)))
     ),
     run_contract!(
         PrivateToolchain,
         Line,
-        "--global --prefix \"$toolchain_prefix\" --offline --omit=optional --ignore-scripts",
+        "test ! -e \"$toolchain_prefix\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 71)))
     ),
     run_contract!(
-        DiagnosticLog,
+        PrivateToolchain,
         Line,
-        "--loglevel verbose --logs-dir \"$npm_logs\" --audit=false --fund=false",
+        "mkdir \"$toolchain_prefix\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 72)))
     ),
     run_contract!(
         PrivateToolchain,
         Line,
-        "--update-notifier=false /tmp/tauri-cli.tgz /tmp/tauri-cli-linux-x64-gnu.tgz",
+        "tar -xJf /tmp/node.tar.xz --strip-components=1 -C \"$toolchain_prefix\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 73)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "export PATH=\"$toolchain_prefix/bin:$PATH\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 74)))
+    ),
+    run_contract!(
+        TauriArtifact,
+        Line,
+        "curl --fail --location --silent --show-error \"$TAURI_LINUX_X64_GNU_URL\" --output /tmp/tauri-cli-linux-x64-gnu.tgz",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 75)))
+    ),
+    run_contract!(
+        TauriArtifact,
+        Line,
+        "echo \"$TAURI_LINUX_X64_GNU_SHA512  /tmp/tauri-cli-linux-x64-gnu.tgz\" | sha512sum -c -",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 76)))
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "artifact_dir=\"$GITHUB_WORKSPACE/.afk/gui/artifacts\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 77)))
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "npm_logs=\"$artifact_dir/npm-logs\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 78)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "npm_home=\"$RUNNER_TEMP/kicad-gui-npm-home\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 79)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "env HOME=\"$npm_home\" NPM_CONFIG_USERCONFIG=/dev/null \"$toolchain_prefix/bin/npm\" install",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 80)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "--global --prefix \"$toolchain_prefix\" --offline --omit=optional --ignore-scripts",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 81)))
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "--loglevel verbose --logs-dir \"$npm_logs\" --audit=false --fund=false",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 82)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "--update-notifier=false /tmp/tauri-cli.tgz /tmp/tauri-cli-linux-x64-gnu.tgz",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 83)))
     ),
     run_contract!(
         DiagnosticLog,
         Line,
         "2>&1 | tee \"$artifact_dir/npm-tauri-install.log\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 74)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 84)))
     ),
     run_contract!(
         PrivateToolchain,
         Line,
         "echo \"$toolchain_prefix/bin\" >> \"$GITHUB_PATH\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 75)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 85)))
     ),
     run_contract!(
         ToolchainProbe,
         Line,
         "test \"$(rustc --version | awk '{print $2}')\" = \"$RUST_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 80)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 90)))
     ),
     run_contract!(
         ToolchainProbe,
         Line,
         "test \"$(\"$toolchain_prefix/bin/node\" --version)\" = \"v$NODE_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 81)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 91)))
     ),
     run_contract!(
         ToolchainProbe,
         Line,
         "test \"$(\"$toolchain_prefix/bin/npm\" --version)\" = \"$NPM_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 82)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 92)))
     ),
     run_contract!(
         ToolchainProbe,
         Line,
         "test \"$(\"$toolchain_prefix/bin/tauri\" --version)\" = \"tauri-cli $TAURI_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 83)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 93)))
     ),
     field_contract!(
         Isolation,
@@ -654,14 +696,14 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
     run_contract!(
         PackageManifest,
         Line,
-        "dpkg-query -W \"$KICAD_PACKAGE\" \"$KICAD_SYMBOLS_PACKAGE\" \"$KICAD_FOOTPRINTS_PACKAGE\" \"$KICAD_PACKAGES3D_PACKAGE\" \"$WEBKIT_LIBRARY_PACKAGE\" \"$WEBKIT_DRIVER_PACKAGE\" \"$XVFB_PACKAGE\" \"$X11_UTILS_PACKAGE\" \"$IMAGEMAGICK_PACKAGE\"",
+        "dpkg-query -W \"$KICAD_PACKAGE\" \"$KICAD_SYMBOLS_PACKAGE\" \"$KICAD_FOOTPRINTS_PACKAGE\" \"$KICAD_PACKAGES3D_PACKAGE\" \"$WEBKIT_LIBRARY_PACKAGE\" \"$WEBKIT_DRIVER_PACKAGE\" \"$XVFB_PACKAGE\" \"$X11_UTILS_PACKAGE\" \"$IMAGEMAGICK_PACKAGE\" \"$WINDOW_MANAGER_PACKAGE\"",
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 15)))
     ),
     run_contract!(
         CliVersion,
         Line,
         "kicad_upstream_version=\"${KICAD_VERSION%%~*}\"",
-        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 21)))
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 22)))
     ),
     run_contract!(
         StockPath,
@@ -698,6 +740,208 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         Token,
         "Xvfb :99 -screen 0 1280x800x24",
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 40)))
+    ),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        "xserver_current=\"$RUNNER_TEMP/kicad-xserver-readiness.current.txt\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(XServerReadiness, Line, "xvfb_pid=", (Smoke, 2, None)),
+    run_contract!(WindowManager, Line, "wm_pid=", (Smoke, 3, None)),
+    run_contract!(
+        WindowManager,
+        Line,
+        "if [[ -n \"$wm_pid\" ]]; then kill \"$wm_pid\" 2>/dev/null || true; wait \"$wm_pid\" 2>/dev/null || true; fi",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        "if [[ -n \"$xvfb_pid\" ]]; then kill \"$xvfb_pid\" 2>/dev/null || true; wait \"$xvfb_pid\" 2>/dev/null || true; fi",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "wm_root_current=\"$RUNNER_TEMP/kicad-wm-root.current.txt\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "wm_window_current=\"$RUNNER_TEMP/kicad-wm-window.current.txt\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        ": > \"$artifact_dir/xserver-readiness.txt\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        ": > \"$artifact_dir/wm-readiness.txt\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        "Xvfb :99 -screen 0 1280x800x24 > \"$artifact_dir/xvfb.log\" 2>&1 &",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 10)))
+    ),
+    run_contract!(XServerReadiness, Line, "xvfb_pid=$!", (Smoke, 1, None)),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        "for _xserver_attempt in $(seq 1 100); do",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        "if ! kill -0 \"$xvfb_pid\" 2>/dev/null; then",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        "if wait \"$xvfb_pid\"; then xvfb_rc=0; else xvfb_rc=$?; fi",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        "printf 'Xvfb exited before readiness (exit_code=%d)\\n' \"$xvfb_rc\" >> \"$artifact_dir/xvfb.log\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        "if xprop -root -notype > \"$xserver_current\" 2>&1; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 20)))
+    ),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        "cat \"$xserver_current\" >> \"$artifact_dir/xserver-readiness.txt\"",
+        (Smoke, 2, None)
+    ),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        "xserver_ready=true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        XServerReadiness,
+        Line,
+        "test \"${xserver_ready:-false}\" = true",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 30)))
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "/usr/bin/openbox --sm-disable > \"$artifact_dir/wm.log\" 2>&1 &",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 40)))
+    ),
+    run_contract!(WindowManager, Line, "wm_pid=$!", (Smoke, 1, None)),
+    run_contract!(
+        WindowManager,
+        Line,
+        "for _wm_attempt in $(seq 1 100); do",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "if ! kill -0 \"$wm_pid\" 2>/dev/null; then",
+        (Smoke, 2, None)
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "if wait \"$wm_pid\"; then wm_rc=0; else wm_rc=$?; fi",
+        (Smoke, 2, None)
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "printf 'Openbox exited before readiness (exit_code=%d)\\n' \"$wm_rc\" >> \"$artifact_dir/wm.log\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "if xprop -root -notype _NET_SUPPORTING_WM_CHECK > \"$wm_root_current\" 2>&1; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 50)))
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "cat \"$wm_root_current\" >> \"$artifact_dir/wm-readiness.txt\"",
+        (Smoke, 2, None)
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        OPENBOX_ROOT_OWNER_LINE,
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 51)))
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "if xprop -id \"$wm_window_id\" -notype _NET_SUPPORTING_WM_CHECK _NET_WM_NAME > \"$wm_window_current\" 2>&1; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 52)))
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "cat \"$wm_window_current\" >> \"$artifact_dir/wm-readiness.txt\"",
+        (Smoke, 2, None)
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        OPENBOX_SELF_ASSERTION_LINE,
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 53)))
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "wm_ready=true",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 54)))
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "test \"${wm_ready:-false}\" = true",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 60)))
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "kill -0 \"$wm_pid\" 2>/dev/null",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 61)))
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "pcbnew \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 70)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        "for _attempt in $(seq 1 60); do",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 80)))
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "printf 'Openbox exited before window assertion (exit_code=%d)\\n' \"$wm_rc\" >> \"$artifact_dir/wm.log\"",
+        (Smoke, 1, None)
     ),
     run_contract!(
         GuiLog,
@@ -1128,18 +1372,18 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
     BTreeMap::from([
         (WorkflowContractCategory::ActionPin, 2),
         (WorkflowContractCategory::AlwaysUpload, 3),
-        (WorkflowContractCategory::Availability, 9),
+        (WorkflowContractCategory::Availability, 10),
         (WorkflowContractCategory::CandidateCardinality, 11),
         (WorkflowContractCategory::CliVersion, 3),
         (WorkflowContractCategory::DiagnosticLog, 4),
-        (WorkflowContractCategory::DpkgAssertion, 9),
+        (WorkflowContractCategory::DpkgAssertion, 10),
         (WorkflowContractCategory::DowngradePermission, 1),
-        (WorkflowContractCategory::ExecutablePreflight, 6),
+        (WorkflowContractCategory::ExecutablePreflight, 8),
         (WorkflowContractCategory::Exporter, 1),
         (WorkflowContractCategory::GuiLog, 2),
         (WorkflowContractCategory::HashProof, 3),
         (WorkflowContractCategory::ImageProof, 4),
-        (WorkflowContractCategory::InstallSpec, 9),
+        (WorkflowContractCategory::InstallSpec, 10),
         (WorkflowContractCategory::Isolation, 7),
         (WorkflowContractCategory::Junit, 1),
         (WorkflowContractCategory::LaneEvidence, 1),
@@ -1154,8 +1398,10 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::TauriArtifact, 2),
         (WorkflowContractCategory::ToolchainProbe, 4),
         (WorkflowContractCategory::UploadPath, 1),
-        (WorkflowContractCategory::Window, 16),
+        (WorkflowContractCategory::Window, 17),
+        (WorkflowContractCategory::WindowManager, 23),
         (WorkflowContractCategory::Xvfb, 1),
+        (WorkflowContractCategory::XServerReadiness, 14),
     ])
 }
 
@@ -1277,6 +1523,7 @@ fn github_env_export(lock: &VersionsLock) -> LabResult<String> {
         ("XVFB", &lock.ubuntu_gui.xvfb),
         ("X11_UTILS", &lock.ubuntu_gui.x11_utils),
         ("IMAGEMAGICK", &lock.ubuntu_gui.imagemagick),
+        ("WINDOW_MANAGER", &lock.ubuntu_gui.window_manager),
     ];
     let mut values = BTreeMap::from([
         ("KICAD_PPA".to_owned(), lock.ubuntu_gui.ppa.clone()),
@@ -2391,11 +2638,11 @@ const PROTECTED_PROGRAM_DIGESTS: &[(WorkflowStep, &str)] = &[
     ),
     (
         WorkflowStep::Install,
-        "1fc0710a43fd951ed08e777f776abef778d29f0a1fb009bbe3056976df8537ac",
+        "bcaafb4b7ce5dd22b5ba66238a0763885ab940b056ad5c2f5c0507fc138182c0",
     ),
     (
         WorkflowStep::Smoke,
-        "33a10793193ef80691dc8a9d1afd27d22d498711a02cdb31abd0d5fcdc2d5ebd",
+        "ea7ba339cd265731f39fa8a8ee96c77547a37c7c5e67261987ca114246fcbd99",
     ),
     (
         WorkflowStep::EnsureEvidence,
@@ -2726,6 +2973,7 @@ fn validate_gui_workflow_value(workflow: &Yaml, lock: &VersionsLock) -> LabResul
             &lock.ubuntu_gui.xvfb,
             &lock.ubuntu_gui.x11_utils,
             &lock.ubuntu_gui.imagemagick,
+            &lock.ubuntu_gui.window_manager,
         ])
     {
         if parsed_semantics_contains(workflow, &package.version) {
@@ -3440,7 +3688,7 @@ mod tests {
             },
         );
         assert_eq!(categories, expected_workflow_category_counts());
-        assert_eq!(WORKFLOW_CONTRACT.len(), 152);
+        assert_eq!(WORKFLOW_CONTRACT.len(), 195);
         for required in WORKFLOW_CONTRACT {
             match required.locator {
                 WorkflowContractLocator::Run { kind, locations } => {
@@ -3594,6 +3842,7 @@ mod tests {
         for (spec, floating) in [
             ("\"$X11_UTILS_SPEC\"", "\"$X11_UTILS_PACKAGE\""),
             ("\"$IMAGEMAGICK_SPEC\"", "\"$IMAGEMAGICK_PACKAGE\""),
+            ("\"$WINDOW_MANAGER_SPEC\"", "\"$WINDOW_MANAGER_PACKAGE\""),
         ] {
             assert_eq!(workflow.matches(spec).count(), 1);
             for replacement in ["", floating] {
@@ -3612,6 +3861,8 @@ mod tests {
             ("xwininfo", "/usr/bin/xwininfo"),
             ("import", "/usr/bin/import"),
             ("identify", "/usr/bin/identify"),
+            ("openbox", "/usr/bin/openbox"),
+            ("xprop", "/usr/bin/xprop"),
         ] {
             let preflight = format!("test \"$(command -v {command})\" = {path}");
             assert_eq!(workflow.matches(&preflight).count(), 1);
@@ -3624,10 +3875,235 @@ mod tests {
             }
         }
 
-        let manifest_tail = " \"$XVFB_PACKAGE\" \"$X11_UTILS_PACKAGE\" \"$IMAGEMAGICK_PACKAGE\"";
+        let manifest_tail = " \"$XVFB_PACKAGE\" \"$X11_UTILS_PACKAGE\" \"$IMAGEMAGICK_PACKAGE\" \"$WINDOW_MANAGER_PACKAGE\"";
         assert_eq!(workflow.matches(manifest_tail).count(), 1);
         let incomplete_manifest = workflow.replacen(manifest_tail, " \"$XVFB_PACKAGE\"", 1);
         assert!(validate_gui_workflow_contract(&incomplete_manifest, &lock).is_err());
+    }
+
+    #[test]
+    fn gui_workflow_requires_ready_owned_window_manager_before_pcbnew() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let lock = VersionsLock::load(
+            &repository.join("infra/versions.lock"),
+            &repository.join("rust-toolchain.toml"),
+        )
+        .unwrap();
+        let workflow =
+            fs::read_to_string(repository.join(".github/workflows/kicad-gui-smoke.yml")).unwrap();
+        validate_gui_workflow_contract(&workflow, &lock).unwrap();
+
+        let reject = |from: &str, to: &str, case: &str| {
+            assert_eq!(workflow.matches(from).count(), 1, "fixture drift: {case}");
+            let changed = workflow.replacen(from, to, 1);
+            assert!(
+                validate_gui_workflow_contract(&changed, &lock).is_err(),
+                "accepted workflow that {case}"
+            );
+        };
+
+        let original_package_transaction = concat!(
+            "sudo apt-get install --yes --allow-downgrades \\",
+            "\n            \"$KICAD_SPEC\""
+        );
+        reject(
+            original_package_transaction,
+            concat!(
+                "sudo apt-get install --yes --no-install-recommends --allow-downgrades \\",
+                "\n            \"$KICAD_SPEC\""
+            ),
+            "changed the existing nine-package dependency transaction while minimizing Openbox",
+        );
+
+        for (from, to, case) in [
+            (
+                "sudo apt-get install --yes --no-install-recommends --allow-downgrades \\",
+                "sudo apt-get install --yes --allow-downgrades \\",
+                "installed Openbox recommendations instead of the minimal exact WM transaction",
+            ),
+            (
+                "for _xserver_attempt in $(seq 1 100); do",
+                "for _xserver_attempt in $(seq 1 1); do",
+                "removed the bounded X server startup allowance",
+            ),
+            (
+                "if xprop -root -notype > \"$xserver_current\" 2>&1; then",
+                "if true; then",
+                "treated a blind delay as X server readiness",
+            ),
+            (
+                "if ! kill -0 \"$xvfb_pid\" 2>/dev/null; then",
+                "if false; then",
+                "removed Xvfb liveness during readiness",
+            ),
+            (
+                ": > \"$artifact_dir/xserver-readiness.txt\"",
+                ":",
+                "removed durable X server readiness evidence",
+            ),
+            (
+                "printf 'Xvfb exited before readiness (exit_code=%d)\\n' \"$xvfb_rc\" >> \"$artifact_dir/xvfb.log\"",
+                ":",
+                "removed the exact early-Xvfb-exit diagnostic",
+            ),
+            (
+                "for _wm_attempt in $(seq 1 100); do",
+                "for _wm_attempt in $(seq 1 1); do",
+                "removed the bounded WM startup allowance",
+            ),
+            (
+                "/usr/bin/openbox --sm-disable > \"$artifact_dir/wm.log\" 2>&1 &",
+                "openbox > /dev/null 2>&1 &",
+                "used an unpinned executable without isolated session-manager arguments or logs",
+            ),
+            (
+                ": > \"$artifact_dir/wm-readiness.txt\"",
+                ":",
+                "removed durable WM readiness evidence",
+            ),
+            (
+                "printf 'Openbox exited before readiness (exit_code=%d)\\n' \"$wm_rc\" >> \"$artifact_dir/wm.log\"",
+                ":",
+                "removed the exact early-Openbox-exit diagnostic",
+            ),
+            (
+                "if xprop -root -notype _NET_SUPPORTING_WM_CHECK > \"$wm_root_current\" 2>&1; then",
+                "if grep -Fq Openbox \"$artifact_dir/wm.log\"; then",
+                "substituted log text for root WM ownership",
+            ),
+            (
+                "if xprop -id \"$wm_window_id\" -notype _NET_SUPPORTING_WM_CHECK _NET_WM_NAME > \"$wm_window_current\" 2>&1; then",
+                "if xprop -root -notype _NET_WM_NAME > \"$wm_window_current\" 2>&1; then",
+                "queried arbitrary root text instead of the root-owned WM window",
+            ),
+            (
+                "printf 'Openbox readiness accepted: root_owner=%s self_owner=%s name=Openbox\\n' \"$wm_window_id\" \"$wm_window_id\" >> \"$artifact_dir/wm-readiness.txt\"",
+                ":",
+                "removed the accepted WM ownership evidence",
+            ),
+            (
+                "test \"${wm_ready:-false}\" = true",
+                ":",
+                "launched without successful WM readiness",
+            ),
+            (
+                "test \"${wm_ready:-false}\" = true\n          kill -0 \"$wm_pid\" 2>/dev/null\n          pcbnew \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "test \"${wm_ready:-false}\" = true\n          :\n          pcbnew \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "launched after readiness without a final WM liveness check",
+            ),
+            (
+                "for _attempt in $(seq 1 60); do",
+                "for _attempt in $(seq 1 30); do",
+                "restored the hosted-evidence-insufficient 30-second window timeout",
+            ),
+            (
+                "printf 'Openbox exited before window assertion (exit_code=%d)\\n' \"$wm_rc\" >> \"$artifact_dir/wm.log\"",
+                ":",
+                "removed the post-launch WM death diagnostic",
+            ),
+        ] {
+            reject(from, to, case);
+        }
+
+        for (evidence_line, expected_count, case) in [
+            (
+                "cat \"$xserver_current\" >> \"$artifact_dir/xserver-readiness.txt\"",
+                2,
+                "removed success/failure X server query evidence",
+            ),
+            (
+                "cat \"$wm_root_current\" >> \"$artifact_dir/wm-readiness.txt\"",
+                2,
+                "removed success/failure root WM ownership evidence",
+            ),
+            (
+                "cat \"$wm_window_current\" >> \"$artifact_dir/wm-readiness.txt\"",
+                2,
+                "removed success/failure WM self-property evidence",
+            ),
+        ] {
+            assert_eq!(workflow.matches(evidence_line).count(), expected_count);
+            let changed = workflow.replace(evidence_line, ":");
+            assert!(
+                validate_gui_workflow_contract(&changed, &lock).is_err(),
+                "accepted workflow that {case}"
+            );
+        }
+
+        assert_eq!(workflow.matches(OPENBOX_ROOT_OWNER_LINE).count(), 1);
+        for (replacement, case) in [
+            (
+                OPENBOX_ROOT_OWNER_LINE.replace("count == 1", "count >= 1"),
+                "accepted ambiguous root WM ownership",
+            ),
+            (
+                OPENBOX_ROOT_OWNER_LINE.replace("$5 ~ /^0x[[:xdigit:]]+$/ && ", ""),
+                "accepted a non-XID root owner",
+            ),
+        ] {
+            reject(OPENBOX_ROOT_OWNER_LINE, &replacement, case);
+        }
+
+        assert_eq!(workflow.matches(OPENBOX_SELF_ASSERTION_LINE).count(), 1);
+        for (replacement, case) in [
+            (
+                OPENBOX_SELF_ASSERTION_LINE.replace("$5 == expected_id", "$5 ~ /^0x/"),
+                "stopped binding the WM self property to the root-owned XID",
+            ),
+            (
+                OPENBOX_SELF_ASSERTION_LINE.replace("name_count == 1", "name_count >= 1"),
+                "accepted ambiguous Openbox name evidence",
+            ),
+        ] {
+            reject(OPENBOX_SELF_ASSERTION_LINE, &replacement, case);
+        }
+
+        let mut wrong_xserver_order = parse_gui_workflow(&workflow).unwrap();
+        swap_active_lines(
+            &mut wrong_xserver_order,
+            WorkflowStep::Smoke,
+            "Xvfb :99 -screen 0 1280x800x24 > \"$artifact_dir/xvfb.log\" 2>&1 &",
+            "if xprop -root -notype > \"$xserver_current\" 2>&1; then",
+        );
+        assert!(validate_gui_workflow_value(&wrong_xserver_order, &lock).is_err());
+
+        let mut pcbnew_before_wm = parse_gui_workflow(&workflow).unwrap();
+        swap_active_lines(
+            &mut pcbnew_before_wm,
+            WorkflowStep::Smoke,
+            "/usr/bin/openbox --sm-disable > \"$artifact_dir/wm.log\" 2>&1 &",
+            "pcbnew \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+        );
+        assert!(validate_gui_workflow_value(&pcbnew_before_wm, &lock).is_err());
+
+        let cleanup = "            if [[ -n \"$kicad_pid\" ]]; then kill \"$kicad_pid\" 2>/dev/null || true; wait \"$kicad_pid\" 2>/dev/null || true; fi\n            if [[ -n \"$wm_pid\" ]]; then kill \"$wm_pid\" 2>/dev/null || true; wait \"$wm_pid\" 2>/dev/null || true; fi\n            if [[ -n \"$xvfb_pid\" ]]; then kill \"$xvfb_pid\" 2>/dev/null || true; wait \"$xvfb_pid\" 2>/dev/null || true; fi";
+        assert_eq!(workflow.matches(cleanup).count(), 1);
+        let wrong_cleanup = cleanup
+            .replace("$wm_pid", "$temporary_pid")
+            .replace("$xvfb_pid", "$wm_pid")
+            .replace("$temporary_pid", "$xvfb_pid");
+        reject(cleanup, &wrong_cleanup, "cleaned Xvfb before Openbox");
+
+        let wm_waited_then_cleared = "              if wait \"$wm_pid\"; then wm_rc=0; else wm_rc=$?; fi\n              wm_pid=\n";
+        assert_eq!(workflow.matches(wm_waited_then_cleared).count(), 2);
+        let double_wait = workflow.replacen(
+            wm_waited_then_cleared,
+            "              if wait \"$wm_pid\"; then wm_rc=0; else wm_rc=$?; fi\n",
+            1,
+        );
+        assert!(validate_gui_workflow_contract(&double_wait, &lock).is_err());
+
+        let xvfb_waited_then_cleared = "              if wait \"$xvfb_pid\"; then xvfb_rc=0; else xvfb_rc=$?; fi\n              xvfb_pid=\n";
+        assert_eq!(workflow.matches(xvfb_waited_then_cleared).count(), 1);
+        let double_wait = workflow.replacen(
+            xvfb_waited_then_cleared,
+            "              if wait \"$xvfb_pid\"; then xvfb_rc=0; else xvfb_rc=$?; fi\n",
+            1,
+        );
+        assert!(validate_gui_workflow_contract(&double_wait, &lock).is_err());
     }
 
     #[test]
@@ -4368,6 +4844,7 @@ mod tests {
             ("\"$XVFB_SPEC\"", "\"$XVFB_PACKAGE\""),
             ("\"$X11_UTILS_SPEC\"", "\"$X11_UTILS_PACKAGE\""),
             ("\"$IMAGEMAGICK_SPEC\"", "\"$IMAGEMAGICK_PACKAGE\""),
+            ("\"$WINDOW_MANAGER_SPEC\"", "\"$WINDOW_MANAGER_PACKAGE\""),
         ];
         for (spec, unpinned) in install_specs {
             for payload in [
@@ -4463,7 +4940,7 @@ mod tests {
         let first = github_env_export(&lock).unwrap();
         let second = github_env_export(&lock).unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.lines().count(), 33);
+        assert_eq!(first.lines().count(), 36);
         assert!(first.lines().any(|line| {
             line == format!(
                 "TAURI_LINUX_X64_GNU_URL={}",
@@ -4486,6 +4963,7 @@ mod tests {
             "XVFB",
             "X11_UTILS",
             "IMAGEMAGICK",
+            "WINDOW_MANAGER",
         ] {
             assert!(
                 first

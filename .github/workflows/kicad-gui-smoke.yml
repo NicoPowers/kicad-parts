@@ -39,7 +39,7 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal
           cargo xtask export-github-env >> "$GITHUB_ENV"
 
-      - name: Install exact KiCad and pinned Tauri/X11 runner
+      - name: Install exact KiCad and pinned Tauri/X11/Openbox runner
         shell: bash
         run: |
           set -euo pipefail
@@ -54,10 +54,13 @@ jobs:
           apt-cache madison "$XVFB_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$XVFB_VERSION"
           apt-cache madison "$X11_UTILS_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$X11_UTILS_VERSION"
           apt-cache madison "$IMAGEMAGICK_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$IMAGEMAGICK_VERSION"
+          apt-cache madison "$WINDOW_MANAGER_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$WINDOW_MANAGER_VERSION"
           sudo apt-get install --yes --allow-downgrades \
             "$KICAD_SPEC" "$KICAD_SYMBOLS_SPEC" "$KICAD_FOOTPRINTS_SPEC" \
             "$KICAD_PACKAGES3D_SPEC" "$WEBKIT_LIBRARY_SPEC" "$WEBKIT_DRIVER_SPEC" \
             "$XVFB_SPEC" "$X11_UTILS_SPEC" "$IMAGEMAGICK_SPEC"
+          sudo apt-get install --yes --no-install-recommends --allow-downgrades \
+            "$WINDOW_MANAGER_SPEC"
           test "$(dpkg-query -W -f='${Version}' "$KICAD_PACKAGE")" = "$KICAD_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$KICAD_SYMBOLS_PACKAGE")" = "$KICAD_SYMBOLS_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$KICAD_FOOTPRINTS_PACKAGE")" = "$KICAD_FOOTPRINTS_VERSION"
@@ -67,12 +70,15 @@ jobs:
           test "$(dpkg-query -W -f='${Version}' "$XVFB_PACKAGE")" = "$XVFB_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$X11_UTILS_PACKAGE")" = "$X11_UTILS_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$IMAGEMAGICK_PACKAGE")" = "$IMAGEMAGICK_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$WINDOW_MANAGER_PACKAGE")" = "$WINDOW_MANAGER_VERSION"
           test "$(command -v kicad-cli)" = /usr/bin/kicad-cli
           test "$(command -v pcbnew)" = /usr/bin/pcbnew
           test "$(command -v Xvfb)" = /usr/bin/Xvfb
           test "$(command -v xwininfo)" = /usr/bin/xwininfo
           test "$(command -v import)" = /usr/bin/import
           test "$(command -v identify)" = /usr/bin/identify
+          test "$(command -v openbox)" = /usr/bin/openbox
+          test "$(command -v xprop)" = /usr/bin/xprop
           rustup default "$RUST_VERSION"
           curl --fail --location --silent --show-error "$NODE_URL" --output /tmp/node.tar.xz
           echo "$NODE_SHA256  /tmp/node.tar.xz" | sha256sum -c -
@@ -116,11 +122,13 @@ jobs:
           fixture=fixtures/kicad-10/afk-smoke/afk-smoke.kicad_pcb
           mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$KICAD_CONFIG_HOME" "$artifact_dir"
           xvfb_pid=
+          wm_pid=
           kicad_pid=
           finish() {
             rc=$?
             trap - EXIT
             if [[ -n "$kicad_pid" ]]; then kill "$kicad_pid" 2>/dev/null || true; wait "$kicad_pid" 2>/dev/null || true; fi
+            if [[ -n "$wm_pid" ]]; then kill "$wm_pid" 2>/dev/null || true; wait "$wm_pid" 2>/dev/null || true; fi
             if [[ -n "$xvfb_pid" ]]; then kill "$xvfb_pid" 2>/dev/null || true; wait "$xvfb_pid" 2>/dev/null || true; fi
             if [[ $rc -eq 0 ]]; then status=passed; failures=0; failure_xml=; else status=failed; failures=1; failure_xml='<failure message="Ubuntu X11 GUI smoke failed; inspect uploaded logs"/>'; fi
             printf '{"schema":1,"lane":"ubuntu-x11-gui","status":"%s","exit_code":%d,"kicad_package":"%s","window_asserted":%s,"fixture_unchanged":%s}\n' \
@@ -133,7 +141,7 @@ jobs:
           sha256sum "$fixture" > "$artifact_dir/source.before.sha256"
           {
             uname -a
-            dpkg-query -W "$KICAD_PACKAGE" "$KICAD_SYMBOLS_PACKAGE" "$KICAD_FOOTPRINTS_PACKAGE" "$KICAD_PACKAGES3D_PACKAGE" "$WEBKIT_LIBRARY_PACKAGE" "$WEBKIT_DRIVER_PACKAGE" "$XVFB_PACKAGE" "$X11_UTILS_PACKAGE" "$IMAGEMAGICK_PACKAGE"
+            dpkg-query -W "$KICAD_PACKAGE" "$KICAD_SYMBOLS_PACKAGE" "$KICAD_FOOTPRINTS_PACKAGE" "$KICAD_PACKAGES3D_PACKAGE" "$WEBKIT_LIBRARY_PACKAGE" "$WEBKIT_DRIVER_PACKAGE" "$XVFB_PACKAGE" "$X11_UTILS_PACKAGE" "$IMAGEMAGICK_PACKAGE" "$WINDOW_MANAGER_PACKAGE"
             rustc --version
             cargo --version
             node --version
@@ -141,14 +149,69 @@ jobs:
             tauri --version
           } > "$artifact_dir/machine-manifest.txt"
           test "$(dpkg-query -W -f='${Version}' "$KICAD_PACKAGE")" = "$KICAD_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$WINDOW_MANAGER_PACKAGE")" = "$WINDOW_MANAGER_VERSION"
           kicad_upstream_version="${KICAD_VERSION%%~*}"
           test -f "$STOCK_SYMBOL"
           test -f "$STOCK_FOOTPRINT"
           test -f "$STOCK_3D_MODEL"
           kicad-cli version --format about | tee "$artifact_dir/kicad-version.txt"
           grep -Fqx -- "Version: $kicad_upstream_version-$KICAD_VERSION, release build" "$artifact_dir/kicad-version.txt"
+          xserver_current="$RUNNER_TEMP/kicad-xserver-readiness.current.txt"
+          wm_root_current="$RUNNER_TEMP/kicad-wm-root.current.txt"
+          wm_window_current="$RUNNER_TEMP/kicad-wm-window.current.txt"
+          : > "$artifact_dir/xserver-readiness.txt"
+          : > "$artifact_dir/wm-readiness.txt"
           Xvfb :99 -screen 0 1280x800x24 > "$artifact_dir/xvfb.log" 2>&1 &
           xvfb_pid=$!
+          for _xserver_attempt in $(seq 1 100); do
+            printf -- '--- xserver attempt=%d ---\n' "$_xserver_attempt" >> "$artifact_dir/xserver-readiness.txt"
+            if ! kill -0 "$xvfb_pid" 2>/dev/null; then
+              if wait "$xvfb_pid"; then xvfb_rc=0; else xvfb_rc=$?; fi
+              xvfb_pid=
+              printf 'Xvfb exited before readiness (exit_code=%d)\n' "$xvfb_rc" >> "$artifact_dir/xvfb.log"
+              break
+            fi
+            if xprop -root -notype > "$xserver_current" 2>&1; then
+              cat "$xserver_current" >> "$artifact_dir/xserver-readiness.txt"
+              xserver_ready=true
+              break
+            else
+              cat "$xserver_current" >> "$artifact_dir/xserver-readiness.txt"
+            fi
+            sleep 0.1
+          done
+          test "${xserver_ready:-false}" = true
+          /usr/bin/openbox --sm-disable > "$artifact_dir/wm.log" 2>&1 &
+          wm_pid=$!
+          for _wm_attempt in $(seq 1 100); do
+            printf -- '--- wm attempt=%d ---\n' "$_wm_attempt" >> "$artifact_dir/wm-readiness.txt"
+            if ! kill -0 "$wm_pid" 2>/dev/null; then
+              if wait "$wm_pid"; then wm_rc=0; else wm_rc=$?; fi
+              wm_pid=
+              printf 'Openbox exited before readiness (exit_code=%d)\n' "$wm_rc" >> "$artifact_dir/wm.log"
+              break
+            fi
+            if xprop -root -notype _NET_SUPPORTING_WM_CHECK > "$wm_root_current" 2>&1; then
+              cat "$wm_root_current" >> "$artifact_dir/wm-readiness.txt"
+              if wm_window_id=$(awk '$1 == "_NET_SUPPORTING_WM_CHECK:" && $2 == "window" && $3 == "id" && $4 == "#" && $5 ~ /^0x[[:xdigit:]]+$/ && NF == 5 { count++; id=$5 } END { if (count == 1) print id; else exit 1 }' "$wm_root_current"); then
+                if xprop -id "$wm_window_id" -notype _NET_SUPPORTING_WM_CHECK _NET_WM_NAME > "$wm_window_current" 2>&1; then
+                  cat "$wm_window_current" >> "$artifact_dir/wm-readiness.txt"
+                  if awk -v expected_id="$wm_window_id" '$1 == "_NET_SUPPORTING_WM_CHECK:" && $2 == "window" && $3 == "id" && $4 == "#" && $5 == expected_id && NF == 5 { self_count++ } $1 == "_NET_WM_NAME" && $2 == "=" && $3 == "\"Openbox\"" && NF == 3 { name_count++ } END { exit(self_count == 1 && name_count == 1 ? 0 : 1) }' "$wm_window_current"; then
+                    printf 'Openbox readiness accepted: root_owner=%s self_owner=%s name=Openbox\n' "$wm_window_id" "$wm_window_id" >> "$artifact_dir/wm-readiness.txt"
+                    wm_ready=true
+                    break
+                  fi
+                else
+                  cat "$wm_window_current" >> "$artifact_dir/wm-readiness.txt"
+                fi
+              fi
+            else
+              cat "$wm_root_current" >> "$artifact_dir/wm-readiness.txt"
+            fi
+            sleep 0.1
+          done
+          test "${wm_ready:-false}" = true
+          kill -0 "$wm_pid" 2>/dev/null
           pcbnew "$fixture" > "$artifact_dir/kicad-gui.log" 2>&1 &
           kicad_pid=$!
           current_tree="$RUNNER_TEMP/kicad-window-tree.current.txt"
@@ -166,7 +229,7 @@ jobs:
           window_height=
           : > "$artifact_dir/window-tree.txt"
           : > "$artifact_dir/window-details.txt"
-          for _attempt in $(seq 1 30); do
+          for _attempt in $(seq 1 60); do
             printf -- '--- attempt=%d ---\n' "$_attempt" >> "$artifact_dir/window-tree.txt"
             printf -- '--- attempt=%d candidates ---\n' "$_attempt" >> "$artifact_dir/window-details.txt"
             : > "$candidate_file"
@@ -253,6 +316,12 @@ jobs:
             fi
             if [[ -n "$window_id" ]]; then
               window_asserted=true
+              break
+            fi
+            if ! kill -0 "$wm_pid" 2>/dev/null; then
+              if wait "$wm_pid"; then wm_rc=0; else wm_rc=$?; fi
+              wm_pid=
+              printf 'Openbox exited before window assertion (exit_code=%d)\n' "$wm_rc" >> "$artifact_dir/wm.log"
               break
             fi
             if ! kill -0 "$kicad_pid" 2>/dev/null; then

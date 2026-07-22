@@ -107,6 +107,7 @@ pub struct UbuntuGuiLock {
     pub xvfb: UbuntuPackagePin,
     pub x11_utils: UbuntuPackagePin,
     pub imagemagick: UbuntuPackagePin,
+    pub window_manager: UbuntuPackagePin,
     pub stock_symbol: String,
     pub stock_footprint: String,
     pub stock_3d_model: String,
@@ -256,6 +257,7 @@ impl VersionsLock {
             ("xvfb", &self.ubuntu_gui.xvfb),
             ("x11-utils", &self.ubuntu_gui.x11_utils),
             ("imagemagick-6.q16", &self.ubuntu_gui.imagemagick),
+            ("openbox", &self.ubuntu_gui.window_manager),
         ];
         for (expected_name, package) in expected_packages {
             validate_ubuntu_package(package, expected_name)?;
@@ -285,6 +287,7 @@ impl VersionsLock {
             || self.ubuntu_gui.xvfb.version != "2:21.1.12-1ubuntu1.5"
             || self.ubuntu_gui.x11_utils.version != "7.7+6build2"
             || self.ubuntu_gui.imagemagick.version != "8:6.9.12.98+dfsg1-5.2build2"
+            || self.ubuntu_gui.window_manager.version != "3.6.1-12build5"
             || self.ubuntu_gui.ubuntu_packages_source != "https://packages.ubuntu.com/noble/amd64"
         {
             return Err(LabError(
@@ -544,6 +547,14 @@ impl VersionsLock {
                 self.ubuntu_gui.imagemagick.version.as_str(),
             ),
             (
+                "ubuntu_gui.window_manager.name",
+                self.ubuntu_gui.window_manager.name.as_str(),
+            ),
+            (
+                "ubuntu_gui.window_manager.version",
+                self.ubuntu_gui.window_manager.version.as_str(),
+            ),
+            (
                 "ubuntu_gui.stock_symbol",
                 self.ubuntu_gui.stock_symbol.as_str(),
             ),
@@ -678,6 +689,7 @@ mod tests {
             "xvfb = ",
             "x11_utils = ",
             "imagemagick = ",
+            "window_manager = ",
         ] {
             let filtered = text
                 .lines()
@@ -713,6 +725,11 @@ mod tests {
                 "version = \"8:6.9.12.98+dfsg1-5.2build2\"",
                 "version = \"8:6.9.12.98+dfsg1-5.2build1\"",
             ),
+            (
+                "version = \"3.6.1-12build5\"",
+                "version = \"3.6.1-12build4\"",
+            ),
+            ("name = \"openbox\"", "name = \"open-box\""),
             ("name = \"kicad-symbols\"", "name = \"kicad-symbol\""),
         ] {
             let changed = text.replace(from, to);

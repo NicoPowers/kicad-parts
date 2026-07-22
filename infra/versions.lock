@@ -80,6 +80,7 @@ webkit_driver = { name = "webkit2gtk-driver", version = "2.52.3-0ubuntu0.24.04.1
 xvfb = { name = "xvfb", version = "2:21.1.12-1ubuntu1.5" }
 x11_utils = { name = "x11-utils", version = "7.7+6build2" }
 imagemagick = { name = "imagemagick-6.q16", version = "8:6.9.12.98+dfsg1-5.2build2" }
+window_manager = { name = "openbox", version = "3.6.1-12build5" }
 stock_symbol = "/usr/share/kicad/symbols/Device.kicad_sym"
 stock_footprint = "/usr/share/kicad/footprints/Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod"
 stock_3d_model = "/usr/share/kicad/3dmodels/Resistor_SMD.3dshapes/R_0603_1608Metric.step"
