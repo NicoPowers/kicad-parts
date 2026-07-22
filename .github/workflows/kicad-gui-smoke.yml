@@ -72,6 +72,7 @@ jobs:
           test "$(command -v Xvfb)" = /usr/bin/Xvfb
           test "$(command -v xwininfo)" = /usr/bin/xwininfo
           test "$(command -v import)" = /usr/bin/import
+          test "$(command -v identify)" = /usr/bin/identify
           rustup default "$RUST_VERSION"
           curl --fail --location --silent --show-error "$NODE_URL" --output /tmp/node.tar.xz
           echo "$NODE_SHA256  /tmp/node.tar.xz" | sha256sum -c -
@@ -150,10 +151,107 @@ jobs:
           xvfb_pid=$!
           pcbnew "$fixture" > "$artifact_dir/kicad-gui.log" 2>&1 &
           kicad_pid=$!
+          current_tree="$RUNNER_TEMP/kicad-window-tree.current.txt"
+          current_detail="$RUNNER_TEMP/kicad-window-detail.current.txt"
+          candidate_file="$RUNNER_TEMP/kicad-window-candidates.current.txt"
+          qualified_file="$RUNNER_TEMP/kicad-window-qualified.current.txt"
+          post_tree="$RUNNER_TEMP/kicad-window-tree.post-capture.txt"
+          post_detail="$RUNNER_TEMP/kicad-window-detail.post-capture.txt"
+          post_candidate_file="$RUNNER_TEMP/kicad-window-candidates.post-capture.txt"
+          post_qualified_file="$RUNNER_TEMP/kicad-window-qualified.post-capture.txt"
+          min_window_width=100
+          min_window_height=100
+          window_id=
+          window_width=
+          window_height=
           : > "$artifact_dir/window-tree.txt"
+          : > "$artifact_dir/window-details.txt"
           for _attempt in $(seq 1 30); do
             printf -- '--- attempt=%d ---\n' "$_attempt" >> "$artifact_dir/window-tree.txt"
-            if xwininfo -root -tree >> "$artifact_dir/window-tree.txt" 2>&1 && awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { found=1 } END { exit(found ? 0 : 1) }' "$artifact_dir/window-tree.txt"; then
+            printf -- '--- attempt=%d candidates ---\n' "$_attempt" >> "$artifact_dir/window-details.txt"
+            : > "$candidate_file"
+            : > "$qualified_file"
+            if xwininfo -root -tree > "$current_tree" 2>&1; then
+              cat "$current_tree" >> "$artifact_dir/window-tree.txt"
+              awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$current_tree" > "$candidate_file"
+              while read -r candidate_id tree_width tree_height; do
+                printf -- 'candidate=%s tree_size=%sx%s minimum=%sx%s\n' "$candidate_id" "$tree_width" "$tree_height" "$min_window_width" "$min_window_height" >> "$artifact_dir/window-details.txt"
+                if xwininfo -id "$candidate_id" > "$current_detail" 2>&1; then
+                  cat "$current_detail" >> "$artifact_dir/window-details.txt"
+                  if awk -v expected_id="$candidate_id" -v expected_width="$tree_width" -v expected_height="$tree_height" -v min_width="$min_window_width" -v min_height="$min_window_height" '$1 == "xwininfo:" && $2 == "Window" && $3 == "id:" && $4 == expected_id { id_count++ } $1 == "Width:" && NF == 2 && $2 ~ /^[0-9]+$/ { width_count++; width=$2+0 } $1 == "Height:" && NF == 2 && $2 ~ /^[0-9]+$/ { height_count++; height=$2+0 } $1 == "Map" && $2 == "State:" { map_count++; if (NF == 3 && $3 == "IsViewable") viewable_count++ } END { exit(id_count == 1 && width_count == 1 && height_count == 1 && map_count == 1 && viewable_count == 1 && width == expected_width && height == expected_height && width >= min_width && height >= min_height ? 0 : 1) }' "$current_detail"; then
+                    printf '%s %s %s\n' "$candidate_id" "$tree_width" "$tree_height" >> "$qualified_file"
+                    printf 'candidate qualified: id=%s size=%sx%s map_state=IsViewable\n' "$candidate_id" "$tree_width" "$tree_height" >> "$artifact_dir/window-details.txt"
+                  else
+                    printf 'candidate rejected: id=%s\n' "$candidate_id" >> "$artifact_dir/window-details.txt"
+                  fi
+                else
+                  cat "$current_detail" >> "$artifact_dir/window-details.txt"
+                  printf 'candidate query failed: id=%s\n' "$candidate_id" >> "$artifact_dir/window-details.txt"
+                fi
+              done < "$candidate_file"
+            else
+              cat "$current_tree" >> "$artifact_dir/window-tree.txt"
+            fi
+            qualified_count=$(awk 'END { print NR+0 }' "$qualified_file")
+            printf 'qualified candidate count=%s\n' "$qualified_count" >> "$artifact_dir/window-details.txt"
+            if [[ "$qualified_count" -eq 1 ]]; then
+              read -r candidate_id tree_width tree_height < "$qualified_file"
+              : > "$artifact_dir/kicad-gui.png"
+              if import -window "$candidate_id" "$artifact_dir/kicad-gui.png" 2>> "$artifact_dir/window-details.txt"; then
+                printf -- '--- attempt=%d post-capture tree candidate=%s ---\n' "$_attempt" "$candidate_id" >> "$artifact_dir/window-tree.txt"
+                : > "$post_candidate_file"
+                : > "$post_qualified_file"
+                if xwininfo -root -tree > "$post_tree" 2>&1; then
+                  cat "$post_tree" >> "$artifact_dir/window-tree.txt"
+                  awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$post_tree" > "$post_candidate_file"
+                  while read -r post_candidate_id post_tree_width post_tree_height; do
+                    printf -- 'post-capture candidate=%s tree_size=%sx%s minimum=%sx%s\n' "$post_candidate_id" "$post_tree_width" "$post_tree_height" "$min_window_width" "$min_window_height" >> "$artifact_dir/window-details.txt"
+                    if xwininfo -id "$post_candidate_id" > "$post_detail" 2>&1; then
+                      cat "$post_detail" >> "$artifact_dir/window-details.txt"
+                      if awk -v expected_id="$post_candidate_id" -v expected_width="$post_tree_width" -v expected_height="$post_tree_height" -v min_width="$min_window_width" -v min_height="$min_window_height" '$1 == "xwininfo:" && $2 == "Window" && $3 == "id:" && $4 == expected_id { id_count++ } $1 == "Width:" && NF == 2 && $2 ~ /^[0-9]+$/ { width_count++; width=$2+0 } $1 == "Height:" && NF == 2 && $2 ~ /^[0-9]+$/ { height_count++; height=$2+0 } $1 == "Map" && $2 == "State:" { map_count++; if (NF == 3 && $3 == "IsViewable") viewable_count++ } END { exit(id_count == 1 && width_count == 1 && height_count == 1 && map_count == 1 && viewable_count == 1 && width == expected_width && height == expected_height && width >= min_width && height >= min_height ? 0 : 1) }' "$post_detail"; then
+                        printf '%s %s %s\n' "$post_candidate_id" "$post_tree_width" "$post_tree_height" >> "$post_qualified_file"
+                        printf 'post-capture candidate qualified: id=%s size=%sx%s map_state=IsViewable\n' "$post_candidate_id" "$post_tree_width" "$post_tree_height" >> "$artifact_dir/window-details.txt"
+                      else
+                        printf 'post-capture candidate rejected: id=%s\n' "$post_candidate_id" >> "$artifact_dir/window-details.txt"
+                      fi
+                    else
+                      cat "$post_detail" >> "$artifact_dir/window-details.txt"
+                      printf 'post-capture candidate query failed: id=%s\n' "$post_candidate_id" >> "$artifact_dir/window-details.txt"
+                    fi
+                  done < "$post_candidate_file"
+                else
+                  cat "$post_tree" >> "$artifact_dir/window-tree.txt"
+                fi
+                post_qualified_count=$(awk 'END { print NR+0 }' "$post_qualified_file")
+                printf 'post-capture qualified candidate count=%s\n' "$post_qualified_count" >> "$artifact_dir/window-details.txt"
+                if [[ "$post_qualified_count" -eq 1 ]]; then
+                  read -r post_candidate_id post_tree_width post_tree_height < "$post_qualified_file"
+                  if [[ "$post_candidate_id" == "$candidate_id" && "$post_tree_width" -eq "$tree_width" && "$post_tree_height" -eq "$tree_height" ]]; then
+                    if identify -format '%w %h %k\n' "$artifact_dir/kicad-gui.png" > "$artifact_dir/kicad-gui.identify.txt" 2>&1; then
+                      cat "$artifact_dir/kicad-gui.identify.txt" >> "$artifact_dir/window-details.txt"
+                      read -r image_width image_height image_colors < "$artifact_dir/kicad-gui.identify.txt"
+                      if [[ "$image_width" =~ ^[1-9][0-9]*$ && "$image_height" =~ ^[1-9][0-9]*$ && "$image_colors" =~ ^[1-9][0-9]*$ ]] && (( image_width == tree_width && image_height == tree_height && image_colors > 1 )); then
+                        window_id=$candidate_id
+                        window_width=$tree_width
+                        window_height=$tree_height
+                        printf 'candidate accepted after global post-capture revalidation: id=%s size=%sx%s colors=%s map_state=IsViewable\n' "$window_id" "$window_width" "$window_height" "$image_colors" >> "$artifact_dir/window-details.txt"
+                      fi
+                    fi
+                  else
+                    printf 'post-capture sole candidate changed: pre=%s/%sx%s post=%s/%sx%s\n' "$candidate_id" "$tree_width" "$tree_height" "$post_candidate_id" "$post_tree_width" "$post_tree_height" >> "$artifact_dir/window-details.txt"
+                  fi
+                elif [[ "$post_qualified_count" -eq 0 ]]; then
+                  printf 'no post-capture qualified candidate on attempt=%s\n' "$_attempt" >> "$artifact_dir/window-details.txt"
+                else
+                  printf 'ambiguous post-capture qualified candidates on attempt=%s count=%s\n' "$_attempt" "$post_qualified_count" >> "$artifact_dir/window-details.txt"
+                fi
+              fi
+            elif [[ "$qualified_count" -eq 0 ]]; then
+              printf 'no qualified candidate on attempt=%s\n' "$_attempt" >> "$artifact_dir/window-details.txt"
+            else
+              printf 'ambiguous qualified candidates on attempt=%s count=%s\n' "$_attempt" "$qualified_count" >> "$artifact_dir/window-details.txt"
+            fi
+            if [[ -n "$window_id" ]]; then
               window_asserted=true
               break
             fi
@@ -166,7 +264,6 @@ jobs:
             sleep 1
           done
           test "${window_asserted:-false}" = true
-          import -window root "$artifact_dir/kicad-gui.png"
           sha256sum -c "$artifact_dir/source.before.sha256"
           sha256sum "$fixture" > "$artifact_dir/source.after.sha256"
           cmp "$artifact_dir/source.before.sha256" "$artifact_dir/source.after.sha256"

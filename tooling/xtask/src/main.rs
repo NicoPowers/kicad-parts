@@ -25,6 +25,7 @@ enum WorkflowContractCategory {
     ActionPin,
     AlwaysUpload,
     Availability,
+    CandidateCardinality,
     CliVersion,
     DiagnosticLog,
     DpkgAssertion,
@@ -33,6 +34,7 @@ enum WorkflowContractCategory {
     Exporter,
     GuiLog,
     HashProof,
+    ImageProof,
     InstallSpec,
     Isolation,
     Junit,
@@ -42,6 +44,7 @@ enum WorkflowContractCategory {
     PackageManifest,
     PrivateToolchain,
     ProcessLiveness,
+    PostCapture,
     Screenshot,
     StockPath,
     TauriArtifact,
@@ -94,7 +97,12 @@ const WORKFLOW_STEPS: &[WorkflowStep] = &[
     WorkflowStep::Upload,
 ];
 
-const PCBNEW_WINDOW_ASSERTION_LINE: &str = r#"if xwininfo -root -tree >> "$artifact_dir/window-tree.txt" 2>&1 && awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { found=1 } END { exit(found ? 0 : 1) }' "$artifact_dir/window-tree.txt"; then"#;
+const PCBNEW_CANDIDATE_EXTRACTION_LINE: &str = r#"awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$current_tree" > "$candidate_file""#;
+const PCBNEW_VIEWABLE_DETAIL_ASSERTION_LINE: &str = r#"if awk -v expected_id="$candidate_id" -v expected_width="$tree_width" -v expected_height="$tree_height" -v min_width="$min_window_width" -v min_height="$min_window_height" '$1 == "xwininfo:" && $2 == "Window" && $3 == "id:" && $4 == expected_id { id_count++ } $1 == "Width:" && NF == 2 && $2 ~ /^[0-9]+$/ { width_count++; width=$2+0 } $1 == "Height:" && NF == 2 && $2 ~ /^[0-9]+$/ { height_count++; height=$2+0 } $1 == "Map" && $2 == "State:" { map_count++; if (NF == 3 && $3 == "IsViewable") viewable_count++ } END { exit(id_count == 1 && width_count == 1 && height_count == 1 && map_count == 1 && viewable_count == 1 && width == expected_width && height == expected_height && width >= min_width && height >= min_height ? 0 : 1) }' "$current_detail"; then"#;
+const PCBNEW_POST_CANDIDATE_EXTRACTION_LINE: &str = r#"awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$post_tree" > "$post_candidate_file""#;
+const PCBNEW_POST_CAPTURE_DETAIL_ASSERTION_LINE: &str = r#"if awk -v expected_id="$post_candidate_id" -v expected_width="$post_tree_width" -v expected_height="$post_tree_height" -v min_width="$min_window_width" -v min_height="$min_window_height" '$1 == "xwininfo:" && $2 == "Window" && $3 == "id:" && $4 == expected_id { id_count++ } $1 == "Width:" && NF == 2 && $2 ~ /^[0-9]+$/ { width_count++; width=$2+0 } $1 == "Height:" && NF == 2 && $2 ~ /^[0-9]+$/ { height_count++; height=$2+0 } $1 == "Map" && $2 == "State:" { map_count++; if (NF == 3 && $3 == "IsViewable") viewable_count++ } END { exit(id_count == 1 && width_count == 1 && height_count == 1 && map_count == 1 && viewable_count == 1 && width == expected_width && height == expected_height && width >= min_width && height >= min_height ? 0 : 1) }' "$post_detail"; then"#;
+const PCBNEW_POST_SELECTION_ASSERTION_LINE: &str = r#"if [[ "$post_candidate_id" == "$candidate_id" && "$post_tree_width" -eq "$tree_width" && "$post_tree_height" -eq "$tree_height" ]]; then"#;
+const PCBNEW_IMAGE_ASSERTION_LINE: &str = r#"if [[ "$image_width" =~ ^[1-9][0-9]*$ && "$image_height" =~ ^[1-9][0-9]*$ && "$image_colors" =~ ^[1-9][0-9]*$ ]] && (( image_width == tree_width && image_height == tree_height && image_colors > 1 )); then"#;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum WorkflowOrderGroup {
@@ -456,6 +464,12 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 54)))
     ),
     run_contract!(
+        ExecutablePreflight,
+        Line,
+        "test \"$(command -v identify)\" = /usr/bin/identify",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 55)))
+    ),
+    run_contract!(
         PrivateToolchain,
         Line,
         "toolchain_prefix=\"$RUNNER_TEMP/kicad-gui-toolchain-$NODE_VERSION-$TAURI_VERSION\"",
@@ -700,50 +714,362 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
     run_contract!(
         Window,
         Line,
-        ": > \"$artifact_dir/window-tree.txt\"",
+        "current_tree=\"$RUNNER_TEMP/kicad-window-tree.current.txt\"",
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 43)))
     ),
     run_contract!(
         Window,
         Line,
-        PCBNEW_WINDOW_ASSERTION_LINE,
+        "current_detail=\"$RUNNER_TEMP/kicad-window-detail.current.txt\"",
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 44)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        "candidate_file=\"$RUNNER_TEMP/kicad-window-candidates.current.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 45)))
+    ),
+    run_contract!(
+        CandidateCardinality,
+        Line,
+        "qualified_file=\"$RUNNER_TEMP/kicad-window-qualified.current.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 46)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "post_tree=\"$RUNNER_TEMP/kicad-window-tree.post-capture.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 47)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "post_detail=\"$RUNNER_TEMP/kicad-window-detail.post-capture.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 48)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "post_candidate_file=\"$RUNNER_TEMP/kicad-window-candidates.post-capture.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 49)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "post_qualified_file=\"$RUNNER_TEMP/kicad-window-qualified.post-capture.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 50)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        "min_window_width=100",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 51)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        "min_window_height=100",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 52)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        ": > \"$artifact_dir/window-tree.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 53)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        ": > \"$artifact_dir/window-details.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 54)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        ": > \"$candidate_file\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 55)))
+    ),
+    run_contract!(
+        CandidateCardinality,
+        Line,
+        ": > \"$qualified_file\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 56)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        "if xwininfo -root -tree > \"$current_tree\" 2>&1; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 57)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        "cat \"$current_tree\" >> \"$artifact_dir/window-tree.txt\"",
+        (Smoke, 2, None)
+    ),
+    run_contract!(
+        Window,
+        Line,
+        PCBNEW_CANDIDATE_EXTRACTION_LINE,
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 58)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        "if xwininfo -id \"$candidate_id\" > \"$current_detail\" 2>&1; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 59)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        "cat \"$current_detail\" >> \"$artifact_dir/window-details.txt\"",
+        (Smoke, 2, None)
+    ),
+    run_contract!(
+        Window,
+        Line,
+        PCBNEW_VIEWABLE_DETAIL_ASSERTION_LINE,
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 60)))
+    ),
+    run_contract!(
+        CandidateCardinality,
+        Line,
+        "printf '%s %s %s\\n' \"$candidate_id\" \"$tree_width\" \"$tree_height\" >> \"$qualified_file\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 61)))
+    ),
+    run_contract!(
+        CandidateCardinality,
+        Line,
+        "printf 'candidate qualified: id=%s size=%sx%s map_state=IsViewable\\n' \"$candidate_id\" \"$tree_width\" \"$tree_height\" >> \"$artifact_dir/window-details.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 62)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        "done < \"$candidate_file\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 63)))
+    ),
+    run_contract!(
+        CandidateCardinality,
+        Line,
+        "qualified_count=$(awk 'END { print NR+0 }' \"$qualified_file\")",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 64)))
+    ),
+    run_contract!(
+        CandidateCardinality,
+        Line,
+        "printf 'qualified candidate count=%s\\n' \"$qualified_count\" >> \"$artifact_dir/window-details.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 65)))
+    ),
+    run_contract!(
+        CandidateCardinality,
+        Line,
+        "if [[ \"$qualified_count\" -eq 1 ]]; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 66)))
+    ),
+    run_contract!(
+        CandidateCardinality,
+        Line,
+        "read -r candidate_id tree_width tree_height < \"$qualified_file\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 67)))
+    ),
+    run_contract!(
+        ImageProof,
+        Line,
+        ": > \"$artifact_dir/kicad-gui.png\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 68)))
+    ),
+    run_contract!(
+        Screenshot,
+        Line,
+        "if import -window \"$candidate_id\" \"$artifact_dir/kicad-gui.png\" 2>> \"$artifact_dir/window-details.txt\"; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 69)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        ": > \"$post_candidate_file\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 70)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        ": > \"$post_qualified_file\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 71)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "if xwininfo -root -tree > \"$post_tree\" 2>&1; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 72)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "cat \"$post_tree\" >> \"$artifact_dir/window-tree.txt\"",
+        (Smoke, 2, None)
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        PCBNEW_POST_CANDIDATE_EXTRACTION_LINE,
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 73)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "if xwininfo -id \"$post_candidate_id\" > \"$post_detail\" 2>&1; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 74)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "cat \"$post_detail\" >> \"$artifact_dir/window-details.txt\"",
+        (Smoke, 2, None)
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        PCBNEW_POST_CAPTURE_DETAIL_ASSERTION_LINE,
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 75)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "printf '%s %s %s\\n' \"$post_candidate_id\" \"$post_tree_width\" \"$post_tree_height\" >> \"$post_qualified_file\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 76)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "printf 'post-capture candidate qualified: id=%s size=%sx%s map_state=IsViewable\\n' \"$post_candidate_id\" \"$post_tree_width\" \"$post_tree_height\" >> \"$artifact_dir/window-details.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 77)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "done < \"$post_candidate_file\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 78)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "post_qualified_count=$(awk 'END { print NR+0 }' \"$post_qualified_file\")",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 79)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "printf 'post-capture qualified candidate count=%s\\n' \"$post_qualified_count\" >> \"$artifact_dir/window-details.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 80)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "if [[ \"$post_qualified_count\" -eq 1 ]]; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 81)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "read -r post_candidate_id post_tree_width post_tree_height < \"$post_qualified_file\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 82)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        PCBNEW_POST_SELECTION_ASSERTION_LINE,
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 83)))
+    ),
+    run_contract!(
+        ImageProof,
+        Line,
+        "if identify -format '%w %h %k\\n' \"$artifact_dir/kicad-gui.png\" > \"$artifact_dir/kicad-gui.identify.txt\" 2>&1; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 84)))
+    ),
+    run_contract!(
+        ImageProof,
+        Line,
+        "read -r image_width image_height image_colors < \"$artifact_dir/kicad-gui.identify.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 85)))
+    ),
+    run_contract!(
+        ImageProof,
+        Line,
+        PCBNEW_IMAGE_ASSERTION_LINE,
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 86)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "elif [[ \"$post_qualified_count\" -eq 0 ]]; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 87)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "printf 'no post-capture qualified candidate on attempt=%s\\n' \"$_attempt\" >> \"$artifact_dir/window-details.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 88)))
+    ),
+    run_contract!(
+        PostCapture,
+        Line,
+        "printf 'ambiguous post-capture qualified candidates on attempt=%s count=%s\\n' \"$_attempt\" \"$post_qualified_count\" >> \"$artifact_dir/window-details.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 89)))
+    ),
+    run_contract!(
+        CandidateCardinality,
+        Line,
+        "elif [[ \"$qualified_count\" -eq 0 ]]; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 90)))
+    ),
+    run_contract!(
+        CandidateCardinality,
+        Line,
+        "printf 'no qualified candidate on attempt=%s\\n' \"$_attempt\" >> \"$artifact_dir/window-details.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 91)))
+    ),
+    run_contract!(
+        CandidateCardinality,
+        Line,
+        "printf 'ambiguous qualified candidates on attempt=%s count=%s\\n' \"$_attempt\" \"$qualified_count\" >> \"$artifact_dir/window-details.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 92)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        "if [[ -n \"$window_id\" ]]; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 93)))
     ),
     run_contract!(
         ProcessLiveness,
         Line,
         "if ! kill -0 \"$kicad_pid\" 2>/dev/null; then",
-        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 45)))
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 94)))
     ),
     run_contract!(
         ProcessLiveness,
         Line,
         "if wait \"$kicad_pid\"; then kicad_rc=0; else kicad_rc=$?; fi",
-        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 46)))
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 95)))
     ),
     run_contract!(
         ProcessLiveness,
         Line,
         r#"printf 'pcbnew exited before window assertion (exit_code=%d)\n' "$kicad_rc" >> "$artifact_dir/kicad-gui.log""#,
-        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 47)))
-    ),
-    run_contract!(
-        Screenshot,
-        Line,
-        "import -window root \"$artifact_dir/kicad-gui.png\"",
-        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 50)))
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 96)))
     ),
     run_contract!(
         HashProof,
         Line,
         "sha256sum -c \"$artifact_dir/source.before.sha256\"",
-        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 60)))
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 100)))
     ),
     run_contract!(
         HashProof,
         Line,
         "cmp \"$artifact_dir/source.before.sha256\" \"$artifact_dir/source.after.sha256\"",
-        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 61)))
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 101)))
     ),
     run_contract!(
         Junit,
@@ -803,14 +1129,16 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::ActionPin, 2),
         (WorkflowContractCategory::AlwaysUpload, 3),
         (WorkflowContractCategory::Availability, 9),
+        (WorkflowContractCategory::CandidateCardinality, 11),
         (WorkflowContractCategory::CliVersion, 3),
         (WorkflowContractCategory::DiagnosticLog, 4),
         (WorkflowContractCategory::DpkgAssertion, 9),
         (WorkflowContractCategory::DowngradePermission, 1),
-        (WorkflowContractCategory::ExecutablePreflight, 5),
+        (WorkflowContractCategory::ExecutablePreflight, 6),
         (WorkflowContractCategory::Exporter, 1),
         (WorkflowContractCategory::GuiLog, 2),
         (WorkflowContractCategory::HashProof, 3),
+        (WorkflowContractCategory::ImageProof, 4),
         (WorkflowContractCategory::InstallSpec, 9),
         (WorkflowContractCategory::Isolation, 7),
         (WorkflowContractCategory::Junit, 1),
@@ -819,13 +1147,14 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::Ppa, 1),
         (WorkflowContractCategory::PackageManifest, 1),
         (WorkflowContractCategory::ProcessLiveness, 3),
+        (WorkflowContractCategory::PostCapture, 23),
         (WorkflowContractCategory::Screenshot, 1),
         (WorkflowContractCategory::StockPath, 3),
         (WorkflowContractCategory::PrivateToolchain, 10),
         (WorkflowContractCategory::TauriArtifact, 2),
         (WorkflowContractCategory::ToolchainProbe, 4),
         (WorkflowContractCategory::UploadPath, 1),
-        (WorkflowContractCategory::Window, 2),
+        (WorkflowContractCategory::Window, 16),
         (WorkflowContractCategory::Xvfb, 1),
     ])
 }
@@ -2062,11 +2391,11 @@ const PROTECTED_PROGRAM_DIGESTS: &[(WorkflowStep, &str)] = &[
     ),
     (
         WorkflowStep::Install,
-        "281ad6a30c973fc7ff2b36522e33643ee13d934884de25c4ecd0bff04eb11580",
+        "1fc0710a43fd951ed08e777f776abef778d29f0a1fb009bbe3056976df8537ac",
     ),
     (
         WorkflowStep::Smoke,
-        "a42290b11c38a43ad5aa5d71ad9cb386c439596da1264e4b466c3ba4c342cc84",
+        "33a10793193ef80691dc8a9d1afd27d22d498711a02cdb31abd0d5fcdc2d5ebd",
     ),
     (
         WorkflowStep::EnsureEvidence,
@@ -3111,7 +3440,7 @@ mod tests {
             },
         );
         assert_eq!(categories, expected_workflow_category_counts());
-        assert_eq!(WORKFLOW_CONTRACT.len(), 99);
+        assert_eq!(WORKFLOW_CONTRACT.len(), 152);
         for required in WORKFLOW_CONTRACT {
             match required.locator {
                 WorkflowContractLocator::Run { kind, locations } => {
@@ -3282,6 +3611,7 @@ mod tests {
             ("Xvfb", "/usr/bin/Xvfb"),
             ("xwininfo", "/usr/bin/xwininfo"),
             ("import", "/usr/bin/import"),
+            ("identify", "/usr/bin/identify"),
         ] {
             let preflight = format!("test \"$(command -v {command})\" = {path}");
             assert_eq!(workflow.matches(&preflight).count(), 1);
@@ -3301,7 +3631,7 @@ mod tests {
     }
 
     #[test]
-    fn gui_workflow_requires_exact_pcbnew_window_identity_and_liveness_evidence() {
+    fn gui_workflow_requires_current_viewable_rendered_pcbnew_window() {
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -3313,69 +3643,74 @@ mod tests {
         .unwrap();
         let workflow =
             fs::read_to_string(repository.join(".github/workflows/kicad-gui-smoke.yml")).unwrap();
+        validate_gui_workflow_contract(&workflow, &lock).unwrap();
 
-        let exact_assertion = PCBNEW_WINDOW_ASSERTION_LINE;
-        assert_eq!(workflow.matches(exact_assertion).count(), 1);
-        for (replacement, case) in [
-            (
-                "if xwininfo -root -tree >> \"$artifact_dir/window-tree.txt\" 2>&1 && grep -Fq pcbnew \"$artifact_dir/window-tree.txt\"; then",
-                "accepted a loose pcbnew substring",
-            ),
-            (
-                "if xwininfo -root -tree >> \"$artifact_dir/window-tree.txt\" 2>&1 && grep -Fq KiCad \"$artifact_dir/window-tree.txt\"; then",
-                "accepted the incorrect KiCad title",
-            ),
-            (
-                "if xwininfo -root -tree >> \"$artifact_dir/window-tree.txt\" 2>&1; then",
-                "removed the identity matcher",
-            ),
-            (
-                &exact_assertion.replace("(pcbnew|Pcbnew)", "(pcbnew|PCBNEW)"),
-                "accepted the wrong WM_CLASS case",
-            ),
-            (
-                "if xwininfo -root -tree >> \"$artifact_dir/window-tree.txt\" 2>&1 && grep -Eiq '\\(\"pcbnew\"' \"$artifact_dir/window-tree.txt\"; then",
-                "accepted a case-insensitive partial class matcher",
-            ),
-        ] {
-            let changed = workflow.replacen(exact_assertion, replacement, 1);
+        let reject = |from: &str, to: &str, case: &str| {
+            assert_eq!(workflow.matches(from).count(), 1, "fixture drift: {case}");
+            let changed = workflow.replacen(from, to, 1);
             assert!(
                 validate_gui_workflow_contract(&changed, &lock).is_err(),
-                "{case}"
+                "accepted workflow that {case}"
             );
+        };
+
+        assert_eq!(
+            workflow.matches(PCBNEW_CANDIDATE_EXTRACTION_LINE).count(),
+            1
+        );
+        for (replacement, case) in [
+            (
+                PCBNEW_CANDIDATE_EXTRACTION_LINE.replace("(pcbnew|Pcbnew)", "(pcbnew|PCBNEW)"),
+                "used the wrong WM_CLASS case",
+            ),
+            (
+                PCBNEW_CANDIDATE_EXTRACTION_LINE
+                    .replace(r#"$0 ~ /^[[:space:]]+0x[[:xdigit:]]+"#, r#"$0 ~ /pcbnew/"#),
+                "used a loose pcbnew substring",
+            ),
+            (
+                PCBNEW_CANDIDATE_EXTRACTION_LINE.replace(
+                    "\"$current_tree\" > \"$candidate_file\"",
+                    "\"$artifact_dir/window-tree.txt\" > \"$candidate_file\"",
+                ),
+                "selected candidates from stale accumulated trees",
+            ),
+        ] {
+            reject(PCBNEW_CANDIDATE_EXTRACTION_LINE, &replacement, case);
         }
 
         let exact_geometry =
             r#"[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$"#;
-        assert_eq!(exact_assertion.matches(exact_geometry).count(), 1);
+        assert_eq!(
+            PCBNEW_CANDIDATE_EXTRACTION_LINE
+                .matches(exact_geometry)
+                .count(),
+            1
+        );
         for (replacement, case) in [
             (
-                exact_assertion.replace(
+                PCBNEW_CANDIDATE_EXTRACTION_LINE.replace(
                     exact_geometry,
                     r#"[1-9][0-9]*x[1-9][0-9]*[+-][0-9]+[+-][0-9]+[[:space:]]+[+-][0-9]+[+-][0-9]+$"#,
                 ),
                 "restored the false-negative coordinate grammar",
             ),
             (
-                exact_assertion.replace(
+                PCBNEW_CANDIDATE_EXTRACTION_LINE.replace(
                     exact_geometry,
                     r#"[0-9]+x[0-9]+\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$"#,
                 ),
                 "allowed zero-sized windows",
             ),
             (
-                exact_assertion.replace(
+                PCBNEW_CANDIDATE_EXTRACTION_LINE.replace(
                     exact_geometry,
                     r#"[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+"#,
                 ),
                 "allowed trailing geometry junk",
             ),
         ] {
-            let changed = workflow.replacen(exact_assertion, &replacement, 1);
-            assert!(
-                validate_gui_workflow_contract(&changed, &lock).is_err(),
-                "accepted workflow that {case}"
-            );
+            reject(PCBNEW_CANDIDATE_EXTRACTION_LINE, &replacement, case);
         }
 
         for (from, to, case) in [
@@ -3385,9 +3720,69 @@ mod tests {
                 "removed the initial evidence truncation",
             ),
             (
-                "xwininfo -root -tree >> \"$artifact_dir/window-tree.txt\"",
-                "xwininfo -root -tree > \"$artifact_dir/window-tree.txt\"",
-                "overwrote prior attempt evidence",
+                ": > \"$candidate_file\"",
+                ":",
+                "retained stale candidates between attempts",
+            ),
+            (
+                ": > \"$qualified_file\"",
+                ":",
+                "retained stale qualified candidates between attempts",
+            ),
+            (
+                "if [[ \"$qualified_count\" -eq 1 ]]; then",
+                "if [[ \"$qualified_count\" -ge 1 ]]; then",
+                "accepted a non-unique pre-capture qualified set",
+            ),
+            (
+                ": > \"$artifact_dir/kicad-gui.png\"",
+                ":",
+                "allowed a failed capture to reuse a stale PNG",
+            ),
+            (
+                ": > \"$post_candidate_file\"",
+                ":",
+                "retained stale post-capture candidates",
+            ),
+            (
+                ": > \"$post_qualified_file\"",
+                ":",
+                "retained stale post-capture qualifiers",
+            ),
+            (
+                "if xwininfo -root -tree > \"$post_tree\" 2>&1; then",
+                "if xwininfo -id \"$candidate_id\" > \"$post_tree\" 2>&1; then",
+                "rechecked only the selected XID after capture",
+            ),
+            (
+                "if xwininfo -id \"$post_candidate_id\" > \"$post_detail\" 2>&1; then",
+                "if xwininfo -id \"$candidate_id\" > \"$post_detail\" 2>&1; then",
+                "queried stale selected-XID details instead of every post-capture candidate",
+            ),
+            (
+                "if [[ \"$post_qualified_count\" -eq 1 ]]; then",
+                "if [[ \"$post_qualified_count\" -ge 1 ]]; then",
+                "accepted a non-unique post-capture qualified set",
+            ),
+            (
+                "min_window_width=100",
+                "min_window_width=10",
+                "accepted the observed 10-pixel helper width",
+            ),
+            (
+                "min_window_height=100",
+                "min_window_height=10",
+                "accepted the observed 10-pixel helper height",
+            ),
+            (
+                "if import -window \"$candidate_id\" \"$artifact_dir/kicad-gui.png\" 2>> \"$artifact_dir/window-details.txt\"; then",
+                "if import -window root \"$artifact_dir/kicad-gui.png\" 2>> \"$artifact_dir/window-details.txt\"; then",
+                "captured the root instead of the qualified window",
+            ),
+            (
+                "if identify -format '%w %h %k\\n' \"$artifact_dir/kicad-gui.png\" > \"$artifact_dir/kicad-gui.identify.txt\" 2>&1; then",
+                "if identify -format '%w %h\\n' \"$artifact_dir/kicad-gui.png\" > \"$artifact_dir/kicad-gui.identify.txt\" 2>&1; then",
+                "removed unique-color evidence",
             ),
             (
                 "if ! kill -0 \"$kicad_pid\" 2>/dev/null; then",
@@ -3405,12 +3800,169 @@ mod tests {
                 "removed the early-exit diagnostic",
             ),
         ] {
-            assert_eq!(workflow.matches(from).count(), 1, "fixture drift: {case}");
-            let changed = workflow.replacen(from, to, 1);
-            assert!(
-                validate_gui_workflow_contract(&changed, &lock).is_err(),
-                "accepted workflow that {case}"
+            reject(from, to, case);
+        }
+
+        let current_qualification = "printf '%s %s %s\\n' \"$candidate_id\" \"$tree_width\" \"$tree_height\" >> \"$qualified_file\"";
+        reject(
+            current_qualification,
+            &format!("{current_qualification}\n                    break"),
+            "stopped at the first qualified pre-capture candidate",
+        );
+        let post_qualification = "printf '%s %s %s\\n' \"$post_candidate_id\" \"$post_tree_width\" \"$post_tree_height\" >> \"$post_qualified_file\"";
+        reject(
+            post_qualification,
+            &format!("{post_qualification}\n                        break"),
+            "stopped at the first qualified post-capture candidate",
+        );
+
+        assert_eq!(
+            workflow
+                .matches(PCBNEW_POST_CANDIDATE_EXTRACTION_LINE)
+                .count(),
+            1
+        );
+        for (replacement, case) in [
+            (
+                PCBNEW_POST_CANDIDATE_EXTRACTION_LINE.replace(
+                    "\"$post_tree\" > \"$post_candidate_file\"",
+                    "\"$current_tree\" > \"$post_candidate_file\"",
+                ),
+                "reused the pre-capture tree for post-capture cardinality",
+            ),
+            (
+                PCBNEW_POST_CANDIDATE_EXTRACTION_LINE.replace(
+                    "print $1, width, height",
+                    "if ($1 == expected_id) print $1, width, height",
+                ),
+                "filtered post-capture candidates down to the selected XID",
+            ),
+        ] {
+            reject(PCBNEW_POST_CANDIDATE_EXTRACTION_LINE, &replacement, case);
+        }
+
+        assert_eq!(
+            workflow
+                .matches(PCBNEW_POST_CAPTURE_DETAIL_ASSERTION_LINE)
+                .count(),
+            1
+        );
+        for (replacement, case) in [
+            (
+                PCBNEW_POST_CAPTURE_DETAIL_ASSERTION_LINE.replace(
+                    "expected_id=\"$post_candidate_id\"",
+                    "expected_id=\"$candidate_id\"",
+                ),
+                "bound fresh details to the stale pre-capture XID",
+            ),
+            (
+                PCBNEW_POST_CAPTURE_DETAIL_ASSERTION_LINE.replace("viewable_count == 1 && ", ""),
+                "accepted a post-capture state change",
+            ),
+            (
+                PCBNEW_POST_CAPTURE_DETAIL_ASSERTION_LINE
+                    .replace("width == expected_width", "width >= min_width"),
+                "accepted a post-capture tree/detail width disagreement",
+            ),
+            (
+                PCBNEW_POST_CAPTURE_DETAIL_ASSERTION_LINE
+                    .replace("height == expected_height", "height >= min_height"),
+                "accepted a post-capture tree/detail height disagreement",
+            ),
+        ] {
+            reject(
+                PCBNEW_POST_CAPTURE_DETAIL_ASSERTION_LINE,
+                &replacement,
+                case,
             );
+        }
+
+        assert_eq!(
+            workflow
+                .matches(PCBNEW_POST_SELECTION_ASSERTION_LINE)
+                .count(),
+            1
+        );
+        for (replacement, case) in [
+            (
+                PCBNEW_POST_SELECTION_ASSERTION_LINE
+                    .replace("\"$post_candidate_id\" == \"$candidate_id\" && ", ""),
+                "accepted a replacement XID after capture",
+            ),
+            (
+                PCBNEW_POST_SELECTION_ASSERTION_LINE
+                    .replace(" && \"$post_tree_width\" -eq \"$tree_width\"", ""),
+                "accepted a post-capture selected-window width change",
+            ),
+            (
+                PCBNEW_POST_SELECTION_ASSERTION_LINE
+                    .replace(" && \"$post_tree_height\" -eq \"$tree_height\"", ""),
+                "accepted a post-capture selected-window height change",
+            ),
+        ] {
+            reject(PCBNEW_POST_SELECTION_ASSERTION_LINE, &replacement, case);
+        }
+
+        let append_current_tree = "cat \"$current_tree\" >> \"$artifact_dir/window-tree.txt\"";
+        assert_eq!(workflow.matches(append_current_tree).count(), 2);
+        let overwritten_history = workflow.replace(
+            append_current_tree,
+            "cat \"$current_tree\" > \"$artifact_dir/window-tree.txt\"",
+        );
+        assert!(validate_gui_workflow_contract(&overwritten_history, &lock).is_err());
+
+        assert_eq!(
+            workflow
+                .matches(PCBNEW_VIEWABLE_DETAIL_ASSERTION_LINE)
+                .count(),
+            1
+        );
+        for (replacement, case) in [
+            (
+                PCBNEW_VIEWABLE_DETAIL_ASSERTION_LINE.replace("IsViewable", "IsUnMapped"),
+                "accepted an unmapped window",
+            ),
+            (
+                PCBNEW_VIEWABLE_DETAIL_ASSERTION_LINE.replace("id_count == 1 && ", ""),
+                "stopped binding details to the queried XID",
+            ),
+            (
+                PCBNEW_VIEWABLE_DETAIL_ASSERTION_LINE
+                    .replace("width == expected_width", "width >= min_width"),
+                "stopped agreeing with current tree width",
+            ),
+            (
+                PCBNEW_VIEWABLE_DETAIL_ASSERTION_LINE
+                    .replace("height == expected_height", "height >= min_height"),
+                "stopped agreeing with current tree height",
+            ),
+            (
+                PCBNEW_VIEWABLE_DETAIL_ASSERTION_LINE.replace(
+                    "\"$current_detail\"; then",
+                    "\"$artifact_dir/window-details.txt\"; then",
+                ),
+                "validated stale accumulated candidate details",
+            ),
+        ] {
+            reject(PCBNEW_VIEWABLE_DETAIL_ASSERTION_LINE, &replacement, case);
+        }
+
+        assert_eq!(workflow.matches(PCBNEW_IMAGE_ASSERTION_LINE).count(), 1);
+        for (replacement, case) in [
+            (
+                PCBNEW_IMAGE_ASSERTION_LINE.replace("image_colors > 1", "image_colors >= 1"),
+                "accepted a uniform screenshot",
+            ),
+            (
+                PCBNEW_IMAGE_ASSERTION_LINE.replace("image_width == tree_width && ", ""),
+                "stopped agreeing with captured window width",
+            ),
+            (
+                PCBNEW_IMAGE_ASSERTION_LINE.replace("image_height == tree_height && ", ""),
+                "stopped agreeing with captured window height",
+            ),
+        ] {
+            reject(PCBNEW_IMAGE_ASSERTION_LINE, &replacement, case);
         }
 
         let waited_then_cleared = "              if wait \"$kicad_pid\"; then kicad_rc=0; else kicad_rc=$?; fi\n              kicad_pid=\n";
@@ -3425,19 +3977,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn gui_workflow_pcbnew_window_awk_accepts_exact_negative_coordinates_only() {
-        let awk_program = PCBNEW_WINDOW_ASSERTION_LINE
-            .strip_prefix(
-                r#"if xwininfo -root -tree >> "$artifact_dir/window-tree.txt" 2>&1 && awk '"#,
-            )
-            .and_then(|program| program.strip_suffix(r#"' "$artifact_dir/window-tree.txt"; then"#))
-            .expect("window assertion must wrap exactly one AWK program");
-
-        let assert_match = |line: &str, expected: bool, case: &str| {
+    fn gui_workflow_pcbnew_window_awk_requires_current_viewable_main_window() {
+        let candidate_program = PCBNEW_CANDIDATE_EXTRACTION_LINE
+            .strip_prefix("awk '")
+            .and_then(|program| program.strip_suffix(r#"' "$current_tree" > "$candidate_file""#))
+            .expect("candidate extraction must wrap exactly one AWK program");
+        let run_awk = |program: &str, variables: &[String], input: &str| {
             let mut child = Command::new("awk")
-                .arg(awk_program)
+                .args(variables)
+                .arg(program)
                 .stdin(Stdio::piped())
-                .stdout(Stdio::null())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("POSIX awk must be available on Unix");
@@ -3445,28 +3995,30 @@ mod tests {
                 .stdin
                 .take()
                 .unwrap()
-                .write_all(format!("{line}\n").as_bytes())
+                .write_all(input.as_bytes())
                 .unwrap();
-            let output = child.wait_with_output().unwrap();
-            assert_eq!(
-                output.status.success(),
-                expected,
-                "{case}: awk stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            child.wait_with_output().unwrap()
         };
 
-        for (line, case) in [
+        for (line, expected, case) in [
             (
                 r#"     0x300001 "pcbnew": ("pcbnew" "pcbnew")  200x200+-1+-2  +-3+-4"#,
-                "lowercase class with negative coordinates in both pairs",
+                "0x300001 200 200\n",
+                "main lowercase-class candidate",
             ),
             (
                 r#"     0x300002 "pcbnew": ("pcbnew" "Pcbnew")  10x10+15+-20  +-30+40"#,
-                "title-case class with mixed coordinates in both pairs",
+                "0x300002 10 10\n",
+                "10x10 helper remains visible for detail rejection",
             ),
         ] {
-            assert_match(line, true, case);
+            let output = run_awk(candidate_program, &[], &format!("{line}\n"));
+            assert!(output.status.success(), "{case}");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                expected,
+                "{case}"
+            );
         }
 
         for (line, case) in [
@@ -3495,7 +4047,57 @@ mod tests {
                 "trailing junk",
             ),
         ] {
-            assert_match(line, false, case);
+            let output = run_awk(candidate_program, &[], &format!("{line}\n"));
+            assert!(output.status.success(), "{case}");
+            assert!(output.stdout.is_empty(), "{case}");
+        }
+
+        let detail_program = PCBNEW_VIEWABLE_DETAIL_ASSERTION_LINE
+            .split_once(" '")
+            .and_then(|(_, rest)| rest.strip_suffix(r#"' "$current_detail"; then"#))
+            .expect("detail assertion must wrap exactly one AWK program");
+        let detail = |id: &str, width: u16, height: u16, map_state: &str| {
+            format!(
+                "xwininfo: Window id: {id} \"pcbnew\"\n  Width: {width}\n  Height: {height}\n  Map State: {map_state}\n"
+            )
+        };
+        for (id, width, height, map_state, expected, case) in [
+            ("0x300001", 200, 200, "IsViewable", true, "viewable main"),
+            ("0x300001", 200, 200, "IsUnMapped", false, "unmapped main"),
+            ("0x300002", 10, 10, "IsViewable", false, "viewable helper"),
+            (
+                "0x999999",
+                200,
+                200,
+                "IsViewable",
+                false,
+                "stale different ID",
+            ),
+            ("0x300001", 201, 200, "IsViewable", false, "changed width"),
+        ] {
+            let variables = [
+                "-v".into(),
+                "expected_id=0x300001".into(),
+                "-v".into(),
+                "expected_width=200".into(),
+                "-v".into(),
+                "expected_height=200".into(),
+                "-v".into(),
+                "min_width=100".into(),
+                "-v".into(),
+                "min_height=100".into(),
+            ];
+            let output = run_awk(
+                detail_program,
+                &variables,
+                &detail(id, width, height, map_state),
+            );
+            assert_eq!(
+                output.status.success(),
+                expected,
+                "{case}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 
