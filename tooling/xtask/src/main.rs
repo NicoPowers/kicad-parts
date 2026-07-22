@@ -41,6 +41,7 @@ enum WorkflowContractCategory {
     Ppa,
     PackageManifest,
     PrivateToolchain,
+    ProcessLiveness,
     Screenshot,
     StockPath,
     TauriArtifact,
@@ -92,6 +93,8 @@ const WORKFLOW_STEPS: &[WorkflowStep] = &[
     WorkflowStep::EnsureEvidence,
     WorkflowStep::Upload,
 ];
+
+const PCBNEW_WINDOW_ASSERTION_LINE: &str = r#"if xwininfo -root -tree >> "$artifact_dir/window-tree.txt" 2>&1 && awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { found=1 } END { exit(found ? 0 : 1) }' "$artifact_dir/window-tree.txt"; then"#;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum WorkflowOrderGroup {
@@ -696,9 +699,33 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
     ),
     run_contract!(
         Window,
-        Token,
-        "xwininfo -root -tree",
+        Line,
+        ": > \"$artifact_dir/window-tree.txt\"",
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 43)))
+    ),
+    run_contract!(
+        Window,
+        Line,
+        PCBNEW_WINDOW_ASSERTION_LINE,
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 44)))
+    ),
+    run_contract!(
+        ProcessLiveness,
+        Line,
+        "if ! kill -0 \"$kicad_pid\" 2>/dev/null; then",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 45)))
+    ),
+    run_contract!(
+        ProcessLiveness,
+        Line,
+        "if wait \"$kicad_pid\"; then kicad_rc=0; else kicad_rc=$?; fi",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 46)))
+    ),
+    run_contract!(
+        ProcessLiveness,
+        Line,
+        r#"printf 'pcbnew exited before window assertion (exit_code=%d)\n' "$kicad_rc" >> "$artifact_dir/kicad-gui.log""#,
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 47)))
     ),
     run_contract!(
         Screenshot,
@@ -791,13 +818,14 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::LockReference, 10),
         (WorkflowContractCategory::Ppa, 1),
         (WorkflowContractCategory::PackageManifest, 1),
+        (WorkflowContractCategory::ProcessLiveness, 3),
         (WorkflowContractCategory::Screenshot, 1),
         (WorkflowContractCategory::StockPath, 3),
         (WorkflowContractCategory::PrivateToolchain, 10),
         (WorkflowContractCategory::TauriArtifact, 2),
         (WorkflowContractCategory::ToolchainProbe, 4),
         (WorkflowContractCategory::UploadPath, 1),
-        (WorkflowContractCategory::Window, 1),
+        (WorkflowContractCategory::Window, 2),
         (WorkflowContractCategory::Xvfb, 1),
     ])
 }
@@ -2038,7 +2066,7 @@ const PROTECTED_PROGRAM_DIGESTS: &[(WorkflowStep, &str)] = &[
     ),
     (
         WorkflowStep::Smoke,
-        "8e188bed7fb4157a7e7a278f4fd877e9cd9a51ff4b4ed05582c724f4ea0ebac9",
+        "a42290b11c38a43ad5aa5d71ad9cb386c439596da1264e4b466c3ba4c342cc84",
     ),
     (
         WorkflowStep::EnsureEvidence,
@@ -3083,7 +3111,7 @@ mod tests {
             },
         );
         assert_eq!(categories, expected_workflow_category_counts());
-        assert_eq!(WORKFLOW_CONTRACT.len(), 95);
+        assert_eq!(WORKFLOW_CONTRACT.len(), 99);
         for required in WORKFLOW_CONTRACT {
             match required.locator {
                 WorkflowContractLocator::Run { kind, locations } => {
@@ -3270,6 +3298,205 @@ mod tests {
         assert_eq!(workflow.matches(manifest_tail).count(), 1);
         let incomplete_manifest = workflow.replacen(manifest_tail, " \"$XVFB_PACKAGE\"", 1);
         assert!(validate_gui_workflow_contract(&incomplete_manifest, &lock).is_err());
+    }
+
+    #[test]
+    fn gui_workflow_requires_exact_pcbnew_window_identity_and_liveness_evidence() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let lock = VersionsLock::load(
+            &repository.join("infra/versions.lock"),
+            &repository.join("rust-toolchain.toml"),
+        )
+        .unwrap();
+        let workflow =
+            fs::read_to_string(repository.join(".github/workflows/kicad-gui-smoke.yml")).unwrap();
+
+        let exact_assertion = PCBNEW_WINDOW_ASSERTION_LINE;
+        assert_eq!(workflow.matches(exact_assertion).count(), 1);
+        for (replacement, case) in [
+            (
+                "if xwininfo -root -tree >> \"$artifact_dir/window-tree.txt\" 2>&1 && grep -Fq pcbnew \"$artifact_dir/window-tree.txt\"; then",
+                "accepted a loose pcbnew substring",
+            ),
+            (
+                "if xwininfo -root -tree >> \"$artifact_dir/window-tree.txt\" 2>&1 && grep -Fq KiCad \"$artifact_dir/window-tree.txt\"; then",
+                "accepted the incorrect KiCad title",
+            ),
+            (
+                "if xwininfo -root -tree >> \"$artifact_dir/window-tree.txt\" 2>&1; then",
+                "removed the identity matcher",
+            ),
+            (
+                &exact_assertion.replace("(pcbnew|Pcbnew)", "(pcbnew|PCBNEW)"),
+                "accepted the wrong WM_CLASS case",
+            ),
+            (
+                "if xwininfo -root -tree >> \"$artifact_dir/window-tree.txt\" 2>&1 && grep -Eiq '\\(\"pcbnew\"' \"$artifact_dir/window-tree.txt\"; then",
+                "accepted a case-insensitive partial class matcher",
+            ),
+        ] {
+            let changed = workflow.replacen(exact_assertion, replacement, 1);
+            assert!(
+                validate_gui_workflow_contract(&changed, &lock).is_err(),
+                "{case}"
+            );
+        }
+
+        let exact_geometry =
+            r#"[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$"#;
+        assert_eq!(exact_assertion.matches(exact_geometry).count(), 1);
+        for (replacement, case) in [
+            (
+                exact_assertion.replace(
+                    exact_geometry,
+                    r#"[1-9][0-9]*x[1-9][0-9]*[+-][0-9]+[+-][0-9]+[[:space:]]+[+-][0-9]+[+-][0-9]+$"#,
+                ),
+                "restored the false-negative coordinate grammar",
+            ),
+            (
+                exact_assertion.replace(
+                    exact_geometry,
+                    r#"[0-9]+x[0-9]+\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$"#,
+                ),
+                "allowed zero-sized windows",
+            ),
+            (
+                exact_assertion.replace(
+                    exact_geometry,
+                    r#"[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+"#,
+                ),
+                "allowed trailing geometry junk",
+            ),
+        ] {
+            let changed = workflow.replacen(exact_assertion, &replacement, 1);
+            assert!(
+                validate_gui_workflow_contract(&changed, &lock).is_err(),
+                "accepted workflow that {case}"
+            );
+        }
+
+        for (from, to, case) in [
+            (
+                ": > \"$artifact_dir/window-tree.txt\"",
+                ":",
+                "removed the initial evidence truncation",
+            ),
+            (
+                "xwininfo -root -tree >> \"$artifact_dir/window-tree.txt\"",
+                "xwininfo -root -tree > \"$artifact_dir/window-tree.txt\"",
+                "overwrote prior attempt evidence",
+            ),
+            (
+                "if ! kill -0 \"$kicad_pid\" 2>/dev/null; then",
+                "if false; then",
+                "removed the pcbnew liveness probe",
+            ),
+            (
+                "if wait \"$kicad_pid\"; then kicad_rc=0; else kicad_rc=$?; fi",
+                "wait \"$kicad_pid\"",
+                "lost the early pcbnew exit code under errexit",
+            ),
+            (
+                "printf 'pcbnew exited before window assertion (exit_code=%d)\\n' \"$kicad_rc\" >> \"$artifact_dir/kicad-gui.log\"",
+                ":",
+                "removed the early-exit diagnostic",
+            ),
+        ] {
+            assert_eq!(workflow.matches(from).count(), 1, "fixture drift: {case}");
+            let changed = workflow.replacen(from, to, 1);
+            assert!(
+                validate_gui_workflow_contract(&changed, &lock).is_err(),
+                "accepted workflow that {case}"
+            );
+        }
+
+        let waited_then_cleared = "              if wait \"$kicad_pid\"; then kicad_rc=0; else kicad_rc=$?; fi\n              kicad_pid=\n";
+        assert_eq!(workflow.matches(waited_then_cleared).count(), 1);
+        let double_wait = workflow.replacen(
+            waited_then_cleared,
+            "              if wait \"$kicad_pid\"; then kicad_rc=0; else kicad_rc=$?; fi\n",
+            1,
+        );
+        assert!(validate_gui_workflow_contract(&double_wait, &lock).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gui_workflow_pcbnew_window_awk_accepts_exact_negative_coordinates_only() {
+        let awk_program = PCBNEW_WINDOW_ASSERTION_LINE
+            .strip_prefix(
+                r#"if xwininfo -root -tree >> "$artifact_dir/window-tree.txt" 2>&1 && awk '"#,
+            )
+            .and_then(|program| program.strip_suffix(r#"' "$artifact_dir/window-tree.txt"; then"#))
+            .expect("window assertion must wrap exactly one AWK program");
+
+        let assert_match = |line: &str, expected: bool, case: &str| {
+            let mut child = Command::new("awk")
+                .arg(awk_program)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("POSIX awk must be available on Unix");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{line}\n").as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(
+                output.status.success(),
+                expected,
+                "{case}: awk stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        for (line, case) in [
+            (
+                r#"     0x300001 "pcbnew": ("pcbnew" "pcbnew")  200x200+-1+-2  +-3+-4"#,
+                "lowercase class with negative coordinates in both pairs",
+            ),
+            (
+                r#"     0x300002 "pcbnew": ("pcbnew" "Pcbnew")  10x10+15+-20  +-30+40"#,
+                "title-case class with mixed coordinates in both pairs",
+            ),
+        ] {
+            assert_match(line, true, case);
+        }
+
+        for (line, case) in [
+            (
+                r#"     0x300003 "pcbnew": ("pcbnew" "pcbnew")  200x200-1-2  +-3+-4"#,
+                "missing literal plus delimiters",
+            ),
+            (
+                r#"     0x300004 "pcbnew": ("pcbnew" "Pcbnew")  200x200++1+2  +3+4"#,
+                "double-plus coordinate",
+            ),
+            (
+                r#"     0x300005 "pcbnew": ("pcbnew" "pcbnew")  200x200+--1+2  +3+4"#,
+                "double-minus coordinate",
+            ),
+            (
+                r#"     0x300006 "pcbnew": ("pcbnew" "Pcbnew")  0x200+-1+-2  +-3+-4"#,
+                "zero width",
+            ),
+            (
+                r#"     0x300007 "pcbnew": ("pcbnew" "pcbnew")  200x0+-1+-2  +-3+-4"#,
+                "zero height",
+            ),
+            (
+                r#"     0x300008 "pcbnew": ("pcbnew" "Pcbnew")  200x200+-1+-2  +-3+-4junk"#,
+                "trailing junk",
+            ),
+        ] {
+            assert_match(line, false, case);
+        }
     }
 
     #[test]

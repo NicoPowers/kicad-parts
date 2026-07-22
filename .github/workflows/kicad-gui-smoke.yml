@@ -150,9 +150,17 @@ jobs:
           xvfb_pid=$!
           pcbnew "$fixture" > "$artifact_dir/kicad-gui.log" 2>&1 &
           kicad_pid=$!
+          : > "$artifact_dir/window-tree.txt"
           for _attempt in $(seq 1 30); do
-            if xwininfo -root -tree > "$artifact_dir/window-tree.txt" 2>&1 && grep -Fq KiCad "$artifact_dir/window-tree.txt"; then
+            printf -- '--- attempt=%d ---\n' "$_attempt" >> "$artifact_dir/window-tree.txt"
+            if xwininfo -root -tree >> "$artifact_dir/window-tree.txt" 2>&1 && awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { found=1 } END { exit(found ? 0 : 1) }' "$artifact_dir/window-tree.txt"; then
               window_asserted=true
+              break
+            fi
+            if ! kill -0 "$kicad_pid" 2>/dev/null; then
+              if wait "$kicad_pid"; then kicad_rc=0; else kicad_rc=$?; fi
+              kicad_pid=
+              printf 'pcbnew exited before window assertion (exit_code=%d)\n' "$kicad_rc" >> "$artifact_dir/kicad-gui.log"
               break
             fi
             sleep 1
