@@ -37,10 +37,10 @@ enum WorkflowContractCategory {
     LaneEvidence,
     LockReference,
     Ppa,
+    PrivateToolchain,
     Screenshot,
     StockPath,
     TauriArtifact,
-    TauriInstall,
     ToolchainProbe,
     UploadPath,
     Window,
@@ -384,82 +384,100 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 46)))
     ),
     run_contract!(
+        PrivateToolchain,
+        Line,
+        "toolchain_prefix=\"$RUNNER_TEMP/kicad-gui-toolchain-$NODE_VERSION-$TAURI_VERSION\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 47)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "test ! -e \"$toolchain_prefix\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 48)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "mkdir \"$toolchain_prefix\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 49)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "tar -xJf /tmp/node.tar.xz --strip-components=1 -C \"$toolchain_prefix\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 50)))
+    ),
+    run_contract!(
+        PrivateToolchain,
+        Line,
+        "export PATH=\"$toolchain_prefix/bin:$PATH\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 51)))
+    ),
+    run_contract!(
         TauriArtifact,
         Line,
         "curl --fail --location --silent --show-error \"$TAURI_LINUX_X64_GNU_URL\" --output /tmp/tauri-cli-linux-x64-gnu.tgz",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 47)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 52)))
     ),
     run_contract!(
         TauriArtifact,
         Line,
         "echo \"$TAURI_LINUX_X64_GNU_SHA512  /tmp/tauri-cli-linux-x64-gnu.tgz\" | sha512sum -c -",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 48)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 53)))
     ),
     run_contract!(
         DiagnosticLog,
         Line,
         "artifact_dir=\"$GITHUB_WORKSPACE/.afk/gui/artifacts\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 49)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 54)))
     ),
     run_contract!(
         DiagnosticLog,
         Line,
         "npm_logs=\"$artifact_dir/npm-logs\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 50)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 55)))
     ),
     run_contract!(
-        TauriInstall,
+        PrivateToolchain,
         Line,
         "npm_home=\"$RUNNER_TEMP/kicad-gui-npm-home\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 51)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 56)))
     ),
     run_contract!(
-        TauriInstall,
+        PrivateToolchain,
         Line,
-        "tauri_prefix=\"$RUNNER_TEMP/kicad-gui-tauri-$TAURI_VERSION\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 52)))
+        "env HOME=\"$npm_home\" NPM_CONFIG_USERCONFIG=/dev/null \"$toolchain_prefix/bin/npm\" install",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 57)))
     ),
     run_contract!(
-        TauriInstall,
+        PrivateToolchain,
         Line,
-        "test ! -e \"$tauri_prefix\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 53)))
-    ),
-    run_contract!(
-        TauriInstall,
-        Line,
-        "env HOME=\"$npm_home\" NPM_CONFIG_USERCONFIG=/dev/null npm install",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 54)))
-    ),
-    run_contract!(
-        TauriInstall,
-        Line,
-        "--global --prefix \"$tauri_prefix\" --offline --omit=optional --ignore-scripts",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 55)))
+        "--global --prefix \"$toolchain_prefix\" --offline --omit=optional --ignore-scripts",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 58)))
     ),
     run_contract!(
         DiagnosticLog,
         Line,
         "--loglevel verbose --logs-dir \"$npm_logs\" --audit=false --fund=false",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 56)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 59)))
     ),
     run_contract!(
-        TauriInstall,
+        PrivateToolchain,
         Line,
         "--update-notifier=false /tmp/tauri-cli.tgz /tmp/tauri-cli-linux-x64-gnu.tgz",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 57)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 60)))
     ),
     run_contract!(
         DiagnosticLog,
         Line,
         "2>&1 | tee \"$artifact_dir/npm-tauri-install.log\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 58)))
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 61)))
     ),
     run_contract!(
-        TauriInstall,
+        PrivateToolchain,
         Line,
-        "echo \"$tauri_prefix/bin\" >> \"$GITHUB_PATH\"",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 59)))
+        "echo \"$toolchain_prefix/bin\" >> \"$GITHUB_PATH\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 62)))
     ),
     run_contract!(
         ToolchainProbe,
@@ -470,19 +488,19 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
     run_contract!(
         ToolchainProbe,
         Line,
-        "test \"$(node --version)\" = \"v$NODE_VERSION\"",
+        "test \"$(\"$toolchain_prefix/bin/node\" --version)\" = \"v$NODE_VERSION\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 71)))
     ),
     run_contract!(
         ToolchainProbe,
         Line,
-        "test \"$(npm --version)\" = \"$NPM_VERSION\"",
+        "test \"$(\"$toolchain_prefix/bin/npm\" --version)\" = \"$NPM_VERSION\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 72)))
     ),
     run_contract!(
         ToolchainProbe,
         Line,
-        "test \"$(\"$tauri_prefix/bin/tauri\" --version)\" = \"tauri-cli $TAURI_VERSION\"",
+        "test \"$(\"$toolchain_prefix/bin/tauri\" --version)\" = \"tauri-cli $TAURI_VERSION\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 73)))
     ),
     field_contract!(
@@ -679,8 +697,8 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::Ppa, 1),
         (WorkflowContractCategory::Screenshot, 1),
         (WorkflowContractCategory::StockPath, 3),
+        (WorkflowContractCategory::PrivateToolchain, 10),
         (WorkflowContractCategory::TauriArtifact, 2),
-        (WorkflowContractCategory::TauriInstall, 7),
         (WorkflowContractCategory::ToolchainProbe, 4),
         (WorkflowContractCategory::UploadPath, 1),
         (WorkflowContractCategory::Window, 1),
@@ -1918,7 +1936,7 @@ const PROTECTED_PROGRAM_DIGESTS: &[(WorkflowStep, &str)] = &[
     ),
     (
         WorkflowStep::Install,
-        "9c53b054d2de588db233078a04ffe74b09be2c3557f12e906ee1cd571223e4b0",
+        "e55030ea5f21e9fb073fe8c0e54067676bc63763941a1ec2e4f7d7ae9ce20017",
     ),
     (
         WorkflowStep::Smoke,
@@ -2965,7 +2983,7 @@ mod tests {
             },
         );
         assert_eq!(categories, expected_workflow_category_counts());
-        assert_eq!(WORKFLOW_CONTRACT.len(), 77);
+        assert_eq!(WORKFLOW_CONTRACT.len(), 80);
         for required in WORKFLOW_CONTRACT {
             match required.locator {
                 WorkflowContractLocator::Run { kind, locations } => {
@@ -3034,6 +3052,79 @@ mod tests {
     }
 
     #[test]
+    fn gui_workflow_requires_private_pinned_node_and_npm() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let lock = VersionsLock::load(
+            &repository.join("infra/versions.lock"),
+            &repository.join("rust-toolchain.toml"),
+        )
+        .unwrap();
+        let workflow =
+            fs::read_to_string(repository.join(".github/workflows/kicad-gui-smoke.yml")).unwrap();
+
+        for (from, to, case) in [
+            (
+                "tar -xJf /tmp/node.tar.xz --strip-components=1 -C \"$toolchain_prefix\"",
+                "sudo tar -xJf /tmp/node.tar.xz --strip-components=1 -C /usr/local",
+                "global sudo extraction",
+            ),
+            (
+                "test ! -e \"$toolchain_prefix\"",
+                ":",
+                "removed fresh-prefix assertion",
+            ),
+            (
+                "mkdir \"$toolchain_prefix\"",
+                "mkdir -p \"$toolchain_prefix\"",
+                "allowed a preexisting prefix",
+            ),
+            (
+                "export PATH=\"$toolchain_prefix/bin:$PATH\"",
+                ":",
+                "removed current-step private PATH",
+            ),
+            (
+                "\"$toolchain_prefix/bin/npm\" install",
+                "npm install",
+                "selected implicit npm",
+            ),
+            (
+                "$(\"$toolchain_prefix/bin/node\" --version)",
+                "$(node --version)",
+                "selected implicit node probe",
+            ),
+            (
+                "$(\"$toolchain_prefix/bin/npm\" --version)",
+                "$(npm --version)",
+                "selected implicit npm probe",
+            ),
+            (
+                "echo \"$toolchain_prefix/bin\" >> \"$GITHUB_PATH\"",
+                "echo \"/usr/local/bin\" >> \"$GITHUB_PATH\"",
+                "propagated the global tool path",
+            ),
+        ] {
+            assert_eq!(workflow.matches(from).count(), 1, "fixture drift: {case}");
+            let changed = workflow.replacen(from, to, 1);
+            assert!(
+                validate_gui_workflow_contract(&changed, &lock).is_err(),
+                "accepted workflow with {case}"
+            );
+        }
+
+        let path_line = "          echo \"$toolchain_prefix/bin\" >> \"$GITHUB_PATH\"\n";
+        let probe_line = "          test \"$(\"$toolchain_prefix/bin/tauri\" --version)\" = \"tauri-cli $TAURI_VERSION\"\n";
+        assert_eq!(workflow.matches(path_line).count(), 1);
+        assert_eq!(workflow.matches(probe_line).count(), 1);
+        let without_path = workflow.replacen(path_line, "", 1);
+        let misplaced = without_path.replacen(probe_line, &format!("{probe_line}{path_line}"), 1);
+        assert!(validate_gui_workflow_contract(&misplaced, &lock).is_err());
+    }
+
+    #[test]
     fn gui_workflow_requires_verified_offline_private_tauri_install_and_logs() {
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -3060,7 +3151,7 @@ mod tests {
             ),
             (" --offline ", " ", "removed offline mode"),
             (
-                "--global --prefix \"$tauri_prefix\"",
+                "--global --prefix \"$toolchain_prefix\"",
                 "--global --prefix /usr/local",
                 "replaced private prefix",
             ),
@@ -3089,7 +3180,7 @@ mod tests {
         }
 
         let checksum_line = "          echo \"$TAURI_LINUX_X64_GNU_SHA512  /tmp/tauri-cli-linux-x64-gnu.tgz\" | sha512sum -c -\n";
-        let path_line = "          echo \"$tauri_prefix/bin\" >> \"$GITHUB_PATH\"\n";
+        let path_line = "          echo \"$toolchain_prefix/bin\" >> \"$GITHUB_PATH\"\n";
         assert_eq!(workflow.matches(checksum_line).count(), 1);
         assert_eq!(workflow.matches(path_line).count(), 1);
         let without_checksum = workflow.replacen(checksum_line, "", 1);
