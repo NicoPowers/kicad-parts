@@ -131,11 +131,12 @@ jobs:
             tauri --version
           } > "$artifact_dir/machine-manifest.txt"
           test "$(dpkg-query -W -f='${Version}' "$KICAD_PACKAGE")" = "$KICAD_VERSION"
+          kicad_upstream_version="${KICAD_VERSION%%~*}"
           test -f "$STOCK_SYMBOL"
           test -f "$STOCK_FOOTPRINT"
           test -f "$STOCK_3D_MODEL"
           kicad-cli version --format about | tee "$artifact_dir/kicad-version.txt"
-          grep -Fqx "Version: 10.0.4, release build" "$artifact_dir/kicad-version.txt"
+          grep -Fqx -- "Version: $kicad_upstream_version-$KICAD_VERSION, release build" "$artifact_dir/kicad-version.txt"
           Xvfb :99 -screen 0 1280x800x24 > "$artifact_dir/xvfb.log" 2>&1 &
           xvfb_pid=$!
           pcbnew "$fixture" > "$artifact_dir/kicad-gui.log" 2>&1 &

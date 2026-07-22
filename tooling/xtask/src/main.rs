@@ -25,6 +25,7 @@ enum WorkflowContractCategory {
     ActionPin,
     AlwaysUpload,
     Availability,
+    CliVersion,
     DiagnosticLog,
     DpkgAssertion,
     DowngradePermission,
@@ -566,6 +567,12 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 10)))
     ),
     run_contract!(
+        CliVersion,
+        Line,
+        "kicad_upstream_version=\"${KICAD_VERSION%%~*}\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 21)))
+    ),
+    run_contract!(
         StockPath,
         Line,
         "test -f \"$STOCK_SYMBOL\"",
@@ -582,6 +589,18 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         Line,
         "test -f \"$STOCK_3D_MODEL\"",
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 32)))
+    ),
+    run_contract!(
+        CliVersion,
+        Line,
+        "kicad-cli version --format about | tee \"$artifact_dir/kicad-version.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 33)))
+    ),
+    run_contract!(
+        CliVersion,
+        Line,
+        "grep -Fqx -- \"Version: $kicad_upstream_version-$KICAD_VERSION, release build\" \"$artifact_dir/kicad-version.txt\"",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 34)))
     ),
     run_contract!(
         Xvfb,
@@ -683,6 +702,7 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::ActionPin, 2),
         (WorkflowContractCategory::AlwaysUpload, 3),
         (WorkflowContractCategory::Availability, 7),
+        (WorkflowContractCategory::CliVersion, 3),
         (WorkflowContractCategory::DiagnosticLog, 4),
         (WorkflowContractCategory::DpkgAssertion, 7),
         (WorkflowContractCategory::DowngradePermission, 1),
@@ -1940,7 +1960,7 @@ const PROTECTED_PROGRAM_DIGESTS: &[(WorkflowStep, &str)] = &[
     ),
     (
         WorkflowStep::Smoke,
-        "8a822149e4a74e4fb237949b4894b21babb876623ea3b679b14a6c7f91d725b7",
+        "ef8c4e31f6f990070ba29357f5fe229314e866ee8b77c9136d66b49e309e4025",
     ),
     (
         WorkflowStep::EnsureEvidence,
@@ -2983,7 +3003,7 @@ mod tests {
             },
         );
         assert_eq!(categories, expected_workflow_category_counts());
-        assert_eq!(WORKFLOW_CONTRACT.len(), 80);
+        assert_eq!(WORKFLOW_CONTRACT.len(), 83);
         for required in WORKFLOW_CONTRACT {
             match required.locator {
                 WorkflowContractLocator::Run { kind, locations } => {
@@ -3048,6 +3068,73 @@ mod tests {
             "sudo apt-get update --allow-downgrades",
             1,
         );
+        assert!(validate_gui_workflow_contract(&misplaced, &lock).is_err());
+    }
+
+    #[test]
+    fn gui_workflow_derives_exact_cli_version_from_locked_package() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let lock = VersionsLock::load(
+            &repository.join("infra/versions.lock"),
+            &repository.join("rust-toolchain.toml"),
+        )
+        .unwrap();
+        let workflow =
+            fs::read_to_string(repository.join(".github/workflows/kicad-gui-smoke.yml")).unwrap();
+
+        let exact_check = "grep -Fqx -- \"Version: $kicad_upstream_version-$KICAD_VERSION, release build\" \"$artifact_dir/kicad-version.txt\"";
+        let upstream_version = lock
+            .ubuntu_gui
+            .kicad_package
+            .version
+            .split_once('~')
+            .unwrap()
+            .0;
+        let upstream_only = format!(
+            "grep -Fqx -- \"Version: {upstream_version}, release build\" \"$artifact_dir/kicad-version.txt\""
+        );
+        let loose_substring = exact_check.replacen("grep -Fqx --", "grep -Fq --", 1);
+        let regex_check = exact_check.replacen("grep -Fqx --", "grep -Eqx --", 1);
+        for (from, to, case) in [
+            (
+                "kicad_upstream_version=\"${KICAD_VERSION%%~*}\"",
+                ":",
+                "removed locked-package derivation",
+            ),
+            (
+                exact_check,
+                loose_substring.as_str(),
+                "accepted a substring",
+            ),
+            (
+                exact_check,
+                regex_check.as_str(),
+                "accepted a regular expression",
+            ),
+            (
+                exact_check,
+                upstream_only.as_str(),
+                "used an upstream-only literal",
+            ),
+        ] {
+            assert_eq!(workflow.matches(from).count(), 1, "fixture drift: {case}");
+            let changed = workflow.replacen(from, to, 1);
+            assert!(
+                validate_gui_workflow_contract(&changed, &lock).is_err(),
+                "accepted workflow that {case}"
+            );
+        }
+
+        let output_line = "          kicad-cli version --format about | tee \"$artifact_dir/kicad-version.txt\"\n";
+        let check_line = format!("          {exact_check}\n");
+        assert_eq!(workflow.matches(output_line).count(), 1);
+        assert_eq!(workflow.matches(&check_line).count(), 1);
+        let without_check = workflow.replacen(&check_line, "", 1);
+        let misplaced =
+            without_check.replacen(output_line, &format!("{check_line}{output_line}"), 1);
         assert!(validate_gui_workflow_contract(&misplaced, &lock).is_err());
     }
 
