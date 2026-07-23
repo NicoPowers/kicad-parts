@@ -122,6 +122,8 @@ services:
         TAURI_CLI_VERSION: ${AFK_TAURI_VERSION}
         TAURI_CLI_URL: ${AFK_TAURI_URL}
         TAURI_CLI_SHA512: ${AFK_TAURI_SHA512}
+        TAURI_CLI_LINUX_X64_GNU_URL: ${AFK_TAURI_LINUX_X64_GNU_URL}
+        TAURI_CLI_LINUX_X64_GNU_SHA512: ${AFK_TAURI_LINUX_X64_GNU_SHA512}
         AFK_UID: ${AFK_RUNNER_UID}
         AFK_GID: ${AFK_RUNNER_GID}
     environment:
@@ -130,7 +132,6 @@ services:
       XDG_CONFIG_HOME: /afk/xdg/config
       XDG_DATA_HOME: /afk/xdg/data
       XDG_STATE_HOME: /afk/xdg/state
-      KICAD_CONFIG_HOME: /afk/kicad/config
     command: ["sleep", "infinity"]
     networks: [afk]
     mem_limit: 2g
@@ -150,55 +151,6 @@ services:
           mode: 01777
       - type: tmpfs
         target: /afk/xdg
-        tmpfs:
-          size: 67108864
-          mode: 01777
-      - type: tmpfs
-        target: /afk/kicad
-        tmpfs:
-          size: 67108864
-          mode: 01777
-  kicad-cli:
-    image: ${AFK_KICAD_IMAGE}
-    environment:
-      HOME: /afk/home
-      XDG_CACHE_HOME: /afk/xdg/cache
-      XDG_CONFIG_HOME: /afk/xdg/config
-      XDG_DATA_HOME: /afk/xdg/data
-      XDG_STATE_HOME: /afk/xdg/state
-      KICAD_CONFIG_HOME: /afk/kicad/config
-    entrypoint: []
-    command: ["kicad-cli", "version", "--format", "about"]
-    networks: [afk]
-    mem_limit: 2g
-    pids_limit: 512
-    read_only: true
-    user: "${AFK_RUNNER_UID}:${AFK_RUNNER_GID}"
-    volumes:
-      - type: bind
-        source: ${AFK_FIXTURE_DIR}
-        target: /fixture
-        read_only: true
-      - type: bind
-        source: ${AFK_ARTIFACT_DIR}
-        target: /artifacts
-      - type: tmpfs
-        target: /tmp
-        tmpfs:
-          size: 134217728
-          mode: 01777
-      - type: tmpfs
-        target: /afk/home
-        tmpfs:
-          size: 67108864
-          mode: 01777
-      - type: tmpfs
-        target: /afk/xdg
-        tmpfs:
-          size: 67108864
-          mode: 01777
-      - type: tmpfs
-        target: /afk/kicad
         tmpfs:
           size: 67108864
           mode: 01777

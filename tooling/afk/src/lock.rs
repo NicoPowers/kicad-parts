@@ -12,7 +12,6 @@ pub struct VersionsLock {
     pub toolchain: ToolchainLock,
     pub images: ImageLocks,
     pub components: ComponentLocks,
-    pub ubuntu_gui: UbuntuGuiLock,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -45,7 +44,6 @@ pub struct ToolchainLock {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageLocks {
-    pub kicad: ImageLock,
     pub busybox: ImageLock,
     pub rust: ImageLock,
 }
@@ -91,34 +89,6 @@ pub struct MinioLock {
     pub release_url: String,
     pub registry_status: String,
     pub expected_arch: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct UbuntuGuiLock {
-    pub runner: String,
-    pub ppa: String,
-    pub packages_index: String,
-    pub ubuntu_packages_source: String,
-    pub kicad_package: UbuntuPackagePin,
-    pub stock_packages: Vec<UbuntuPackagePin>,
-    pub webkit_library: UbuntuPackagePin,
-    pub webkit_driver: UbuntuPackagePin,
-    pub xvfb: UbuntuPackagePin,
-    pub x11_utils: UbuntuPackagePin,
-    pub imagemagick: UbuntuPackagePin,
-    pub coredump_tool: UbuntuPackagePin,
-    pub window_manager: UbuntuPackagePin,
-    pub stock_symbol: String,
-    pub stock_footprint: String,
-    pub stock_3d_model: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct UbuntuPackagePin {
-    pub name: String,
-    pub version: String,
 }
 
 impl VersionsLock {
@@ -200,7 +170,6 @@ impl VersionsLock {
             validate_hex(value, length, field)?;
         }
         for (name, image) in [
-            ("images.kicad", &self.images.kicad),
             ("images.busybox", &self.images.busybox),
             ("images.rust", &self.images.rust),
         ] {
@@ -245,57 +214,6 @@ impl VersionsLock {
         }
         if self.toolchain.runner_uid == 0 || self.toolchain.runner_gid == 0 {
             return Err(LabError("runner UID/GID must be non-root".into()));
-        }
-        if self.ubuntu_gui.runner != "ubuntu-24.04" {
-            return Err(LabError(
-                "Ubuntu GUI runner must remain ubuntu-24.04".into(),
-            ));
-        }
-        let expected_packages = [
-            ("kicad", &self.ubuntu_gui.kicad_package),
-            ("libwebkit2gtk-4.1-0", &self.ubuntu_gui.webkit_library),
-            ("webkit2gtk-driver", &self.ubuntu_gui.webkit_driver),
-            ("xvfb", &self.ubuntu_gui.xvfb),
-            ("x11-utils", &self.ubuntu_gui.x11_utils),
-            ("imagemagick-6.q16", &self.ubuntu_gui.imagemagick),
-            ("systemd-coredump", &self.ubuntu_gui.coredump_tool),
-            ("openbox", &self.ubuntu_gui.window_manager),
-        ];
-        for (expected_name, package) in expected_packages {
-            validate_ubuntu_package(package, expected_name)?;
-        }
-        let wanted_stock = ["kicad-symbols", "kicad-footprints", "kicad-packages3d"];
-        if self.ubuntu_gui.stock_packages.len() != wanted_stock.len() {
-            return Err(LabError(
-                "Ubuntu GUI stock package lock must contain exactly three packages".into(),
-            ));
-        }
-        for (package, expected_name) in self.ubuntu_gui.stock_packages.iter().zip(wanted_stock) {
-            validate_ubuntu_package(package, expected_name)?;
-            if package.version != self.ubuntu_gui.kicad_package.version {
-                return Err(LabError(format!(
-                    "Ubuntu GUI stock package `{expected_name}` must match the KiCad package version"
-                )));
-            }
-        }
-        if self.ubuntu_gui.webkit_driver.version != self.ubuntu_gui.webkit_library.version {
-            return Err(LabError(
-                "Ubuntu GUI WebKit driver and library versions must match".into(),
-            ));
-        }
-        let expected_kicad_gui = format!("{}~ubuntu24.04.1", self.images.kicad.version);
-        if self.ubuntu_gui.kicad_package.version != expected_kicad_gui
-            || self.ubuntu_gui.webkit_library.version != "2.52.3-0ubuntu0.24.04.1"
-            || self.ubuntu_gui.xvfb.version != "2:21.1.12-1ubuntu1.5"
-            || self.ubuntu_gui.x11_utils.version != "7.7+6build2"
-            || self.ubuntu_gui.imagemagick.version != "8:6.9.12.98+dfsg1-5.2build2"
-            || self.ubuntu_gui.coredump_tool.version != "255.4-1ubuntu8.16"
-            || self.ubuntu_gui.window_manager.version != "3.6.1-12build5"
-            || self.ubuntu_gui.ubuntu_packages_source != "https://packages.ubuntu.com/noble/amd64"
-        {
-            return Err(LabError(
-                "Ubuntu GUI package snapshot differs from authoritative Noble/PPA locks".into(),
-            ));
         }
         for (artifact, integrity, sha512) in [
             (
@@ -361,7 +279,6 @@ impl VersionsLock {
             }
         }
         for (name, image) in [
-            ("kicad", &self.images.kicad),
             ("busybox", &self.images.busybox),
             ("rust", &self.images.rust),
         ] {
@@ -375,14 +292,9 @@ impl VersionsLock {
             != format!("{}-x86_64-unknown-linux-gnu", self.toolchain.rust)
             || self.toolchain.debian_snapshot.len() != 16
             || !self.toolchain.debian_snapshot.ends_with('Z')
-            || !self
-                .ubuntu_gui
-                .kicad_package
-                .version
-                .starts_with(&self.images.kicad.version)
         {
             return Err(LabError(
-                "toolchain directory, snapshot, or GUI package version is inconsistent".into(),
+                "toolchain directory or snapshot is inconsistent".into(),
             ));
         }
         let release_from_build = format!(
@@ -393,21 +305,6 @@ impl VersionsLock {
             return Err(LabError(
                 "MinIO build_version and release version disagree".into(),
             ));
-        }
-        for path in [
-            &self.ubuntu_gui.stock_symbol,
-            &self.ubuntu_gui.stock_footprint,
-            &self.ubuntu_gui.stock_3d_model,
-        ] {
-            if !path.starts_with("/usr/share/kicad/")
-                || !path
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || "/._-".contains(ch))
-            {
-                return Err(LabError(
-                    "stock assertion path is outside /usr/share/kicad or unsafe".into(),
-                ));
-            }
         }
         Ok(())
     }
@@ -494,116 +391,8 @@ impl VersionsLock {
                 "components.minio.expected_arch",
                 self.components.minio.expected_arch.as_str(),
             ),
-            ("ubuntu_gui.runner", self.ubuntu_gui.runner.as_str()),
-            ("ubuntu_gui.ppa", self.ubuntu_gui.ppa.as_str()),
-            (
-                "ubuntu_gui.packages_index",
-                self.ubuntu_gui.packages_index.as_str(),
-            ),
-            (
-                "ubuntu_gui.ubuntu_packages_source",
-                self.ubuntu_gui.ubuntu_packages_source.as_str(),
-            ),
-            (
-                "ubuntu_gui.kicad_package.name",
-                self.ubuntu_gui.kicad_package.name.as_str(),
-            ),
-            (
-                "ubuntu_gui.kicad_package.version",
-                self.ubuntu_gui.kicad_package.version.as_str(),
-            ),
-            (
-                "ubuntu_gui.webkit_library.name",
-                self.ubuntu_gui.webkit_library.name.as_str(),
-            ),
-            (
-                "ubuntu_gui.webkit_library.version",
-                self.ubuntu_gui.webkit_library.version.as_str(),
-            ),
-            (
-                "ubuntu_gui.webkit_driver.name",
-                self.ubuntu_gui.webkit_driver.name.as_str(),
-            ),
-            (
-                "ubuntu_gui.webkit_driver.version",
-                self.ubuntu_gui.webkit_driver.version.as_str(),
-            ),
-            ("ubuntu_gui.xvfb.name", self.ubuntu_gui.xvfb.name.as_str()),
-            (
-                "ubuntu_gui.xvfb.version",
-                self.ubuntu_gui.xvfb.version.as_str(),
-            ),
-            (
-                "ubuntu_gui.x11_utils.name",
-                self.ubuntu_gui.x11_utils.name.as_str(),
-            ),
-            (
-                "ubuntu_gui.x11_utils.version",
-                self.ubuntu_gui.x11_utils.version.as_str(),
-            ),
-            (
-                "ubuntu_gui.imagemagick.name",
-                self.ubuntu_gui.imagemagick.name.as_str(),
-            ),
-            (
-                "ubuntu_gui.imagemagick.version",
-                self.ubuntu_gui.imagemagick.version.as_str(),
-            ),
-            (
-                "ubuntu_gui.coredump_tool.name",
-                self.ubuntu_gui.coredump_tool.name.as_str(),
-            ),
-            (
-                "ubuntu_gui.coredump_tool.version",
-                self.ubuntu_gui.coredump_tool.version.as_str(),
-            ),
-            (
-                "ubuntu_gui.window_manager.name",
-                self.ubuntu_gui.window_manager.name.as_str(),
-            ),
-            (
-                "ubuntu_gui.window_manager.version",
-                self.ubuntu_gui.window_manager.version.as_str(),
-            ),
-            (
-                "ubuntu_gui.stock_symbol",
-                self.ubuntu_gui.stock_symbol.as_str(),
-            ),
-            (
-                "ubuntu_gui.stock_footprint",
-                self.ubuntu_gui.stock_footprint.as_str(),
-            ),
-            (
-                "ubuntu_gui.stock_3d_model",
-                self.ubuntu_gui.stock_3d_model.as_str(),
-            ),
         ])
     }
-}
-
-fn validate_ubuntu_package(package: &UbuntuPackagePin, expected_name: &str) -> LabResult<()> {
-    if package.name != expected_name
-        || !package
-            .name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ".+-".contains(ch))
-    {
-        return Err(LabError(format!(
-            "Ubuntu GUI package name must be exactly `{expected_name}`"
-        )));
-    }
-    if package.version.is_empty()
-        || package.version.eq_ignore_ascii_case("latest")
-        || !package
-            .version
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ".+~:-".contains(ch))
-    {
-        return Err(LabError(format!(
-            "Ubuntu GUI package `{expected_name}` has an unsafe or floating version"
-        )));
-    }
-    Ok(())
 }
 
 fn hex_bytes(value: &str) -> LabResult<Vec<u8>> {
@@ -690,75 +479,6 @@ mod tests {
     }
 
     #[test]
-    fn every_ubuntu_gui_package_pin_is_required_and_snapshot_exact() {
-        let root = repository();
-        let text = fs::read_to_string(root.join("infra/versions.lock")).unwrap();
-        for line_prefix in [
-            "kicad_package = ",
-            "webkit_library = ",
-            "webkit_driver = ",
-            "xvfb = ",
-            "x11_utils = ",
-            "imagemagick = ",
-            "coredump_tool = ",
-            "window_manager = ",
-        ] {
-            let filtered = text
-                .lines()
-                .filter(|line| !line.starts_with(line_prefix))
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(
-                toml::from_str::<VersionsLock>(&filtered).is_err(),
-                "accepted missing {line_prefix}"
-            );
-        }
-        for stock_name in ["kicad-symbols", "kicad-footprints", "kicad-packages3d"] {
-            let filtered = text
-                .lines()
-                .filter(|line| !line.contains(&format!("name = \"{stock_name}\"")))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let lock: VersionsLock = toml::from_str(&filtered).unwrap();
-            assert!(lock.validate().is_err(), "accepted missing {stock_name}");
-        }
-
-        for (from, to) in [
-            (
-                "version = \"2.52.3-0ubuntu0.24.04.1\"",
-                "version = \"2.44.0-2\"",
-            ),
-            (
-                "version = \"2:21.1.12-1ubuntu1.5\"",
-                "version = \"2:21.1.12-1ubuntu1\"",
-            ),
-            ("version = \"7.7+6build2\"", "version = \"7.7+5build2\""),
-            (
-                "version = \"8:6.9.12.98+dfsg1-5.2build2\"",
-                "version = \"8:6.9.12.98+dfsg1-5.2build1\"",
-            ),
-            (
-                "version = \"255.4-1ubuntu8.16\"",
-                "version = \"255.4-1ubuntu8.15\"",
-            ),
-            (
-                "version = \"3.6.1-12build5\"",
-                "version = \"3.6.1-12build4\"",
-            ),
-            ("name = \"openbox\"", "name = \"open-box\""),
-            (
-                "name = \"systemd-coredump\"",
-                "name = \"systemd-core-dump\"",
-            ),
-            ("name = \"kicad-symbols\"", "name = \"kicad-symbol\""),
-        ] {
-            let changed = text.replace(from, to);
-            let lock: VersionsLock = toml::from_str(&changed).unwrap();
-            assert!(lock.validate().is_err(), "accepted changed pin `{from}`");
-        }
-    }
-
-    #[test]
     fn checksum_integrity_commit_and_reference_mismatches_fail() {
         let root = repository();
         let mut lock = VersionsLock::load(
@@ -811,7 +531,7 @@ mod tests {
             &root.join("rust-toolchain.toml"),
         )
         .unwrap();
-        lock.images.kicad.reference = "docker.io/kicad/kicad:latest".into();
+        lock.images.busybox.reference = "docker.io/library/busybox:latest".into();
         assert!(lock.validate().is_err());
     }
 

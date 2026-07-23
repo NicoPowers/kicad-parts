@@ -64,7 +64,6 @@ pub struct RunImages {
     pub pocketbase: String,
     pub minio: String,
     pub test_runner: String,
-    pub kicad: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -84,7 +83,6 @@ pub struct RunPlan {
     pub run_root: PathBuf,
     pub state_dir: PathBuf,
     pub artifact_dir: PathBuf,
-    pub fixture_dir: PathBuf,
     pub images: RunImages,
     pub credentials: TestCredentials,
 }
@@ -119,7 +117,6 @@ impl RunPlan {
                 "{image_prefix}/test-runner:rust-{}-node-{}",
                 lock.toolchain.rust, lock.toolchain.node
             ),
-            kicad: lock.images.kicad.reference.clone(),
         };
         let credentials = TestCredentials {
             minio_user: format!("afk-{}", &digest(format!("{run_id}:user").as_bytes())[..12]),
@@ -131,7 +128,6 @@ impl RunPlan {
             repository: repository.clone(),
             state_dir: run_root.join("state"),
             artifact_dir: run_root.join("artifacts"),
-            fixture_dir: repository.join("fixtures/kicad-10/afk-smoke"),
             run_root,
             images,
             credentials,
@@ -177,14 +173,6 @@ impl RunPlan {
         let result = (|| {
             fs::create_dir(&self.state_dir)?;
             fs::create_dir(&self.artifact_dir)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-
-                // Only this fresh, run-scoped output directory is shared with the
-                // fixed non-root UIDs used by the runner and KiCad containers.
-                fs::set_permissions(&self.artifact_dir, fs::Permissions::from_mode(0o777))?;
-            }
             write_json_new(&self.state_dir.join("run.json"), &self.metadata())?;
             fs::write(
                 self.state_dir.join("run-canary"),
@@ -245,8 +233,6 @@ impl RunPlan {
         let gid = lock.toolchain.runner_gid.to_string();
         BTreeMap::from([
             ("AFK_COMPOSE_PROJECT".into(), self.compose_project.clone()),
-            ("AFK_FIXTURE_DIR".into(), compose_path(&self.fixture_dir)),
-            ("AFK_ARTIFACT_DIR".into(), compose_path(&self.artifact_dir)),
             ("AFK_MINIO_USER".into(), self.credentials.minio_user.clone()),
             (
                 "AFK_MINIO_PASSWORD".into(),
@@ -261,7 +247,6 @@ impl RunPlan {
                 "AFK_TEST_RUNNER_IMAGE".into(),
                 self.images.test_runner.clone(),
             ),
-            ("AFK_KICAD_IMAGE".into(), self.images.kicad.clone()),
             (
                 "AFK_BUSYBOX_IMAGE".into(),
                 lock.images.busybox.reference.clone(),
@@ -334,6 +319,14 @@ impl RunPlan {
                 "AFK_TAURI_SHA512".into(),
                 lock.toolchain.tauri_cli_sha512.clone(),
             ),
+            (
+                "AFK_TAURI_LINUX_X64_GNU_URL".into(),
+                lock.toolchain.tauri_cli_linux_x64_gnu_url.clone(),
+            ),
+            (
+                "AFK_TAURI_LINUX_X64_GNU_SHA512".into(),
+                lock.toolchain.tauri_cli_linux_x64_gnu_sha512.clone(),
+            ),
         ])
     }
 
@@ -347,8 +340,6 @@ impl RunPlan {
         };
         PolicyExpectation {
             project: self.compose_project.clone(),
-            fixture_dir: self.fixture_dir.clone(),
-            artifact_dir: self.artifact_dir.clone(),
             user: format!(
                 "{}:{}",
                 lock.toolchain.runner_uid, lock.toolchain.runner_gid
@@ -357,7 +348,6 @@ impl RunPlan {
                 ("pocketbase".into(), self.images.pocketbase.clone()),
                 ("minio".into(), self.images.minio.clone()),
                 ("test-runner".into(), self.images.test_runner.clone()),
-                ("kicad-cli".into(), self.images.kicad.clone()),
             ]),
             build_contexts: BTreeMap::from([
                 (
@@ -414,6 +404,14 @@ impl RunPlan {
                         ("TAURI_CLI_SHA512", "AFK_TAURI_SHA512"),
                         ("TAURI_CLI_URL", "AFK_TAURI_URL"),
                         ("TAURI_CLI_VERSION", "AFK_TAURI_VERSION"),
+                        (
+                            "TAURI_CLI_LINUX_X64_GNU_SHA512",
+                            "AFK_TAURI_LINUX_X64_GNU_SHA512",
+                        ),
+                        (
+                            "TAURI_CLI_LINUX_X64_GNU_URL",
+                            "AFK_TAURI_LINUX_X64_GNU_URL",
+                        ),
                     ]),
                 ),
             ]),
@@ -579,7 +577,6 @@ pub fn protected_sentinels(repository: &Path) -> LabResult<BTreeMap<String, Stri
         "footprints",
         "3d-models",
         "fixtures/import",
-        "fixtures/kicad-10/afk-smoke",
     ] {
         let root = repository.join(relative);
         result.insert(relative.into(), tree_digest(repository, &root)?);
@@ -708,12 +705,7 @@ pub fn initial_lanes() -> BTreeMap<String, LaneResult> {
         ("static-policy", "not reached"),
         ("foundation-stack", "not reached"),
         ("test-runner", "not reached"),
-        ("kicad-cli", "not reached"),
         ("orchestration", "not reached"),
-        (
-            "ubuntu-x11-gui",
-            "requires authorized ubuntu-24.04 CI execution",
-        ),
     ]
     .into_iter()
     .map(|(name, detail)| {
@@ -909,9 +901,6 @@ pub fn expected_service_writable_targets(service: &str) -> LabResult<BTreeSet<St
     ] {
         targets.insert(target.into());
     }
-    if matches!(service, "test-runner" | "kicad-cli") {
-        targets.insert("/afk/kicad/config".into());
-    }
     Ok(targets)
 }
 
@@ -1068,24 +1057,6 @@ pub fn validate_runner_output(output: &str, lock: &VersionsLock) -> LabResult<()
     Ok(())
 }
 
-pub fn validate_kicad_output(output: &str, lock: &VersionsLock) -> LabResult<()> {
-    reject_runtime_state_errors(output)?;
-    for expected in [
-        format!("Version: {}, release build", lock.images.kicad.version),
-        format!("STOCK_SYMBOL_OK {}", lock.ubuntu_gui.stock_symbol),
-        format!("STOCK_FOOTPRINT_OK {}", lock.ubuntu_gui.stock_footprint),
-        format!("STOCK_3D_OK {}", lock.ubuntu_gui.stock_3d_model),
-        "HOST_SECRET_PATHS_ABSENT".into(),
-    ] {
-        if !output.lines().any(|line| line.trim() == expected) {
-            return Err(LabError(format!(
-                "KiCad output did not prove exact `{expected}`"
-            )));
-        }
-    }
-    Ok(())
-}
-
 fn exact_trimmed(actual: &str, expected: &str, label: &str) -> LabResult<()> {
     if actual.trim() != expected {
         return Err(LabError(format!(
@@ -1121,7 +1092,6 @@ mod tests {
         let repository = real_repository();
         let lock = fixture_lock(&repository);
         let temporary = tempdir().unwrap();
-        fs::create_dir_all(temporary.path().join("fixtures/kicad-10/afk-smoke")).unwrap();
         fs::create_dir_all(temporary.path().join(".afk/runs")).unwrap();
         let one = RunPlan::create(temporary.path(), Some("duplicate-01"), &lock).unwrap();
         let two = one.clone();
@@ -1147,10 +1117,7 @@ mod tests {
         let environment = plan.compose_environment(&lock);
         assert!(!environment.contains_key("AFK_REPO_ROOT"));
         assert!(!environment.keys().any(|key| key.contains("ENV_FILE")));
-        assert_eq!(
-            environment["AFK_FIXTURE_DIR"],
-            compose_path(&plan.fixture_dir)
-        );
+        assert!(!environment.keys().any(|key| key.contains("FIXTURE")));
     }
 
     #[test]
@@ -1300,7 +1267,7 @@ mod tests {
     #[test]
     fn runtime_isolation_proof_is_exact_exhaustive_and_error_sensitive() {
         let lock = fixture_lock(&real_repository());
-        for service in ["pocketbase", "minio", "test-runner", "kicad-cli"] {
+        for service in ["pocketbase", "minio", "test-runner"] {
             let exact = exact_runtime_isolation_markers(service, &lock);
             let evidence = validate_runtime_isolation_output(&exact, service, &lock).unwrap();
             assert_eq!(
@@ -1317,36 +1284,14 @@ mod tests {
     }
 
     #[test]
-    fn successful_markers_cannot_mask_permission_or_configuration_errors() {
-        let lock = fixture_lock(&real_repository());
-        let exact = format!(
-            "Version: {}, release build\nSTOCK_SYMBOL_OK {}\nSTOCK_FOOTPRINT_OK {}\nSTOCK_3D_OK {}\nHOST_SECRET_PATHS_ABSENT\n",
-            lock.images.kicad.version,
-            lock.ubuntu_gui.stock_symbol,
-            lock.ubuntu_gui.stock_footprint,
-            lock.ubuntu_gui.stock_3d_model,
-        );
-        validate_kicad_output(&exact, &lock).unwrap();
-        for suffix in [
-            "permission denied while creating config\n",
-            "configuration error: state unavailable\n",
-            "read-only file system\n",
-        ] {
-            assert!(validate_kicad_output(&format!("{exact}{suffix}"), &lock).is_err());
-        }
-    }
-
-    #[test]
     fn all_failure_manifests_start_with_every_lane() {
         let lanes = initial_lanes();
-        assert_eq!(lanes.len(), 6);
+        assert_eq!(lanes.len(), 4);
         for name in [
             "static-policy",
             "foundation-stack",
             "test-runner",
-            "kicad-cli",
             "orchestration",
-            "ubuntu-x11-gui",
         ] {
             assert!(lanes.contains_key(name));
         }

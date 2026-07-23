@@ -8,8 +8,6 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug)]
 pub struct PolicyExpectation {
     pub project: String,
-    pub fixture_dir: PathBuf,
-    pub artifact_dir: PathBuf,
     pub user: String,
     pub images: BTreeMap<String, String>,
     pub build_contexts: BTreeMap<String, PathBuf>,
@@ -63,22 +61,17 @@ pub fn validate_compose_policy(
         .then_some(())
         .ok_or_else(|| LabError("normalized Compose project name is not run-scoped".into()))?;
     reject_forbidden_keys(&Value::Object(root.clone()), "root")?;
+    reject_native_automation_tokens(&Value::Object(root.clone()), "root")?;
 
     let services = object(required(root, "services", "root")?, "services")?;
     exact_keys(
         services,
-        &["kicad-cli", "minio", "pocketbase", "test-runner"],
+        &["minio", "pocketbase", "test-runner"],
         "services",
     )?;
-    let mut binds = Vec::new();
     let mut service_resources = BTreeMap::new();
-    for name in ["pocketbase", "minio", "test-runner", "kicad-cli"] {
-        let resources = validate_service(
-            name,
-            required(services, name, "services")?,
-            expected,
-            &mut binds,
-        )?;
+    for name in ["pocketbase", "minio", "test-runner"] {
+        let resources = validate_service(name, required(services, name, "services")?, expected)?;
         service_resources.insert(name.into(), resources);
     }
 
@@ -124,11 +117,10 @@ pub fn validate_compose_policy(
         ));
     }
 
-    validate_bind_paths(expected, &binds)?;
     Ok(ComposePolicyReport {
         passed: true,
         services: services.keys().cloned().collect(),
-        bind_mounts: binds,
+        bind_mounts: Vec::new(),
         named_volumes: volumes.keys().cloned().collect(),
         internal_network: network_name.to_owned(),
         host_ports: 0,
@@ -141,7 +133,6 @@ fn validate_service(
     name: &str,
     value: &Value,
     expected: &PolicyExpectation,
-    binds: &mut Vec<BindMountEvidence>,
 ) -> LabResult<ServiceResourceEvidence> {
     let service = object(value, &format!("services.{name}"))?;
     let keys: &[&str] = match name {
@@ -161,18 +152,6 @@ fn validate_service(
         ],
         "test-runner" => &[
             "build",
-            "command",
-            "entrypoint",
-            "environment",
-            "image",
-            "mem_limit",
-            "networks",
-            "pids_limit",
-            "read_only",
-            "user",
-            "volumes",
-        ],
-        "kicad-cli" => &[
             "command",
             "entrypoint",
             "environment",
@@ -215,13 +194,10 @@ fn validate_service(
     if matches!(name, "pocketbase" | "minio") {
         validate_healthcheck(name, required(service, "healthcheck", name)?)?;
     }
-    if name != "kicad-cli" {
-        validate_build(name, required(service, "build", name)?, expected)?;
-    }
+    validate_build(name, required(service, "build", name)?, expected)?;
     match name {
         "pocketbase" => validate_named_volume(name, volumes, "pocketbase-data", "/afk/pb_data")?,
         "minio" => validate_named_volume(name, volumes, "minio-data", "/afk/minio-data")?,
-        "kicad-cli" => validate_kicad_binds(volumes, expected, binds)?,
         "test-runner" => validate_only_tmpfs(name, volumes)?,
         _ => unreachable!(),
     }
@@ -229,12 +205,7 @@ fn validate_service(
 }
 
 fn validate_entrypoint(name: &str, value: &Value) -> LabResult<()> {
-    let valid = if name == "kicad-cli" {
-        value.as_array().is_some_and(Vec::is_empty)
-    } else {
-        value.is_null()
-    };
-    if !valid {
+    if !value.is_null() {
         return Err(LabError(format!(
             "service `{name}` entrypoint override is unexpected"
         )));
@@ -340,9 +311,6 @@ fn validate_environment(name: &str, value: &Value, expected: &PolicyExpectation)
         ("XDG_DATA_HOME", "/afk/xdg/data"),
         ("XDG_STATE_HOME", "/afk/xdg/state"),
     ]);
-    if matches!(name, "test-runner" | "kicad-cli") {
-        wanted.insert("KICAD_CONFIG_HOME", "/afk/kicad/config");
-    }
     if name == "minio" {
         wanted.insert("MINIO_BROWSER", "off");
     }
@@ -374,22 +342,19 @@ pub fn expected_service_resource_bounds(name: &str) -> LabResult<(u64, u64)> {
     match name {
         "pocketbase" => Ok((256 * 1024 * 1024, 128)),
         "minio" => Ok((1024 * 1024 * 1024, 256)),
-        "test-runner" | "kicad-cli" => Ok((2 * 1024 * 1024 * 1024, 512)),
+        "test-runner" => Ok((2 * 1024 * 1024 * 1024, 512)),
         _ => Err(LabError(format!("unexpected service `{name}`"))),
     }
 }
 
 fn expected_tmpfs(name: &str) -> LabResult<BTreeMap<&'static str, (u64, u64)>> {
-    let mut wanted = BTreeMap::from([
+    let wanted = BTreeMap::from([
         ("/tmp", (128 * 1024 * 1024, 0o1777)),
         ("/afk/home", (64 * 1024 * 1024, 0o1777)),
         ("/afk/xdg", (64 * 1024 * 1024, 0o1777)),
     ]);
     match name {
-        "test-runner" | "kicad-cli" => {
-            wanted.insert("/afk/kicad", (64 * 1024 * 1024, 0o1777));
-        }
-        "pocketbase" | "minio" => {}
+        "pocketbase" | "minio" | "test-runner" => {}
         _ => return Err(LabError(format!("unexpected service `{name}`"))),
     }
     Ok(wanted)
@@ -488,7 +453,6 @@ fn validate_command(name: &str, value: &Value) -> LabResult<()> {
             ":9001",
         ],
         "test-runner" => vec!["sleep", "infinity"],
-        "kicad-cli" => vec!["kicad-cli", "version", "--format", "about"],
         _ => unreachable!(),
     };
     if actual != wanted {
@@ -572,100 +536,6 @@ fn validate_only_tmpfs(service: &str, value: &Value) -> LabResult<()> {
     Ok(())
 }
 
-fn validate_kicad_binds(
-    value: &Value,
-    expected: &PolicyExpectation,
-    binds: &mut Vec<BindMountEvidence>,
-) -> LabResult<()> {
-    let volumes = value
-        .as_array()
-        .ok_or_else(|| LabError("kicad-cli volumes must be an array".into()))?;
-    let tmpfs_count = expected_tmpfs("kicad-cli")?.len();
-    if volumes.len() != tmpfs_count + 2 {
-        return Err(LabError(
-            "kicad-cli must have exactly fixture/artifact binds and bounded tmpfs mounts".into(),
-        ));
-    }
-    let bind_mounts = volumes
-        .iter()
-        .filter(|value| {
-            value
-                .as_object()
-                .and_then(|mount| mount.get("type"))
-                .and_then(Value::as_str)
-                == Some("bind")
-        })
-        .collect::<Vec<_>>();
-    if bind_mounts.len() != 2 {
-        return Err(LabError(
-            "kicad-cli must have exactly two bind mounts".into(),
-        ));
-    }
-    let wanted = [
-        (&expected.fixture_dir, "/fixture", true),
-        (&expected.artifact_dir, "/artifacts", false),
-    ];
-    for (wanted_source, wanted_target, wanted_ro) in wanted {
-        let mount = bind_mounts
-            .iter()
-            .find_map(|value| {
-                value.as_object().filter(|mount| {
-                    mount.get("target").and_then(Value::as_str) == Some(wanted_target)
-                })
-            })
-            .ok_or_else(|| LabError(format!("kicad-cli bind `{wanted_target}` is missing")))?;
-        let keys = if wanted_ro {
-            &["read_only", "source", "target", "type"][..]
-        } else {
-            &["source", "target", "type"][..]
-        };
-        exact_keys(mount, keys, "kicad-cli volume")?;
-        if string(mount, "type", "kicad-cli volume")? != "bind"
-            || string(mount, "target", "kicad-cli volume")? != wanted_target
-            || mount
-                .get("read_only")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                != wanted_ro
-        {
-            return Err(LabError(
-                "kicad-cli bind target or mode is unexpected".into(),
-            ));
-        }
-        let actual = canonical_checked(Path::new(string(mount, "source", "kicad-cli volume")?))?;
-        let wanted = canonical_checked(wanted_source)?;
-        if normalize(&actual) != normalize(&wanted) {
-            return Err(LabError(
-                "kicad-cli bind source is not the exact allowlisted path".into(),
-            ));
-        }
-        binds.push(BindMountEvidence {
-            service: "kicad-cli".into(),
-            source: compose_path(&actual),
-            target: wanted_target.into(),
-            read_only: wanted_ro,
-        });
-    }
-    Ok(())
-}
-
-fn validate_bind_paths(expected: &PolicyExpectation, binds: &[BindMountEvidence]) -> LabResult<()> {
-    let fixture = canonical_checked(&expected.fixture_dir)?;
-    let artifacts = canonical_checked(&expected.artifact_dir)?;
-    if path_overlaps(&fixture, &artifacts) {
-        return Err(LabError("fixture and artifact bind sources overlap".into()));
-    }
-    if expected.fixture_dir.join("secrets.env").exists() {
-        return Err(LabError(
-            "safe fixture directory unexpectedly contains secrets.env".into(),
-        ));
-    }
-    if binds.len() != 2 {
-        return Err(LabError("normalized bind allowlist is incomplete".into()));
-    }
-    Ok(())
-}
-
 fn reject_forbidden_keys(value: &Value, path: &str) -> LabResult<()> {
     const FORBIDDEN: &[&str] = &[
         "cap_add",
@@ -713,6 +583,52 @@ fn reject_forbidden_keys(value: &Value, path: &str) -> LabResult<()> {
     Ok(())
 }
 
+fn reject_native_automation_tokens(value: &Value, path: &str) -> LabResult<()> {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                reject_native_automation_text(key, &format!("{path}.{key}"))?;
+                reject_native_automation_tokens(child, &format!("{path}.{key}"))?;
+            }
+        }
+        Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                reject_native_automation_tokens(child, &format!("{path}[{index}]"))?;
+            }
+        }
+        Value::String(text) => reject_native_automation_text(text, path)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn reject_native_automation_text(text: &str, path: &str) -> LabResult<()> {
+    let native = [
+        ["ki", "cad"].concat(),
+        ["ki", "cad-cli"].concat(),
+        ["pcb", "new"].concat(),
+        ["ki", "cad-gui-smoke"].concat(),
+        ["afk", "-smoke"].concat(),
+        ["gui", "-config"].concat(),
+    ];
+    let automation_prefix = ["ki", "cad_"].concat();
+    if let Some(token) = text
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
+        })
+        .filter(|token| !token.is_empty())
+        .find(|token| {
+            let lower = token.to_ascii_lowercase();
+            native.contains(&lower) || lower.starts_with(&automation_prefix)
+        })
+    {
+        return Err(LabError(format!(
+            "normalized Compose contains forbidden native-application token `{token}` at `{path}`"
+        )));
+    }
+    Ok(())
+}
+
 fn canonical_checked(path: &Path) -> LabResult<PathBuf> {
     let canonical = path
         .canonicalize()
@@ -740,12 +656,6 @@ fn is_reparse_point(metadata: &fs::Metadata) -> bool {
 #[cfg(not(windows))]
 fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
-}
-
-fn path_overlaps(one: &Path, two: &Path) -> bool {
-    let one = normalize(one);
-    let two = normalize(two);
-    one == two || one.starts_with(&(two.clone() + "/")) || two.starts_with(&(one + "/"))
 }
 
 fn normalize(path: &Path) -> String {
@@ -813,11 +723,7 @@ mod tests {
     fn setup() -> (TempDir, PolicyExpectation, Value) {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path();
-        let fixture = root.join("fixture");
-        let artifacts = root.join("runs/run-01/artifacts");
         for path in [
-            &fixture,
-            &artifacts,
             &root.join("infra/docker/pocketbase"),
             &root.join("infra/docker/minio"),
             &root.join("infra/docker/test-runner"),
@@ -828,7 +734,6 @@ mod tests {
             ("pocketbase".into(), "run/pocketbase:1".into()),
             ("minio".into(), "run/minio:1".into()),
             ("test-runner".into(), "run/test-runner:1".into()),
-            ("kicad-cli".into(), "kicad@sha256:locked".into()),
         ]);
         let build_contexts = BTreeMap::from([
             ("pocketbase".into(), root.join("infra/docker/pocketbase")),
@@ -846,13 +751,21 @@ mod tests {
             ),
             (
                 "test-runner".into(),
-                BTreeMap::from([("PIN".into(), "runner".into())]),
+                BTreeMap::from([
+                    ("PIN".into(), "runner".into()),
+                    (
+                        "TAURI_CLI_LINUX_X64_GNU_URL".into(),
+                        "https://registry.invalid/native.tgz".into(),
+                    ),
+                    (
+                        "TAURI_CLI_LINUX_X64_GNU_SHA512".into(),
+                        "native-sha512".into(),
+                    ),
+                ]),
             ),
         ]);
         let expected = PolicyExpectation {
             project: "kp-afk-run-01".into(),
-            fixture_dir: fixture,
-            artifact_dir: artifacts,
             user: "65532:65532".into(),
             images,
             build_contexts,
@@ -877,8 +790,6 @@ mod tests {
                 "interval":"2s", "retries":30, "start_period":"2s"
             })
         };
-        let mut runner_env = base_env.clone();
-        runner_env["KICAD_CONFIG_HOME"] = json!("/afk/kicad/config");
         let mut minio_env = base_env.clone();
         minio_env["MINIO_BROWSER"] = json!("off");
         minio_env["MINIO_ROOT_USER"] = json!(expected.minio_user);
@@ -917,26 +828,12 @@ mod tests {
                 },
                 "test-runner":{
                     "build":build("test-runner"), "command":["sleep","infinity"], "entrypoint":null,
-                    "environment":runner_env, "image":expected.images["test-runner"], "networks":{"afk":null},
+                    "environment":base_env, "image":expected.images["test-runner"], "networks":{"afk":null},
                     "mem_limit":"2147483648", "pids_limit":512, "read_only":true, "user":expected.user,
                     "volumes":[
                         {"type":"tmpfs","target":"/tmp","tmpfs":{"size":"134217728","mode":1023}},
                         {"type":"tmpfs","target":"/afk/home","tmpfs":{"size":"67108864","mode":1023}},
-                        {"type":"tmpfs","target":"/afk/xdg","tmpfs":{"size":"67108864","mode":1023}},
-                        {"type":"tmpfs","target":"/afk/kicad","tmpfs":{"size":"67108864","mode":1023}}
-                    ]
-                },
-                "kicad-cli":{
-                    "command":["kicad-cli","version","--format","about"], "entrypoint":[], "environment":runner_env,
-                    "image":expected.images["kicad-cli"], "mem_limit":"2147483648", "networks":{"afk":null},
-                    "pids_limit":512, "read_only":true, "user":expected.user,
-                    "volumes":[
-                        {"type":"bind","source":compose_path(&expected.fixture_dir),"target":"/fixture","read_only":true},
-                        {"type":"bind","source":compose_path(&expected.artifact_dir),"target":"/artifacts"},
-                        {"type":"tmpfs","target":"/tmp","tmpfs":{"size":"134217728","mode":1023}},
-                        {"type":"tmpfs","target":"/afk/home","tmpfs":{"size":"67108864","mode":1023}},
-                        {"type":"tmpfs","target":"/afk/xdg","tmpfs":{"size":"67108864","mode":1023}},
-                        {"type":"tmpfs","target":"/afk/kicad","tmpfs":{"size":"67108864","mode":1023}}
+                        {"type":"tmpfs","target":"/afk/xdg","tmpfs":{"size":"67108864","mode":1023}}
                     ]
                 }
             }
@@ -948,14 +845,14 @@ mod tests {
     fn exact_normalized_model_is_accepted() {
         let (_temporary, expected, model) = setup();
         let report = validate_compose_policy(&model.to_string(), &expected).unwrap();
-        assert_eq!(report.bind_mounts.len(), 2);
+        assert!(report.bind_mounts.is_empty());
         assert_eq!(report.host_ports, 0);
     }
 
     #[test]
     fn equivalent_numeric_normalization_from_compose_variants_is_accepted() {
         let (_temporary, expected, mut model) = setup();
-        for service in ["pocketbase", "minio", "test-runner", "kicad-cli"] {
+        for service in ["pocketbase", "minio", "test-runner"] {
             let memory = model["services"][service]["mem_limit"]
                 .as_str()
                 .unwrap()
@@ -1056,23 +953,16 @@ mod tests {
             Box::new(|model, _| {
                 model["services"]["pocketbase"]["volumes"][0]["target"] = json!("/var/lib");
             }),
-            Box::new(|model, _| {
-                model["services"]["kicad-cli"]["volumes"][0]["source"] =
-                    json!("/var/run/docker.sock");
-            }),
-            Box::new(|model, _| {
-                model["services"]["kicad-cli"]["volumes"][0]["target"] = json!("/workspace");
-            }),
-            Box::new(|model, _| {
-                model["services"]["kicad-cli"]["volumes"][0]["read_only"] = json!(false);
-            }),
             Box::new(|model, expected| {
-                model["services"]["kicad-cli"]["volumes"][0]["source"] =
-                    json!(compose_path(expected.fixture_dir.parent().unwrap()));
+                model["services"]["pocketbase"]["build"]["context"] = json!(compose_path(
+                    expected.build_contexts["pocketbase"].parent().unwrap()
+                ));
             }),
-            Box::new(|model, expected| {
-                model["services"]["pocketbase"]["build"]["context"] =
-                    json!(compose_path(expected.fixture_dir.parent().unwrap()));
+            Box::new(|model, _| {
+                model["services"]["test-runner"]["volumes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"type":"bind","source":"/var/run/docker.sock","target":"/sock"}));
             }),
         ];
         for (index, mutation) in mutations.into_iter().enumerate() {
@@ -1087,7 +977,7 @@ mod tests {
 
     #[test]
     fn every_service_requires_exact_enforced_memory_and_pid_limits() {
-        for service in ["pocketbase", "minio", "test-runner", "kicad-cli"] {
+        for service in ["pocketbase", "minio", "test-runner"] {
             for key in ["mem_limit", "pids_limit"] {
                 for mutation in ["missing", "zero", "wrong", "oversized"] {
                     let (_temporary, expected, mut model) = setup();
@@ -1124,7 +1014,7 @@ mod tests {
 
     #[test]
     fn every_service_requires_exact_tmpfs_targets_sizes_and_modes() {
-        for service in ["pocketbase", "minio", "test-runner", "kicad-cli"] {
+        for service in ["pocketbase", "minio", "test-runner"] {
             let (_temporary, expected, base) = setup();
             let tmpfs_index = base["services"][service]["volumes"]
                 .as_array()
@@ -1182,25 +1072,56 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_allowlisted_sources_are_rejected() {
-        let (_temporary, mut expected, mut model) = setup();
-        let nested = expected.fixture_dir.join("artifacts");
-        fs::create_dir(&nested).unwrap();
-        expected.artifact_dir = nested.clone();
-        model["services"]["kicad-cli"]["volumes"][1]["source"] = json!(compose_path(&nested));
-        assert!(validate_compose_policy(&model.to_string(), &expected).is_err());
+    fn native_tauri_build_inputs_are_required_and_exact() {
+        for key in [
+            "TAURI_CLI_LINUX_X64_GNU_URL",
+            "TAURI_CLI_LINUX_X64_GNU_SHA512",
+        ] {
+            let (_temporary, expected, mut missing) = setup();
+            missing["services"]["test-runner"]["build"]["args"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(validate_compose_policy(&missing.to_string(), &expected).is_err());
+
+            let (_temporary, expected, mut changed) = setup();
+            changed["services"]["test-runner"]["build"]["args"][key] = json!("wrong");
+            assert!(validate_compose_policy(&changed.to_string(), &expected).is_err());
+        }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn linked_allowlisted_source_is_rejected() {
-        use std::os::unix::fs::symlink;
-        let (_temporary, mut expected, mut model) = setup();
-        let real = expected.fixture_dir.clone();
-        let linked = real.parent().unwrap().join("linked-fixture");
-        symlink(&real, &linked).unwrap();
-        expected.fixture_dir = linked.clone();
-        model["services"]["kicad-cli"]["volumes"][0]["source"] = json!(compose_path(&linked));
-        assert!(validate_compose_policy(&model.to_string(), &expected).is_err());
+    fn normalized_compose_rejects_native_application_variants() {
+        let executable = ["ki", "cad"].concat();
+        let command_line = ["pcb", "new"].concat();
+        let automation_env = format!("{}_CONFIG_HOME", executable.to_ascii_uppercase());
+        let service_name = ["ki", "cad-cli"].concat();
+        let mutations: Vec<PolicyMutation> = vec![
+            Box::new(move |model, _| {
+                model["services"]
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(service_name.clone(), json!({}));
+            }),
+            Box::new(move |model, _| {
+                model["services"]["test-runner"]["command"] =
+                    json!([command_line.clone()]);
+            }),
+            Box::new(move |model, _| {
+                model["services"]["test-runner"]["image"] =
+                    json!(format!("docker.invalid/{executable}:locked"));
+            }),
+            Box::new(move |model, _| {
+                model["services"]["test-runner"]["environment"]
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(automation_env.clone(), json!("/tmp/native-config"));
+            }),
+        ];
+        for mutation in mutations {
+            let (_temporary, mut expected, mut model) = setup();
+            mutation(&mut model, &mut expected);
+            assert!(validate_compose_policy(&model.to_string(), &expected).is_err());
+        }
     }
 }

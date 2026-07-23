@@ -25,12 +25,6 @@ go = "1.24.8"
 go_linux_x64_sha256 = "6842c516ca66c89d648a7f1dbe28e28c47b61b59f8f06633eb2ceb1188e9251d"
 go_url = "https://go.dev/dl/go1.24.8.linux-amd64.tar.gz"
 
-[images.kicad]
-version = "10.0.4"
-reference = "docker.io/kicad/kicad:10.0.4-full@sha256:142fed45e24735662779aad155c5412da2455ad0c18e7d015260ca746be29d58"
-digest = "sha256:142fed45e24735662779aad155c5412da2455ad0c18e7d015260ca746be29d58"
-source = "https://hub.docker.com/r/kicad/kicad/tags?name=10.0.4-full"
-
 [images.busybox]
 version = "1.37.0-musl"
 reference = "docker.io/library/busybox:1.37.0-musl@sha256:6be969a074d06073a62ad8ccfd2ad6ec2790cae25d519d8df255ba24819d96f0"
@@ -63,25 +57,3 @@ source_sha256 = "45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee584
 release_url = "https://github.com/minio/minio/releases/tag/RELEASE.2025-10-15T17-29-55Z"
 registry_status = "not-published; build exact source and record local image content ID"
 expected_arch = "linux/amd64"
-
-[ubuntu_gui]
-runner = "ubuntu-24.04"
-ppa = "ppa:kicad/kicad-10.0-releases"
-packages_index = "https://ppa.launchpadcontent.net/kicad/kicad-10.0-releases/ubuntu/dists/noble/main/binary-amd64/Packages.gz"
-ubuntu_packages_source = "https://packages.ubuntu.com/noble/amd64"
-kicad_package = { name = "kicad", version = "10.0.4~ubuntu24.04.1" }
-stock_packages = [
-  { name = "kicad-symbols", version = "10.0.4~ubuntu24.04.1" },
-  { name = "kicad-footprints", version = "10.0.4~ubuntu24.04.1" },
-  { name = "kicad-packages3d", version = "10.0.4~ubuntu24.04.1" },
-]
-webkit_library = { name = "libwebkit2gtk-4.1-0", version = "2.52.3-0ubuntu0.24.04.1" }
-webkit_driver = { name = "webkit2gtk-driver", version = "2.52.3-0ubuntu0.24.04.1" }
-xvfb = { name = "xvfb", version = "2:21.1.12-1ubuntu1.5" }
-x11_utils = { name = "x11-utils", version = "7.7+6build2" }
-imagemagick = { name = "imagemagick-6.q16", version = "8:6.9.12.98+dfsg1-5.2build2" }
-coredump_tool = { name = "systemd-coredump", version = "255.4-1ubuntu8.16" }
-window_manager = { name = "openbox", version = "3.6.1-12build5" }
-stock_symbol = "/usr/share/kicad/symbols/Device.kicad_sym"
-stock_footprint = "/usr/share/kicad/footprints/Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod"
-stock_3d_model = "/usr/share/kicad/3dmodels/Resistor_SMD.3dshapes/R_0603_1608Metric.step"
