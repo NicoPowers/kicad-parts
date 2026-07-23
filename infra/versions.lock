@@ -1,0 +1,59 @@
+schema = 1
+locked_at = "2026-07-21"
+
+[toolchain]
+rust = "1.85.1"
+rust_toolchain_dir = "1.85.1-x86_64-unknown-linux-gnu"
+node = "24.18.0"
+node_linux_x64_sha256 = "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742"
+node_url = "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz"
+tauri_cli = "2.11.4"
+tauri_cli_integrity = "sha512-R8xGtMpwyetawSqm9kYOuMmEqkhUbvcUy8n0aNXIxollKBLESUu5f4Fx+64hgASYm1H+jSWq6jCW6zqTnH6hqQ=="
+tauri_cli_sha512 = "47cc46b4ca70c9eb5ac12aa6f6460eb8c984aa48546ef714cbc9f468d5c8c689652812c4494bb97f8171fbae218004989b51fe8d25aaea3096eb3a939c7ea1a9"
+tauri_cli_url = "https://registry.npmjs.org/@tauri-apps/cli/-/cli-2.11.4.tgz"
+tauri_cli_linux_x64_gnu_integrity = "sha512-2VRNWl84FOH0m2giiDkO2h0QXlcMJeX+zJDpI5kDIQAx6s+geF3v48F4DXfJez4GS/FdoDGnPnw1C2iYGbQ7bQ=="
+tauri_cli_linux_x64_gnu_sha512 = "d9544d5a5f3814e1f49b682288390eda1d105e570c25e5fecc90e9239903210031eacfa0785defe3c1780d77c97b3e064bf15da031a73e7c350b689819b43b6d"
+tauri_cli_linux_x64_gnu_url = "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-gnu/-/cli-linux-x64-gnu-2.11.4.tgz"
+debian_snapshot = "20260720T000000Z"
+npm = "11.16.0"
+webkit2gtk_driver = "2.50.6-1~deb12u2"
+libwebkit2gtk = "2.50.6-1~deb12u2"
+xvfb = "2:21.1.7-3+deb12u12"
+runner_uid = 65532
+runner_gid = 65532
+go = "1.24.8"
+go_linux_x64_sha256 = "6842c516ca66c89d648a7f1dbe28e28c47b61b59f8f06633eb2ceb1188e9251d"
+go_url = "https://go.dev/dl/go1.24.8.linux-amd64.tar.gz"
+
+[images.busybox]
+version = "1.37.0-musl"
+reference = "docker.io/library/busybox:1.37.0-musl@sha256:6be969a074d06073a62ad8ccfd2ad6ec2790cae25d519d8df255ba24819d96f0"
+digest = "sha256:6be969a074d06073a62ad8ccfd2ad6ec2790cae25d519d8df255ba24819d96f0"
+source = "https://hub.docker.com/_/busybox"
+
+[images.rust]
+version = "1.85.1-bookworm"
+reference = "public.ecr.aws/docker/library/rust:1.85.1-bookworm@sha256:bf7d87666c4da6eace19e06d21bc4859c6e2a5c97a21ac273b0e082112753cf0"
+digest = "sha256:bf7d87666c4da6eace19e06d21bc4859c6e2a5c97a21ac273b0e082112753cf0"
+source = "https://hub.docker.com/_/rust"
+
+[components.pocketbase]
+version = "0.38.2"
+url = "https://github.com/pocketbase/pocketbase/releases/download/v0.38.2/pocketbase_0.38.2_linux_amd64.zip"
+checksums_url = "https://github.com/pocketbase/pocketbase/releases/download/v0.38.2/checksums.txt"
+release_api = "https://api.github.com/repos/pocketbase/pocketbase/releases/tags/v0.38.2"
+asset_digest = "sha256:3749cf7e85b00027f3fb92494037e154aa023276246a101cd0592260b94ad1c3"
+sha256 = "3749cf7e85b00027f3fb92494037e154aa023276246a101cd0592260b94ad1c3"
+expected_output = "pocketbase version 0.38.2"
+
+[components.minio]
+version = "RELEASE.2025-10-15T17-29-55Z"
+commit = "9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a"
+short_commit = "9e49d5e7a648"
+build_version = "2025-10-15T17:29:55Z"
+copyright_year = "2025"
+source_url = "https://github.com/minio/minio/archive/9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a.tar.gz"
+source_sha256 = "45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee5841"
+release_url = "https://github.com/minio/minio/releases/tag/RELEASE.2025-10-15T17-29-55Z"
+registry_status = "not-published; build exact source and record local image content ID"
+expected_arch = "linux/amd64"

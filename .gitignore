@@ -13,3 +13,7 @@ database/provider-lib-table-fragments.txt
 database/parts.sqlite
 __pycache__/
 logs/
+# Rust workspace build output
+/target/
+# Disposable AFK runtime state and evidence bundles
+/.afk/
