@@ -72,7 +72,7 @@ jobs:
           test "$(dpkg-query -W -f='${Version}' "$IMAGEMAGICK_PACKAGE")" = "$IMAGEMAGICK_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$WINDOW_MANAGER_PACKAGE")" = "$WINDOW_MANAGER_VERSION"
           test "$(command -v kicad-cli)" = /usr/bin/kicad-cli
-          test "$(command -v pcbnew)" = /usr/bin/pcbnew
+          test "$(command -v kicad)" = /usr/bin/kicad
           test "$(command -v Xvfb)" = /usr/bin/Xvfb
           test "$(command -v xwininfo)" = /usr/bin/xwininfo
           test "$(command -v import)" = /usr/bin/import
@@ -130,6 +130,38 @@ jobs:
           xvfb_pid=
           wm_pid=
           kicad_pid=
+          capture_kicad_process_snapshot() {
+            local snapshot_attempt=$1
+            local snapshot_file="$artifact_dir/kicad-process-snapshot-attempt-$snapshot_attempt.txt"
+            {
+              printf 'attempt=%s pid=%s\n' "$snapshot_attempt" "$kicad_pid"
+              if [[ ! -d "/proc/$kicad_pid" ]]; then
+                printf 'process unavailable before snapshot\n'
+                return 0
+              fi
+              printf 'executable='
+              readlink "/proc/$kicad_pid/exe" || true
+              sha256sum "/proc/$kicad_pid/exe" || true
+              printf 'command_line='
+              tr '\0' ' ' < "/proc/$kicad_pid/cmdline" || true
+              printf '\n--- process status ---\n'
+              cat "/proc/$kicad_pid/status" || true
+              printf '%s\n' '--- thread summary ---'
+              ps -L -p "$kicad_pid" -o pid=,tid=,psr=,stat=,wchan:32=,etime=,comm=,args= || true
+              for task_dir in "/proc/$kicad_pid"/task/[0-9]*; do
+                [[ -d "$task_dir" ]] || continue
+                task_id=${task_dir##*/}
+                printf -- '--- thread=%s comm ---\n' "$task_id"
+                cat "$task_dir/comm" || true
+                printf -- '--- thread=%s wchan ---\n' "$task_id"
+                cat "$task_dir/wchan" || true
+                printf -- '--- thread=%s status ---\n' "$task_id"
+                grep -E '^(Name|State|Tgid|Pid|PPid|TracerPid|Threads):' "$task_dir/status" || true
+                printf -- '--- thread=%s syscall ---\n' "$task_id"
+                cat "$task_dir/syscall" || true
+              done
+            } > "$snapshot_file" 2>&1 || true
+          }
           finish() {
             rc=$?
             trap - EXIT
@@ -141,6 +173,9 @@ jobs:
                 cd "$startup_config_dir"
                 sha256sum "${startup_config_files[@]}"
               ) > "$artifact_dir/startup-config-post-run.sha256" 2>> "$artifact_dir/startup-config-readiness.txt" || true
+              if [[ -f "$startup_config_dir/kicad_common.json" && ! -L "$startup_config_dir/kicad_common.json" ]]; then
+                cp -- "$startup_config_dir/kicad_common.json" "$artifact_dir/startup-config-post-run-kicad_common.json" 2>> "$artifact_dir/startup-config-readiness.txt" || true
+              fi
             fi
             if [[ $rc -eq 0 ]]; then status=passed; failures=0; failure_xml=; else status=failed; failures=1; failure_xml='<failure message="Ubuntu X11 GUI smoke failed; inspect uploaded logs"/>'; fi
             printf '{"schema":1,"lane":"ubuntu-x11-gui","status":"%s","exit_code":%d,"kicad_package":"%s","window_asserted":%s,"fixture_unchanged":%s}\n' \
@@ -205,6 +240,15 @@ jobs:
           test -f "$STOCK_3D_MODEL"
           kicad-cli version --format about | tee "$artifact_dir/kicad-version.txt"
           grep -Fqx -- "Version: $kicad_upstream_version-$KICAD_VERSION, release build" "$artifact_dir/kicad-version.txt"
+          {
+            printf 'command_path='
+            command -v kicad
+            printf 'resolved_path='
+            readlink -f /usr/bin/kicad
+            stat --format='path=%n mode=%a size=%s owner=%u:%g' /usr/bin/kicad /usr/bin/_pcbnew.kiface
+            sha256sum /usr/bin/kicad /usr/bin/_pcbnew.kiface
+            ldd /usr/bin/kicad
+          } > "$artifact_dir/kicad-launcher-identity.txt" 2>&1
           xserver_current="$RUNNER_TEMP/kicad-xserver-readiness.current.txt"
           wm_root_current="$RUNNER_TEMP/kicad-wm-root.current.txt"
           wm_window_current="$RUNNER_TEMP/kicad-wm-window.current.txt"
@@ -259,10 +303,10 @@ jobs:
             fi
             sleep 0.1
           done
-          : > "$artifact_dir/pcbnew-process-status.txt"
+          : > "$artifact_dir/kicad-process-status.txt"
           test "${wm_ready:-false}" = true
           kill -0 "$wm_pid" 2>/dev/null
-          pcbnew "$fixture" > "$artifact_dir/kicad-gui.log" 2>&1 &
+          /usr/bin/kicad --frame pcb --software-rendering "$fixture" > "$artifact_dir/kicad-gui.log" 2>&1 &
           kicad_pid=$!
           current_tree="$RUNNER_TEMP/kicad-window-tree.current.txt"
           current_detail="$RUNNER_TEMP/kicad-window-detail.current.txt"
@@ -279,16 +323,19 @@ jobs:
           window_height=
           : > "$artifact_dir/window-tree.txt"
           : > "$artifact_dir/window-details.txt"
-          for _attempt in $(seq 1 60); do
-            printf -- '--- attempt=%d ---\n' "$_attempt" >> "$artifact_dir/pcbnew-process-status.txt"
-            ps -o pid=,ppid=,stat=,etime=,args= -p "$kicad_pid" >> "$artifact_dir/pcbnew-process-status.txt" 2>&1 || true
+          for _attempt in $(seq 1 180); do
+            printf -- '--- attempt=%d ---\n' "$_attempt" >> "$artifact_dir/kicad-process-status.txt"
+            ps -o pid=,ppid=,stat=,etime=,args= -p "$kicad_pid" >> "$artifact_dir/kicad-process-status.txt" 2>&1 || true
+            case "$_attempt" in
+              1|30|60|120|180) capture_kicad_process_snapshot "$_attempt" ;;
+            esac
             printf -- '--- attempt=%d ---\n' "$_attempt" >> "$artifact_dir/window-tree.txt"
             printf -- '--- attempt=%d candidates ---\n' "$_attempt" >> "$artifact_dir/window-details.txt"
             : > "$candidate_file"
             : > "$qualified_file"
             if xwininfo -root -tree > "$current_tree" 2>&1; then
               cat "$current_tree" >> "$artifact_dir/window-tree.txt"
-              awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$current_tree" > "$candidate_file"
+              awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("kicad" "KiCad"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$current_tree" > "$candidate_file"
               while read -r candidate_id tree_width tree_height; do
                 printf -- 'candidate=%s tree_size=%sx%s minimum=%sx%s\n' "$candidate_id" "$tree_width" "$tree_height" "$min_window_width" "$min_window_height" >> "$artifact_dir/window-details.txt"
                 if xwininfo -id "$candidate_id" > "$current_detail" 2>&1; then
@@ -318,7 +365,7 @@ jobs:
                 : > "$post_qualified_file"
                 if xwininfo -root -tree > "$post_tree" 2>&1; then
                   cat "$post_tree" >> "$artifact_dir/window-tree.txt"
-                  awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$post_tree" > "$post_candidate_file"
+                  awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("kicad" "KiCad"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$post_tree" > "$post_candidate_file"
                   while read -r post_candidate_id post_tree_width post_tree_height; do
                     printf -- 'post-capture candidate=%s tree_size=%sx%s minimum=%sx%s\n' "$post_candidate_id" "$post_tree_width" "$post_tree_height" "$min_window_width" "$min_window_height" >> "$artifact_dir/window-details.txt"
                     if xwininfo -id "$post_candidate_id" > "$post_detail" 2>&1; then
@@ -379,7 +426,7 @@ jobs:
             if ! kill -0 "$kicad_pid" 2>/dev/null; then
               if wait "$kicad_pid"; then kicad_rc=0; else kicad_rc=$?; fi
               kicad_pid=
-              printf 'pcbnew exited before window assertion (exit_code=%d)\n' "$kicad_rc" >> "$artifact_dir/kicad-gui.log"
+              printf 'KiCad PCB dispatcher exited before window assertion (exit_code=%d)\n' "$kicad_rc" >> "$artifact_dir/kicad-gui.log"
               break
             fi
             sleep 1

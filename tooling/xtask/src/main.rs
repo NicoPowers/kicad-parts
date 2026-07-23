@@ -44,6 +44,7 @@ enum WorkflowContractCategory {
     PackageManifest,
     PrivateToolchain,
     ProcessLiveness,
+    ProcessSnapshot,
     PostCapture,
     Screenshot,
     StockPath,
@@ -100,9 +101,9 @@ const WORKFLOW_STEPS: &[WorkflowStep] = &[
     WorkflowStep::Upload,
 ];
 
-const PCBNEW_CANDIDATE_EXTRACTION_LINE: &str = r#"awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$current_tree" > "$candidate_file""#;
+const PCBNEW_CANDIDATE_EXTRACTION_LINE: &str = r#"awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("kicad" "KiCad"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$current_tree" > "$candidate_file""#;
 const PCBNEW_VIEWABLE_DETAIL_ASSERTION_LINE: &str = r#"if awk -v expected_id="$candidate_id" -v expected_width="$tree_width" -v expected_height="$tree_height" -v min_width="$min_window_width" -v min_height="$min_window_height" '$1 == "xwininfo:" && $2 == "Window" && $3 == "id:" && $4 == expected_id { id_count++ } $1 == "Width:" && NF == 2 && $2 ~ /^[0-9]+$/ { width_count++; width=$2+0 } $1 == "Height:" && NF == 2 && $2 ~ /^[0-9]+$/ { height_count++; height=$2+0 } $1 == "Map" && $2 == "State:" { map_count++; if (NF == 3 && $3 == "IsViewable") viewable_count++ } END { exit(id_count == 1 && width_count == 1 && height_count == 1 && map_count == 1 && viewable_count == 1 && width == expected_width && height == expected_height && width >= min_width && height >= min_height ? 0 : 1) }' "$current_detail"; then"#;
-const PCBNEW_POST_CANDIDATE_EXTRACTION_LINE: &str = r#"awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("pcbnew" "(pcbnew|Pcbnew)"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$post_tree" > "$post_candidate_file""#;
+const PCBNEW_POST_CANDIDATE_EXTRACTION_LINE: &str = r#"awk '$0 ~ /^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+.*:[[:space:]]+\("kicad" "KiCad"\)[[:space:]]+[1-9][0-9]*x[1-9][0-9]*\+-?[0-9]+\+-?[0-9]+[[:space:]]+\+-?[0-9]+\+-?[0-9]+$/ { geometry=$(NF-1); split(geometry, dimensions, "x"); width=dimensions[1]+0; split(dimensions[2], height_and_position, /\+/); height=height_and_position[1]+0; print $1, width, height }' "$post_tree" > "$post_candidate_file""#;
 const PCBNEW_POST_CAPTURE_DETAIL_ASSERTION_LINE: &str = r#"if awk -v expected_id="$post_candidate_id" -v expected_width="$post_tree_width" -v expected_height="$post_tree_height" -v min_width="$min_window_width" -v min_height="$min_window_height" '$1 == "xwininfo:" && $2 == "Window" && $3 == "id:" && $4 == expected_id { id_count++ } $1 == "Width:" && NF == 2 && $2 ~ /^[0-9]+$/ { width_count++; width=$2+0 } $1 == "Height:" && NF == 2 && $2 ~ /^[0-9]+$/ { height_count++; height=$2+0 } $1 == "Map" && $2 == "State:" { map_count++; if (NF == 3 && $3 == "IsViewable") viewable_count++ } END { exit(id_count == 1 && width_count == 1 && height_count == 1 && map_count == 1 && viewable_count == 1 && width == expected_width && height == expected_height && width >= min_width && height >= min_height ? 0 : 1) }' "$post_detail"; then"#;
 const PCBNEW_POST_SELECTION_ASSERTION_LINE: &str = r#"if [[ "$post_candidate_id" == "$candidate_id" && "$post_tree_width" -eq "$tree_width" && "$post_tree_height" -eq "$tree_height" ]]; then"#;
 const PCBNEW_IMAGE_ASSERTION_LINE: &str = r#"if [[ "$image_width" =~ ^[1-9][0-9]*$ && "$image_height" =~ ^[1-9][0-9]*$ && "$image_colors" =~ ^[1-9][0-9]*$ ]] && (( image_width == tree_width && image_height == tree_height && image_colors > 1 )); then"#;
@@ -496,7 +497,7 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
     run_contract!(
         ExecutablePreflight,
         Line,
-        "test \"$(command -v pcbnew)\" = /usr/bin/pcbnew",
+        "test \"$(command -v kicad)\" = /usr/bin/kicad",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 61)))
     ),
     run_contract!(
@@ -868,6 +869,18 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Smoke, 1, None)
     ),
     run_contract!(
+        StartupConfig,
+        Line,
+        "if [[ -f \"$startup_config_dir/kicad_common.json\" && ! -L \"$startup_config_dir/kicad_common.json\" ]]; then",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        StartupConfig,
+        Line,
+        "cp -- \"$startup_config_dir/kicad_common.json\" \"$artifact_dir/startup-config-post-run-kicad_common.json\" 2>> \"$artifact_dir/startup-config-readiness.txt\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
         HashProof,
         Line,
         "sha256sum \"$fixture\" > \"$artifact_dir/source.before.sha256\"",
@@ -914,6 +927,25 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         Line,
         "grep -Fqx -- \"Version: $kicad_upstream_version-$KICAD_VERSION, release build\" \"$artifact_dir/kicad-version.txt\"",
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 34)))
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "stat --format='path=%n mode=%a size=%s owner=%u:%g' /usr/bin/kicad /usr/bin/_pcbnew.kiface",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "sha256sum /usr/bin/kicad /usr/bin/_pcbnew.kiface",
+        (Smoke, 1, None)
+    ),
+    run_contract!(DiagnosticLog, Line, "ldd /usr/bin/kicad", (Smoke, 1, None)),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "} > \"$artifact_dir/kicad-launcher-identity.txt\" 2>&1",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 35)))
     ),
     run_contract!(
         Xvfb,
@@ -1108,25 +1140,115 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
     run_contract!(
         WindowManager,
         Line,
-        "pcbnew \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+        "/usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
         (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 70)))
     ),
     run_contract!(
         DiagnosticLog,
         Line,
-        ": > \"$artifact_dir/pcbnew-process-status.txt\"",
+        ": > \"$artifact_dir/kicad-process-status.txt\"",
         (Smoke, 1, None)
     ),
     run_contract!(
         DiagnosticLog,
         Line,
-        "ps -o pid=,ppid=,stat=,etime=,args= -p \"$kicad_pid\" >> \"$artifact_dir/pcbnew-process-status.txt\" 2>&1 || true",
+        "ps -o pid=,ppid=,stat=,etime=,args= -p \"$kicad_pid\" >> \"$artifact_dir/kicad-process-status.txt\" 2>&1 || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "capture_kicad_process_snapshot() {",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "local snapshot_file=\"$artifact_dir/kicad-process-snapshot-attempt-$snapshot_attempt.txt\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "if [[ ! -d \"/proc/$kicad_pid\" ]]; then",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "readlink \"/proc/$kicad_pid/exe\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "sha256sum \"/proc/$kicad_pid/exe\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "tr '\\0' ' ' < \"/proc/$kicad_pid/cmdline\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "cat \"/proc/$kicad_pid/status\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "ps -L -p \"$kicad_pid\" -o pid=,tid=,psr=,stat=,wchan:32=,etime=,comm=,args= || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "for task_dir in \"/proc/$kicad_pid\"/task/[0-9]*; do",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "cat \"$task_dir/comm\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "cat \"$task_dir/wchan\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "grep -E '^(Name|State|Tgid|Pid|PPid|TracerPid|Threads):' \"$task_dir/status\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "cat \"$task_dir/syscall\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "} > \"$snapshot_file\" 2>&1 || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "1|30|60|120|180) capture_kicad_process_snapshot \"$_attempt\" ;;",
         (Smoke, 1, None)
     ),
     run_contract!(
         Window,
         Line,
-        "for _attempt in $(seq 1 60); do",
+        "for _attempt in $(seq 1 180); do",
         (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 80)))
     ),
     run_contract!(
@@ -1492,7 +1614,7 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
     run_contract!(
         ProcessLiveness,
         Line,
-        r#"printf 'pcbnew exited before window assertion (exit_code=%d)\n' "$kicad_rc" >> "$artifact_dir/kicad-gui.log""#,
+        r#"printf 'KiCad PCB dispatcher exited before window assertion (exit_code=%d)\n' "$kicad_rc" >> "$artifact_dir/kicad-gui.log""#,
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 96)))
     ),
     run_contract!(
@@ -1567,7 +1689,7 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::Availability, 10),
         (WorkflowContractCategory::CandidateCardinality, 11),
         (WorkflowContractCategory::CliVersion, 3),
-        (WorkflowContractCategory::DiagnosticLog, 6),
+        (WorkflowContractCategory::DiagnosticLog, 10),
         (WorkflowContractCategory::DpkgAssertion, 10),
         (WorkflowContractCategory::DowngradePermission, 1),
         (WorkflowContractCategory::ExecutablePreflight, 8),
@@ -1583,10 +1705,11 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::Ppa, 1),
         (WorkflowContractCategory::PackageManifest, 1),
         (WorkflowContractCategory::ProcessLiveness, 3),
+        (WorkflowContractCategory::ProcessSnapshot, 15),
         (WorkflowContractCategory::PostCapture, 23),
         (WorkflowContractCategory::Screenshot, 1),
         (WorkflowContractCategory::StockPath, 3),
-        (WorkflowContractCategory::StartupConfig, 26),
+        (WorkflowContractCategory::StartupConfig, 28),
         (WorkflowContractCategory::PrivateToolchain, 10),
         (WorkflowContractCategory::TauriArtifact, 2),
         (WorkflowContractCategory::ToolchainProbe, 4),
@@ -2878,11 +3001,11 @@ const PROTECTED_PROGRAM_DIGESTS: &[(WorkflowStep, &str)] = &[
     ),
     (
         WorkflowStep::Install,
-        "bcaafb4b7ce5dd22b5ba66238a0763885ab940b056ad5c2f5c0507fc138182c0",
+        "37840f3bb9a17b5b002779bb846256408d62d58549500a19ea6e65c0c481b030",
     ),
     (
         WorkflowStep::Smoke,
-        "bc4c38a85c18b409c3d91bd6bab7158eb8272118b20ad45bbbbb8dac788cde7f",
+        "f6ed84169af523da9c229978818dd00896b303b36a06ec3fd26a5e94301798cf",
     ),
     (
         WorkflowStep::EnsureEvidence,
@@ -3928,7 +4051,7 @@ mod tests {
             },
         );
         assert_eq!(categories, expected_workflow_category_counts());
-        assert_eq!(WORKFLOW_CONTRACT.len(), 223);
+        assert_eq!(WORKFLOW_CONTRACT.len(), 244);
         for required in WORKFLOW_CONTRACT {
             match required.locator {
                 WorkflowContractLocator::Run { kind, locations } => {
@@ -4219,7 +4342,7 @@ mod tests {
 
         for (command, path) in [
             ("kicad-cli", "/usr/bin/kicad-cli"),
-            ("pcbnew", "/usr/bin/pcbnew"),
+            ("kicad", "/usr/bin/kicad"),
             ("Xvfb", "/usr/bin/Xvfb"),
             ("xwininfo", "/usr/bin/xwininfo"),
             ("import", "/usr/bin/import"),
@@ -4245,7 +4368,7 @@ mod tests {
     }
 
     #[test]
-    fn gui_workflow_requires_ready_owned_window_manager_before_pcbnew() {
+    fn gui_workflow_requires_ready_owned_window_manager_before_kicad_dispatcher() {
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -4353,14 +4476,14 @@ mod tests {
                 "launched without successful WM readiness",
             ),
             (
-                "test \"${wm_ready:-false}\" = true\n          kill -0 \"$wm_pid\" 2>/dev/null\n          pcbnew \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
-                "test \"${wm_ready:-false}\" = true\n          :\n          pcbnew \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "test \"${wm_ready:-false}\" = true\n          kill -0 \"$wm_pid\" 2>/dev/null\n          /usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "test \"${wm_ready:-false}\" = true\n          :\n          /usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
                 "launched after readiness without a final WM liveness check",
             ),
             (
+                "for _attempt in $(seq 1 180); do",
                 "for _attempt in $(seq 1 60); do",
-                "for _attempt in $(seq 1 30); do",
-                "restored the hosted-evidence-insufficient 30-second window timeout",
+                "restored the hosted-evidence-insufficient 60-second window timeout",
             ),
             (
                 "printf 'Openbox exited before window assertion (exit_code=%d)\\n' \"$wm_rc\" >> \"$artifact_dir/wm.log\"",
@@ -4433,14 +4556,14 @@ mod tests {
         );
         assert!(validate_gui_workflow_value(&wrong_xserver_order, &lock).is_err());
 
-        let mut pcbnew_before_wm = parse_gui_workflow(&workflow).unwrap();
+        let mut kicad_before_wm = parse_gui_workflow(&workflow).unwrap();
         swap_active_lines(
-            &mut pcbnew_before_wm,
+            &mut kicad_before_wm,
             WorkflowStep::Smoke,
             "/usr/bin/openbox --sm-disable > \"$artifact_dir/wm.log\" 2>&1 &",
-            "pcbnew \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+            "/usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
         );
-        assert!(validate_gui_workflow_value(&pcbnew_before_wm, &lock).is_err());
+        assert!(validate_gui_workflow_value(&kicad_before_wm, &lock).is_err());
 
         let cleanup = "            if [[ -n \"$kicad_pid\" ]]; then kill \"$kicad_pid\" 2>/dev/null || true; wait \"$kicad_pid\" 2>/dev/null || true; fi\n            if [[ -n \"$wm_pid\" ]]; then kill \"$wm_pid\" 2>/dev/null || true; wait \"$wm_pid\" 2>/dev/null || true; fi\n            if [[ -n \"$xvfb_pid\" ]]; then kill \"$xvfb_pid\" 2>/dev/null || true; wait \"$xvfb_pid\" 2>/dev/null || true; fi";
         assert_eq!(workflow.matches(cleanup).count(), 1);
@@ -4467,6 +4590,98 @@ mod tests {
             1,
         );
         assert!(validate_gui_workflow_contract(&double_wait, &lock).is_err());
+    }
+
+    #[test]
+    fn gui_workflow_requires_software_dispatcher_and_bounded_process_snapshots() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let lock = VersionsLock::load(
+            &repository.join("infra/versions.lock"),
+            &repository.join("rust-toolchain.toml"),
+        )
+        .unwrap();
+        let workflow =
+            fs::read_to_string(repository.join(".github/workflows/kicad-gui-smoke.yml")).unwrap();
+        validate_gui_workflow_contract(&workflow, &lock).unwrap();
+
+        let reject = |from: &str, to: &str, case: &str| {
+            assert_eq!(workflow.matches(from).count(), 1, "fixture drift: {case}");
+            let changed = workflow.replacen(from, to, 1);
+            assert!(
+                validate_gui_workflow_contract(&changed, &lock).is_err(),
+                "accepted workflow that {case}"
+            );
+        };
+
+        let launch = "/usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &";
+        let launch_sequence = concat!(
+            "          test \"${wm_ready:-false}\" = true\n",
+            "          kill -0 \"$wm_pid\" 2>/dev/null\n",
+            "          /usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &\n",
+            "          kicad_pid=$!\n"
+        );
+        assert_eq!(workflow.matches(launch_sequence).count(), 1);
+        for (replacement, case) in [
+            (
+                "pcbnew \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "reverted to the direct pcbnew launcher",
+            ),
+            (
+                "/usr/bin/kicad --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "removed the PCB dispatcher frame selection",
+            ),
+            (
+                "/usr/bin/kicad --frame pcb \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "removed the software-rendering correction",
+            ),
+        ] {
+            reject(launch, replacement, case);
+        }
+
+        for (from, to, case) in [
+            (
+                "for _attempt in $(seq 1 180); do",
+                "for _attempt in $(seq 1 60); do",
+                "lowered the hosted startup budget back to 60 seconds",
+            ),
+            (
+                "1|30|60|120|180) capture_kicad_process_snapshot \"$_attempt\" ;;",
+                "1|30|60) capture_kicad_process_snapshot \"$_attempt\" ;;",
+                "removed the late bounded process snapshots",
+            ),
+            (
+                "ps -L -p \"$kicad_pid\" -o pid=,tid=,psr=,stat=,wchan:32=,etime=,comm=,args= || true",
+                ":",
+                "removed the per-thread wait-channel summary",
+            ),
+            (
+                "cat \"$task_dir/wchan\" || true",
+                ":",
+                "removed exact per-thread wait channels",
+            ),
+            (
+                "grep -E '^(Name|State|Tgid|Pid|PPid|TracerPid|Threads):' \"$task_dir/status\" || true",
+                ":",
+                "removed exact per-thread status",
+            ),
+            (
+                "} > \"$snapshot_file\" 2>&1 || true",
+                "} > \"$snapshot_file\" 2>&1",
+                "allowed diagnostics to mask the primary lane status",
+            ),
+            (
+                "cp -- \"$startup_config_dir/kicad_common.json\" \"$artifact_dir/startup-config-post-run-kicad_common.json\" 2>> \"$artifact_dir/startup-config-readiness.txt\" || true",
+                ":",
+                "removed the isolated post-run common-settings copy",
+            ),
+        ] {
+            reject(from, to, case);
+        }
+
+        assert!(!workflow.contains("/proc/$kicad_pid/environ"));
     }
 
     #[test]
@@ -4499,8 +4714,14 @@ mod tests {
         );
         for (replacement, case) in [
             (
-                PCBNEW_CANDIDATE_EXTRACTION_LINE.replace("(pcbnew|Pcbnew)", "(pcbnew|PCBNEW)"),
-                "used the wrong WM_CLASS case",
+                PCBNEW_CANDIDATE_EXTRACTION_LINE
+                    .replace("\"kicad\" \"KiCad\"", "\"kicad\" \"Kicad\""),
+                "used the wrong dispatcher WM_CLASS case",
+            ),
+            (
+                PCBNEW_CANDIDATE_EXTRACTION_LINE
+                    .replace("\"kicad\" \"KiCad\"", "\"pcbnew\" \"Pcbnew\""),
+                "accepted the direct-launch WM_CLASS instead of the dispatcher tuple",
             ),
             (
                 PCBNEW_CANDIDATE_EXTRACTION_LINE
@@ -4626,15 +4847,15 @@ mod tests {
             (
                 "if ! kill -0 \"$kicad_pid\" 2>/dev/null; then",
                 "if false; then",
-                "removed the pcbnew liveness probe",
+                "removed the KiCad dispatcher liveness probe",
             ),
             (
                 "if wait \"$kicad_pid\"; then kicad_rc=0; else kicad_rc=$?; fi",
                 "wait \"$kicad_pid\"",
-                "lost the early pcbnew exit code under errexit",
+                "lost the early KiCad dispatcher exit code under errexit",
             ),
             (
-                "printf 'pcbnew exited before window assertion (exit_code=%d)\\n' \"$kicad_rc\" >> \"$artifact_dir/kicad-gui.log\"",
+                "printf 'KiCad PCB dispatcher exited before window assertion (exit_code=%d)\\n' \"$kicad_rc\" >> \"$artifact_dir/kicad-gui.log\"",
                 ":",
                 "removed the early-exit diagnostic",
             ),
@@ -4662,6 +4883,11 @@ mod tests {
             1
         );
         for (replacement, case) in [
+            (
+                PCBNEW_POST_CANDIDATE_EXTRACTION_LINE
+                    .replace("\"kicad\" \"KiCad\"", "\"pcbnew\" \"Pcbnew\""),
+                "accepted the direct-launch WM_CLASS after capture",
+            ),
             (
                 PCBNEW_POST_CANDIDATE_EXTRACTION_LINE.replace(
                     "\"$post_tree\" > \"$post_candidate_file\"",
@@ -4816,7 +5042,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn gui_workflow_pcbnew_window_awk_requires_current_viewable_main_window() {
+    fn gui_workflow_dispatcher_window_awk_requires_current_viewable_main_window() {
         let candidate_program = PCBNEW_CANDIDATE_EXTRACTION_LINE
             .strip_prefix("awk '")
             .and_then(|program| program.strip_suffix(r#"' "$current_tree" > "$candidate_file""#))
@@ -4841,12 +5067,12 @@ mod tests {
 
         for (line, expected, case) in [
             (
-                r#"     0x300001 "pcbnew": ("pcbnew" "pcbnew")  200x200+-1+-2  +-3+-4"#,
+                r#"     0x300001 "PCB Editor": ("kicad" "KiCad")  200x200+-1+-2  +-3+-4"#,
                 "0x300001 200 200\n",
-                "main lowercase-class candidate",
+                "exact dispatcher main candidate",
             ),
             (
-                r#"     0x300002 "pcbnew": ("pcbnew" "Pcbnew")  10x10+15+-20  +-30+40"#,
+                r#"     0x300002 "PCB Editor helper": ("kicad" "KiCad")  10x10+15+-20  +-30+40"#,
                 "0x300002 10 10\n",
                 "10x10 helper remains visible for detail rejection",
             ),
@@ -4862,28 +5088,44 @@ mod tests {
 
         for (line, case) in [
             (
-                r#"     0x300003 "pcbnew": ("pcbnew" "pcbnew")  200x200-1-2  +-3+-4"#,
+                r#"     0x300003 "PCB Editor": ("kicad" "KiCad")  200x200-1-2  +-3+-4"#,
                 "missing literal plus delimiters",
             ),
             (
-                r#"     0x300004 "pcbnew": ("pcbnew" "Pcbnew")  200x200++1+2  +3+4"#,
+                r#"     0x300004 "PCB Editor": ("kicad" "KiCad")  200x200++1+2  +3+4"#,
                 "double-plus coordinate",
             ),
             (
-                r#"     0x300005 "pcbnew": ("pcbnew" "pcbnew")  200x200+--1+2  +3+4"#,
+                r#"     0x300005 "PCB Editor": ("kicad" "KiCad")  200x200+--1+2  +3+4"#,
                 "double-minus coordinate",
             ),
             (
-                r#"     0x300006 "pcbnew": ("pcbnew" "Pcbnew")  0x200+-1+-2  +-3+-4"#,
+                r#"     0x300006 "PCB Editor": ("kicad" "KiCad")  0x200+-1+-2  +-3+-4"#,
                 "zero width",
             ),
             (
-                r#"     0x300007 "pcbnew": ("pcbnew" "pcbnew")  200x0+-1+-2  +-3+-4"#,
+                r#"     0x300007 "PCB Editor": ("kicad" "KiCad")  200x0+-1+-2  +-3+-4"#,
                 "zero height",
             ),
             (
-                r#"     0x300008 "pcbnew": ("pcbnew" "Pcbnew")  200x200+-1+-2  +-3+-4junk"#,
+                r#"     0x300008 "PCB Editor": ("kicad" "KiCad")  200x200+-1+-2  +-3+-4junk"#,
                 "trailing junk",
+            ),
+            (
+                r#"     0x300009 "PCB Editor": ("pcbnew" "Pcbnew")  200x200+-1+-2  +-3+-4"#,
+                "old direct-launch resource and class",
+            ),
+            (
+                r#"     0x30000a "PCB Editor": ("Kicad" "KiCad")  200x200+-1+-2  +-3+-4"#,
+                "wrong dispatcher resource casing",
+            ),
+            (
+                r#"     0x30000b "PCB Editor": ("kicad" "Kicad")  200x200+-1+-2  +-3+-4"#,
+                "wrong dispatcher class casing",
+            ),
+            (
+                r#"     0x30000c "PCB Editor": ("kicad" "kicad")  200x200+-1+-2  +-3+-4"#,
+                "lowercase dispatcher class",
             ),
         ] {
             let output = run_awk(candidate_program, &[], &format!("{line}\n"));
@@ -4897,7 +5139,7 @@ mod tests {
             .expect("detail assertion must wrap exactly one AWK program");
         let detail = |id: &str, width: u16, height: u16, map_state: &str| {
             format!(
-                "xwininfo: Window id: {id} \"pcbnew\"\n  Width: {width}\n  Height: {height}\n  Map State: {map_state}\n"
+                "xwininfo: Window id: {id} \"PCB Editor\"\n  Width: {width}\n  Height: {height}\n  Map State: {map_state}\n"
             )
         };
         for (id, width, height, map_state, expected, case) in [
