@@ -948,6 +948,50 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 35)))
     ),
     run_contract!(
+        DiagnosticLog,
+        Line,
+        "for diagnostic_path in /usr/bin/gdb /usr/bin/coredumpctl /usr/bin/eu-stack /usr/bin/catchsegv; do",
+        (Smoke, 1, None)
+    ),
+    run_contract!(DiagnosticLog, Line, "ulimit -S -c", (Smoke, 1, None)),
+    run_contract!(DiagnosticLog, Line, "ulimit -H -c", (Smoke, 1, None)),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "cat /proc/sys/kernel/core_pattern",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "cat /proc/sys/kernel/core_uses_pid",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "stat --format='diagnostic_path=%n mode=%a size=%s owner=%u:%g' \"$diagnostic_path\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "dpkg-query -S \"$diagnostic_path\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "dpkg-query -W -f='package=${binary:Package} version=${Version}\\n' gdb systemd systemd-coredump elfutils libc-bin 2>&1 || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        DiagnosticLog,
+        Line,
+        "} > \"$artifact_dir/debugger-core-capabilities.txt\" 2>&1",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 36)))
+    ),
+    run_contract!(
         Xvfb,
         Token,
         "Xvfb :99 -screen 0 1280x800x24",
@@ -1140,7 +1184,7 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
     run_contract!(
         WindowManager,
         Line,
-        "/usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+        "/usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
         (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 70)))
     ),
     run_contract!(
@@ -1643,6 +1687,13 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Smoke, 1, None),
         (EnsureEvidence, 2, None)
     ),
+    run_contract!(
+        LaneEvidence,
+        Token,
+        r#""gui_input":"blank","gui_board_opened":false,"fixture_evidence":"integrity_only","file_integration_lane":"afk-linux-cli-drc""#,
+        (Smoke, 1, None),
+        (EnsureEvidence, 1, None)
+    ),
     field_contract!(
         AlwaysUpload,
         WorkflowContractLocator::If {
@@ -1689,7 +1740,7 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::Availability, 10),
         (WorkflowContractCategory::CandidateCardinality, 11),
         (WorkflowContractCategory::CliVersion, 3),
-        (WorkflowContractCategory::DiagnosticLog, 10),
+        (WorkflowContractCategory::DiagnosticLog, 19),
         (WorkflowContractCategory::DpkgAssertion, 10),
         (WorkflowContractCategory::DowngradePermission, 1),
         (WorkflowContractCategory::ExecutablePreflight, 8),
@@ -1700,7 +1751,7 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::InstallSpec, 10),
         (WorkflowContractCategory::Isolation, 7),
         (WorkflowContractCategory::Junit, 1),
-        (WorkflowContractCategory::LaneEvidence, 1),
+        (WorkflowContractCategory::LaneEvidence, 2),
         (WorkflowContractCategory::LockReference, 10),
         (WorkflowContractCategory::Ppa, 1),
         (WorkflowContractCategory::PackageManifest, 1),
@@ -3005,11 +3056,11 @@ const PROTECTED_PROGRAM_DIGESTS: &[(WorkflowStep, &str)] = &[
     ),
     (
         WorkflowStep::Smoke,
-        "f6ed84169af523da9c229978818dd00896b303b36a06ec3fd26a5e94301798cf",
+        "7f6c377fd2cd0c14f88b8e5e66fa45bc1cd1136cad27f8e49f10a6dd225bb156",
     ),
     (
         WorkflowStep::EnsureEvidence,
-        "71be693544f9e2a467ee1892d399ae16cb8128a00633ef37541c95238f44ada0",
+        "67a482a6942e369d4d3b7153acc975e85fb459a11287ede7b5e89dc1890be087",
     ),
 ];
 
@@ -4051,7 +4102,7 @@ mod tests {
             },
         );
         assert_eq!(categories, expected_workflow_category_counts());
-        assert_eq!(WORKFLOW_CONTRACT.len(), 244);
+        assert_eq!(WORKFLOW_CONTRACT.len(), 254);
         for required in WORKFLOW_CONTRACT {
             match required.locator {
                 WorkflowContractLocator::Run { kind, locations } => {
@@ -4476,8 +4527,8 @@ mod tests {
                 "launched without successful WM readiness",
             ),
             (
-                "test \"${wm_ready:-false}\" = true\n          kill -0 \"$wm_pid\" 2>/dev/null\n          /usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
-                "test \"${wm_ready:-false}\" = true\n          :\n          /usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "test \"${wm_ready:-false}\" = true\n          kill -0 \"$wm_pid\" 2>/dev/null\n          /usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "test \"${wm_ready:-false}\" = true\n          :\n          /usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
                 "launched after readiness without a final WM liveness check",
             ),
             (
@@ -4561,7 +4612,7 @@ mod tests {
             &mut kicad_before_wm,
             WorkflowStep::Smoke,
             "/usr/bin/openbox --sm-disable > \"$artifact_dir/wm.log\" 2>&1 &",
-            "/usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+            "/usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
         );
         assert!(validate_gui_workflow_value(&kicad_before_wm, &lock).is_err());
 
@@ -4593,7 +4644,7 @@ mod tests {
     }
 
     #[test]
-    fn gui_workflow_requires_software_dispatcher_and_bounded_process_snapshots() {
+    fn gui_workflow_requires_blank_software_dispatcher_and_bounded_process_snapshots() {
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -4616,26 +4667,30 @@ mod tests {
             );
         };
 
-        let launch = "/usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &";
+        let launch = "/usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &";
         let launch_sequence = concat!(
             "          test \"${wm_ready:-false}\" = true\n",
             "          kill -0 \"$wm_pid\" 2>/dev/null\n",
-            "          /usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &\n",
+            "          /usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &\n",
             "          kicad_pid=$!\n"
         );
         assert_eq!(workflow.matches(launch_sequence).count(), 1);
         for (replacement, case) in [
             (
-                "pcbnew \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "pcbnew > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
                 "reverted to the direct pcbnew launcher",
             ),
             (
-                "/usr/bin/kicad --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "/usr/bin/kicad --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
                 "removed the PCB dispatcher frame selection",
             ),
             (
-                "/usr/bin/kicad --frame pcb \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "/usr/bin/kicad --frame pcb > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
                 "removed the software-rendering correction",
+            ),
+            (
+                "/usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "passed the file-integration fixture into the native GUI startup proof",
             ),
         ] {
             reject(launch, replacement, case);
@@ -4677,8 +4732,46 @@ mod tests {
                 ":",
                 "removed the isolated post-run common-settings copy",
             ),
+            (
+                "cat /proc/sys/kernel/core_pattern",
+                ":",
+                "removed the hosted core-handler evidence",
+            ),
+            (
+                "for diagnostic_path in /usr/bin/gdb /usr/bin/coredumpctl /usr/bin/eu-stack /usr/bin/catchsegv; do",
+                "for diagnostic_path in /usr/bin/gdb; do",
+                "stopped inventorying the bounded debugger and core-analysis paths",
+            ),
+            (
+                "dpkg-query -W -f='package=${binary:Package} version=${Version}\\n' gdb systemd systemd-coredump elfutils libc-bin 2>&1 || true",
+                ":",
+                "removed diagnostic package-version evidence",
+            ),
         ] {
             reject(from, to, case);
+        }
+
+        let evidence_boundary = "\"gui_input\":\"blank\",\"gui_board_opened\":false,\"fixture_evidence\":\"integrity_only\",\"file_integration_lane\":\"afk-linux-cli-drc\"";
+        assert_eq!(workflow.matches(evidence_boundary).count(), 2);
+        for (replacement, case) in [
+            (
+                "\"gui_input\":\"board\",\"gui_board_opened\":false,\"fixture_evidence\":\"integrity_only\",\"file_integration_lane\":\"afk-linux-cli-drc\"",
+                "misreported the native GUI input",
+            ),
+            (
+                "\"gui_input\":\"blank\",\"gui_board_opened\":true,\"fixture_evidence\":\"integrity_only\",\"file_integration_lane\":\"afk-linux-cli-drc\"",
+                "claimed the GUI opened the fixture",
+            ),
+            (
+                "\"gui_input\":\"blank\",\"gui_board_opened\":false,\"fixture_evidence\":\"gui_acceptance\",\"file_integration_lane\":\"afk-linux-cli-drc\"",
+                "claimed the GUI fixture hash proved GUI acceptance",
+            ),
+        ] {
+            let changed = workflow.replace(evidence_boundary, replacement);
+            assert!(
+                validate_gui_workflow_contract(&changed, &lock).is_err(),
+                "accepted workflow that {case}"
+            );
         }
 
         assert!(!workflow.contains("/proc/$kicad_pid/environ"));

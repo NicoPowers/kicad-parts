@@ -178,7 +178,7 @@ jobs:
               fi
             fi
             if [[ $rc -eq 0 ]]; then status=passed; failures=0; failure_xml=; else status=failed; failures=1; failure_xml='<failure message="Ubuntu X11 GUI smoke failed; inspect uploaded logs"/>'; fi
-            printf '{"schema":1,"lane":"ubuntu-x11-gui","status":"%s","exit_code":%d,"kicad_package":"%s","window_asserted":%s,"fixture_unchanged":%s}\n' \
+            printf '{"schema":1,"lane":"ubuntu-x11-gui","status":"%s","exit_code":%d,"kicad_package":"%s","window_asserted":%s,"fixture_unchanged":%s,"gui_input":"blank","gui_board_opened":false,"fixture_evidence":"integrity_only","file_integration_lane":"afk-linux-cli-drc"}\n' \
               "$status" "$rc" "$KICAD_VERSION" "${window_asserted:-false}" "${fixture_unchanged:-false}" > "$artifact_dir/lane-result.json"
             printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="ubuntu-x11-gui" tests="1" failures="%d"><testcase name="kicad-10-window-smoke">%s</testcase></testsuite>\n' \
               "$failures" "$failure_xml" > "$artifact_dir/results.xml"
@@ -249,6 +249,25 @@ jobs:
             sha256sum /usr/bin/kicad /usr/bin/_pcbnew.kiface
             ldd /usr/bin/kicad
           } > "$artifact_dir/kicad-launcher-identity.txt" 2>&1
+          {
+            printf 'core_soft_limit_blocks='
+            ulimit -S -c
+            printf 'core_hard_limit_blocks='
+            ulimit -H -c
+            printf 'core_pattern='
+            cat /proc/sys/kernel/core_pattern
+            printf 'core_uses_pid='
+            cat /proc/sys/kernel/core_uses_pid
+            for diagnostic_path in /usr/bin/gdb /usr/bin/coredumpctl /usr/bin/eu-stack /usr/bin/catchsegv; do
+              if [[ -e "$diagnostic_path" ]]; then
+                stat --format='diagnostic_path=%n mode=%a size=%s owner=%u:%g' "$diagnostic_path"
+                dpkg-query -S "$diagnostic_path" || true
+              else
+                printf 'diagnostic_path=%s absent\n' "$diagnostic_path"
+              fi
+            done
+            dpkg-query -W -f='package=${binary:Package} version=${Version}\n' gdb systemd systemd-coredump elfutils libc-bin 2>&1 || true
+          } > "$artifact_dir/debugger-core-capabilities.txt" 2>&1
           xserver_current="$RUNNER_TEMP/kicad-xserver-readiness.current.txt"
           wm_root_current="$RUNNER_TEMP/kicad-wm-root.current.txt"
           wm_window_current="$RUNNER_TEMP/kicad-wm-window.current.txt"
@@ -306,7 +325,7 @@ jobs:
           : > "$artifact_dir/kicad-process-status.txt"
           test "${wm_ready:-false}" = true
           kill -0 "$wm_pid" 2>/dev/null
-          /usr/bin/kicad --frame pcb --software-rendering "$fixture" > "$artifact_dir/kicad-gui.log" 2>&1 &
+          /usr/bin/kicad --frame pcb --software-rendering > "$artifact_dir/kicad-gui.log" 2>&1 &
           kicad_pid=$!
           current_tree="$RUNNER_TEMP/kicad-window-tree.current.txt"
           current_detail="$RUNNER_TEMP/kicad-window-detail.current.txt"
@@ -445,7 +464,7 @@ jobs:
           artifact_dir=.afk/gui/artifacts
           mkdir -p "$artifact_dir"
           if [[ ! -f "$artifact_dir/lane-result.json" ]]; then
-            printf '{"schema":1,"lane":"ubuntu-x11-gui","status":"failed","exit_code":1,"kicad_package":"%s","window_asserted":false,"fixture_unchanged":false}\n' \
+            printf '{"schema":1,"lane":"ubuntu-x11-gui","status":"failed","exit_code":1,"kicad_package":"%s","window_asserted":false,"fixture_unchanged":false,"gui_input":"blank","gui_board_opened":false,"fixture_evidence":"integrity_only","file_integration_lane":"afk-linux-cli-drc"}\n' \
               "${KICAD_VERSION:-unavailable}" > "$artifact_dir/lane-result.json"
             printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?><testsuite name="ubuntu-x11-gui" tests="1" failures="1"><testcase name="kicad-10-window-smoke"><failure message="setup or smoke failed before lane evidence completed"/></testcase></testsuite>' \
               > "$artifact_dir/results.xml"
