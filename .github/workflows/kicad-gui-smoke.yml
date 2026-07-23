@@ -39,7 +39,7 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal
           cargo xtask export-github-env >> "$GITHUB_ENV"
 
-      - name: Install exact KiCad and pinned Tauri/X11/Openbox runner
+      - name: Install exact KiCad and pinned Tauri/X11/Openbox/core runner
         shell: bash
         run: |
           set -euo pipefail
@@ -54,11 +54,12 @@ jobs:
           apt-cache madison "$XVFB_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$XVFB_VERSION"
           apt-cache madison "$X11_UTILS_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$X11_UTILS_VERSION"
           apt-cache madison "$IMAGEMAGICK_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$IMAGEMAGICK_VERSION"
+          apt-cache madison "$COREDUMP_TOOL_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$COREDUMP_TOOL_VERSION"
           apt-cache madison "$WINDOW_MANAGER_PACKAGE" | awk '{print $3}' | grep -Fqx -- "$WINDOW_MANAGER_VERSION"
           sudo apt-get install --yes --allow-downgrades \
             "$KICAD_SPEC" "$KICAD_SYMBOLS_SPEC" "$KICAD_FOOTPRINTS_SPEC" \
             "$KICAD_PACKAGES3D_SPEC" "$WEBKIT_LIBRARY_SPEC" "$WEBKIT_DRIVER_SPEC" \
-            "$XVFB_SPEC" "$X11_UTILS_SPEC" "$IMAGEMAGICK_SPEC"
+            "$XVFB_SPEC" "$X11_UTILS_SPEC" "$IMAGEMAGICK_SPEC" "$COREDUMP_TOOL_SPEC"
           sudo apt-get install --yes --no-install-recommends --allow-downgrades \
             "$WINDOW_MANAGER_SPEC"
           test "$(dpkg-query -W -f='${Version}' "$KICAD_PACKAGE")" = "$KICAD_VERSION"
@@ -70,6 +71,7 @@ jobs:
           test "$(dpkg-query -W -f='${Version}' "$XVFB_PACKAGE")" = "$XVFB_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$X11_UTILS_PACKAGE")" = "$X11_UTILS_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$IMAGEMAGICK_PACKAGE")" = "$IMAGEMAGICK_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$COREDUMP_TOOL_PACKAGE")" = "$COREDUMP_TOOL_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$WINDOW_MANAGER_PACKAGE")" = "$WINDOW_MANAGER_VERSION"
           test "$(command -v kicad-cli)" = /usr/bin/kicad-cli
           test "$(command -v kicad)" = /usr/bin/kicad
@@ -79,6 +81,7 @@ jobs:
           test "$(command -v identify)" = /usr/bin/identify
           test "$(command -v openbox)" = /usr/bin/openbox
           test "$(command -v xprop)" = /usr/bin/xprop
+          test "$(command -v coredumpctl)" = /usr/bin/coredumpctl
           rustup default "$RUST_VERSION"
           curl --fail --location --silent --show-error "$NODE_URL" --output /tmp/node.tar.xz
           echo "$NODE_SHA256  /tmp/node.tar.xz" | sha256sum -c -
@@ -118,6 +121,7 @@ jobs:
           DISPLAY: ":99"
         run: |
           set -euo pipefail
+          ulimit -S -c 0
           artifact_dir=.afk/gui/artifacts
           fixture=fixtures/kicad-10/afk-smoke/afk-smoke.kicad_pcb
           startup_config_source=fixtures/kicad-10/gui-config
@@ -146,6 +150,8 @@ jobs:
               tr '\0' ' ' < "/proc/$kicad_pid/cmdline" || true
               printf '\n--- process status ---\n'
               cat "/proc/$kicad_pid/status" || true
+              printf '%s\n' '--- process limits ---'
+              cat "/proc/$kicad_pid/limits" || true
               printf '%s\n' '--- thread summary ---'
               ps -L -p "$kicad_pid" -o pid=,tid=,psr=,stat=,wchan:32=,etime=,comm=,args= || true
               for task_dir in "/proc/$kicad_pid"/task/[0-9]*; do
@@ -161,6 +167,50 @@ jobs:
                 cat "$task_dir/syscall" || true
               done
             } > "$snapshot_file" 2>&1 || true
+          }
+          capture_kicad_coredump_info() {
+            local crashed_pid=$1
+            local launch_since=$2
+            local expected_exe=/usr/bin/kicad
+            local expected_signal=11
+            local expected_cmdline='/usr/bin/kicad --frame pcb --software-rendering'
+            local coredump_current="$RUNNER_TEMP/kicad-coredump-info.current.txt"
+            local coredump_validated="$RUNNER_TEMP/kicad-coredump-info.validated.txt"
+            local coredump_rendered="$RUNNER_TEMP/kicad-coredump-info.rendered.txt"
+            local coredump_artifact="$artifact_dir/kicad-coredump-info.txt"
+            local coredump_limit_bytes=262144
+            local coredump_attempt=0
+            local coredump_captured=false
+            : > "$coredump_validated"
+            for coredump_attempt in $(seq 1 20); do
+              if LC_ALL=C /usr/bin/coredumpctl --no-pager --quiet --since "$launch_since" -1 info \
+                "COREDUMP_PID=$crashed_pid" \
+                "COREDUMP_EXE=/usr/bin/kicad" \
+                "COREDUMP_SIGNAL=11" \
+                "COREDUMP_CMDLINE=/usr/bin/kicad --frame pcb --software-rendering" \
+                > "$coredump_current" 2>&1 &&
+                awk -v expected_pid="$crashed_pid" -v expected_exe="$expected_exe" -v expected_signal="$expected_signal" -v expected_cmdline="$expected_cmdline" '$1 == "PID:" && $2 == expected_pid { pid_count++ } $1 == "Signal:" && $2 == expected_signal { signal_count++ } $1 == "Executable:" && $2 == expected_exe && NF == 2 { exe_count++ } /^[[:space:]]*Command Line:/ { actual_cmdline=$0; sub(/^[[:space:]]*Command Line:[[:space:]]*/, "", actual_cmdline); if (actual_cmdline == expected_cmdline) cmdline_count++ } END { exit(pid_count == 1 && exe_count == 1 && signal_count == 1 && cmdline_count == 1 ? 0 : 1) }' "$coredump_current" &&
+                cp -- "$coredump_current" "$coredump_validated"; then
+                coredump_captured=true
+                break
+              fi
+              sleep 0.5
+            done
+            {
+              printf 'pid=%s launch_since=%s attempts=%s captured=%s expected_exe=%s expected_signal=%s expected_cmdline=%s artifact_limit_bytes=%s\n' \
+                "$crashed_pid" "$launch_since" "$coredump_attempt" "$coredump_captured" \
+                "$expected_exe" "$expected_signal" "$expected_cmdline" "$coredump_limit_bytes"
+              if [[ "$coredump_captured" == true ]]; then
+                cat "$coredump_validated" || true
+              else
+                printf 'no launch-bounded identity-validated KiCad SIGSEGV journal record found\n'
+              fi
+            } > "$coredump_rendered" 2>&1 || true
+            if ! head -c "$coredump_limit_bytes" "$coredump_rendered" > "$coredump_artifact" 2>/dev/null; then
+              : > "$coredump_artifact" 2>/dev/null || true
+            fi
+            test ! -f "$coredump_artifact" || test "$(stat --format='%s' "$coredump_artifact")" -le "$coredump_limit_bytes" || return 0
+            return 0
           }
           finish() {
             rc=$?
@@ -225,7 +275,7 @@ jobs:
           } > "$artifact_dir/startup-config-readiness.txt" 2>&1
           {
             uname -a
-            dpkg-query -W "$KICAD_PACKAGE" "$KICAD_SYMBOLS_PACKAGE" "$KICAD_FOOTPRINTS_PACKAGE" "$KICAD_PACKAGES3D_PACKAGE" "$WEBKIT_LIBRARY_PACKAGE" "$WEBKIT_DRIVER_PACKAGE" "$XVFB_PACKAGE" "$X11_UTILS_PACKAGE" "$IMAGEMAGICK_PACKAGE" "$WINDOW_MANAGER_PACKAGE"
+            dpkg-query -W "$KICAD_PACKAGE" "$KICAD_SYMBOLS_PACKAGE" "$KICAD_FOOTPRINTS_PACKAGE" "$KICAD_PACKAGES3D_PACKAGE" "$WEBKIT_LIBRARY_PACKAGE" "$WEBKIT_DRIVER_PACKAGE" "$XVFB_PACKAGE" "$X11_UTILS_PACKAGE" "$IMAGEMAGICK_PACKAGE" "$COREDUMP_TOOL_PACKAGE" "$WINDOW_MANAGER_PACKAGE"
             rustc --version
             cargo --version
             node --version
@@ -233,6 +283,7 @@ jobs:
             tauri --version
           } > "$artifact_dir/machine-manifest.txt"
           test "$(dpkg-query -W -f='${Version}' "$KICAD_PACKAGE")" = "$KICAD_VERSION"
+          test "$(dpkg-query -W -f='${Version}' "$COREDUMP_TOOL_PACKAGE")" = "$COREDUMP_TOOL_VERSION"
           test "$(dpkg-query -W -f='${Version}' "$WINDOW_MANAGER_PACKAGE")" = "$WINDOW_MANAGER_VERSION"
           kicad_upstream_version="${KICAD_VERSION%%~*}"
           test -f "$STOCK_SYMBOL"
@@ -258,16 +309,10 @@ jobs:
             cat /proc/sys/kernel/core_pattern
             printf 'core_uses_pid='
             cat /proc/sys/kernel/core_uses_pid
-            for diagnostic_path in /usr/bin/gdb /usr/bin/coredumpctl /usr/bin/eu-stack /usr/bin/catchsegv; do
-              if [[ -e "$diagnostic_path" ]]; then
-                stat --format='diagnostic_path=%n mode=%a size=%s owner=%u:%g' "$diagnostic_path"
-                dpkg-query -S "$diagnostic_path" || true
-              else
-                printf 'diagnostic_path=%s absent\n' "$diagnostic_path"
-              fi
-            done
-            dpkg-query -W -f='package=${binary:Package} version=${Version}\n' gdb systemd systemd-coredump elfutils libc-bin 2>&1 || true
-          } > "$artifact_dir/debugger-core-capabilities.txt" 2>&1
+            stat --format='diagnostic_path=%n mode=%a size=%s owner=%u:%g' /usr/bin/coredumpctl
+            dpkg-query -S /usr/bin/coredumpctl
+            dpkg-query -W -f='package=${binary:Package} version=${Version}\n' "$COREDUMP_TOOL_PACKAGE"
+          } > "$artifact_dir/coredump-capabilities.txt" 2>&1
           xserver_current="$RUNNER_TEMP/kicad-xserver-readiness.current.txt"
           wm_root_current="$RUNNER_TEMP/kicad-wm-root.current.txt"
           wm_window_current="$RUNNER_TEMP/kicad-wm-window.current.txt"
@@ -325,8 +370,15 @@ jobs:
           : > "$artifact_dir/kicad-process-status.txt"
           test "${wm_ready:-false}" = true
           kill -0 "$wm_pid" 2>/dev/null
-          /usr/bin/kicad --frame pcb --software-rendering > "$artifact_dir/kicad-gui.log" 2>&1 &
+          kicad_launch_since=$(date --utc '+%Y-%m-%d %H:%M:%S UTC')
+          test "$(ulimit -S -c)" = 0
+          (
+            ulimit -S -c unlimited
+            test "$(ulimit -S -c)" = unlimited
+            exec /usr/bin/kicad --frame pcb --software-rendering
+          ) > "$artifact_dir/kicad-gui.log" 2>&1 &
           kicad_pid=$!
+          test "$(ulimit -S -c)" = 0
           current_tree="$RUNNER_TEMP/kicad-window-tree.current.txt"
           current_detail="$RUNNER_TEMP/kicad-window-detail.current.txt"
           candidate_file="$RUNNER_TEMP/kicad-window-candidates.current.txt"
@@ -444,6 +496,7 @@ jobs:
             fi
             if ! kill -0 "$kicad_pid" 2>/dev/null; then
               if wait "$kicad_pid"; then kicad_rc=0; else kicad_rc=$?; fi
+              if [[ "$kicad_rc" -eq 139 ]]; then capture_kicad_coredump_info "$kicad_pid" "$kicad_launch_since"; fi
               kicad_pid=
               printf 'KiCad PCB dispatcher exited before window assertion (exit_code=%d)\n' "$kicad_rc" >> "$artifact_dir/kicad-gui.log"
               break

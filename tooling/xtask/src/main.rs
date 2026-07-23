@@ -27,6 +27,7 @@ enum WorkflowContractCategory {
     Availability,
     CandidateCardinality,
     CliVersion,
+    Coredump,
     DiagnosticLog,
     DpkgAssertion,
     DowngradePermission,
@@ -84,7 +85,7 @@ impl WorkflowStep {
         match self {
             Self::Checkout => None,
             Self::Export => Some("Load exact Ubuntu GUI package contract from versions.lock"),
-            Self::Install => Some("Install exact KiCad and pinned Tauri/X11/Openbox runner"),
+            Self::Install => Some("Install exact KiCad and pinned Tauri/X11/Openbox/core runner"),
             Self::Smoke => Some("Launch isolated KiCad GUI smoke and write lane evidence"),
             Self::EnsureEvidence => Some("Ensure machine-readable failure evidence exists"),
             Self::Upload => Some("Upload diagnostics"),
@@ -109,6 +110,7 @@ const PCBNEW_POST_SELECTION_ASSERTION_LINE: &str = r#"if [[ "$post_candidate_id"
 const PCBNEW_IMAGE_ASSERTION_LINE: &str = r#"if [[ "$image_width" =~ ^[1-9][0-9]*$ && "$image_height" =~ ^[1-9][0-9]*$ && "$image_colors" =~ ^[1-9][0-9]*$ ]] && (( image_width == tree_width && image_height == tree_height && image_colors > 1 )); then"#;
 const OPENBOX_ROOT_OWNER_LINE: &str = r##"if wm_window_id=$(awk '$1 == "_NET_SUPPORTING_WM_CHECK:" && $2 == "window" && $3 == "id" && $4 == "#" && $5 ~ /^0x[[:xdigit:]]+$/ && NF == 5 { count++; id=$5 } END { if (count == 1) print id; else exit 1 }' "$wm_root_current"); then"##;
 const OPENBOX_SELF_ASSERTION_LINE: &str = r##"if awk -v expected_id="$wm_window_id" '$1 == "_NET_SUPPORTING_WM_CHECK:" && $2 == "window" && $3 == "id" && $4 == "#" && $5 == expected_id && NF == 5 { self_count++ } $1 == "_NET_WM_NAME" && $2 == "=" && $3 == "\"Openbox\"" && NF == 3 { name_count++ } END { exit(self_count == 1 && name_count == 1 ? 0 : 1) }' "$wm_window_current"; then"##;
+const COREDUMP_INFO_IDENTITY_ASSERTION_LINE: &str = r#"awk -v expected_pid="$crashed_pid" -v expected_exe="$expected_exe" -v expected_signal="$expected_signal" -v expected_cmdline="$expected_cmdline" '$1 == "PID:" && $2 == expected_pid { pid_count++ } $1 == "Signal:" && $2 == expected_signal { signal_count++ } $1 == "Executable:" && $2 == expected_exe && NF == 2 { exe_count++ } /^[[:space:]]*Command Line:/ { actual_cmdline=$0; sub(/^[[:space:]]*Command Line:[[:space:]]*/, "", actual_cmdline); if (actual_cmdline == expected_cmdline) cmdline_count++ } END { exit(pid_count == 1 && exe_count == 1 && signal_count == 1 && cmdline_count == 1 ? 0 : 1) }' "$coredump_current" &&"#;
 
 const KICAD_STARTUP_CONFIG_FIXTURES: &[(&str, &str, &str)] = &[
     (
@@ -351,80 +353,92 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
     run_contract!(
         Availability,
         Line,
-        "apt-cache madison \"$WINDOW_MANAGER_PACKAGE\" | awk '{print $3}' | grep -Fqx -- \"$WINDOW_MANAGER_VERSION\"",
+        "apt-cache madison \"$COREDUMP_TOOL_PACKAGE\" | awk '{print $3}' | grep -Fqx -- \"$COREDUMP_TOOL_VERSION\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 29)))
+    ),
+    run_contract!(
+        Availability,
+        Line,
+        "apt-cache madison \"$WINDOW_MANAGER_PACKAGE\" | awk '{print $3}' | grep -Fqx -- \"$WINDOW_MANAGER_VERSION\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 30)))
     ),
     run_contract!(
         DowngradePermission,
         Line,
         "sudo apt-get install --yes --allow-downgrades",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 30)))
-    ),
-    run_contract!(
-        InstallSpec,
-        Token,
-        "\"$KICAD_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 31)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$KICAD_SYMBOLS_SPEC\"",
+        "\"$KICAD_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 32)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$KICAD_FOOTPRINTS_SPEC\"",
+        "\"$KICAD_SYMBOLS_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 33)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$KICAD_PACKAGES3D_SPEC\"",
+        "\"$KICAD_FOOTPRINTS_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 34)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$WEBKIT_LIBRARY_SPEC\"",
+        "\"$KICAD_PACKAGES3D_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 35)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$WEBKIT_DRIVER_SPEC\"",
+        "\"$WEBKIT_LIBRARY_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 36)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$XVFB_SPEC\"",
+        "\"$WEBKIT_DRIVER_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 37)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$X11_UTILS_SPEC\"",
+        "\"$XVFB_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 38)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$IMAGEMAGICK_SPEC\"",
+        "\"$X11_UTILS_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 39)))
     ),
     run_contract!(
-        WindowManager,
-        Line,
-        "sudo apt-get install --yes --no-install-recommends --allow-downgrades",
+        InstallSpec,
+        Token,
+        "\"$IMAGEMAGICK_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 40)))
     ),
     run_contract!(
         InstallSpec,
         Token,
-        "\"$WINDOW_MANAGER_SPEC\"",
+        "\"$COREDUMP_TOOL_SPEC\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 41)))
+    ),
+    run_contract!(
+        WindowManager,
+        Line,
+        "sudo apt-get install --yes --no-install-recommends --allow-downgrades",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 42)))
+    ),
+    run_contract!(
+        InstallSpec,
+        Token,
+        "\"$WINDOW_MANAGER_SPEC\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 43)))
     ),
     run_contract!(
         DpkgAssertion,
@@ -484,57 +498,70 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
     run_contract!(
         DpkgAssertion,
         Line,
-        "test \"$(dpkg-query -W -f='${Version}' \"$WINDOW_MANAGER_PACKAGE\")\" = \"$WINDOW_MANAGER_VERSION\"",
+        "test \"$(dpkg-query -W -f='${Version}' \"$COREDUMP_TOOL_PACKAGE\")\" = \"$COREDUMP_TOOL_VERSION\"",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 59))),
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 21)))
+    ),
+    run_contract!(
+        DpkgAssertion,
+        Line,
+        "test \"$(dpkg-query -W -f='${Version}' \"$WINDOW_MANAGER_PACKAGE\")\" = \"$WINDOW_MANAGER_VERSION\"",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 60))),
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 22)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
         "test \"$(command -v kicad-cli)\" = /usr/bin/kicad-cli",
-        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 60)))
-    ),
-    run_contract!(
-        ExecutablePreflight,
-        Line,
-        "test \"$(command -v kicad)\" = /usr/bin/kicad",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 61)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
-        "test \"$(command -v Xvfb)\" = /usr/bin/Xvfb",
+        "test \"$(command -v kicad)\" = /usr/bin/kicad",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 62)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
-        "test \"$(command -v xwininfo)\" = /usr/bin/xwininfo",
+        "test \"$(command -v Xvfb)\" = /usr/bin/Xvfb",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 63)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
-        "test \"$(command -v import)\" = /usr/bin/import",
+        "test \"$(command -v xwininfo)\" = /usr/bin/xwininfo",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 64)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
-        "test \"$(command -v identify)\" = /usr/bin/identify",
+        "test \"$(command -v import)\" = /usr/bin/import",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 65)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
-        "test \"$(command -v openbox)\" = /usr/bin/openbox",
+        "test \"$(command -v identify)\" = /usr/bin/identify",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 66)))
     ),
     run_contract!(
         ExecutablePreflight,
         Line,
-        "test \"$(command -v xprop)\" = /usr/bin/xprop",
+        "test \"$(command -v openbox)\" = /usr/bin/openbox",
         (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 67)))
+    ),
+    run_contract!(
+        ExecutablePreflight,
+        Line,
+        "test \"$(command -v xprop)\" = /usr/bin/xprop",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 68)))
+    ),
+    run_contract!(
+        ExecutablePreflight,
+        Line,
+        "test \"$(command -v coredumpctl)\" = /usr/bin/coredumpctl",
+        (Install, 1, Some((WorkflowOrderGroup::InstallPipeline, 69)))
     ),
     run_contract!(
         PrivateToolchain,
@@ -889,14 +916,14 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
     run_contract!(
         PackageManifest,
         Line,
-        "dpkg-query -W \"$KICAD_PACKAGE\" \"$KICAD_SYMBOLS_PACKAGE\" \"$KICAD_FOOTPRINTS_PACKAGE\" \"$KICAD_PACKAGES3D_PACKAGE\" \"$WEBKIT_LIBRARY_PACKAGE\" \"$WEBKIT_DRIVER_PACKAGE\" \"$XVFB_PACKAGE\" \"$X11_UTILS_PACKAGE\" \"$IMAGEMAGICK_PACKAGE\" \"$WINDOW_MANAGER_PACKAGE\"",
+        "dpkg-query -W \"$KICAD_PACKAGE\" \"$KICAD_SYMBOLS_PACKAGE\" \"$KICAD_FOOTPRINTS_PACKAGE\" \"$KICAD_PACKAGES3D_PACKAGE\" \"$WEBKIT_LIBRARY_PACKAGE\" \"$WEBKIT_DRIVER_PACKAGE\" \"$XVFB_PACKAGE\" \"$X11_UTILS_PACKAGE\" \"$IMAGEMAGICK_PACKAGE\" \"$COREDUMP_TOOL_PACKAGE\" \"$WINDOW_MANAGER_PACKAGE\"",
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 15)))
     ),
     run_contract!(
         CliVersion,
         Line,
         "kicad_upstream_version=\"${KICAD_VERSION%%~*}\"",
-        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 22)))
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 23)))
     ),
     run_contract!(
         StockPath,
@@ -948,47 +975,47 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 35)))
     ),
     run_contract!(
-        DiagnosticLog,
+        Coredump,
         Line,
-        "for diagnostic_path in /usr/bin/gdb /usr/bin/coredumpctl /usr/bin/eu-stack /usr/bin/catchsegv; do",
-        (Smoke, 1, None)
+        "ulimit -S -c 0",
+        (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 1)))
     ),
-    run_contract!(DiagnosticLog, Line, "ulimit -S -c", (Smoke, 1, None)),
-    run_contract!(DiagnosticLog, Line, "ulimit -H -c", (Smoke, 1, None)),
+    run_contract!(Coredump, Line, "ulimit -S -c", (Smoke, 1, None)),
+    run_contract!(Coredump, Line, "ulimit -H -c", (Smoke, 1, None)),
     run_contract!(
-        DiagnosticLog,
+        Coredump,
         Line,
         "cat /proc/sys/kernel/core_pattern",
         (Smoke, 1, None)
     ),
     run_contract!(
-        DiagnosticLog,
+        Coredump,
         Line,
         "cat /proc/sys/kernel/core_uses_pid",
         (Smoke, 1, None)
     ),
     run_contract!(
-        DiagnosticLog,
+        Coredump,
         Line,
-        "stat --format='diagnostic_path=%n mode=%a size=%s owner=%u:%g' \"$diagnostic_path\"",
+        "stat --format='diagnostic_path=%n mode=%a size=%s owner=%u:%g' /usr/bin/coredumpctl",
         (Smoke, 1, None)
     ),
     run_contract!(
-        DiagnosticLog,
+        Coredump,
         Line,
-        "dpkg-query -S \"$diagnostic_path\" || true",
+        "dpkg-query -S /usr/bin/coredumpctl",
         (Smoke, 1, None)
     ),
     run_contract!(
-        DiagnosticLog,
+        Coredump,
         Line,
-        "dpkg-query -W -f='package=${binary:Package} version=${Version}\\n' gdb systemd systemd-coredump elfutils libc-bin 2>&1 || true",
+        "dpkg-query -W -f='package=${binary:Package} version=${Version}\\n' \"$COREDUMP_TOOL_PACKAGE\"",
         (Smoke, 1, None)
     ),
     run_contract!(
-        DiagnosticLog,
+        Coredump,
         Line,
-        "} > \"$artifact_dir/debugger-core-capabilities.txt\" 2>&1",
+        "} > \"$artifact_dir/coredump-capabilities.txt\" 2>&1",
         (Smoke, 1, Some((WorkflowOrderGroup::SmokePipeline, 36)))
     ),
     run_contract!(
@@ -1182,10 +1209,159 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 61)))
     ),
     run_contract!(
+        Coredump,
+        Line,
+        "kicad_launch_since=$(date --utc '+%Y-%m-%d %H:%M:%S UTC')",
+        (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 62)))
+    ),
+    run_contract!(
         WindowManager,
         Line,
-        "/usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+        "exec /usr/bin/kicad --frame pcb --software-rendering",
         (Smoke, 1, Some((WorkflowOrderGroup::GuiLifecycle, 70)))
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "test \"$(ulimit -S -c)\" = 0",
+        (Smoke, 2, None)
+    ),
+    run_contract!(Coredump, Line, "ulimit -S -c unlimited", (Smoke, 1, None)),
+    run_contract!(
+        Coredump,
+        Line,
+        "test \"$(ulimit -S -c)\" = unlimited",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "capture_kicad_coredump_info() {",
+        (Smoke, 1, None)
+    ),
+    run_contract!(Coredump, Line, "local launch_since=$2", (Smoke, 1, None)),
+    run_contract!(
+        Coredump,
+        Line,
+        "local expected_exe=/usr/bin/kicad",
+        (Smoke, 1, None)
+    ),
+    run_contract!(Coredump, Line, "local expected_signal=11", (Smoke, 1, None)),
+    run_contract!(
+        Coredump,
+        Line,
+        "local expected_cmdline='/usr/bin/kicad --frame pcb --software-rendering'",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "local coredump_validated=\"$RUNNER_TEMP/kicad-coredump-info.validated.txt\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "local coredump_rendered=\"$RUNNER_TEMP/kicad-coredump-info.rendered.txt\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "local coredump_artifact=\"$artifact_dir/kicad-coredump-info.txt\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "local coredump_limit_bytes=262144",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        ": > \"$coredump_validated\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "for coredump_attempt in $(seq 1 20); do",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "if LC_ALL=C /usr/bin/coredumpctl --no-pager --quiet --since \"$launch_since\" -1 info",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Token,
+        "\"COREDUMP_PID=$crashed_pid\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Token,
+        "\"COREDUMP_EXE=/usr/bin/kicad\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(Coredump, Token, "\"COREDUMP_SIGNAL=11\"", (Smoke, 1, None)),
+    run_contract!(
+        Coredump,
+        Token,
+        "\"COREDUMP_CMDLINE=/usr/bin/kicad --frame pcb --software-rendering\"",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        COREDUMP_INFO_IDENTITY_ASSERTION_LINE,
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "cp -- \"$coredump_current\" \"$coredump_validated\"; then",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "if [[ \"$coredump_captured\" == true ]]; then",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "cat \"$coredump_validated\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "} > \"$coredump_rendered\" 2>&1 || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "if ! head -c \"$coredump_limit_bytes\" \"$coredump_rendered\" > \"$coredump_artifact\" 2>/dev/null; then",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        Coredump,
+        Line,
+        "test ! -f \"$coredump_artifact\" || test \"$(stat --format='%s' \"$coredump_artifact\")\" -le \"$coredump_limit_bytes\" || return 0",
+        (Smoke, 1, None)
+    ),
+    run_contract!(Coredump, Line, "return 0", (Smoke, 2, None)),
+    run_contract!(
+        Coredump,
+        Line,
+        "if [[ \"$kicad_rc\" -eq 139 ]]; then capture_kicad_coredump_info \"$kicad_pid\" \"$kicad_launch_since\"; fi",
+        (Smoke, 1, None)
     ),
     run_contract!(
         DiagnosticLog,
@@ -1239,6 +1415,12 @@ const WORKFLOW_CONTRACT: &[WorkflowContractEntry] = &[
         ProcessSnapshot,
         Line,
         "cat \"/proc/$kicad_pid/status\" || true",
+        (Smoke, 1, None)
+    ),
+    run_contract!(
+        ProcessSnapshot,
+        Line,
+        "cat \"/proc/$kicad_pid/limits\" || true",
         (Smoke, 1, None)
     ),
     run_contract!(
@@ -1737,18 +1919,19 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
     BTreeMap::from([
         (WorkflowContractCategory::ActionPin, 2),
         (WorkflowContractCategory::AlwaysUpload, 3),
-        (WorkflowContractCategory::Availability, 10),
+        (WorkflowContractCategory::Availability, 11),
         (WorkflowContractCategory::CandidateCardinality, 11),
         (WorkflowContractCategory::CliVersion, 3),
-        (WorkflowContractCategory::DiagnosticLog, 19),
-        (WorkflowContractCategory::DpkgAssertion, 10),
+        (WorkflowContractCategory::Coredump, 38),
+        (WorkflowContractCategory::DiagnosticLog, 10),
+        (WorkflowContractCategory::DpkgAssertion, 11),
         (WorkflowContractCategory::DowngradePermission, 1),
-        (WorkflowContractCategory::ExecutablePreflight, 8),
+        (WorkflowContractCategory::ExecutablePreflight, 9),
         (WorkflowContractCategory::Exporter, 1),
         (WorkflowContractCategory::GuiLog, 2),
         (WorkflowContractCategory::HashProof, 3),
         (WorkflowContractCategory::ImageProof, 4),
-        (WorkflowContractCategory::InstallSpec, 10),
+        (WorkflowContractCategory::InstallSpec, 11),
         (WorkflowContractCategory::Isolation, 7),
         (WorkflowContractCategory::Junit, 1),
         (WorkflowContractCategory::LaneEvidence, 2),
@@ -1756,7 +1939,7 @@ fn expected_workflow_category_counts() -> BTreeMap<WorkflowContractCategory, usi
         (WorkflowContractCategory::Ppa, 1),
         (WorkflowContractCategory::PackageManifest, 1),
         (WorkflowContractCategory::ProcessLiveness, 3),
-        (WorkflowContractCategory::ProcessSnapshot, 15),
+        (WorkflowContractCategory::ProcessSnapshot, 16),
         (WorkflowContractCategory::PostCapture, 23),
         (WorkflowContractCategory::Screenshot, 1),
         (WorkflowContractCategory::StockPath, 3),
@@ -1890,6 +2073,7 @@ fn github_env_export(lock: &VersionsLock) -> LabResult<String> {
         ("XVFB", &lock.ubuntu_gui.xvfb),
         ("X11_UTILS", &lock.ubuntu_gui.x11_utils),
         ("IMAGEMAGICK", &lock.ubuntu_gui.imagemagick),
+        ("COREDUMP_TOOL", &lock.ubuntu_gui.coredump_tool),
         ("WINDOW_MANAGER", &lock.ubuntu_gui.window_manager),
     ];
     let mut values = BTreeMap::from([
@@ -3052,11 +3236,11 @@ const PROTECTED_PROGRAM_DIGESTS: &[(WorkflowStep, &str)] = &[
     ),
     (
         WorkflowStep::Install,
-        "37840f3bb9a17b5b002779bb846256408d62d58549500a19ea6e65c0c481b030",
+        "e71f5e123e4470d9a0feb8ab4e8822c8ab2111aca720763ccccf343e3b2b5007",
     ),
     (
         WorkflowStep::Smoke,
-        "7f6c377fd2cd0c14f88b8e5e66fa45bc1cd1136cad27f8e49f10a6dd225bb156",
+        "22378f99f65121a71da6025c0751caae294163cc9c4534fd6dd17bcf2b88f2f7",
     ),
     (
         WorkflowStep::EnsureEvidence,
@@ -3387,6 +3571,7 @@ fn validate_gui_workflow_value(workflow: &Yaml, lock: &VersionsLock) -> LabResul
             &lock.ubuntu_gui.xvfb,
             &lock.ubuntu_gui.x11_utils,
             &lock.ubuntu_gui.imagemagick,
+            &lock.ubuntu_gui.coredump_tool,
             &lock.ubuntu_gui.window_manager,
         ])
     {
@@ -4102,7 +4287,7 @@ mod tests {
             },
         );
         assert_eq!(categories, expected_workflow_category_counts());
-        assert_eq!(WORKFLOW_CONTRACT.len(), 254);
+        assert_eq!(WORKFLOW_CONTRACT.len(), 288);
         for required in WORKFLOW_CONTRACT {
             match required.locator {
                 WorkflowContractLocator::Run { kind, locations } => {
@@ -4379,6 +4564,7 @@ mod tests {
         for (spec, floating) in [
             ("\"$X11_UTILS_SPEC\"", "\"$X11_UTILS_PACKAGE\""),
             ("\"$IMAGEMAGICK_SPEC\"", "\"$IMAGEMAGICK_PACKAGE\""),
+            ("\"$COREDUMP_TOOL_SPEC\"", "\"$COREDUMP_TOOL_PACKAGE\""),
             ("\"$WINDOW_MANAGER_SPEC\"", "\"$WINDOW_MANAGER_PACKAGE\""),
         ] {
             assert_eq!(workflow.matches(spec).count(), 1);
@@ -4400,6 +4586,7 @@ mod tests {
             ("identify", "/usr/bin/identify"),
             ("openbox", "/usr/bin/openbox"),
             ("xprop", "/usr/bin/xprop"),
+            ("coredumpctl", "/usr/bin/coredumpctl"),
         ] {
             let preflight = format!("test \"$(command -v {command})\" = {path}");
             assert_eq!(workflow.matches(&preflight).count(), 1);
@@ -4412,7 +4599,7 @@ mod tests {
             }
         }
 
-        let manifest_tail = " \"$XVFB_PACKAGE\" \"$X11_UTILS_PACKAGE\" \"$IMAGEMAGICK_PACKAGE\" \"$WINDOW_MANAGER_PACKAGE\"";
+        let manifest_tail = " \"$XVFB_PACKAGE\" \"$X11_UTILS_PACKAGE\" \"$IMAGEMAGICK_PACKAGE\" \"$COREDUMP_TOOL_PACKAGE\" \"$WINDOW_MANAGER_PACKAGE\"";
         assert_eq!(workflow.matches(manifest_tail).count(), 1);
         let incomplete_manifest = workflow.replacen(manifest_tail, " \"$XVFB_PACKAGE\"", 1);
         assert!(validate_gui_workflow_contract(&incomplete_manifest, &lock).is_err());
@@ -4452,7 +4639,7 @@ mod tests {
                 "sudo apt-get install --yes --no-install-recommends --allow-downgrades \\",
                 "\n            \"$KICAD_SPEC\""
             ),
-            "changed the existing nine-package dependency transaction while minimizing Openbox",
+            "changed the exact ten-package dependency transaction while minimizing Openbox",
         );
 
         for (from, to, case) in [
@@ -4527,8 +4714,8 @@ mod tests {
                 "launched without successful WM readiness",
             ),
             (
-                "test \"${wm_ready:-false}\" = true\n          kill -0 \"$wm_pid\" 2>/dev/null\n          /usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
-                "test \"${wm_ready:-false}\" = true\n          :\n          /usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "test \"${wm_ready:-false}\" = true\n          kill -0 \"$wm_pid\" 2>/dev/null\n          kicad_launch_since=$(date --utc '+%Y-%m-%d %H:%M:%S UTC')",
+                "test \"${wm_ready:-false}\" = true\n          :\n          kicad_launch_since=$(date --utc '+%Y-%m-%d %H:%M:%S UTC')",
                 "launched after readiness without a final WM liveness check",
             ),
             (
@@ -4612,7 +4799,7 @@ mod tests {
             &mut kicad_before_wm,
             WorkflowStep::Smoke,
             "/usr/bin/openbox --sm-disable > \"$artifact_dir/wm.log\" 2>&1 &",
-            "/usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+            "exec /usr/bin/kicad --frame pcb --software-rendering",
         );
         assert!(validate_gui_workflow_value(&kicad_before_wm, &lock).is_err());
 
@@ -4667,29 +4854,38 @@ mod tests {
             );
         };
 
-        let launch = "/usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &";
+        let launch = "exec /usr/bin/kicad --frame pcb --software-rendering";
         let launch_sequence = concat!(
             "          test \"${wm_ready:-false}\" = true\n",
             "          kill -0 \"$wm_pid\" 2>/dev/null\n",
-            "          /usr/bin/kicad --frame pcb --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &\n",
-            "          kicad_pid=$!\n"
+            "          kicad_launch_since=$(date --utc '+%Y-%m-%d %H:%M:%S UTC')\n",
+            "          test \"$(ulimit -S -c)\" = 0\n",
+            "          (\n",
+            "            ulimit -S -c unlimited\n",
+            "            test \"$(ulimit -S -c)\" = unlimited\n",
+            "            exec /usr/bin/kicad --frame pcb --software-rendering\n",
+            "          ) > \"$artifact_dir/kicad-gui.log\" 2>&1 &\n",
+            "          kicad_pid=$!\n",
+            "          test \"$(ulimit -S -c)\" = 0\n"
         );
         assert_eq!(workflow.matches(launch_sequence).count(), 1);
+        reject(
+            "ulimit -S -c 0",
+            ":",
+            "removed the parent zero-limit defense-in-depth setting",
+        );
         for (replacement, case) in [
+            ("exec pcbnew", "reverted to the direct pcbnew launcher"),
             (
-                "pcbnew > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
-                "reverted to the direct pcbnew launcher",
-            ),
-            (
-                "/usr/bin/kicad --software-rendering > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "exec /usr/bin/kicad --software-rendering",
                 "removed the PCB dispatcher frame selection",
             ),
             (
-                "/usr/bin/kicad --frame pcb > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "exec /usr/bin/kicad --frame pcb",
                 "removed the software-rendering correction",
             ),
             (
-                "/usr/bin/kicad --frame pcb --software-rendering \"$fixture\" > \"$artifact_dir/kicad-gui.log\" 2>&1 &",
+                "exec /usr/bin/kicad --frame pcb --software-rendering \"$fixture\"",
                 "passed the file-integration fixture into the native GUI startup proof",
             ),
         ] {
@@ -4738,17 +4934,83 @@ mod tests {
                 "removed the hosted core-handler evidence",
             ),
             (
-                "for diagnostic_path in /usr/bin/gdb /usr/bin/coredumpctl /usr/bin/eu-stack /usr/bin/catchsegv; do",
-                "for diagnostic_path in /usr/bin/gdb; do",
-                "stopped inventorying the bounded debugger and core-analysis paths",
+                "if LC_ALL=C /usr/bin/coredumpctl --no-pager --quiet --since \"$launch_since\" -1 info",
+                "if LC_ALL=C /usr/bin/coredumpctl --no-pager --quiet info",
+                "removed the launch-time and most-recent-record bounds",
             ),
             (
-                "dpkg-query -W -f='package=${binary:Package} version=${Version}\\n' gdb systemd systemd-coredump elfutils libc-bin 2>&1 || true",
+                "cp -- \"$coredump_current\" \"$coredump_validated\"; then",
+                "cp -- \"$coredump_current\" \"$coredump_artifact\"; then",
+                "uploaded an unvalidated journal record",
+            ),
+            (
+                "} > \"$coredump_rendered\" 2>&1 || true",
+                "} > \"$coredump_rendered\" 2>&1",
+                "allowed coredump diagnostics to mask the primary lane result",
+            ),
+            (
+                "if ! head -c \"$coredump_limit_bytes\" \"$coredump_rendered\" > \"$coredump_artifact\" 2>/dev/null; then",
+                "if ! cat \"$coredump_rendered\" > \"$coredump_artifact\" 2>/dev/null; then",
+                "removed the whole-artifact byte bound",
+            ),
+            (
+                "test ! -f \"$coredump_artifact\" || test \"$(stat --format='%s' \"$coredump_artifact\")\" -le \"$coredump_limit_bytes\" || return 0",
                 ":",
-                "removed diagnostic package-version evidence",
+                "removed the final uploaded-artifact size assertion",
+            ),
+            (
+                "cat \"/proc/$kicad_pid/limits\" || true",
+                ":",
+                "removed the recorded core-limit defense-in-depth evidence",
             ),
         ] {
             reject(from, to, case);
+        }
+
+        for (filter, replacement, case) in [
+            (
+                "\"COREDUMP_PID=$crashed_pid\"",
+                "\"COREDUMP_PID=1\"",
+                "stopped binding the record to the crashed child PID",
+            ),
+            (
+                "\"COREDUMP_EXE=/usr/bin/kicad\"",
+                "\"COREDUMP_EXE=/usr/bin/false\"",
+                "stopped binding the record to exact KiCad",
+            ),
+            (
+                "\"COREDUMP_SIGNAL=11\"",
+                "\"COREDUMP_SIGNAL=6\"",
+                "stopped binding the record to SIGSEGV",
+            ),
+            (
+                "\"COREDUMP_CMDLINE=/usr/bin/kicad --frame pcb --software-rendering\"",
+                "\"COREDUMP_CMDLINE=/usr/bin/kicad\"",
+                "stopped binding the record to the stable launch command line",
+            ),
+        ] {
+            reject(filter, replacement, case);
+        }
+
+        for (replacement, case) in [
+            (
+                COREDUMP_INFO_IDENTITY_ASSERTION_LINE.replace("pid_count == 1", "pid_count >= 1"),
+                "accepted ambiguous PID fields",
+            ),
+            (
+                COREDUMP_INFO_IDENTITY_ASSERTION_LINE.replace(" && exe_count == 1", ""),
+                "stopped validating the returned executable",
+            ),
+            (
+                COREDUMP_INFO_IDENTITY_ASSERTION_LINE.replace(" && signal_count == 1", ""),
+                "stopped validating the returned signal",
+            ),
+            (
+                COREDUMP_INFO_IDENTITY_ASSERTION_LINE.replace(" && cmdline_count == 1", ""),
+                "stopped validating the returned command line",
+            ),
+        ] {
+            reject(COREDUMP_INFO_IDENTITY_ASSERTION_LINE, &replacement, case);
         }
 
         let evidence_boundary = "\"gui_input\":\"blank\",\"gui_board_opened\":false,\"fixture_evidence\":\"integrity_only\",\"file_integration_lane\":\"afk-linux-cli-drc\"";
@@ -4774,7 +5036,51 @@ mod tests {
             );
         }
 
-        assert!(!workflow.contains("/proc/$kicad_pid/environ"));
+        for forbidden in [
+            "/proc/$kicad_pid/environ",
+            "COREDUMP_ENVIRON",
+            "coredumpctl dump",
+            "coredumpctl debug",
+            "/usr/bin/gdb",
+            "bt full",
+        ] {
+            assert!(
+                !workflow.contains(forbidden),
+                "workflow contains forbidden raw/sensitive debugger path `{forbidden}`"
+            );
+        }
+    }
+
+    #[test]
+    fn gui_workflow_coredump_evidence_is_launch_bounded_identity_validated_and_whole_artifact_capped()
+     {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let workflow =
+            fs::read_to_string(repository.join(".github/workflows/kicad-gui-smoke.yml")).unwrap();
+
+        for required in [
+            "kicad_launch_since=$(date --utc '+%Y-%m-%d %H:%M:%S UTC')",
+            "--since \"$launch_since\" -1 info",
+            "\"COREDUMP_PID=$crashed_pid\"",
+            "\"COREDUMP_EXE=/usr/bin/kicad\"",
+            "\"COREDUMP_SIGNAL=11\"",
+            "\"COREDUMP_CMDLINE=/usr/bin/kicad --frame pcb --software-rendering\"",
+            "cp -- \"$coredump_current\" \"$coredump_validated\"",
+            "head -c \"$coredump_limit_bytes\" \"$coredump_rendered\" > \"$coredump_artifact\"",
+            "test \"$(stat --format='%s' \"$coredump_artifact\")\" -le \"$coredump_limit_bytes\"",
+            "capture_kicad_coredump_info \"$kicad_pid\" \"$kicad_launch_since\"",
+        ] {
+            assert!(
+                workflow.contains(required),
+                "workflow lacks reviewed coredump evidence boundary `{required}`"
+            );
+        }
+        assert!(!workflow.contains("coredumpctl --no-pager --quiet info \"$crashed_pid\""));
+        assert!(!workflow.contains("> /proc/sys/kernel/core_pattern"));
+        assert!(!workflow.contains("sysctl -w kernel.core_pattern"));
     }
 
     #[test]
@@ -5123,11 +5429,11 @@ mod tests {
             reject(PCBNEW_IMAGE_ASSERTION_LINE, &replacement, case);
         }
 
-        let waited_then_cleared = "              if wait \"$kicad_pid\"; then kicad_rc=0; else kicad_rc=$?; fi\n              kicad_pid=\n";
+        let waited_then_cleared = "              if wait \"$kicad_pid\"; then kicad_rc=0; else kicad_rc=$?; fi\n              if [[ \"$kicad_rc\" -eq 139 ]]; then capture_kicad_coredump_info \"$kicad_pid\" \"$kicad_launch_since\"; fi\n              kicad_pid=\n";
         assert_eq!(workflow.matches(waited_then_cleared).count(), 1);
         let double_wait = workflow.replacen(
             waited_then_cleared,
-            "              if wait \"$kicad_pid\"; then kicad_rc=0; else kicad_rc=$?; fi\n",
+            "              if wait \"$kicad_pid\"; then kicad_rc=0; else kicad_rc=$?; fi\n              if [[ \"$kicad_rc\" -eq 139 ]]; then capture_kicad_coredump_info \"$kicad_pid\" \"$kicad_launch_since\"; fi\n",
             1,
         );
         assert!(validate_gui_workflow_contract(&double_wait, &lock).is_err());
@@ -5542,6 +5848,7 @@ mod tests {
             ("\"$XVFB_SPEC\"", "\"$XVFB_PACKAGE\""),
             ("\"$X11_UTILS_SPEC\"", "\"$X11_UTILS_PACKAGE\""),
             ("\"$IMAGEMAGICK_SPEC\"", "\"$IMAGEMAGICK_PACKAGE\""),
+            ("\"$COREDUMP_TOOL_SPEC\"", "\"$COREDUMP_TOOL_PACKAGE\""),
             ("\"$WINDOW_MANAGER_SPEC\"", "\"$WINDOW_MANAGER_PACKAGE\""),
         ];
         for (spec, unpinned) in install_specs {
@@ -5638,7 +5945,7 @@ mod tests {
         let first = github_env_export(&lock).unwrap();
         let second = github_env_export(&lock).unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.lines().count(), 36);
+        assert_eq!(first.lines().count(), 39);
         assert!(first.lines().any(|line| {
             line == format!(
                 "TAURI_LINUX_X64_GNU_URL={}",
@@ -5661,6 +5968,7 @@ mod tests {
             "XVFB",
             "X11_UTILS",
             "IMAGEMAGICK",
+            "COREDUMP_TOOL",
             "WINDOW_MANAGER",
         ] {
             assert!(
