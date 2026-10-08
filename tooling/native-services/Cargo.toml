@@ -1,0 +1,29 @@
+[package]
+name = "native-services"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Fetches pinned, checksum-verified PocketBase and MinIO builds and runs them as disposable, loopback-only, windowless processes for tests."
+
+[dependencies]
+afk-lab = { path = "../afk" }
+flate2 = "1"
+getrandom = "0.3"
+hmac = "0.12"
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+ureq = { version = "2", default-features = false }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3.10"

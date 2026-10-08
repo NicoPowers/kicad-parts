@@ -3,6 +3,7 @@ members = [
     "apps/desktop",
     "apps/desktop-ui",
     "crates/catalog-browser",
+    "crates/collaboration",
     "crates/desktop-contract",
     "crates/kicad-integration",
     "crates/legacy-catalog",
@@ -10,6 +11,7 @@ members = [
     "tooling/fake-kicad-cli",
     "tooling/import-fixture",
     "tooling/journey-desktop",
+    "tooling/native-services",
     "tooling/xtask",
 ]
 resolver = "2"
