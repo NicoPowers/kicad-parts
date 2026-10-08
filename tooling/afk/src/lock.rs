@@ -39,6 +39,8 @@ pub struct ToolchainLock {
     pub go: String,
     pub go_linux_x64_sha256: String,
     pub go_url: String,
+    pub go_windows_x64_sha256: String,
+    pub go_windows_x64_url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -74,6 +76,8 @@ pub struct PocketBaseLock {
     pub asset_digest: String,
     pub sha256: String,
     pub expected_output: String,
+    pub windows_amd64_url: String,
+    pub windows_amd64_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -150,6 +154,10 @@ impl VersionsLock {
                 self.toolchain.go_linux_x64_sha256.as_str(),
             ),
             (
+                "toolchain.go_windows_x64_sha256",
+                self.toolchain.go_windows_x64_sha256.as_str(),
+            ),
+            (
                 "toolchain.tauri_cli_sha512",
                 self.toolchain.tauri_cli_sha512.as_str(),
             ),
@@ -160,6 +168,10 @@ impl VersionsLock {
             (
                 "components.pocketbase.sha256",
                 self.components.pocketbase.sha256.as_str(),
+            ),
+            (
+                "components.pocketbase.windows_amd64_sha256",
+                self.components.pocketbase.windows_amd64_sha256.as_str(),
             ),
             (
                 "components.minio.source_sha256",
@@ -259,10 +271,23 @@ impl VersionsLock {
                 format!("go{}.linux-amd64.tar.gz", self.toolchain.go),
             ),
             (
+                "toolchain.go_windows_x64_url",
+                self.toolchain.go_windows_x64_url.as_str(),
+                format!("/go{}.windows-amd64.zip", self.toolchain.go),
+            ),
+            (
                 "components.pocketbase.url",
                 self.components.pocketbase.url.as_str(),
                 format!(
                     "/v{0}/pocketbase_{0}_linux_amd64.zip",
+                    self.components.pocketbase.version
+                ),
+            ),
+            (
+                "components.pocketbase.windows_amd64_url",
+                self.components.pocketbase.windows_amd64_url.as_str(),
+                format!(
+                    "/v{0}/pocketbase_{0}_windows_amd64.zip",
                     self.components.pocketbase.version
                 ),
             ),
@@ -344,12 +369,20 @@ impl VersionsLock {
             ("toolchain.go", self.toolchain.go.as_str()),
             ("toolchain.go_url", self.toolchain.go_url.as_str()),
             (
+                "toolchain.go_windows_x64_url",
+                self.toolchain.go_windows_x64_url.as_str(),
+            ),
+            (
                 "components.pocketbase.version",
                 self.components.pocketbase.version.as_str(),
             ),
             (
                 "components.pocketbase.url",
                 self.components.pocketbase.url.as_str(),
+            ),
+            (
+                "components.pocketbase.windows_amd64_url",
+                self.components.pocketbase.windows_amd64_url.as_str(),
             ),
             (
                 "components.pocketbase.checksums_url",
@@ -533,6 +566,55 @@ mod tests {
         .unwrap();
         lock.images.busybox.reference = "docker.io/library/busybox:latest".into();
         assert!(lock.validate().is_err());
+    }
+
+    #[test]
+    fn native_windows_pins_share_the_linux_versions() {
+        let root = repository();
+        let load = || {
+            VersionsLock::load(
+                &root.join("infra/versions.lock"),
+                &root.join("rust-toolchain.toml"),
+            )
+            .unwrap()
+        };
+        // A Windows pin from another release fails even with a valid hash.
+        let mut lock = load();
+        lock.components.pocketbase.windows_amd64_url = lock
+            .components
+            .pocketbase
+            .windows_amd64_url
+            .replace("0.38.2", "0.38.1");
+        assert!(lock.validate().is_err());
+        let mut lock = load();
+        lock.toolchain.go_windows_x64_url = lock
+            .toolchain
+            .go_windows_x64_url
+            .replace("1.24.8", "1.24.7");
+        assert!(lock.validate().is_err());
+        let mut lock = load();
+        lock.components.pocketbase.windows_amd64_sha256 = "short".into();
+        assert!(lock.validate().is_err());
+        let mut lock = load();
+        lock.toolchain.go_windows_x64_sha256 = "g".repeat(64);
+        assert!(lock.validate().is_err());
+        let mut lock = load();
+        lock.components.pocketbase.windows_amd64_url = lock
+            .components
+            .pocketbase
+            .windows_amd64_url
+            .replace("https://", "http://");
+        assert!(lock.validate().is_err());
+        let text = fs::read_to_string(root.join("infra/versions.lock")).unwrap();
+        let missing = text
+            .lines()
+            .filter(|line| !line.starts_with("windows_amd64_sha256"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(toml::from_str::<VersionsLock>(&missing).is_err());
     }
 
     #[test]

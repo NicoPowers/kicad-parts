@@ -24,6 +24,10 @@ runner_gid = 65532
 go = "1.24.8"
 go_linux_x64_sha256 = "6842c516ca66c89d648a7f1dbe28e28c47b61b59f8f06633eb2ceb1188e9251d"
 go_url = "https://go.dev/dl/go1.24.8.linux-amd64.tar.gz"
+# Native Windows test services (tooling/native-services) build MinIO with this
+# same Go release.
+go_windows_x64_sha256 = "0de7b65422d9377404a22f3903f17b20e4065f6c43e136ae2de16494c8c6b057"
+go_windows_x64_url = "https://go.dev/dl/go1.24.8.windows-amd64.zip"
 
 [images.busybox]
 version = "1.37.0-musl"
@@ -45,6 +49,8 @@ release_api = "https://api.github.com/repos/pocketbase/pocketbase/releases/tags/
 asset_digest = "sha256:3749cf7e85b00027f3fb92494037e154aa023276246a101cd0592260b94ad1c3"
 sha256 = "3749cf7e85b00027f3fb92494037e154aa023276246a101cd0592260b94ad1c3"
 expected_output = "pocketbase version 0.38.2"
+windows_amd64_url = "https://github.com/pocketbase/pocketbase/releases/download/v0.38.2/pocketbase_0.38.2_windows_amd64.zip"
+windows_amd64_sha256 = "9114bb978c694f49064bbf6f7ae28cf2bf01042a4ae9be26df1b98a4729a597e"
 
 [components.minio]
 version = "RELEASE.2025-10-15T17-29-55Z"
