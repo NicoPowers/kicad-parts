@@ -63,69 +63,7 @@ pub fn minio_binary(repository: &Path) -> ServiceResult<PathBuf> {
         "native-services: building MinIO {} from source with Go {} (first run only)",
         minio.archive.version, pins.go.archive.version
     );
-    // The same stamps as infra/docker/minio/Dockerfile.
-    let ldflags = format!(
-        "-s -w -X github.com/minio/minio/cmd.Version={build} \
-         -X github.com/minio/minio/cmd.CopyrightYear={year} \
-         -X github.com/minio/minio/cmd.ReleaseTag={release} \
-         -X github.com/minio/minio/cmd.CommitID={commit} \
-         -X github.com/minio/minio/cmd.ShortCommitID={short} \
-         -X github.com/minio/minio/cmd.GOPATH=/go \
-         -X github.com/minio/minio/cmd.GOROOT=/usr/local/go",
-        build = minio.build_version,
-        year = minio.copyright_year,
-        release = minio.archive.version,
-        commit = minio.commit,
-        short = minio.short_commit,
-    );
-    let go_path = cache.root().join("go-path");
-    let mut command = Command::new(go_root.join("bin").join(pins.platform.executable("go")));
-    command
-        .args([
-            "build",
-            "-tags",
-            "kqueue",
-            "-trimpath",
-            "-ldflags",
-            &ldflags,
-            "-o",
-        ])
-        .arg(&staging)
-        .arg(".")
-        .current_dir(&source)
-        // Only the variables below reach the build, so a developer's own Go
-        // settings cannot change what gets built.
-        .env_clear()
-        .env("GOROOT", &go_root)
-        .env("GOPATH", &go_path)
-        .env("GOMODCACHE", go_path.join("pkg").join("mod"))
-        .env("GOCACHE", cache.root().join("go-build"))
-        .env("GOENV", "off")
-        .env("GOTOOLCHAIN", "local")
-        .env("GOFLAGS", "-mod=readonly")
-        .env("GOPROXY", "https://proxy.golang.org")
-        .env("GOSUMDB", "sum.golang.org")
-        .env("CGO_ENABLED", "0")
-        .env("GOOS", pins.platform.goos())
-        .env("GOARCH", "amd64")
-        .env("GOAMD64", "v1");
-    for name in [
-        "SystemRoot",
-        "SystemDrive",
-        "windir",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "HOME",
-        "PATH",
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "NO_PROXY",
-    ] {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
+    let mut command = go_build_command(&pins, &go_root, &source, &staging, cache.root());
     let started = Instant::now();
     let output = run_hidden("go build (MinIO)", &mut command)?;
     if !output.status.success() {
@@ -155,6 +93,82 @@ pub fn minio_binary(repository: &Path) -> ServiceResult<PathBuf> {
     );
     *cached = Some(executable.clone());
     Ok(executable)
+}
+
+/// The exact `go build` for MinIO. Nothing about this machine may reach
+/// the binary, or its pinned SHA-256 would not reproduce:
+/// - `-buildvcs=false`: the source sits inside this repository's
+///   `target/`, so Go would otherwise stamp this repository's git commit
+///   and dirty flag into the binary;
+/// - `-trimpath`: no local paths;
+/// - a cleared environment with Go's settings fixed (`GOENV=off` ignores
+///   the user's `go env -w` file, `GOTOOLCHAIN=local`, `CGO_ENABLED=0`,
+///   fixed `GOOS`/`GOARCH`/`GOAMD64`) and caches under `cache_root`;
+/// - no `PATH`, so Go cannot find git or a C compiler.
+fn go_build_command(
+    pins: &NativePins,
+    go_root: &Path,
+    source: &Path,
+    output: &Path,
+    cache_root: &Path,
+) -> Command {
+    let minio = &pins.minio;
+    // The same stamps as infra/docker/minio/Dockerfile.
+    let ldflags = format!(
+        "-s -w -X github.com/minio/minio/cmd.Version={build}          -X github.com/minio/minio/cmd.CopyrightYear={year}          -X github.com/minio/minio/cmd.ReleaseTag={release}          -X github.com/minio/minio/cmd.CommitID={commit}          -X github.com/minio/minio/cmd.ShortCommitID={short}          -X github.com/minio/minio/cmd.GOPATH=/go          -X github.com/minio/minio/cmd.GOROOT=/usr/local/go",
+        build = minio.build_version,
+        year = minio.copyright_year,
+        release = minio.archive.version,
+        commit = minio.commit,
+        short = minio.short_commit,
+    );
+    let go_path = cache_root.join("go-path");
+    let mut command = Command::new(go_root.join("bin").join(pins.platform.executable("go")));
+    command
+        .args([
+            "build",
+            "-buildvcs=false",
+            "-tags",
+            "kqueue",
+            "-trimpath",
+            "-ldflags",
+            &ldflags,
+            "-o",
+        ])
+        .arg(output)
+        .arg(".")
+        .current_dir(source)
+        .env_clear()
+        .env("GOROOT", go_root)
+        .env("GOPATH", &go_path)
+        .env("GOMODCACHE", go_path.join("pkg").join("mod"))
+        .env("GOCACHE", cache_root.join("go-build"))
+        .env("GOENV", "off")
+        .env("GOTOOLCHAIN", "local")
+        .env("GOFLAGS", "-mod=readonly")
+        .env("GOPROXY", "https://proxy.golang.org")
+        .env("GOSUMDB", "sum.golang.org")
+        .env("CGO_ENABLED", "0")
+        .env("GOOS", pins.platform.goos())
+        .env("GOARCH", "amd64")
+        .env("GOAMD64", "v1");
+    // Only what the OS and a proxy need.
+    for name in [
+        "SystemRoot",
+        "SystemDrive",
+        "windir",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
 }
 
 /// A running single-drive MinIO server on random 127.0.0.1 ports, with
@@ -281,5 +295,80 @@ fn wait_until_live(
             )));
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repository_root;
+    use std::collections::BTreeMap;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn the_minio_build_cannot_pick_up_anything_from_this_machine() {
+        let pins = NativePins::load(&repository_root()).unwrap();
+        let command = go_build_command(
+            &pins,
+            Path::new("goroot"),
+            Path::new("source"),
+            Path::new("out/minio.exe"),
+            Path::new("cache"),
+        );
+        let args: Vec<&OsStr> = command.get_args().collect();
+        for flag in [
+            "build",
+            "-buildvcs=false",
+            "-trimpath",
+            "-ldflags",
+            "-o",
+            ".",
+        ] {
+            assert!(args.contains(&OsStr::new(flag)), "missing {flag}: {args:?}");
+        }
+        let ldflags = args[args.iter().position(|arg| *arg == "-ldflags").unwrap() + 1]
+            .to_string_lossy()
+            .into_owned();
+        assert!(ldflags.contains(&format!("cmd.CommitID={}", pins.minio.commit)));
+        let envs: BTreeMap<String, Option<String>> = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for (name, value) in [
+            ("GOENV", "off"),
+            ("GOTOOLCHAIN", "local"),
+            ("CGO_ENABLED", "0"),
+            ("GOARCH", "amd64"),
+            ("GOAMD64", "v1"),
+            ("GOFLAGS", "-mod=readonly"),
+            ("GOOS", pins.platform.goos()),
+        ] {
+            assert_eq!(envs.get(name), Some(&Some(value.to_owned())), "{name}");
+        }
+        assert_eq!(
+            envs.get("GOCACHE"),
+            Some(&Some(
+                Path::new("cache")
+                    .join("go-build")
+                    .to_string_lossy()
+                    .into_owned()
+            ))
+        );
+        // A cleared environment: no PATH (so no git) and no user Go settings.
+        for name in [
+            "PATH",
+            "Path",
+            "HOME",
+            "USERPROFILE",
+            "GOPRIVATE",
+            "GOEXPERIMENT",
+        ] {
+            assert!(!envs.contains_key(name), "{name} reaches the build");
+        }
     }
 }
