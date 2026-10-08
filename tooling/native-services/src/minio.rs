@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 /// Returns a MinIO executable built from the pinned source with the pinned
 /// Go toolchain. The first call builds it (several minutes, mostly module
 /// downloads verified against the source's go.sum); later calls reuse the
-/// cached build while its recorded hash still matches.
+/// cached build while its hash still matches. Where the lock pins the
+/// build's SHA-256 (Windows), a build that differs is rejected.
 pub fn minio_binary(repository: &Path) -> ServiceResult<PathBuf> {
     static BINARY: Mutex<Option<PathBuf>> = Mutex::new(None);
     let mut cached = BINARY.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -36,6 +37,10 @@ pub fn minio_binary(repository: &Path) -> ServiceResult<PathBuf> {
     let stamp = build_dir.join("minio.sha256");
     if executable.is_file()
         && fs::read_to_string(&stamp).ok().as_deref() == Some(sha256_file(&executable)?.as_str())
+        && minio
+            .build_sha256
+            .as_ref()
+            .is_none_or(|pinned| fs::read_to_string(&stamp).ok().as_deref() == Some(pinned))
     {
         *cached = Some(executable.clone());
         return Ok(executable);
@@ -132,6 +137,15 @@ pub fn minio_binary(repository: &Path) -> ServiceResult<PathBuf> {
     }
     make_executable(&staging)?;
     let hash = sha256_file(&staging)?;
+    if let Some(pinned) = &minio.build_sha256 {
+        if &hash != pinned {
+            let _ = fs::remove_file(&staging);
+            return Err(error(format!(
+                "the MinIO build has SHA-256 {hash}, but infra/versions.lock pins {pinned}; \
+                 the toolchain, source or build flags differ from the pinned build"
+            )));
+        }
+    }
     publish(&staging, &executable)?;
     fs::write(&stamp, &hash)
         .map_err(|io| error(format!("cannot write `{}`: {io}", stamp.display())))?;
@@ -154,7 +168,7 @@ pub struct MinioServer {
 
 impl MinioServer {
     /// Starts MinIO over `data_dir` (which it formats when empty) and waits
-    /// until it is live. `work_dir` holds its log and certificate
+    /// until it is ready. `work_dir` holds its log and certificate
     /// directory, so nothing is written to the user's home.
     pub fn start(binary: &Path, data_dir: &Path, work_dir: &Path) -> ServiceResult<Self> {
         create_dir(data_dir)?;
@@ -244,7 +258,8 @@ fn wait_until_live(
     endpoint: &str,
     timeout: Duration,
 ) -> ServiceResult<()> {
-    let live = format!("{endpoint}/minio/health/live");
+    // "live" answers before the drive is initialised; "ready" waits for it.
+    let ready = format!("{endpoint}/minio/health/ready");
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(2))
         .build();
@@ -256,12 +271,12 @@ fn wait_until_live(
                 process.log_tail()
             )));
         }
-        if matches!(agent.get(&live).call(), Ok(response) if response.status() == 200) {
+        if matches!(agent.get(&ready).call(), Ok(response) if response.status() == 200) {
             return Ok(());
         }
         if Instant::now() > deadline {
             return Err(error(format!(
-                "minio was not live after {timeout:?}:\n{}",
+                "minio was not ready after {timeout:?}:\n{}",
                 process.log_tail()
             )));
         }

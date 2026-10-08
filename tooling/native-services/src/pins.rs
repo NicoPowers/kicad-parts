@@ -63,6 +63,8 @@ pub struct MinioSource {
     pub short_commit: String,
     pub build_version: String,
     pub copyright_year: String,
+    /// The SHA-256 the build must produce, where the lock pins one.
+    pub build_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,6 +129,10 @@ impl NativePins {
                 short_commit: minio.short_commit.clone(),
                 build_version: minio.build_version.clone(),
                 copyright_year: minio.copyright_year.clone(),
+                build_sha256: match platform {
+                    Platform::WindowsX64 => Some(minio.windows_amd64_build_sha256.clone()),
+                    Platform::LinuxX64 => None,
+                },
             },
         }
     }
@@ -149,7 +155,9 @@ mod tests {
         let linux = NativePins::select(&lock, Platform::LinuxX64);
         assert_eq!(windows.pocketbase.version, linux.pocketbase.version);
         assert_eq!(windows.go.archive.version, linux.go.archive.version);
-        assert_eq!(windows.minio, linux.minio);
+        assert_eq!(windows.minio.archive, linux.minio.archive);
+        assert_eq!(windows.minio.commit, linux.minio.commit);
+        assert!(windows.minio.build_sha256.is_some());
         assert!(windows.pocketbase.url.ends_with("_windows_amd64.zip"));
         assert!(linux.pocketbase.url.ends_with("_linux_amd64.zip"));
         assert_ne!(windows.pocketbase.sha256, linux.pocketbase.sha256);

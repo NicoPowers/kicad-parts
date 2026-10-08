@@ -93,6 +93,7 @@ pub struct MinioLock {
     pub release_url: String,
     pub registry_status: String,
     pub expected_arch: String,
+    pub windows_amd64_build_sha256: String,
 }
 
 impl VersionsLock {
@@ -176,6 +177,10 @@ impl VersionsLock {
             (
                 "components.minio.source_sha256",
                 self.components.minio.source_sha256.as_str(),
+            ),
+            (
+                "components.minio.windows_amd64_build_sha256",
+                self.components.minio.windows_amd64_build_sha256.as_str(),
             ),
         ] {
             let length = if field.ends_with("sha512") { 128 } else { 64 };
@@ -594,6 +599,9 @@ mod tests {
         assert!(lock.validate().is_err());
         let mut lock = load();
         lock.components.pocketbase.windows_amd64_sha256 = "short".into();
+        assert!(lock.validate().is_err());
+        let mut lock = load();
+        lock.components.minio.windows_amd64_build_sha256 = "short".into();
         assert!(lock.validate().is_err());
         let mut lock = load();
         lock.toolchain.go_windows_x64_sha256 = "g".repeat(64);

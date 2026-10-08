@@ -27,6 +27,7 @@ pub mod s3;
 use std::fmt;
 use std::path::PathBuf;
 
+pub use archive::extract_zip;
 pub use fetch::{Cache, sha256_file, sha256_hex};
 pub use minio::{MinioServer, minio_binary};
 pub use pins::{GoToolchain, MinioSource, NativePins, PinnedAsset, Platform};
@@ -56,10 +57,21 @@ pub(crate) fn error(message: impl Into<String>) -> ServiceError {
 
 /// The repository root, found from this crate's manifest directory.
 pub fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
-        .expect("the repository root exists")
+        .expect("the repository root exists");
+    without_verbatim_prefix(root)
+}
+
+/// Turns Windows' `\\?\C:\...` (what `canonicalize` returns) into
+/// `C:\...`. Child programs need the plain form: Go, for one, reads the `?`
+/// as a glob wildcard, and its go:embed patterns then match nothing.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 /// A random string of ASCII letters and digits from the OS random source,
@@ -92,6 +104,23 @@ pub fn random_name(length: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verbatim_prefixes_are_removed() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\C:\repo")),
+            PathBuf::from(r"C:\repo")
+        );
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share")),
+            PathBuf::from(r"\\?\UNC\server\share")
+        );
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from("/srv/repo")),
+            PathBuf::from("/srv/repo")
+        );
+        assert!(!repository_root().to_string_lossy().contains('?'));
+    }
 
     #[test]
     fn random_tokens_have_the_requested_length_and_alphabet() {
