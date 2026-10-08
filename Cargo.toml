@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "apps/desktop",
+    "apps/desktop-ui",
     "crates/catalog-browser",
     "crates/desktop-contract",
     "crates/kicad-integration",

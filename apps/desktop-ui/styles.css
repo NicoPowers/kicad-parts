@@ -1,0 +1,561 @@
+:root {
+  --ink: #1b2430;
+  --muted: #566476;
+  --line: #d5dce5;
+  --panel: #ffffff;
+  --canvas: #f2f4f7;
+  --brand: #1f3a5f;
+  --brand-ink: #f4f7fb;
+  --accent: #2563a8;
+  --accent-soft: #e3edf8;
+  --danger: #a32121;
+  --danger-soft: #fdecec;
+  --warn-soft: #fff6e0;
+  --warn-line: #e3b341;
+  --ok: #1d6b3a;
+  --ok-soft: #e4f4ea;
+  --radius: 8px;
+  color-scheme: light;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--canvas);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+code,
+pre {
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: 0.9em;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+  padding: 0.4rem 0.85rem;
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* Header */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 0.6rem 1.25rem;
+  background: var(--brand);
+  color: var(--brand-ink);
+}
+
+.brand {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.catalog-summary {
+  margin: 0;
+  color: #c9d4e2;
+}
+
+.catalog-error {
+  color: #ffd2d2;
+}
+
+.kicad-badge {
+  margin: 0 0 0 auto;
+  padding: 0.2rem 0.75rem;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.kicad-settings {
+  margin-left: auto;
+  position: relative;
+}
+
+.kicad-settings > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.kicad-settings > summary::-webkit-details-marker {
+  display: none;
+}
+
+.kicad-badge-ready {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.kicad-badge-ready::before {
+  content: "\25CF\00A0";
+}
+
+.kicad-badge-problem {
+  background: var(--warn-soft);
+  color: #6b4a00;
+}
+
+.kicad-settings-body {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.5rem);
+  z-index: 10;
+  width: 42rem;
+  padding: 1rem;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(15 30 50 / 18%);
+}
+
+.kicad-settings-body p {
+  margin-top: 0;
+  overflow-wrap: anywhere;
+}
+
+/* KiCad problem panel */
+.kicad-problem {
+  margin: 1rem 1.25rem 0;
+  padding: 1rem 1.25rem;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-line);
+  border-left-width: 6px;
+  border-radius: var(--radius);
+}
+
+.kicad-problem h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.15rem;
+}
+
+.kicad-problem p {
+  margin: 0 0 0.5rem;
+  max-width: 60rem;
+}
+
+.kicad-problem-details {
+  margin: 0 0 0.75rem;
+  padding-left: 1.2rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.override-form label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+}
+
+.override-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.override-row input {
+  flex: 1 1 24rem;
+  min-width: 16rem;
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+}
+
+/* Workspace */
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(20rem, 26rem) 1fr;
+  gap: 1rem;
+  padding: 1rem 1.25rem 1.25rem;
+}
+
+.search-pane,
+.part-panel {
+  min-height: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.search-pane {
+  display: flex;
+  flex-direction: column;
+  padding: 0.9rem 0 0;
+}
+
+.search-label {
+  padding: 0 0.9rem;
+  font-weight: 600;
+}
+
+.search-input {
+  margin: 0.35rem 0.9rem 0;
+  font: inherit;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+}
+
+.result-count {
+  margin: 0.5rem 0.9rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+}
+
+.result {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.1rem 0.75rem;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid #edf0f4;
+  border-left: 4px solid transparent;
+  border-radius: 0;
+  padding: 0.55rem 0.9rem 0.55rem calc(0.9rem - 4px);
+  background: transparent;
+}
+
+.result:hover {
+  background: #f5f8fb;
+}
+
+.result[aria-current="true"] {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+}
+
+.result-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-ipn {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.result-description {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.88rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Part panel */
+.part-panel {
+  overflow-y: auto;
+  padding: 1.1rem 1.4rem 1.4rem;
+}
+
+.empty-state {
+  max-width: 28rem;
+  margin: 18vh auto 0;
+  text-align: center;
+  color: var(--muted);
+}
+
+.empty-state h2 {
+  color: var(--ink);
+  font-size: 1.2rem;
+}
+
+.part-header h2 {
+  margin: 0;
+  font-size: 1.45rem;
+}
+
+.part-description {
+  margin: 0.2rem 0 0.75rem;
+  color: var(--muted);
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 2rem;
+  margin: 0;
+}
+
+.fact dt {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.fact dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.datasheet {
+  margin: 0.6rem 0 0;
+}
+
+a {
+  color: var(--accent);
+}
+
+.preview {
+  margin-top: 1.4rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.preview h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.preview-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 1rem;
+  margin: 0 0 0.6rem;
+}
+
+.reference {
+  background: #eef1f5;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+
+.provenance,
+.alternates {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.alternates {
+  margin: -0.3rem 0 0.6rem;
+}
+
+.preview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 40rem);
+  gap: 0.9rem;
+}
+
+.preview-grid.multi {
+  grid-template-columns: repeat(auto-fill, minmax(22rem, 1fr));
+}
+
+.preview-figure {
+  margin: 0;
+}
+
+/* Symbols on KiCad's light schematic paper, footprints on its dark board. */
+.canvas {
+  display: block;
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: zoom-in;
+}
+
+.canvas-symbol {
+  background: #ffffff;
+}
+
+.canvas-footprint {
+  background: #001023;
+  border-color: #001023;
+}
+
+.canvas img {
+  display: block;
+  width: 100%;
+  height: 22rem;
+  object-fit: contain;
+}
+
+.preview-grid.multi .canvas img {
+  height: 20rem;
+}
+
+.preview-figure figcaption {
+  margin-top: 0.4rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.zoom-dialog {
+  width: min(92vw, 90rem);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  box-shadow: 0 16px 48px rgb(10 20 35 / 35%);
+}
+
+.zoom-dialog::backdrop {
+  background: rgb(10 20 35 / 60%);
+}
+
+.zoom-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.zoom-header h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.zoom-dialog .canvas {
+  border: 0;
+  border-radius: 0 0 var(--radius) var(--radius);
+  cursor: default;
+}
+
+.zoom-dialog .canvas img {
+  height: 80vh;
+}
+
+.loading {
+  color: var(--muted);
+}
+
+.problem {
+  padding: 0.75rem 1rem;
+  background: var(--danger-soft);
+  border: 1px solid #e7b4b4;
+  border-left: 5px solid var(--danger);
+  border-radius: var(--radius);
+}
+
+.problem p {
+  margin: 0 0 0.4rem;
+}
+
+.problem.quiet {
+  background: #f5f7fa;
+  border-color: var(--line);
+  border-left-color: #9aa7b6;
+}
+
+.problem-title {
+  font-weight: 700;
+}
+
+.cli-label {
+  font-weight: 600;
+}
+
+.cli-message,
+.command pre {
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.7rem;
+  background: #fff;
+  border: 1px solid #e7b4b4;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.hint {
+  color: var(--muted);
+}
+
+.all-fields {
+  margin-top: 1.4rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.all-fields summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.all-fields table {
+  margin-top: 0.6rem;
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9rem;
+}
+
+.all-fields th,
+.all-fields td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid #edf0f4;
+  overflow-wrap: anywhere;
+}
+
+.all-fields tbody th {
+  width: 12rem;
+  color: var(--muted);
+  font-weight: 600;
+}

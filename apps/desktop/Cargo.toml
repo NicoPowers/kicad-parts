@@ -1,0 +1,27 @@
+[package]
+name = "kicad-parts-desktop"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Tauri desktop shell: wires catalog-browser use cases to the Leptos UI."
+
+[[bin]]
+name = "kicad-parts-desktop"
+path = "src/main.rs"
+
+[features]
+# Serve the built UI from inside the binary instead of the trunk dev server.
+# `cargo tauri build` turns this on; the journeys build with it as well.
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+catalog-browser = { path = "../../crates/catalog-browser" }
+desktop-contract = { path = "../../crates/desktop-contract" }
+kicad-integration = { path = "../../crates/kicad-integration" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2", features = [] }

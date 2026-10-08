@@ -2,3 +2,5 @@
 channel = "1.85.1"
 profile = "minimal"
 components = ["clippy", "rustfmt"]
+# The Leptos desktop UI compiles to WebAssembly with trunk.
+targets = ["wasm32-unknown-unknown"]
