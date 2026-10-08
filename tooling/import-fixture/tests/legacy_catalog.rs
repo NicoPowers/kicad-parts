@@ -263,8 +263,13 @@ fn semantic_hash_ignores_csv_serialization_but_byte_hash_does_not() {
     copy_inputs(&source_root, temporary.path());
     let before = build_manifest(temporary.path()).unwrap();
     let path = temporary.path().join("database/g-ana.csv");
-    let bytes = fs::read(&path).unwrap();
-    let changed = String::from_utf8(bytes).unwrap().replace("\r\n", "\n");
+    let text = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+    // Flip the line-ending style so the bytes change whatever was committed.
+    let changed = if text.contains("\r\n") {
+        text.replace("\r\n", "\n")
+    } else {
+        text.replace('\n', "\r\n")
+    };
     fs::write(&path, changed).unwrap();
     let after = build_manifest(temporary.path()).unwrap();
     assert_ne!(

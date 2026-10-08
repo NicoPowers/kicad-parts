@@ -61,7 +61,6 @@ pub fn validate_compose_policy(
         .then_some(())
         .ok_or_else(|| LabError("normalized Compose project name is not run-scoped".into()))?;
     reject_forbidden_keys(&Value::Object(root.clone()), "root")?;
-    reject_native_automation_tokens(&Value::Object(root.clone()), "root")?;
 
     let services = object(required(root, "services", "root")?, "services")?;
     exact_keys(
@@ -583,52 +582,6 @@ fn reject_forbidden_keys(value: &Value, path: &str) -> LabResult<()> {
     Ok(())
 }
 
-fn reject_native_automation_tokens(value: &Value, path: &str) -> LabResult<()> {
-    match value {
-        Value::Object(map) => {
-            for (key, child) in map {
-                reject_native_automation_text(key, &format!("{path}.{key}"))?;
-                reject_native_automation_tokens(child, &format!("{path}.{key}"))?;
-            }
-        }
-        Value::Array(values) => {
-            for (index, child) in values.iter().enumerate() {
-                reject_native_automation_tokens(child, &format!("{path}[{index}]"))?;
-            }
-        }
-        Value::String(text) => reject_native_automation_text(text, path)?,
-        _ => {}
-    }
-    Ok(())
-}
-
-fn reject_native_automation_text(text: &str, path: &str) -> LabResult<()> {
-    let native = [
-        ["ki", "cad"].concat(),
-        ["ki", "cad-cli"].concat(),
-        ["pcb", "new"].concat(),
-        ["ki", "cad-gui-smoke"].concat(),
-        ["afk", "-smoke"].concat(),
-        ["gui", "-config"].concat(),
-    ];
-    let automation_prefix = ["ki", "cad_"].concat();
-    if let Some(token) = text
-        .split(|character: char| {
-            !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
-        })
-        .filter(|token| !token.is_empty())
-        .find(|token| {
-            let lower = token.to_ascii_lowercase();
-            native.contains(&lower) || lower.starts_with(&automation_prefix)
-        })
-    {
-        return Err(LabError(format!(
-            "normalized Compose contains forbidden native-application token `{token}` at `{path}`"
-        )));
-    }
-    Ok(())
-}
-
 fn canonical_checked(path: &Path) -> LabResult<PathBuf> {
     let canonical = path
         .canonicalize()
@@ -1090,32 +1043,28 @@ mod tests {
         }
     }
 
+    /// The allowlist is exhaustive: an extra service, command, image, or
+    /// environment entry is rejected without any word filter.
     #[test]
-    fn normalized_compose_rejects_native_application_variants() {
-        let executable = ["ki", "cad"].concat();
-        let command_line = ["pcb", "new"].concat();
-        let automation_env = format!("{}_CONFIG_HOME", executable.to_ascii_uppercase());
-        let service_name = ["ki", "cad-cli"].concat();
+    fn normalized_compose_rejects_unlisted_services_and_settings() {
         let mutations: Vec<PolicyMutation> = vec![
-            Box::new(move |model, _| {
+            Box::new(|model, _| {
                 model["services"]
                     .as_object_mut()
                     .unwrap()
-                    .insert(service_name.clone(), json!({}));
+                    .insert("extra-service".into(), json!({}));
             }),
-            Box::new(move |model, _| {
-                model["services"]["test-runner"]["command"] =
-                    json!([command_line.clone()]);
+            Box::new(|model, _| {
+                model["services"]["test-runner"]["command"] = json!(["unlisted-tool"]);
             }),
-            Box::new(move |model, _| {
-                model["services"]["test-runner"]["image"] =
-                    json!(format!("docker.invalid/{executable}:locked"));
+            Box::new(|model, _| {
+                model["services"]["test-runner"]["image"] = json!("docker.invalid/other:locked");
             }),
-            Box::new(move |model, _| {
+            Box::new(|model, _| {
                 model["services"]["test-runner"]["environment"]
                     .as_object_mut()
                     .unwrap()
-                    .insert(automation_env.clone(), json!("/tmp/native-config"));
+                    .insert("EXTRA_CONFIG_HOME".into(), json!("/tmp/extra-config"));
             }),
         ];
         for mutation in mutations {

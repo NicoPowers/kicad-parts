@@ -1,6 +1,8 @@
+mod dockerfile;
 mod lock;
 mod policy;
 
+pub use dockerfile::{DOCKERFILE_SERVICES, dockerfile_logical_lines, validate_dockerfile};
 pub use lock::{VersionsLock, validate_digest};
 pub use policy::{
     ComposePolicyReport, PolicyExpectation, expected_service_resource_bounds,
@@ -408,10 +410,7 @@ impl RunPlan {
                             "TAURI_CLI_LINUX_X64_GNU_SHA512",
                             "AFK_TAURI_LINUX_X64_GNU_SHA512",
                         ),
-                        (
-                            "TAURI_CLI_LINUX_X64_GNU_URL",
-                            "AFK_TAURI_LINUX_X64_GNU_URL",
-                        ),
+                        ("TAURI_CLI_LINUX_X64_GNU_URL", "AFK_TAURI_LINUX_X64_GNU_URL"),
                     ]),
                 ),
             ]),

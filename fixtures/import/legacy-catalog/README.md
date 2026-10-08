@@ -13,4 +13,6 @@ cargo run -p legacy-import-fixture -- write .
 cargo run -p legacy-import-fixture -- check .
 ```
 
+Byte hashes describe the committed bytes. `.gitattributes` disables line-ending conversion for the catalog trees so every checkout reproduces them; some files were committed with CRLF and must stay that way. `database/parts.sqlite` is committed as a frozen legacy projection because no supported generator remains. It was regenerated from the committed CSVs on 2026-10-08; its semantic hash matches the original capture, and only its byte hash was re-recorded.
+
 The checked manifest records known defects as diagnostics. In particular, CSV discovery produces 21 SQLite category tables while the KiCad database descriptor intentionally exposes 19; `mec` and `pcb` are not descriptor entries. The older shell generator also omits `pcb`. Unresolved local and embedded 3D references remain visible rather than being discarded.

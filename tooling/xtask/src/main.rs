@@ -1,10 +1,11 @@
 use afk_lab::{
-    CleanupAction, ComposeCommand, EvidenceManifest, FailureStage, LabError, LabResult, LaneResult,
-    LaneStatus, RunPlan, RuntimeIsolationEvidence, VersionsLock, artifact_integrity_for_bytes,
-    choose_compose, cleanup_action, enumerate_artifacts, expected_service_resource_bounds,
-    expected_service_tmpfs_bounds, expected_service_writable_targets, host_secret_path_exists,
-    initial_lanes, protected_sentinels, redact, reject_runtime_state_errors, service_is_healthy,
-    validate_compose_policy, validate_digest, validate_minio_output, validate_pocketbase_output,
+    CleanupAction, ComposeCommand, DOCKERFILE_SERVICES, EvidenceManifest, FailureStage, LabError,
+    LabResult, LaneResult, LaneStatus, RunPlan, RuntimeIsolationEvidence, VersionsLock,
+    artifact_integrity_for_bytes, choose_compose, cleanup_action, dockerfile_logical_lines,
+    enumerate_artifacts, expected_service_resource_bounds, expected_service_tmpfs_bounds,
+    expected_service_writable_targets, host_secret_path_exists, initial_lanes, protected_sentinels,
+    redact, reject_runtime_state_errors, service_is_healthy, validate_compose_policy,
+    validate_digest, validate_dockerfile, validate_minio_output, validate_pocketbase_output,
     validate_runner_output, validate_runtime_isolation_output, verify_artifact_manifest,
     write_json_new,
 };
@@ -18,6 +19,41 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// Every program the lab may launch. `clippy.toml` forbids `Command::new`
+/// anywhere else in this crate, so adding a program is a reviewed edit here.
+#[derive(Clone, Copy, Debug)]
+enum Program {
+    Docker,
+    DockerCompose,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    PowerShell,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    TaskKill,
+    #[cfg_attr(windows, allow(dead_code))]
+    Shell,
+}
+
+impl Program {
+    #[allow(clippy::disallowed_methods)] // The one sanctioned spawn point.
+    fn command(self) -> Command {
+        Command::new(match self {
+            Self::Docker => "docker",
+            Self::DockerCompose => "docker-compose",
+            Self::PowerShell => "powershell",
+            Self::TaskKill => "taskkill",
+            Self::Shell => "sh",
+        })
+    }
+
+    fn compose(compose: &ComposeCommand) -> LabResult<Self> {
+        match compose.program.as_str() {
+            "docker" => Ok(Self::Docker),
+            "docker-compose" => Ok(Self::DockerCompose),
+            other => Err(LabError(format!("unexpected Compose program `{other}`"))),
+        }
+    }
+}
 
 #[derive(Debug)]
 enum Cli {
@@ -257,12 +293,8 @@ fn run_test(repository: &Path, lock: &VersionsLock, options: Options) -> LabResu
     } else {
         LaneStatus::Failed
     };
-    let bundle = write_evidence_bundle(&plan, overall, &state.lanes);
-    if let Err(bundle_error) = bundle {
-        let _ = plan.remove_state();
-        return Err(LabError(format!(
-            "final evidence bundle failed after cleanup: {bundle_error}"
-        )));
+    if let Err(bundle_error) = write_evidence_bundle(&plan, overall, &state.lanes) {
+        return Err(evidence_bundle_failure(&plan, bundle_error));
     }
 
     match error {
@@ -285,6 +317,21 @@ fn run_test(repository: &Path, lock: &VersionsLock, options: Options) -> LabResu
                 &plan.credentials.secret_values(),
             )))
         }
+    }
+}
+
+/// Leaves run state alone. A completed teardown has already removed it, and a
+/// preserved run or failed teardown still needs it for `cleanup-afk`.
+fn evidence_bundle_failure(plan: &RunPlan, error: LabError) -> LabError {
+    if plan.state_dir.exists() {
+        LabError(format!(
+            "final evidence bundle failed: {error}; cleanup: {}",
+            plan.cleanup_command()
+        ))
+    } else {
+        LabError(format!(
+            "final evidence bundle failed after cleanup: {error}"
+        ))
     }
 }
 
@@ -540,8 +587,8 @@ fn execute_guarded(
 }
 
 fn detect_compose() -> LabResult<ComposeCommand> {
-    let plugin = invoke(Command::new("docker").args(["compose", "version"])).success;
-    let standalone = invoke(Command::new("docker-compose").arg("version")).success;
+    let plugin = invoke(Program::Docker.command().args(["compose", "version"])).success;
+    let standalone = invoke(Program::DockerCompose.command().arg("version")).success;
     choose_compose(plugin, standalone)
 }
 
@@ -566,11 +613,11 @@ fn ensure_project_absent(plan: &RunPlan) -> LabResult<()> {
 
 fn project_resource_queries(project: &str) -> Vec<Command> {
     let label = format!("label=com.docker.compose.project={project}");
-    let mut containers = Command::new("docker");
+    let mut containers = Program::Docker.command();
     containers.args(["ps", "-aq", "--filter", &label]);
-    let mut volumes = Command::new("docker");
+    let mut volumes = Program::Docker.command();
     volumes.args(["volume", "ls", "-q", "--filter", &label]);
-    let mut networks = Command::new("docker");
+    let mut networks = Program::Docker.command();
     networks.args(["network", "ls", "-q", "--filter", &label]);
     vec![containers, volumes, networks]
 }
@@ -614,7 +661,8 @@ fn compose_call_vec(
     let mut args = base_compose_args(plan, compose);
     args.extend(suffix.iter().cloned());
     let output = invoke(
-        Command::new(&compose.program)
+        Program::compose(compose)?
+            .command()
             .args(&args)
             .envs(plan.compose_environment(lock))
             .current_dir(repository),
@@ -851,7 +899,8 @@ impl ProcessTree {
         unsafe {
             windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job, 1);
         }
-        let _ = Command::new("taskkill")
+        let _ = Program::TaskKill
+            .command()
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .output();
     }
@@ -917,7 +966,7 @@ fn runtime_environment(
     minio: &Invocation,
     runner: &Invocation,
 ) -> LabResult<Value> {
-    let docker = invoke(Command::new("docker").args([
+    let docker = invoke(Program::Docker.command().args([
         "version",
         "--format",
         "{{.Client.Version}}/{{.Server.Version}}",
@@ -926,7 +975,8 @@ fn runtime_environment(
         return Err(LabError("Docker version inventory failed".into()));
     }
     let compose_version = invoke(
-        Command::new(&compose.program)
+        Program::compose(compose)?
+            .command()
             .args(&compose.prefix_args)
             .arg("version"),
     );
@@ -940,7 +990,9 @@ fn runtime_environment(
         ("test-runner", plan.images.test_runner.as_str()),
     ] {
         let inspect = invoke(
-            Command::new("docker").args(["image", "inspect", reference, "--format", "{{.Id}}"]),
+            Program::Docker
+                .command()
+                .args(["image", "inspect", reference, "--format", "{{.Id}}"]),
         );
         let content_id = inspect.stdout.trim();
         if !inspect.success {
@@ -966,7 +1018,6 @@ fn runtime_environment(
 }
 
 fn validate_contract_files(repository: &Path, _lock: &VersionsLock) -> LabResult<()> {
-    validate_owned_runtime_scope(repository)?;
     let compose = fs::read_to_string(repository.join("infra/compose.yaml"))?;
     for variable in [
         "AFK_POCKETBASE_IMAGE",
@@ -1013,7 +1064,7 @@ fn validate_contract_files(repository: &Path, _lock: &VersionsLock) -> LabResult
             "Compose contract contains a repository bind, workspace path, or host ports".into(),
         ));
     }
-    for dockerfile in ["pocketbase", "minio", "test-runner"] {
+    for dockerfile in DOCKERFILE_SERVICES {
         let text =
             fs::read_to_string(repository.join(format!("infra/docker/{dockerfile}/Dockerfile")))?;
         if text.contains("@sha256:") || text.contains("=0.38.2") || text.contains("=24.18.0") {
@@ -1021,6 +1072,7 @@ fn validate_contract_files(repository: &Path, _lock: &VersionsLock) -> LabResult
                 "{dockerfile} Dockerfile duplicates a locked version/digest"
             )));
         }
+        validate_dockerfile(dockerfile, &text)?;
         if dockerfile == "test-runner" {
             validate_test_runner_dockerfile(&text)?;
         }
@@ -1076,119 +1128,6 @@ fn validate_test_runner_dockerfile(text: &str) -> LabResult<()> {
         }
     }
     Ok(())
-}
-
-fn dockerfile_logical_lines(text: &str) -> Vec<String> {
-    let mut logical = Vec::new();
-    let mut current = String::new();
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let continued = line.ends_with('\\');
-        let segment = line.strip_suffix('\\').unwrap_or(line).trim_end();
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(segment);
-        if !continued {
-            logical.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        logical.push(current);
-    }
-    logical
-}
-
-fn validate_owned_runtime_scope(repository: &Path) -> LabResult<()> {
-    for relative in [".github", "infra", "tooling/afk", "tooling/xtask"] {
-        scan_runtime_text(&repository.join(relative))?;
-    }
-    Ok(())
-}
-
-fn scan_runtime_text(path: &Path) -> LabResult<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Err(LabError(format!(
-            "runtime contract path is linked: `{}`",
-            path.display()
-        )));
-    }
-    if metadata.is_dir() {
-        for entry in fs::read_dir(path)? {
-            scan_runtime_text(&entry?.path())?;
-        }
-        return Ok(());
-    }
-    if !metadata.is_file() {
-        return Err(LabError(format!(
-            "runtime contract path is not regular: `{}`",
-            path.display()
-        )));
-    }
-    let text = fs::read_to_string(path)?;
-    if let Some(violation) = owned_automation_violation(&text) {
-        return Err(LabError(format!(
-            "runtime/tooling implementation contains forbidden automation `{violation}` in `{}`",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-fn owned_automation_violation(text: &str) -> Option<String> {
-    let lower = text.to_ascii_lowercase();
-    let forbidden_fragments = [
-        ["fixtures/", "kicad-10/gui-config"].concat(),
-        ["fixtures/", "kicad-10/afk-smoke"].concat(),
-        ["ki", "cad-gui-smoke"].concat(),
-        ["ubuntu", "_gui"].concat(),
-        ["ppa:", "ki", "cad"].concat(),
-        ["add-apt-", "repository"].concat(),
-        ["open", "box"].concat(),
-        ["image", "magick"].concat(),
-        ["systemd-", "coredump"].concat(),
-    ];
-    if let Some(fragment) = forbidden_fragments
-        .iter()
-        .find(|fragment| lower.contains(fragment.as_str()))
-    {
-        return Some(fragment.clone());
-    }
-
-    let native = [
-        ["ki", "cad"].concat(),
-        ["ki", "cad-cli"].concat(),
-        ["pcb", "new"].concat(),
-    ];
-    let scripting = [
-        ["py", "thon"].concat(),
-        ["py", "thon3"].concat(),
-        ["py", "qt"].concat(),
-        ["toml", "lib"].concat(),
-    ];
-    automation_tokens(text).find_map(|token| {
-        let lower = token.to_ascii_lowercase();
-        let automation_prefix = ["ki", "cad_"].concat();
-        if native.contains(&lower)
-            || scripting.contains(&lower)
-            || lower.starts_with(&automation_prefix)
-        {
-            Some(token.to_owned())
-        } else {
-            None
-        }
-    })
-}
-
-fn automation_tokens(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|character: char| {
-        !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
-    })
-    .filter(|token| !token.is_empty())
 }
 
 fn finalize_resources(
@@ -1261,10 +1200,13 @@ fn cleanup_docker(
         &plan.images.minio,
         &plan.images.test_runner,
     ] {
-        let inspect =
-            invoke(Command::new("docker").args(["image", "inspect", image, "--format", "{{.Id}}"]));
+        let inspect = invoke(
+            Program::Docker
+                .command()
+                .args(["image", "inspect", image, "--format", "{{.Id}}"]),
+        );
         if inspect.success {
-            let remove = invoke(Command::new("docker").args(["image", "rm", image]));
+            let remove = invoke(Program::Docker.command().args(["image", "rm", image]));
             if !remove.success {
                 return Err(LabError(format!(
                     "cannot remove scoped image `{image}`: {}",
@@ -1451,14 +1393,14 @@ fn xml(value: &str) -> String {
 
 #[cfg(windows)]
 fn long_sleep_command() -> Command {
-    let mut command = Command::new("powershell");
+    let mut command = Program::PowerShell.command();
     command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
     command
 }
 
 #[cfg(not(windows))]
 fn long_sleep_command() -> Command {
-    let mut command = Command::new("sh");
+    let mut command = Program::Shell.command();
     command.args(["-c", "sleep 30"]);
     command
 }
@@ -1503,7 +1445,7 @@ mod tests {
 
     #[cfg(windows)]
     fn output_command() -> Command {
-        let mut command = Command::new("powershell");
+        let mut command = Program::PowerShell.command();
         command.args([
             "-NoProfile",
             "-Command",
@@ -1514,7 +1456,7 @@ mod tests {
 
     #[cfg(not(windows))]
     fn output_command() -> Command {
-        let mut command = Command::new("sh");
+        let mut command = Program::Shell.command();
         command.args([
             "-c",
             "head -c 131072 /dev/zero | tr '\\0' o; head -c 131072 /dev/zero | tr '\\0' e >&2",
@@ -1540,14 +1482,14 @@ mod tests {
 
     #[cfg(windows)]
     fn grandchild_command() -> Command {
-        let mut command = Command::new("powershell");
+        let mut command = Program::PowerShell.command();
         command.args(["-NoProfile", "-Command", "$p=Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; [Console]::Out.WriteLine($p.Id); Start-Sleep -Seconds 30"]);
         command
     }
 
     #[cfg(not(windows))]
     fn grandchild_command() -> Command {
-        let mut command = Command::new("sh");
+        let mut command = Program::Shell.command();
         command.args(["-c", "sleep 30 & echo $!; wait"]);
         command
     }
@@ -1566,7 +1508,8 @@ mod tests {
         {
             let deadline = Instant::now() + Duration::from_secs(3);
             loop {
-                let probe = Command::new("powershell")
+                let probe = Program::PowerShell
+                    .command()
                     .args([
                         "-NoProfile",
                         "-Command",
@@ -1588,7 +1531,8 @@ mod tests {
         }
         #[cfg(unix)]
         {
-            let probe = Command::new("sh")
+            let probe = Program::Shell
+                .command()
                 .args(["-c", &format!("! kill -0 {pid} 2>/dev/null")])
                 .status()
                 .unwrap();
@@ -1630,18 +1574,26 @@ mod tests {
     }
 
     #[test]
-    fn owned_runtime_scope_rejects_forbidden_dependencies() {
+    fn evidence_failure_keeps_state_needed_for_cleanup() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let lock = VersionsLock::load(
+            &repository.join("infra/versions.lock"),
+            &repository.join("rust-toolchain.toml"),
+        )
+        .unwrap();
         let temporary = tempdir().unwrap();
-        let safe = temporary.path().join("safe.txt");
-        fs::write(&safe, "cargo xtask test-afk --static-only\n").unwrap();
-        let forbidden = [
-            ["py", "thon"].concat(),
-            ["py", "thon3"].concat(),
-            ["py", "qt"].concat(),
-            ["toml", "lib"].concat(),
-        ];
-        scan_runtime_text(temporary.path(), &forbidden).unwrap();
-        fs::write(&safe, ["py", "thon3", " -c pass\n"].concat()).unwrap();
-        assert!(scan_runtime_text(temporary.path(), &forbidden).is_err());
+        let plan = RunPlan::create(temporary.path(), Some("evidence-failure"), &lock).unwrap();
+        plan.prepare().unwrap();
+        fs::remove_dir_all(&plan.artifact_dir).unwrap();
+
+        let bundle_error =
+            write_evidence_bundle(&plan, LaneStatus::Failed, &initial_lanes()).unwrap_err();
+        let error = evidence_bundle_failure(&plan, bundle_error);
+
+        assert!(error.0.contains(&plan.cleanup_command()), "{error}");
+        RunPlan::open_existing(temporary.path(), "evidence-failure", &lock).unwrap();
     }
 }

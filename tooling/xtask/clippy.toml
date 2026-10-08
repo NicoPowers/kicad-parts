@@ -1,0 +1,5 @@
+# Launch processes only through `Program::command` so the lab's process
+# allowlist stays in one place.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "launch processes through Program::command" },
+]

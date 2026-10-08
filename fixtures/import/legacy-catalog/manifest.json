@@ -57,7 +57,7 @@
       {
         "table": "ana",
         "path": "database/g-ana.csv",
-        "byte_sha256": "b0b362ca8e89316c2902496b8545b7ab9cce516a5dddadad9ef4045e89e84ea0",
+        "byte_sha256": "d1061df4284c4f4dc1315787299477484446554368e26627e75ae6b7fdc6898f",
         "semantic_sha256": "51468f457c6a9580e6638b91daf9dac95396393dc4454098c0c0d9ff29f2ccf3",
         "headers": [
           "IPN",
@@ -145,7 +145,7 @@
       {
         "table": "art",
         "path": "database/g-art.csv",
-        "byte_sha256": "0790f64e97311c52e98de75a799604fbc25c415ade118981bd2dd70f93250ca5",
+        "byte_sha256": "42442ee406db4c39027800c463e33424ed38c4e6ba4776530d3cab89505ee9ea",
         "semantic_sha256": "9b9157dbec6b968d775e777a0d215d6af3c5ff0409fb71ee1532ef054945dd06",
         "headers": [
           "IPN",
@@ -195,7 +195,7 @@
       {
         "table": "cap",
         "path": "database/g-cap.csv",
-        "byte_sha256": "0c6e0d79750043cc92a87c40dcac24ee0a6588a5979b7474c9d9d761ffe5df7c",
+        "byte_sha256": "6e7d4e0e2287828d146a0c7ef4256e6f97b464cd03e4a5ddd22bf302577a87db",
         "semantic_sha256": "e597731e4bab78aaf313e2ecf4b05610ea5e820711b99a4dfa2150dc857ee8f9",
         "headers": [
           "IPN",
@@ -563,7 +563,7 @@
       {
         "table": "con",
         "path": "database/g-con.csv",
-        "byte_sha256": "c4af3bb1cfb51f9e2fb185541f1856db8c377eac54ad9544680402ed1f492311",
+        "byte_sha256": "a27fb2219144ac08a1cd43831848afc2294233787efe80f07ff8f7f08a90edc8",
         "semantic_sha256": "dda082fdead4d73c6f9622d6da6140200b632ad59456fe63763b48ddad29d14d",
         "headers": [
           "IPN",
@@ -643,7 +643,7 @@
       {
         "table": "cpd",
         "path": "database/g-cpd.csv",
-        "byte_sha256": "1c345234db5e5ee41fe64db4777f68877cb4f9547e006f88cd0a4d92f9f54bb8",
+        "byte_sha256": "ec75c400738ebb5eaacb0618a780c270a357848fdd2523d0d8a77a21fdf96e9f",
         "semantic_sha256": "8d32c4e34d6adf4415386146432e383057d9943724963ba9a3150376b1b81e41",
         "headers": [
           "IPN",
@@ -907,7 +907,7 @@
       {
         "table": "dio",
         "path": "database/g-dio.csv",
-        "byte_sha256": "13ae5bd14392812b48605486a974b021ed268ffc5d0cf01c8628a7b7dde6892e",
+        "byte_sha256": "8ca9e97f03eba73c1078704276f58adf193d74846e9a627a4e9298b5f03eb356",
         "semantic_sha256": "3a56313945f8ef071e30795ee3cda8247bf78d3a1dbe025a498ede4060d3a7e1",
         "headers": [
           "IPN",
@@ -1010,7 +1010,7 @@
       {
         "table": "ics",
         "path": "database/g-ics.csv",
-        "byte_sha256": "4c29e141b2ff5ef934a79de8dd7b432ab1e0a98a06e9e3720f07636e8d43315f",
+        "byte_sha256": "a8ff2b05e4cdc19cdb2b2a4edc1655c8bcb6894ceaafc92527bbe5468cac7282",
         "semantic_sha256": "d240f1df01673eff70f7b7994b7d60a77bcbc77e7e1622bbd56ee0fd6d26954d",
         "headers": [
           "IPN",
@@ -1770,7 +1770,7 @@
       {
         "table": "ind",
         "path": "database/g-ind.csv",
-        "byte_sha256": "c3a8bb28a19fd7e5251918f32edf307b6661e44f35b9b8e5db792cc1a9bdd202",
+        "byte_sha256": "74dc21e74de9f5e7e1e6d136104318bdb6c6f8de1d2dddc6db7f4c1e3d1cfd16",
         "semantic_sha256": "6e200ed13bcf1be1eb2f7240bf5815f0b3b95d72ebb0e3be6ea4e8bf8df96427",
         "headers": [
           "IPN",
@@ -1940,7 +1940,7 @@
       {
         "table": "mcu",
         "path": "database/g-mcu.csv",
-        "byte_sha256": "d3562d31de46a1e4d08eb2ef311919bab551f74c90d61e568b6f4417b79bcbba",
+        "byte_sha256": "8f248ff87f5dabd82d811a681d5cdcd363b9429a0d90c3a76e0ffcd0e64b20d2",
         "semantic_sha256": "3e514965d48af99c5fcf6418489affda8e6cb81e027310fba33ff8cf5545bf78",
         "headers": [
           "IPN",
@@ -2076,7 +2076,7 @@
       {
         "table": "mec",
         "path": "database/g-mec.csv",
-        "byte_sha256": "fbfcfad849dc011a105d7c6b98c25153e5f836857f9b5f022d5bd67fd4a61c6e",
+        "byte_sha256": "73fe8458229ac1aec7695a10552fcd804fc1ba82e5e722c11b837d88581e9ea3",
         "semantic_sha256": "a1256f1e9a76ab32e558640e83fd8a9585b05b381c8d257649d2585cd5c92bf2",
         "headers": [
           "IPN",
@@ -2100,7 +2100,7 @@
       {
         "table": "mpu",
         "path": "database/g-mpu.csv",
-        "byte_sha256": "d69b0351c893903c6eea0a4865d7d57cc387fdbad0e23a3adb9fe99ae45fdcd3",
+        "byte_sha256": "94b4670b66a3c0a199c617f2c23005a193fefede17e1f4ba473b95998638c77f",
         "semantic_sha256": "a4ebc640f3e6cccd4adce5fa169acde35c7f1e2e4c81fdaed52f6d3daf838f8e",
         "headers": [
           "IPN",
@@ -2188,7 +2188,7 @@
       {
         "table": "opt",
         "path": "database/g-opt.csv",
-        "byte_sha256": "2ac3de3811666b2d6fb451449ba5e6a5f3c6e014a2631cb342e2bf34154cedba",
+        "byte_sha256": "f7a63e95b8dfbdcde87140e6f34f42d709280a702284995766fb0a4ae0efff0e",
         "semantic_sha256": "764cdc9e9f6b4343890a16976ca7e57e82954c82523e40865b316f06a38254e7",
         "headers": [
           "IPN",
@@ -2236,7 +2236,7 @@
       {
         "table": "osc",
         "path": "database/g-osc.csv",
-        "byte_sha256": "aacf606085c7fb3f4d69e91a30b4cde160a43a9f979b201119eb952dc65e36d3",
+        "byte_sha256": "e322fde9703bfd209aa1fa19a382487a66054093ad2556a92502b7647da21d8d",
         "semantic_sha256": "d057e90c985c85e874f19cfeb7a36124167d8c0aaac5cdc91f8dc0d263c627d2",
         "headers": [
           "IPN",
@@ -2453,7 +2453,7 @@
       {
         "table": "pcb",
         "path": "database/g-pcb.csv",
-        "byte_sha256": "e4c470d3dccbf0f43bce8b3f7699deedc1dfd533b9c4b13a0c58fe0131496135",
+        "byte_sha256": "ca9a9a4daf8ec9b13661c82edd31d22b000cfe351121d8022e10b38b38e1aa47",
         "semantic_sha256": "58f572bf3381a2344383b8f7bbac432f011652dbafc3d9da08a6720d10dd3595",
         "headers": [
           "IPN",
@@ -2485,7 +2485,7 @@
       {
         "table": "pwr",
         "path": "database/g-pwr.csv",
-        "byte_sha256": "55ef9bdc176291d9c7e66cd9276e446d5b8ae2e89ca2db4ae2e2f5ea823244c7",
+        "byte_sha256": "d9318518628d44e1a417a34168984d1f38881c0b899bcdcda619ed6972fd3690",
         "semantic_sha256": "8cfc01ece37b8b3a273c8f51ec526ca936b7495ae3f40b58887a9f2f62ff7042",
         "headers": [
           "IPN",
@@ -2637,7 +2637,7 @@
       {
         "table": "reg",
         "path": "database/g-reg.csv",
-        "byte_sha256": "1ab3649114bcb8a1e68625c3a2be7644eaccbd6f904a078757bb6595f4b46c46",
+        "byte_sha256": "a9a2a79b378f183931dc0a08f1051ce7f03f237d740ab38a7de10ff723703d11",
         "semantic_sha256": "5098f5664c4706c93d659faa8c6c7bc6b8cf44aec6c27febc8583737ad62aefb",
         "headers": [
           "IPN",
@@ -2915,7 +2915,7 @@
       {
         "table": "res",
         "path": "database/g-res.csv",
-        "byte_sha256": "975035af6b3c5ae53010e562f2892167fee65dcf04a8ed5efd10c4998c64bb41",
+        "byte_sha256": "57d8dc7e6dd8763d36d7b6ffbe628d77f67d4881e0915429f900d712df47d69a",
         "semantic_sha256": "041fe6eaf5a8b298597fcfdda64e0bd54ddad7afc5a302ff87a7c3e8b0cd9c64",
         "headers": [
           "IPN",
@@ -3463,7 +3463,7 @@
       {
         "table": "rfm",
         "path": "database/g-rfm.csv",
-        "byte_sha256": "363aaed01cd6c860bfa02eed64933e4440176e2afe9a306c5644d99c0c95bbb6",
+        "byte_sha256": "e19493395e7ee5c58079ad59b49aa0ca47bcc18076702e205b7d2f6394f4fe19",
         "semantic_sha256": "364d22157cc7157e7c4e57fcfd827bab01127c2a2bb38ad4f435ae36ab81b379",
         "headers": [
           "IPN",
@@ -3507,7 +3507,7 @@
       {
         "table": "rvr",
         "path": "database/g-rvr.csv",
-        "byte_sha256": "2e2df35314c961723fb09f415cab48e959bc9109dc826791c240ccd516b1a016",
+        "byte_sha256": "ce0b0af09fa0ab169558e119f9c42ab78cdafb16a7af90b6f6f4955b11a7c861",
         "semantic_sha256": "6f0c87fd16f84607dbf9d214ebf897506bbb035f75c7d473285a5b014c46f797",
         "headers": [
           "IPN",
@@ -3555,7 +3555,7 @@
       {
         "table": "swi",
         "path": "database/g-swi.csv",
-        "byte_sha256": "d387302ca0337ac54cf31c0f0972067f29a8e32eb7da7f6113efd5ed9ac93442",
+        "byte_sha256": "46b94d98ad5203ad76487caeb5391901f08c4bdc656d68c13032489171d11b05",
         "semantic_sha256": "1f8834249fb3c2af55eb689d8134cf5b0038fdfc081a754b32e05c5470da12d4",
         "headers": [
           "IPN",
@@ -3597,7 +3597,7 @@
       {
         "table": "trs",
         "path": "database/g-trs.csv",
-        "byte_sha256": "ffbd69d9fcbc9fbcfe25175fe7a4967a302fb2cbf0817f26492df7791db684eb",
+        "byte_sha256": "4d0d6dc228f48b44b8f3964f2aa92513550f1abb681662452210d99393223ef4",
         "semantic_sha256": "375dd03a3df3ed4fc17f2764696350a6d3d837fecaf3b21e4353726a763e7760",
         "headers": [
           "IPN",
@@ -3686,7 +3686,7 @@
   },
   "substitutes": {
     "path": "database/substitutes.csv",
-    "byte_sha256": "e7b235c9d771da3f27a0b4e18d9a3027df56050ae95f649102b29aaab4376bfc",
+    "byte_sha256": "7ebd616a0aded188282069b4e2996757c73834354915247729448f06b7b9060e",
     "semantic_sha256": "be14255d8a4268d7b7c4f899292f209134d5b48fafe64e8544c968888fff5704",
     "headers": [
       "IPN",
@@ -3700,7 +3700,7 @@
   },
   "sqlite_projection": {
     "path": "database/parts.sqlite",
-    "byte_sha256": "ca63030c0efb1bf8fc1cd8f6c0c1012988a1b26b846022865b13a205a4ea733d",
+    "byte_sha256": "571f47fb2fdf5d042df895be8160b27fe8222a46426753c2ea6c0a045a6d381a",
     "semantic_sha256": "ab8af98092a6128ac7d078e3033730393eb4b0ad560866f9bc62a1dae44e9688",
     "bytes": 139264,
     "table_count": 21,
@@ -7275,7 +7275,7 @@
   },
   "descriptor": {
     "path": "database/#gplm.kicad_dbl",
-    "byte_sha256": "8b387819bba01f06c928cb0617be8519e63fb2e15b0692c6d483f18cd791419f",
+    "byte_sha256": "3dc83b2b950e06e81281b9e4585d85a05d65f07f4a1186b5c61b03d997335b60",
     "semantic_sha256": "1002044130c3236ad69c22e8cb5684cf934d18db845db3a14fbc147fde2fc2e1",
     "entry_count": 19,
     "tables": [
@@ -7309,215 +7309,215 @@
     "symbols": [
       {
         "path": "symbols/g-ana.kicad_sym",
-        "byte_sha256": "6ca7317db977ccbdd222340c6eca5edfc222ca680d25b5699e08a3087c432aa6",
+        "byte_sha256": "c4a449bd1d9d7fe9e3463140bd99fa738405ed1290123a788ad2d11923624a3a",
         "semantic_sha256": "66cabd23ea68f51ff0ba98939a05b3d2796a5382c9b32aa88e243f4a008233d5",
-        "bytes": 5599
+        "bytes": 5227
       },
       {
         "path": "symbols/g-art.kicad_sym",
-        "byte_sha256": "849e4cb50cd7682f1b920b94493f89eff2866634f9d3c6ec535d5c312181701f",
+        "byte_sha256": "c3b98cbadd6ee6b10a6d16d41e8a82d49e30093c8ee63bc505796a9baf51acd6",
         "semantic_sha256": "b7376821a0cc343a0b64855b7320d9c0e2355754d8124d3c59780f57b3183f48",
-        "bytes": 1616
+        "bytes": 1510
       },
       {
         "path": "symbols/g-con.kicad_sym",
-        "byte_sha256": "140912474184c05fb45d4588cae4ca4a6a7a2101af31c5c65284bd87feaa582a",
+        "byte_sha256": "fa166c4d0fe24a9123b3fde9a1fc6741ca51a5850a7d19fef3774c2d98e1eea3",
         "semantic_sha256": "fbb236364fa21aa3b80a4739251f6b2a67fd1a5fb172f60b92436fa3c7f4ce5e",
-        "bytes": 10205
+        "bytes": 9568
       },
       {
         "path": "symbols/g-cpd.kicad_sym",
-        "byte_sha256": "71b33f59c32e339c6602871f670f53ceec15f10685c9d47fe7c3331e64468127",
+        "byte_sha256": "a702d6351c3da8fe3d485180f28b2bd1df872828353d3dd26057da5a7d752138",
         "semantic_sha256": "cf00f799bfbee5e59ab0309c7c51e5ae4d991e5377a4dc18692fbbadcfdd0d5c",
-        "bytes": 34586
+        "bytes": 32312
       },
       {
         "path": "symbols/g-dio.kicad_sym",
-        "byte_sha256": "8839203607477a3cec4fd03bb3a852cfd262d5ccb3c38f5830665ee0af90d3b3",
+        "byte_sha256": "4db5a10b54fc8ddd3f23e03bc18026da4eb9b777fab1ee28fc6bc6d009c8f97d",
         "semantic_sha256": "1d97d160aa7cc16ebdd26389d53b854812b95fdccdc07ed3234b3b981dcb685b",
-        "bytes": 73
+        "bytes": 71
       },
       {
         "path": "symbols/g-dis.kicad_sym",
-        "byte_sha256": "8e18e7666daa24609ac5e06260868f3fc93e2a9c374bd86e75708406bb315b56",
+        "byte_sha256": "9c4fde92c0da129267765c2a93cd92503731e7701a97147b12cbe956097cc5ac",
         "semantic_sha256": "95d919ecc6ca2c00339d2017227366c8f2a31fbba535702c80dd294f94ebbf36",
-        "bytes": 16346
+        "bytes": 15294
       },
       {
         "path": "symbols/g-ics.kicad_sym",
-        "byte_sha256": "38428bd440e41a947048661b39192034789a5f8c41149cb36e7e1a560440e954",
+        "byte_sha256": "745650fe00ab847b3c044b0bd4c2203867dd2527e1778840c6b45a0cc4abc3dc",
         "semantic_sha256": "10e497596987de57fd02b262f66d8ae9b00163b5c020c52808570f9dfcc17911",
-        "bytes": 607470
+        "bytes": 566427
       },
       {
         "path": "symbols/g-ind.kicad_sym",
-        "byte_sha256": "0ea72b36d455635b7cb33ee74ab477654297a790528709397dce5a679e352704",
+        "byte_sha256": "d9b0dca7b7e327db329de6b348b93bd4025a1fbc5a0385bcf4cc05a4f5568553",
         "semantic_sha256": "66ac937c28270a158af78f4a73cefd3d5b9f55276cb5ea6ec450f4da335a677c",
-        "bytes": 138995
+        "bytes": 131047
       },
       {
         "path": "symbols/g-mcu.kicad_sym",
-        "byte_sha256": "13515cc28d475805a7ecb3722bee400628ca1d007215dc9243ba47ec9d2e462d",
+        "byte_sha256": "2fb522db42cc83d77c4051076704c44402534c14a46e57adf2d279226e502759",
         "semantic_sha256": "91d93ea0d1fafce0597bfe2a96147e5106341ac7b110c73d8b7d012cb084cbdf",
-        "bytes": 105637
+        "bytes": 98352
       },
       {
         "path": "symbols/g-mpu.kicad_sym",
-        "byte_sha256": "7cf98b40f28b66f3a843628712999560ddf011ae6730e745921f4b5218f042ca",
+        "byte_sha256": "6612e89152766b97beba31ea0830c1ffaa178f6731655bd809deaa98d08c1871",
         "semantic_sha256": "56d0c3f6da5ea91434f476ea9c0588dac4f1e09ac7ebbe4fcda25856600cdc3e",
-        "bytes": 340509
+        "bytes": 317502
       },
       {
         "path": "symbols/g-no_bom.kicad_sym",
-        "byte_sha256": "521fd9d01dc500bceaa4274eb02e0cafd8b090aac83d9e5f98fd3f9f849823ed",
+        "byte_sha256": "cf43c9751f883fb283c711c60b426a1c51019768bc4dc51850aa1d2df6580c7e",
         "semantic_sha256": "dff032f2501bd68785d55c98e76c508dcaf4f3913a14f175df6da6b241561335",
-        "bytes": 4748
+        "bytes": 4441
       },
       {
         "path": "symbols/g-opt.kicad_sym",
-        "byte_sha256": "7f4b7f10727b953016fae042bef01516ce814f0c80e532198be7eb16afe311fd",
+        "byte_sha256": "e230d766521c4e5f35853c8063f12c64b796ea0b8279b5fcf8bb76afb7084cd8",
         "semantic_sha256": "c73eb4e39af946c56d5f18d10235c4e13c285e483683d94a39bf124edc330f46",
-        "bytes": 12114
+        "bytes": 11309
       },
       {
         "path": "symbols/g-osc.kicad_sym",
-        "byte_sha256": "720b5f129d84d5b481a75b470d17aa0c133475314da12741d44088779a4c7a37",
+        "byte_sha256": "bb99bb2fb5d16521d9cdb6f8c0da0d8724bed147598872d58827106cb9ca09dd",
         "semantic_sha256": "cb79d7515932bb0af7d631bced9de2d7914e03ec3a40feb21ac7761d7dd3f93d",
-        "bytes": 2196
+        "bytes": 2048
       },
       {
         "path": "symbols/g-pas.kicad_sym",
-        "byte_sha256": "ccc51194fc62607e4f5373e83ecdfaebcf12c13f02b5e3d932c5311d338ab037",
+        "byte_sha256": "837e3a49741d61582ef4282f58abd4d15451dcbfaf2967af97f8a03f15a4a55e",
         "semantic_sha256": "47837d59c52b7c90e28633ea00c57468b7f8d93bec163e6aa6a882bba3bf83cf",
-        "bytes": 11516
+        "bytes": 10768
       },
       {
         "path": "symbols/g-pwr.kicad_sym",
-        "byte_sha256": "71a0c1ed6029b7a8bc6822bd2fb32196d0dc6f37324dde9734f3907b51d6d78a",
+        "byte_sha256": "8cd2edb98db77e6a2eb80bc7dc3d448b5b519a071793ffa33320714225af99d9",
         "semantic_sha256": "46641c31ec7eac0869f24a6b0eece930e7c489c10c512505c4227c042c0e400b",
-        "bytes": 61309
+        "bytes": 57151
       },
       {
         "path": "symbols/g-reg.kicad_sym",
-        "byte_sha256": "66d9360cd2726111d925b0621dd597813a5e5c9ef69fadded3972e84c3b1944c",
+        "byte_sha256": "7507bf8f7444ec8d3e33597035f7922d5d5bf0a701c48aaeff48301ee8ed101d",
         "semantic_sha256": "783c7fa11d953b77a403099eb21c3108c5caaf0a8d497b6b7ec1b6c8f81f6398",
-        "bytes": 96236
+        "bytes": 89703
       },
       {
         "path": "symbols/g-rfm.kicad_sym",
-        "byte_sha256": "f19ab1d2e05753c455858029ad6c8107d2885220e078a2d4463dc187e9109134",
+        "byte_sha256": "69976c82d0684d1150494358d4e175c9556a971a4bcbf1a28d6fe2d88e0a73f7",
         "semantic_sha256": "92200aea0a5a577333eb524c3fdcd465221a23b0fb8b920541773112595acd40",
-        "bytes": 1405
+        "bytes": 1315
       },
       {
         "path": "symbols/g-swi.kicad_sym",
-        "byte_sha256": "a03cae11abc43f079cf63cc1234fe3ab1c02f7e8d02b8a5237d8c0b0e3f0e4c8",
+        "byte_sha256": "a2137bddcf779380d8095d51b843c0514edfded962e3aab7f965a8ca8eb496b8",
         "semantic_sha256": "6e6fd57df74b653eaf02b067d8b82465738b5c5f4ab4864dce208007f3611685",
-        "bytes": 3216
+        "bytes": 3003
       }
     ],
     "footprints": [
       {
         "path": "footprints/g-SOT.pretty/SOT-23-3.kicad_mod",
-        "byte_sha256": "8fe3e75388ed294c3b0b438617e4e883860af0a186f0114e1ff38f3d054f2ab8",
+        "byte_sha256": "d771a43cd4357235ea93a36ad44f4b323df4c5fc2e47b06c209647b4423355f2",
         "semantic_sha256": "64adba334523f37d89558f08c1a771074d067461275667344526359208f5aea7",
-        "bytes": 2329
+        "bytes": 2217
       },
       {
         "path": "footprints/g-SOT.pretty/SOT-23-5.kicad_mod",
-        "byte_sha256": "16e9c1ae8b3b2eb986b01fda9523d4ed3e875d5eb2c88e676c5d45d172f10364",
+        "byte_sha256": "35225ee8a21c6b68ef74208767c1d4c5062309d27fd7518ed1151060e09ade8f",
         "semantic_sha256": "d12d2818d8c2b8a7d7c9d6c6e1243a42b1187e0fd22178f90323623f8f381a1e",
-        "bytes": 5047
+        "bytes": 4720
       },
       {
         "path": "footprints/g-SOT.pretty/SOT-23-8.kicad_mod",
-        "byte_sha256": "5a57cc691555924d7c6652f369d765190b8074da097da64093025fcb7ff0e279",
+        "byte_sha256": "38eb175cd1732cbb0072e68923420a91d87d1858e565582c3f757c787b8bdde1",
         "semantic_sha256": "acaf800763588ae46d894a5b33989eb97181804e7f82fe5b9a062e22ec40f60a",
-        "bytes": 4848
+        "bytes": 4548
       },
       {
         "path": "footprints/g-SOT.pretty/TSOT-23-5.kicad_mod",
-        "byte_sha256": "8a2d747328dc918bf40f474a6b5e3f58656ee1bd7bfe80e529ffb494f2224a6f",
+        "byte_sha256": "94f47832ef7248ebda86c7451536713410b4f482228190b39b142ddca9606fa2",
         "semantic_sha256": "ecb398464349365c3c9a82424b5b97757c42beaeef2058526fb7215f0bb1e398",
-        "bytes": 5031
+        "bytes": 4704
       },
       {
         "path": "footprints/g-SOT.pretty/TSOT-23-5_HandSoldering.kicad_mod",
-        "byte_sha256": "93483c45513e50119d8f3ff6b140abf1bbc8e8f53c745f4a46a955b63982a66d",
+        "byte_sha256": "dc6544a793ada07a7dcca5c725144a303073cf1550fda8b58c9ed6255334a409",
         "semantic_sha256": "36121eaf7623c76c22d653f33821fbbd962ac4934a1b37685da5d5a3bca8d741",
-        "bytes": 4752
+        "bytes": 4504
       },
       {
         "path": "footprints/g-SOT.pretty/TSOT-23-8_HandSoldering.kicad_mod",
-        "byte_sha256": "b69db4dd71dc63c11fa9de13e7e930cf9e6267869c63be6cc017ed7d56846830",
+        "byte_sha256": "fa3c080232c55bc57140603a5e973905fbf81030edd13aee11e834566317bc64",
         "semantic_sha256": "b25b1e67e2c4815b2b38b7d18cb9268e57997e5fb1f168eb49d2b83df7733a93",
-        "bytes": 5288
+        "bytes": 5019
       },
       {
         "path": "footprints/g-cap.pretty/C_0603_1608Metric.kicad_mod",
-        "byte_sha256": "20288b981ac6492be2ca9beb4a8e4c3b65ebf5f537e2f3c128e7b28d3f989a15",
+        "byte_sha256": "899136caa88b97dd6a98cc07f88267d4f6f8d7e9afd5645d6d55aacb9cefb0e5",
         "semantic_sha256": "30a39e28ffe66414e599454aaf1b483308ccf9f2ef5a107cca5e2abdb8ae1ec5",
-        "bytes": 2672
+        "bytes": 2538
       },
       {
         "path": "footprints/g-cap.pretty/C_1210_3225Metric.kicad_mod",
-        "byte_sha256": "2e22dbf436604cdebafbf4b2172ea6fb5dec145c77d544a7461c072387afd93d",
+        "byte_sha256": "a41d64ab16e310e360a241501451552d48eff47c108405803d7c0957f23e4d51",
         "semantic_sha256": "f67bd37048a3da7e4e3a7144b46f968c51d4bb199bddcc74c6c4979c557c669a",
-        "bytes": 2194
+        "bytes": 2089
       },
       {
         "path": "footprints/g-con.pretty/JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal.kicad_mod",
-        "byte_sha256": "096dd66ff7a29b2e381e909f79d329c86bd64f467af55e3237675847a906cefb",
+        "byte_sha256": "e5a49feddf8c1fa9a12bed221d93616240f0af9bf875ee9a2233b272945e4e95",
         "semantic_sha256": "31d8b8b396aeda06703fc7f407b1e507b8a960d33fc19d5c657c56dd840f7cff",
-        "bytes": 5766
+        "bytes": 5458
       },
       {
         "path": "footprints/g-con.pretty/Jack_3.5mm_SameSky_SJ2-35863B1-SMT-TR_Horizontal.kicad_mod",
-        "byte_sha256": "5c7dfc61656a35bed595e75ccec1169bbd7308c6634331ea88b119bbf2dd3acf",
+        "byte_sha256": "9d51c5dff6128fc94a84b951b5be5bf7b1025b956320775100045d9671f79867",
         "semantic_sha256": "03141eefee8afa66b966bcbaab4a0011766ac3631b7bc2033a1d8c3a4fade5a5",
-        "bytes": 4150
+        "bytes": 3940
       },
       {
         "path": "footprints/g-con.pretty/U.FL_Hirose_U.FL-R-SMT-1_Vertical.kicad_mod",
-        "byte_sha256": "a8827c8bd35c36cf32375a69779c2f42ef3d84ec0e5cb7dd98fc12cf6af0d083",
+        "byte_sha256": "9ba281e470ad97b547088ca57e970e5e6c3ed474ee3c9ba9be65208f25b3139d",
         "semantic_sha256": "8f4a38bd29d8dbe667f6d8a6a79b30b0d36a424e002e2349d3a1662b9feb48a4",
-        "bytes": 5871
+        "bytes": 5555
       },
       {
         "path": "footprints/g-cpd.pretty/DFN-0.060X0.030_Semtech.kicad_mod",
-        "byte_sha256": "895b2d864121d124d30d263304de8343264e2037ccef2a662ba264c5d25058c1",
+        "byte_sha256": "8ce20593cf2d0d51f6ef1ae501f7a96a88d8a831327eabaf2d042219a9fa2797",
         "semantic_sha256": "4cedc1e5ad6bbb3f6cd055998ff7ed1d45abefc0ee251394d3d6ab76eca0b5e6",
-        "bytes": 3582
+        "bytes": 3423
       },
       {
         "path": "footprints/g-cpd.pretty/DQA0010A.kicad_mod",
-        "byte_sha256": "2044d16fbf39c3da3adace899664df43dd869e08deb61decdc24811429e5b951",
+        "byte_sha256": "386cd547be0941ca241d30ae6d19b7d9bddb6e713413fa1dc1fd0bbd259ffc97",
         "semantic_sha256": "50d9fa0522115dce4a6df1ce806c8bec2a28082a61825034e5eb5642db8b26ff",
-        "bytes": 4977
+        "bytes": 4733
       },
       {
         "path": "footprints/g-cpd.pretty/D_SOD-923.kicad_mod",
-        "byte_sha256": "eabb9866aa19ff96050a815aaeeb593c0b5ccd52ac94c304fc58f09ceb681b39",
+        "byte_sha256": "f608f85c54ce995cea89af87f83bd610a28ffd38ab26b10aa5380988048d63b5",
         "semantic_sha256": "c3846eeffe9911954cba5a0593dd20c64a8805329531e0b0ed84cef57c726ea0",
-        "bytes": 6169
+        "bytes": 5824
       },
       {
         "path": "footprints/g-cpd.pretty/RAYCHEM_SMD100F.kicad_mod",
-        "byte_sha256": "5b3d9f137f771c1205a157cf5d959103f44906c75b1c2ba98804838758860948",
+        "byte_sha256": "f8ed29e8a710af392d337a5e350ebc8dfaf6c26185e83c66f2f76d71248fa83e",
         "semantic_sha256": "01c68105606343beae612b918cd5af2f8cb7460e9ae9fe16fe685c49ca5f8755",
-        "bytes": 2583
+        "bytes": 2544
       },
       {
         "path": "footprints/g-cpd.pretty/SLP1616P6_SEM.kicad_mod",
-        "byte_sha256": "a67561a5332b1bef9c45ba3f62b681eef3bab28f3add5cb5cce11af30f2f73ea",
+        "byte_sha256": "ce47bc2590f34cbc18014099599f18e69f38ee2793bd7ccbe7b365559a15f6ba",
         "semantic_sha256": "590c01132586b40cb08ac2fa3a76a65e68e8b696576900de6a8c7498d44addde",
-        "bytes": 6087
+        "bytes": 5781
       },
       {
         "path": "footprints/g-cpd.pretty/WQFN20_RUK_TEX-L.kicad_mod",
-        "byte_sha256": "b74909a1882e6e3d742a9d6a64b7ad799605a0da5959eaebc51407279a1a6ffc",
+        "byte_sha256": "4c47db0c5c0358ca74b3508d6683a47f8651592ca96b5e702633589122f80a19",
         "semantic_sha256": "7017d41d1035e5b3a291fced1c60e16bce4748ccbd78e22e82a88a2adf118bad",
-        "bytes": 27693
+        "bytes": 26236
       },
       {
         "path": "footprints/g-cpd.pretty/WQFN20_RUK_TEX-M.kicad_mod",
@@ -7533,33 +7533,33 @@
       },
       {
         "path": "footprints/g-dio.pretty/D_SOD-323.kicad_mod",
-        "byte_sha256": "0836e15b16438aca3f02a4f005222b11f48afd7fb43f0d25fa115b535ce9850b",
+        "byte_sha256": "dc063ce873293da360c511ee3f5159c83892c181fe8c65e1a543e4ca186a49ef",
         "semantic_sha256": "26bacd5fe37aad322adfd3adb628c7703cc06831c305a272bb2e3806c87e98c9",
-        "bytes": 2798
+        "bytes": 2641
       },
       {
         "path": "footprints/g-dio.pretty/D_SOD-523.kicad_mod",
-        "byte_sha256": "d7c465e6bfc1c635a82e122911c42f077765aba3049e14df0627e298216e40ba",
+        "byte_sha256": "b391d52b895f71f2a70718568fd8a41309b8faa7b1540f5cc7b1bbdb3fa920ca",
         "semantic_sha256": "59ea388c1c0bcdd80d10799f896d7f1efd834af029d24c5a0b5287e612e67797",
-        "bytes": 3533
+        "bytes": 3339
       },
       {
         "path": "footprints/g-ics.pretty/21-0268_T1034N1_M-AA-XM.kicad_mod",
-        "byte_sha256": "99d56131ce989788bad9711135bf9794cadc1382dad4833e443cbe9eec5299c0",
+        "byte_sha256": "1b78d9bd231c42a8d86d0eb1bae1f32705f280237eee9289fb4fd98af344fadf",
         "semantic_sha256": "ce04b7c9dd78dedb72f562dffe84fbedf73de693184c7f6e012bb1b5ce87755d",
-        "bytes": 6832
+        "bytes": 6485
       },
       {
         "path": "footprints/g-ics.pretty/BGA-324_19.0x19.0mm_Layout18x18_P1.0mm_Ball0.5mm_Pad0.48mm_NSMD.kicad_mod",
-        "byte_sha256": "916ce14ec5233dc84e5d772800a7ca36fcaf473a3d782a17aad696b9d5e24e14",
+        "byte_sha256": "0a16af1148ac71ee25f0ef36848fe481914b391062665a3f0623a7e4ba4c0f3e",
         "semantic_sha256": "8a7fbeebcc42475c459251feae5843bc2bca5d4e3d1d981710189d6b41638596",
-        "bytes": 68123
+        "bytes": 65326
       },
       {
         "path": "footprints/g-ics.pretty/DCK0005A_L.kicad_mod",
-        "byte_sha256": "7aeb507445b2420575e8d0d0b91dd1ecca3785858cabe732fb8e2668921415b4",
+        "byte_sha256": "40d0ca7a6ffe72e164a247ad72e511a3e644ddabc1c2e31237ce0b64c41a6876",
         "semantic_sha256": "3f19f64f1f3fcb72477e9623f66bcbcf1898fb4edc935cb705652f095966a693",
-        "bytes": 11003
+        "bytes": 10865
       },
       {
         "path": "footprints/g-ics.pretty/DCK0005A_M.kicad_mod",
@@ -7575,81 +7575,81 @@
       },
       {
         "path": "footprints/g-ics.pretty/DFN-10-1EP_3x3mm_P0.5mm_EP1.65x2.38mm.kicad_mod",
-        "byte_sha256": "27b136fe8b0a7d73cd2f39a57ad8323ef0136e15513ed8f9fc9616ff4bea637b",
+        "byte_sha256": "70dadb83477fd5255fb03c408279b666d19df010ab2a4e1a3e8263ddaaca81a2",
         "semantic_sha256": "28532d35a8846ce804d9199706e7d17d126098e9b0ab41f89fb1868a1b45b5bd",
-        "bytes": 6629
+        "bytes": 6309
       },
       {
         "path": "footprints/g-ics.pretty/DFN-12-1EP_3x3mm_P0.45mm_EP1.6x2.5mm.kicad_mod",
-        "byte_sha256": "2a755e41e5079e76babf0040734e35fb1b27938bd63be4b264bca1da8039fba5",
+        "byte_sha256": "21c2dfdaa86f75b3df9c868d6e4a7cac9809843345b3d3bf878b3a827cd08400",
         "semantic_sha256": "ec8939e7919273652e5180920d2b29d9ca9e56d99d04b36812f49b46148f58ee",
-        "bytes": 7234
+        "bytes": 6892
       },
       {
         "path": "footprints/g-ics.pretty/DFN-12_FTD-L.kicad_mod",
-        "byte_sha256": "677f16cd46b4d83dc1cc411f330f115874313503f1fb6b96d9ee9d1cbd577a72",
+        "byte_sha256": "daf255289dd5a2db31758ca13cd0ff890b66311c4ee7ebad0b195e0238cfdcec",
         "semantic_sha256": "ad04efc809f3b1b61eb4361e68cf2b78ea5e3cbea43d37c854a155b7afd13102",
-        "bytes": 8050
+        "bytes": 7644
       },
       {
         "path": "footprints/g-ics.pretty/DFN-12_FTD-M.kicad_mod",
-        "byte_sha256": "e9b629d1aaf59714f764fbbd8bfc1ba8c1f1efc8ca765835565ebf0724b68887",
+        "byte_sha256": "96e81d0239fb8019572a45762836890b67d09694d4cfccb66bf3f708760e11e0",
         "semantic_sha256": "d9735646c3d9347d6fecead7b3a8871e5d559b7480a580cbe1a51d046b91c8a6",
-        "bytes": 8043
+        "bytes": 7637
       },
       {
         "path": "footprints/g-ics.pretty/DFN-12_FTD.kicad_mod",
-        "byte_sha256": "449d4ac6ecd41f1069c628660075fcbf21ed685e1735427bdd8e5001893c496f",
+        "byte_sha256": "a187b97d20fb8e7ee7de88b7b81fe939e5834382940abd70f386d3c17dc5c0a0",
         "semantic_sha256": "d856089a407ac3dfdd8d367942b3d90436aaf5014bb634a2830ab75eed2f17f9",
-        "bytes": 7822
+        "bytes": 7427
       },
       {
         "path": "footprints/g-ics.pretty/FC-BGA_11x11_ASMedia.kicad_mod",
-        "byte_sha256": "333dad9a08b27aa7269204a5bd0676604a8dcde180b4c3e7f38ea770ecff4cc2",
+        "byte_sha256": "704ffa11ad29fc721364b40219eec8d79283b1afa8597466f3a10970da0f948c",
         "semantic_sha256": "3ab94a7f80b871039b76f5cf373e6abcacc4fa932c3dd4154eb7c8c8bd1b69e6",
-        "bytes": 74476
+        "bytes": 71680
       },
       {
         "path": "footprints/g-ics.pretty/FC-BGA_11x11_Intel.kicad_mod",
-        "byte_sha256": "7196c87e4346e32a7f4033f7e5542e08fd5e8c95300e89d0c306396f22c40058",
+        "byte_sha256": "08c9c2473cd016613dc8db0097cc044dc9d6880d2903252acea660ab8e4dd67f",
         "semantic_sha256": "756a174d8553eb7ed55d97c748cdf6637bfcaf62bde571742751bb2a9ecace96",
-        "bytes": 75338
+        "bytes": 72510
       },
       {
         "path": "footprints/g-ics.pretty/QFN-48-1EP_6x6mm_P0.4mm_EP3.3x3.3mm.kicad_mod",
-        "byte_sha256": "d4b4e1c21f6bb4637c6d51ebdea78170556b86021ac994ffa3aa4f80665c2f77",
+        "byte_sha256": "42aeb1f58607d11d76bfa3254581d6f6f43a2371eb5ec65cfc3fb4f4887330b3",
         "semantic_sha256": "c93a018674f2bf0ac09264dc84e753cf8a4a4d22a54ab601608bccc2c83dd701",
-        "bytes": 15315
+        "bytes": 14634
       },
       {
         "path": "footprints/g-ics.pretty/QFN36_6X6MC_MCH-L.kicad_mod",
-        "byte_sha256": "eb7acff110b44474b59303b7584a53e7b8875987aa18f879225cda285a4e68a7",
+        "byte_sha256": "56db60c70ea794201a24edbc1b724ffcd79ef9787e4509da01ef3a3c317f5051",
         "semantic_sha256": "1dc7f7355792a4e5d8f509e6e650ea1bc6bd1dc55ce1f3e0f92bfd102c7d738f",
-        "bytes": 44800
+        "bytes": 42487
       },
       {
         "path": "footprints/g-ics.pretty/QFN36_6X6MC_MCH-M.kicad_mod",
-        "byte_sha256": "e8be259e02bccc848f1c4b1c5945b2b87e7bcbad070360f59b22328de7c38183",
+        "byte_sha256": "3ca8fd5bf0396542ef26f434bb7db6f6fadf037bb64223fca4d51242fdc830d2",
         "semantic_sha256": "cc3b0d4f113973c860940776c1122509399c826695e7420ed15d343881788106",
-        "bytes": 44804
+        "bytes": 42491
       },
       {
         "path": "footprints/g-ics.pretty/QFN36_6X6MC_MCH.kicad_mod",
-        "byte_sha256": "b4d4305eaabc7d08c85f04924246e344a061203e098e10b033f679655d5e1311",
+        "byte_sha256": "fc9819dc1920937a365acf260423ac8ed8435cac03d19e60c81df15b275d3ba0",
         "semantic_sha256": "b9e30313c116ce41be27bca0f1f7b6c791b12d68caec97eae6296c3663a29bac",
-        "bytes": 45954
+        "bytes": 43605
       },
       {
         "path": "footprints/g-ics.pretty/QFN50P250X450X100-21N_PI3USB302-AZBEX.kicad_mod",
-        "byte_sha256": "84c3533895e6d6a00de21fe783ceb9af000ed29c29efee5e54a5f825a4db93e5",
+        "byte_sha256": "df8ae68498ba6c5a700ef77bb8def0199ac273f96b0d50006216ff00a9ff7abb",
         "semantic_sha256": "5118e6f1c5629e7705333a04c78740d76d2533637667735d200ac0746fb4adac",
-        "bytes": 8874
+        "bytes": 8464
       },
       {
         "path": "footprints/g-ics.pretty/QFN77-48LD-PL-1 (MICROCHIP).kicad_mod",
-        "byte_sha256": "672119bc718ca2b3adfb70f5dde821f8d44fb435fff15671c99387e02dc943ff",
+        "byte_sha256": "cb3c93ffaa1d8f3455822f36f256e1894b4897df325d44116e668166d512e0ec",
         "semantic_sha256": "5e34523980013bc7d9bdecdf33312117100ade35df147ffb4d5d788dfb8a34d5",
-        "bytes": 17275
+        "bytes": 16553
       },
       {
         "path": "footprints/g-ics.pretty/RSL0048B-IPC_A.kicad_mod",
@@ -7689,27 +7689,27 @@
       },
       {
         "path": "footprints/g-ics.pretty/SQFN48_MCH.kicad_mod",
-        "byte_sha256": "34a1509da417a00549cf265bd0599f452607af127c992b45958f40711c9d795d",
+        "byte_sha256": "1013965f4dfc1d0dbfec45b505598d83212229e5e4571edaa947fafcb5cb75ff",
         "semantic_sha256": "868cadb45ed4e8539e11e4771c5d882da777f54d063d03328d999887e6325ec6",
-        "bytes": 57354
+        "bytes": 54393
       },
       {
         "path": "footprints/g-ics.pretty/TI-RSL0048B_VQFN.kicad_mod",
-        "byte_sha256": "cd407e6adb51ded9710d60634ff80ac277aa71f136632c7804915c35f74edd40",
+        "byte_sha256": "8b1b36487df3209b81f84d0137d296f24c54e5425c48ab99da4db46d82b0a52f",
         "semantic_sha256": "2fd89fe34410c949564121d2f1091888caf24d14192b82a5c581eb83fdc46ebb",
-        "bytes": 25189
+        "bytes": 23980
       },
       {
         "path": "footprints/g-ics.pretty/VDFN-1_2x2.5mm_P0.5mm.kicad_mod",
-        "byte_sha256": "fbf6b2bb57d018887f6dfe45d8e1e564572e43230a6c1834adae1a8d97158867",
+        "byte_sha256": "5cb1fc4ab61e944b81dc3a0a36b873d407ceae7c3970fb48f660c412cd834a42",
         "semantic_sha256": "0098610f846314f82fe186897260974e1a962f87c42501ba32b12629298e9d56",
-        "bytes": 4268
+        "bytes": 4060
       },
       {
         "path": "footprints/g-ics.pretty/VQFN100_KDX_MCH.kicad_mod",
-        "byte_sha256": "576b983f04ded9cb34aff32861379618200ce84ed05803681dee6efb2847e34e",
+        "byte_sha256": "345d5d417076c9a143878085c15494f61161146c978005ba39db6c271f3f410d",
         "semantic_sha256": "1d9d5f61b1a29188e6ccf06f11f57efa2590f2f68ff289826b9e80beca04368e",
-        "bytes": 110701
+        "bytes": 105036
       },
       {
         "path": "footprints/g-ics.pretty/X2QFN10_1P6X1P2_ONS-L.kicad_mod",
@@ -7725,167 +7725,167 @@
       },
       {
         "path": "footprints/g-ics.pretty/X2QFN10_1P6X1P2_ONS.kicad_mod",
-        "byte_sha256": "6bbc755a33608337e87562a627643987d66c54df2b27bf2145f200e2823e4470",
+        "byte_sha256": "d7be00c8f59f3305b24cc7193945e4f1ab3766e329502f20d05ee34b5de39118",
         "semantic_sha256": "653fffb18438188ae2d9b95154170b5dd022895c08bfc80c170cc293c87afda5",
-        "bytes": 17052
+        "bytes": 16153
       },
       {
         "path": "footprints/g-ind.pretty/L_Coilcraft_1008HQ_2520Metric.kicad_mod",
-        "byte_sha256": "a0fef7facd024194859ed19f74a361fefa46e5f4087c20e948c4b8d898e89229",
+        "byte_sha256": "f732c61c920774459bc2d5ea5a8aa552f34210485ba8df981888c620955ef20e",
         "semantic_sha256": "1c3796d878e55e2dc20108e8f4cd2c260265c8a2981a74c56a86872a4611c534",
-        "bytes": 2326
+        "bytes": 2210
       },
       {
         "path": "footprints/g-ind.pretty/L_Wurth_WE-CAIR-4248.kicad_mod",
-        "byte_sha256": "1160ee1688a28792b0a3718e75af16fe09a1f678bb73193115e2ed2b11ea2a87",
+        "byte_sha256": "c5350dccefb8784a022975485d2bd51b544b5098bcadc9af2e97dac3d9d6c132",
         "semantic_sha256": "8e246cc9ca7add3e9a8a3c2f65101d23d95ccacca3b3f2cdbffd706d8d149749",
-        "bytes": 2054
+        "bytes": 1948
       },
       {
         "path": "footprints/g-ind.pretty/L_Wurth_WE-CAIR-5910.kicad_mod",
-        "byte_sha256": "bd970593a91e7b163db37f2ad2214e31beae0e5afc27ba67a8f02b74d0d6c76f",
+        "byte_sha256": "36a480d2ac4491a556b778155a5c926ec641cdd293c8b69956009890dd9e709a",
         "semantic_sha256": "7f24a37c0ad4a973117016d263d73ce4f947b9b62860d3d04486c9bfa7a46491",
-        "bytes": 2701
+        "bytes": 2562
       },
       {
         "path": "footprints/g-no_bom.pretty/Fiducial_1mm_Mask2mm.kicad_mod",
-        "byte_sha256": "dd1c9e79a537ed6f8a835d01a721436017bb04b288195bff42163d579fc7131f",
+        "byte_sha256": "00549de88ae51549fcbecb2318d8d5b9376adaa3bfa9a03ac6501ecde5d7feaa",
         "semantic_sha256": "cadf5f6be590f14b7fbe4ed7a084e1f8cd74799eed3efad449614cf3740f7c98",
-        "bytes": 1882
+        "bytes": 1782
       },
       {
         "path": "footprints/g-no_bom.pretty/MountingHole_3.2mm_M3_Pad_Via.kicad_mod",
-        "byte_sha256": "bb1629b33d3234ab02a83d5fac38b9f481c1dfc3a5f55b382af10175d65740df",
+        "byte_sha256": "49705654cc768b67eb8473afe6d68fb6e5c668e989c089f2dd795bae8ee5f015",
         "semantic_sha256": "10e4b443df7ddddbff3b930d4e9211fbb1cbe14622ff3e186b513abfec7b385d",
-        "bytes": 3600
+        "bytes": 3429
       },
       {
         "path": "footprints/g-no_bom.pretty/TestPoint_Pad_D1.0mm.kicad_mod",
-        "byte_sha256": "c75579d8026b6d4b6187b8e75a88da70b66265fe705ef2b70241ec03b80ef523",
+        "byte_sha256": "9da0d086ed4e02918d0eee2270c77deb95b1dba9f56aece488950e6d51c4b554",
         "semantic_sha256": "a39369a5d7ede0d26a672aa3832877922e40cc8ee52a42b527e84a7877193256",
-        "bytes": 1844
+        "bytes": 1744
       },
       {
         "path": "footprints/g-opt.pretty/LED_0805_2012Metric.kicad_mod",
-        "byte_sha256": "3f9777b6a8360bef2d20e1e2b4602bf1a231f32d6954580ae258be87c8a74628",
+        "byte_sha256": "9b161970724387120640298b54ff9b46265c04cb761fb53a4df5ceb25015a527",
         "semantic_sha256": "4af92ba80625b0bccf4c14b30f6cf6eae3e53aedd5f42ee09ca489686d3744cf",
-        "bytes": 3173
+        "bytes": 3008
       },
       {
         "path": "footprints/g-osc.pretty/Abracon_ABS07L.kicad_mod",
-        "byte_sha256": "c55303b2d0e264a8b3c22bdf21551e8182d2aa1051c295380dcc25220b5bba74",
+        "byte_sha256": "e7b9e10c527d5e6d078e3677dad7d3d648ae6d3d3f2f3cf959304cfd4d0b7103",
         "semantic_sha256": "a9c7cd6582f3e5a09123f0dbfd43cba5242704e2f1fa53edd83dccc1060e16a2",
-        "bytes": 2437
+        "bytes": 2299
       },
       {
         "path": "footprints/g-osc.pretty/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.kicad_mod",
-        "byte_sha256": "b8cc4f766975371035189b6c96ded9488ca7fa0fba6020c0fda68321fe5b7f86",
+        "byte_sha256": "c3ca4366f0733d29c26592f6071f886ad0e6323c06633806c098ba800302da27",
         "semantic_sha256": "f7aeedac863e46afb89d807c51f60bf68ef261856c4b83d1a0257d7740644e83",
-        "bytes": 2284
+        "bytes": 2156
       },
       {
         "path": "footprints/g-osc.pretty/Crystal_SMD_SeikoEpson_FA128-4Pin_2.0x1.6mm.kicad_mod",
-        "byte_sha256": "71ecb259c957cbb9645173f44c3b5f6e896930f83d59316408b6e2744e68da43",
+        "byte_sha256": "7c9e5058e9668c30a97672a0733bcfc510a419d1323c3de62c0abfe368928431",
         "semantic_sha256": "972202ba1421e6f1c71d97ffb084b559cd893f8b5cc51563c22e0fb844651d06",
-        "bytes": 4234
+        "bytes": 4015
       },
       {
         "path": "footprints/g-osc.pretty/Hosonic_D3SX_series.kicad_mod",
-        "byte_sha256": "3c3d61699df359eec516a1dcf80be43f6a906a9c3f5fdad690a24a053212ecb8",
+        "byte_sha256": "1ddf6fa7f40e810ec9d6578880d5d274cf19600d3bf6a46e2b900c0779978395",
         "semantic_sha256": "36a05eb28f6c0919bc72dcd3f6589af26b1b34e6243baa5f5287a43e56095bd0",
-        "bytes": 3042
+        "bytes": 2880
       },
       {
         "path": "footprints/g-pwr.pretty/AOZ1353DI.kicad_mod",
-        "byte_sha256": "298fd8aca939c2bc04377a021331f7b4a99ce8d0c52ef7fe7c34a9714710e7a4",
+        "byte_sha256": "3fbedd2cec9efa07eb6a407a033bd7e8326a3b99627163db715768f0b6fee0a9",
         "semantic_sha256": "f26b432c9d4300358694813f484f4cc8fa40be37ef1b08835acc89fd9d4927ee",
-        "bytes": 3975
+        "bytes": 3919
       },
       {
         "path": "footprints/g-pwr.pretty/RWB0012A.kicad_mod",
-        "byte_sha256": "0500552ec73df1a3f335cdbe3dae9ab28695f7e3826c60452f423712bcc56234",
+        "byte_sha256": "dcebce4305ceebff745e3e27fc4acc7567b79ba6a4fa988410e377566038de57",
         "semantic_sha256": "f20c1681cd67faa402f9a410a952174d874ca3a5a4418930c01567417198c667",
-        "bytes": 3819
+        "bytes": 3772
       },
       {
         "path": "footprints/g-pwr.pretty/Relay_SPDT_Omron_G2RL-1.kicad_mod",
-        "byte_sha256": "307a406941ef867e856ff2d4c52fadc18b12cc7a1cddbf4b6d474099dcc32722",
+        "byte_sha256": "8c496c3453da0ad50ac74db89f2996fc8959f8666773f886d45907b602643d26",
         "semantic_sha256": "623189189b4740632f0efdd5c876c58d81bf0273d2f422be8696de1b5d4e2c27",
-        "bytes": 4724
+        "bytes": 4654
       },
       {
         "path": "footprints/g-pwr.pretty/WSON-10-1EP_2x3mm_P0.5mm_EP1.1x2.6mm_ThermalVias.kicad_mod",
-        "byte_sha256": "400e31b6dc39e7bb5765246c7a300cc207b83f12526996a808be95a3756f47f0",
+        "byte_sha256": "b8fac74bf6a16be87280d27807d0e123b25a52e32e50aad10200c0297b58fe74",
         "semantic_sha256": "50e6d3a1a05623009f64b97424a07f88f5a8fbda206ffc4bf7a1324052238158",
-        "bytes": 7669
+        "bytes": 7292
       },
       {
         "path": "footprints/g-qfn.pretty/DFN-10-1EP_2x3mm_P0.5mm_EP0.64x2.4mm.kicad_mod",
-        "byte_sha256": "8785c1219967e338d2a8085f41c177768af17ec96c94010b8e6b3a273067e7a7",
+        "byte_sha256": "936e72bdcb18b36766acf9fecd9b0173de18a054d2909ba84383010fa994683d",
         "semantic_sha256": "4b92384cecb4f72296ed6eeea77e927f42769405bd769fcf9b677b93959ce549",
-        "bytes": 5973
+        "bytes": 5679
       },
       {
         "path": "footprints/g-reg.pretty/LT_BGA_11.25x6.25x3.42mm_35pin_1.27P.kicad_mod",
-        "byte_sha256": "3c10199ac79e9a5ea2f1529a309617066f5fb920e30e579b61d884418a83842e",
+        "byte_sha256": "a19ab1c35e8db54bbba57075ef22df9047e66c98bc6c1efaa7ee6ded7651dc6d",
         "semantic_sha256": "318cd917112cf4a3dd80187a47773db0ff5fbf4519a9ff73c62082154bd80570",
-        "bytes": 8886
+        "bytes": 8494
       },
       {
         "path": "footprints/g-reg.pretty/LT_BGA_49_6.25x6.25mm0.8Px0.4mm.kicad_mod",
-        "byte_sha256": "ff4e26f62b82ed82d58ce6f089aadb4e8ac7692963d022faca265c5053a7f5e8",
+        "byte_sha256": "f9d608dcf6849fc32a74bf97de321f3d5ab8ebaf2c340ff40029a1efb16a4d3c",
         "semantic_sha256": "0b3c7671032d58782ca6a2367955d437da36aeefd3f94faa18b88600d02cc2bc",
-        "bytes": 9788
+        "bytes": 9357
       },
       {
         "path": "footprints/g-reg.pretty/LT_BGA_4X4X25-05-08-1566A.kicad_mod",
-        "byte_sha256": "5efb4ed8226dcb2ee65b4a572e545f518cf4b0792432a3593f749a38a6d1ee6f",
+        "byte_sha256": "12d4e65085c36b25cdabba54b876d5ac906b70cdd2e82d0053c34ffb11549787",
         "semantic_sha256": "ded55b0a8705f30b43dc533f7013a1f41c92362a3d47d3ac7c3a441c8f002d29",
-        "bytes": 6821
+        "bytes": 6730
       },
       {
         "path": "footprints/g-reg.pretty/TI_SO-PowerPAD-8.kicad_mod",
-        "byte_sha256": "3a1cffe53257fec1da5aab6608f558ccb4678c6c8fc704da304cfbe7abd77e2a",
+        "byte_sha256": "d2ebc8e132c5aad0ea32871e1d3a9cc9e8c12ce8fe2978aabb923e6302a590f8",
         "semantic_sha256": "788c40db355c7baacdf2b18792a194942b42c85ba48548b79aabbf22061783f5",
-        "bytes": 5660
+        "bytes": 5380
       },
       {
         "path": "footprints/g-res.pretty/R_0603_1608Metric.kicad_mod",
-        "byte_sha256": "52d1c771daa27ec3223e7f57b24023e078f8ed5a2357bc8a9c43e471a82ccea4",
+        "byte_sha256": "f978a2f64228e9b944c0c566921c993f635052e55d903c53cd26573368f95f55",
         "semantic_sha256": "8feff37b0c4ac8e1f9b856ca16bc61592d04325af522f67c5feeb3c983499da2",
-        "bytes": 2677
+        "bytes": 2544
       },
       {
         "path": "footprints/g-rfm.pretty/H_Wurth_WE-SHC-SEAMLESS-FRAME_3670128.kicad_mod",
-        "byte_sha256": "000b7c212d5121df832d6bc43fb5f59a0077ffc4d4512855af95082c6cf90866",
+        "byte_sha256": "bb3fcf00c9b5268f602ed996d23fd6eed04a24bfdc87f5f4682cc7433416c432",
         "semantic_sha256": "c0b2cec62b0ec622a1a62cfe3f9e90c193203bdf648624011aa12d2179063ab1",
-        "bytes": 8532
+        "bytes": 8285
       },
       {
         "path": "footprints/g-rvr.pretty/Potentiometer_Bourns_3314J_Vertical.kicad_mod",
-        "byte_sha256": "57016d053fed45ba2cdcd22e094d349c1e74f63b9e302b23534d76fc5ee24b1e",
+        "byte_sha256": "246144973856be05f0e1bc85e70983a4591356852ced480f6865fba93f868f6a",
         "semantic_sha256": "d25556746298f583be3c5e8b63579de863bcebc826a50ec8cc3ee71da22f376b",
-        "bytes": 2803
+        "bytes": 2661
       },
       {
         "path": "footprints/g-swi.pretty/SO4_222A-M-V-B_CTS.kicad_mod",
-        "byte_sha256": "75d96821c71528b24a4d18853e53d61c085b3353865b17e43ec305df28a77050",
+        "byte_sha256": "72dfdfe9eef7f967f60485c47222a06ec08fcfd92676062bbcdb30aba2bd0dcd",
         "semantic_sha256": "a1bc1b6be38ce27a1f85e9b47ff0b18bfbf6c23f48c2c52d23fe515f66ca1daa",
-        "bytes": 9728
+        "bytes": 9219
       }
     ],
     "models_3d": [
       {
         "path": "3d-models/DFN-10-1EP_2x3mm_P0.5mm_EP0.64x2.4mm.step",
-        "byte_sha256": "f32bf7ac72cd74fd3cd2ce5cc9cea9c0b978a57d74a28ba263b71c7e8b9d294b",
+        "byte_sha256": "f0319b13e8bfc149c94352a9f8d150c7f125b2102a423811a02c62d499be7737",
         "semantic_sha256": "3fdc49c987e239a2379f1b76e6dc4db0481b58b69c8e2a302eba628b31100256",
-        "bytes": 128338
+        "bytes": 125347
       },
       {
         "path": "3d-models/D_SOD-923.step",
-        "byte_sha256": "2ab2eb57942276dc90db0148894bc98e40b6ed97c8a35c3c24e1f40fc146235f",
+        "byte_sha256": "cd63e916b27e4f1670ecaa6b2278df18609cf7718050791916578702b72cb815",
         "semantic_sha256": "e6807d879dbd61e92902f9bda2bf84d5d7e3307c3fc15cc50a1ffdcde0e0eb63",
-        "bytes": 43849
+        "bytes": 42818
       },
       {
         "path": "3d-models/H_Wurth_WE-SHC-SEAMLESS-FRAME_3670128.step",

@@ -1,6 +1,6 @@
 # AFK Docker application lab
 
-The AFK lab is the reproducible Docker environment for application development and tests. Its single entry point is:
+The AFK lab is the reproducible Docker environment for application development and tests. It is deferred while development runs natively on Windows; see `kicad-parts-c748` before relying on it. Its single entry point is:
 
 ```text
 cargo xtask test-afk
@@ -16,7 +16,7 @@ The stack contains exactly three services:
 - MinIO, built from its verified source lock, with run-scoped in-memory credentials and a project-scoped named volume.
 - A non-root test runner containing the pinned Rust, Node, npm, Tauri, WebKitGTK, and browser-test dependencies.
 
-Linux and Docker do not install, launch, invoke, or automate KiCad or its command-line executable. No native-application image, service, package lock, configuration directory, GUI workflow, or runtime lane belongs in this lab. KiCad-format files may be application-data fixtures only when an application test reads them without calling native KiCad. Native interoperability is a separate, non-blocking manual Windows check documented in [WINDOWS_KICAD_INTEROP.md](WINDOWS_KICAD_INTEROP.md).
+The images do not include KiCad yet. KiCad 10 is a required product dependency, and tests may run `kicad-cli`. To add it to the lab, pin it in `infra/versions.lock` and add its download or package to the test-runner contract in `tooling/afk/src/dockerfile.rs`. Each image may contain only what its contract lists.
 
 ## Isolation and resource policy
 

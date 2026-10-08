@@ -1,6 +1,9 @@
 .~lock*.csv#
 *.bak
+# database/parts.sqlite is a committed, frozen legacy projection read by the
+# import oracle; ignore any other generated copies.
 parts.sqlite
+!/database/parts.sqlite
 secrets.env
 secrets.env
 __pycache__/
