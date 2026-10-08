@@ -64,6 +64,8 @@ release_url = "https://github.com/minio/minio/releases/tag/RELEASE.2025-10-15T17
 registry_status = "not-published; build exact source and record local image content ID"
 expected_arch = "linux/amd64"
 # minio.exe built by tooling/native-services from source_url with Go
-# toolchain.go_windows_x64_url (-trimpath, CGO off, GOAMD64=v1, the
-# Dockerfile's ldflags). Go builds are reproducible, so the result is pinned.
-windows_amd64_build_sha256 = "d8cf31074fd4c971614f84f88fa928a44f1e2ec208342fc5e819ab7035ab8213"
+# toolchain.go_windows_x64_url: -buildvcs=false (the source is unpacked in
+# this repository's target/, and VCS stamps would carry its commit),
+# -trimpath, a cleared environment with CGO off and GOAMD64=v1, and the
+# Dockerfile's ldflags. Reproduced by cold builds in two fresh clones.
+windows_amd64_build_sha256 = "04eb5f939e6efa89c6b4a258790bef7fb7377d50df8dfab4d1b6a759d31bda44"
