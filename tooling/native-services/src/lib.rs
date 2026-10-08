@@ -35,7 +35,7 @@ pub use pocketbase::{
     PocketBaseOptions, PocketBaseServer, Superuser, pocketbase_binary, shows_installer_banner,
     upsert_superuser,
 };
-pub use process::{ServiceProcess, free_loopback_port, run_hidden};
+pub use process::{ServiceProcess, free_loopback_port, run_hidden, run_hidden_with_input};
 
 /// A failure fetching, building, starting or talking to a native service.
 #[derive(Clone, Debug, PartialEq, Eq)]

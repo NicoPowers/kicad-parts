@@ -251,6 +251,9 @@ impl ImportDiagnostic {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LegacyImport {
     pub legacy_grouping: String,
+    /// The commit the inputs were read at, as the caller recorded it. The
+    /// import tooling appends `+dirty` when any input differs from that
+    /// commit, so a dirty tree is never recorded as a clean one.
     pub source_commit: Option<String>,
     pub sources: Vec<SourceFile>,
     pub blobs: Vec<AssetBlob>,

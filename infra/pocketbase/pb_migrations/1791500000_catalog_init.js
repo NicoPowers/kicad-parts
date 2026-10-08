@@ -38,8 +38,10 @@ migrate((app) => {
     name: "catalog_change_sets",
     fields: [
       { name: "seq", type: "number", required: true, min: 1, onlyInt: true },
-      // legacy-import today; later seeds add edit, restore, ...
-      { name: "kind", type: "text", required: true, max: 50 },
+      // A closed set shared with catalog_lib.js (CHANGE_SET_KINDS) and
+      // crates/catalog (ChangeSetKind). Only legacy-import is published
+      // today; edit and restore are reserved for kicad-parts-2254.
+      { name: "kind", type: "select", required: true, maxSelect: 1, values: ["legacy-import", "edit", "restore"] },
       { name: "reason", type: "text", required: true, max: 2000 },
       { name: "correlation_id", type: "text", required: true, max: 100 },
       // "<auth collection>:<record id>", because a superuser is not a users
@@ -86,8 +88,7 @@ migrate((app) => {
     type: "base",
     name: "catalog_assets",
     fields: [
-      // symbol, footprint or model-3d
-      { name: "kind", type: "text", required: true, max: 20 },
+      { name: "kind", type: "select", required: true, maxSelect: 1, values: ["symbol", "footprint", "model-3d"] },
       // LIB:NAME for symbols and footprints, the repository path for 3D models
       { name: "key", type: "text", required: true, max: 500 },
       { name: "first_change_set", type: "relation", collectionId: changeSets.id, maxSelect: 1, required: true },
@@ -220,24 +221,24 @@ migrate((app) => {
   });
   app.save(commands);
 }, (app) => {
-  for (const name of [
-    "catalog_commands",
-    "catalog_audit_events",
-    "catalog_import_diagnostics",
-    "catalog_managed_parts",
-    "catalog_part_revisions",
-    "catalog_asset_revisions",
-    "catalog_assets",
-    "catalog_asset_blobs",
-    "catalog_change_sets",
-  ]) {
+  // Referrers before what they refer to; self-relations and the head
+  // pointer first, so no relation blocks a delete.
+  const removeField = (name, field) => {
     const collection = app.findCollectionByNameOrId(name);
-    if (name === "catalog_managed_parts") {
-      collection.fields.removeByName("head");
-      app.save(collection);
-      continue;
-    }
-    app.delete(collection);
-  }
-  app.delete(app.findCollectionByNameOrId("catalog_managed_parts"));
+    collection.fields.removeByName(field);
+    app.save(collection);
+  };
+  const drop = (name) => app.delete(app.findCollectionByNameOrId(name));
+  drop("catalog_commands");
+  drop("catalog_audit_events");
+  drop("catalog_import_diagnostics");
+  removeField("catalog_managed_parts", "head");
+  removeField("catalog_part_revisions", "predecessor");
+  drop("catalog_part_revisions");
+  drop("catalog_managed_parts");
+  removeField("catalog_asset_revisions", "predecessor");
+  drop("catalog_asset_revisions");
+  drop("catalog_assets");
+  drop("catalog_asset_blobs");
+  drop("catalog_change_sets");
 });

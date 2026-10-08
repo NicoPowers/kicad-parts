@@ -32,6 +32,7 @@
 //! the protected import route and reads the stored records back.
 
 mod asset;
+mod change_set;
 mod hash;
 mod ids;
 mod ipn;
@@ -43,6 +44,7 @@ pub use asset::{
     AssetBlob, AssetKind, AssetRevisionDeclaration, CatalogAsset, LicenseDeclaration,
     ModelReference, ModelTarget,
 };
+pub use change_set::ChangeSetKind;
 pub use hash::sha256_hex;
 pub use ids::{
     AssetBlobId, AssetRevisionId, AuditEventId, CatalogAssetId, ChangeSetId, ID_LENGTH,

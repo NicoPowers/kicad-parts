@@ -350,6 +350,7 @@ dependencies = [
 name = "catalog"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "collaboration",
  "csv",
  "kicad-integration",
@@ -378,8 +379,10 @@ version = "0.1.0"
 dependencies = [
  "catalog",
  "collaboration",
+ "kicad-integration",
  "legacy-import-fixture",
  "native-services",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

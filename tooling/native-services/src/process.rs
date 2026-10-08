@@ -93,6 +93,31 @@ pub fn run_hidden(name: &str, command: &mut Command) -> ServiceResult<Output> {
         .map_err(|io| error(format!("waiting for {name} failed: {io}")))
 }
 
+/// Like [`run_hidden`], but writes `input` to the command's standard input
+/// and then closes it, for commands that ask for a confirmation such as
+/// `pocketbase migrate down` (which, with no input, cancels and still exits
+/// 0).
+pub fn run_hidden_with_input(
+    name: &str,
+    command: &mut Command,
+    input: &[u8],
+) -> ServiceResult<Output> {
+    use std::io::Write;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let (mut child, _job) = spawn_in_job(name, command, false)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input)
+            .map_err(|io| error(format!("writing to {name} failed: {io}")))?;
+    }
+    child
+        .wait_with_output()
+        .map_err(|io| error(format!("waiting for {name} failed: {io}")))
+}
+
 /// A port that was free on 127.0.0.1 a moment ago. Callers retry with a
 /// new port if a service then fails to bind it.
 pub fn free_loopback_port() -> ServiceResult<u16> {

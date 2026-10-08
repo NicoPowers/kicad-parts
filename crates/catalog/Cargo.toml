@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "The Catalog context: Managed Parts, Part Revisions, Catalog Assets and Change Sets, the deterministic Legacy Catalog import, and the PocketBase contract that stores them. No Tauri."
 
 [dependencies]
+base64 = "0.22"
 collaboration = { path = "../collaboration" }
 csv = "1.3"
 kicad-integration = { path = "../kicad-integration" }

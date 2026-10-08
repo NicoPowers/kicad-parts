@@ -13,8 +13,10 @@ use crate::ipn::Ipn;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Characters in every derived ID (60 bits; unique indexes catch the
-/// astronomically unlikely collision rather than merging records).
+/// Characters in every derived ID (60 bits). Before reusing a stored record
+/// found by a derived ID, the import route compares its content hash or key
+/// with the request and answers `id_collision` on a mismatch, so a
+/// collision is refused rather than merged.
 pub const ID_LENGTH: usize = 15;
 
 /// The first [`ID_LENGTH`] hex digits of `SHA-256("kicad-parts:<kind>:v1\n<key>")`.
@@ -161,6 +163,7 @@ mod tests {
         );
         // Pinned: the server derives the same value (see catalog_lib.js),
         // and stored records depend on it never changing.
+        assert_eq!(id.as_str(), "d0469c29a4560b9");
         assert_eq!(
             derive_id("managed-part", "RES-0000-0470"),
             sha256_hex("kicad-parts:managed-part:v1\nRES-0000-0470")[..15]

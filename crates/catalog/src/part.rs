@@ -59,8 +59,9 @@ pub struct SnapshotField {
 pub struct ApprovedManufacturerPart {
     pub manufacturer: String,
     pub mpn: String,
-    /// Only substitutes carry their own datasheet; the primary's datasheet
-    /// is the part's `Datasheet` field.
+    /// Only Approved Manufacturer Parts after the primary carry their own
+    /// datasheet (read from rows of the legacy `substitutes.csv`); the
+    /// primary's datasheet is the part's `Datasheet` field.
     pub datasheet: Option<String>,
 }
 

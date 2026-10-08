@@ -18,11 +18,14 @@
 //
 // Then, in one transaction, it compares the request with what is stored:
 // - blobs, assets, Asset Revisions and diagnostics that already exist are
-//   reused (they are content-addressed);
+//   reused (they are content-addressed), after checking the stored record's
+//   hash or key really matches, so an ID collision is refused, not merged;
 // - a new IPN becomes a Managed Part with Part Revision 1;
 // - an IPN whose head has the same snapshot hash is unchanged; if its source
 //   row's bytes changed anyway (for example an Operational Fact such as a
-//   price), an Import Diagnostic keeps the new row;
+//   price), an Import Diagnostic keeps the new row; if the head has no
+//   Legacy Catalog Provenance to compare with, an Import Diagnostic keeps
+//   the row too;
 // - an IPN whose snapshot changed gets a successor revision if its head was
 //   itself published by a legacy import, and otherwise an Import Diagnostic
 //   instead, so a re-import never overwrites an edit made in the Catalog.
@@ -32,6 +35,9 @@
 //   422 { outcome: "noop", unchanged }    everything is already stored; no
 //                                          Change Set is created
 //   409 { outcome: "correlation_reused" } the ID was used for another request
+//   409 { outcome: "id_collision", collisions } a stored record has the
+//                                          derived ID but other content; the
+//                                          request writes nothing
 //   400 bad or inconsistent input, 401/403 not a superuser.
 // Applied and no-op answers are stored under the correlation ID and replayed
 // byte for byte (with X-Collab-Replayed: true) without writing anything.
@@ -116,6 +122,10 @@ routerAdd(
       if (bytes.length !== blob.size || lib.sha256Bytes(bytes) !== blob.sha256) {
         fail(`blob ${blob.sha256} does not match its bytes`);
       }
+      if (bytes.length === 0) {
+        // PocketBase cannot store an empty file.
+        fail(`blob ${blob.sha256} is empty; Asset Blobs must have at least one byte`);
+      }
       return { id: lib.deriveId("asset-blob", blob.sha256), sha256: blob.sha256, bytes: bytes };
     });
     const requestBlobs = {};
@@ -199,13 +209,17 @@ routerAdd(
           bound.push(lib.deriveId("asset-revision", binding.target.asset + "\n" + binding.target.asset_revision_sha256));
         }
       }
+      const parsedProvenance = parse(provenance, "provenance");
+      if (parsedProvenance.source !== lib.LEGACY_SOURCE || typeof parsedProvenance.raw_record !== "string") {
+        fail(`the provenance of ${ipn} is not a Legacy Catalog row`);
+      }
       return {
         id: id,
         ipn: ipn,
         snapshot: snapshot,
         snapshotSha256: snapshotSha256,
         provenance: provenance,
-        parsedProvenance: parse(provenance, "provenance"),
+        parsedProvenance: parsedProvenance,
         bound: bound,
       };
     });
@@ -288,7 +302,19 @@ routerAdd(
       }
 
       // ---- Phase 1: decide what is new, writing nothing ----------------
-      const newBlobs = blobs.filter((blob) => !byId("catalog_asset_blobs", blob.id));
+      // A stored record found by derived ID is reused only if its content
+      // matches; anything else is an ID collision and nothing is written.
+      const collisions = [];
+      const reuse = (collection, id, matches, what) => {
+        const stored = byId(collection, id);
+        if (stored && !matches(stored)) {
+          collisions.push(`${collection}/${id}: the stored record is not ${what}`);
+        }
+        return stored;
+      };
+      const newBlobs = blobs.filter(
+        (blob) => !reuse("catalog_asset_blobs", blob.id, (r) => r.getString("sha256") === blob.sha256, `blob ${blob.sha256}`),
+      );
       const blobExists = (sha) => !!requestBlobs[sha] || !!byId("catalog_asset_blobs", lib.deriveId("asset-blob", sha));
       const revisionExists = (id) => !!requestRevisions[id] || !!byId("catalog_asset_revisions", id);
 
@@ -308,11 +334,23 @@ routerAdd(
             }
           }
         }
-        if (!seenAssets[revision.assetId] && !byId("catalog_assets", revision.assetId)) {
+        const storedAsset = reuse(
+          "catalog_assets",
+          revision.assetId,
+          (r) => r.getString("kind") === revision.kind && r.getString("key") === revision.key,
+          `${revision.kind} ${revision.key}`,
+        );
+        if (!seenAssets[revision.assetId] && !storedAsset) {
           newAssets.push(revision);
         }
         seenAssets[revision.assetId] = true;
-        if (byId("catalog_asset_revisions", revision.id)) {
+        const storedRevision = reuse(
+          "catalog_asset_revisions",
+          revision.id,
+          (r) => r.getString("asset") === revision.assetId && r.getString("revision_sha256") === revision.revisionSha256,
+          `revision ${revision.revisionSha256} of ${revision.key}`,
+        );
+        if (storedRevision) {
           continue;
         }
         let latest = pendingNumbers[revision.assetId];
@@ -351,9 +389,30 @@ routerAdd(
         const location = `rows[IPN=${part.ipn}]`;
         if (head.getString("snapshot_sha256") === part.snapshotSha256) {
           unchangedParts++;
-          const previous = JSON.parse(head.getString("provenance"));
+          let previous = null;
+          try {
+            previous = JSON.parse(head.getString("provenance"));
+          } catch (_) {
+            previous = null;
+          }
           const current = part.parsedProvenance;
-          if (previous.raw_record !== current.raw_record) {
+          if (!previous || previous.source !== lib.LEGACY_SOURCE || typeof previous.raw_record !== "string") {
+            serverDiagnostics.push(
+              diagnostic(
+                "head-without-legacy-provenance",
+                part.ipn,
+                current.path || "",
+                location,
+                `the head revision ${head.getInt("number")} of ${part.ipn} has no Legacy Catalog Provenance to compare the source row with; the row is kept here and no revision is created`,
+                JSON.stringify({
+                  head_number: head.getInt("number"),
+                  path: current.path,
+                  row_number: current.row_number,
+                  raw_record: current.raw_record,
+                }),
+              ),
+            );
+          } else if (previous.raw_record !== current.raw_record) {
             serverDiagnostics.push(
               diagnostic(
                 "legacy-row-changed-without-semantic-change",
@@ -376,7 +435,7 @@ routerAdd(
           continue;
         }
         const headChangeSet = byId("catalog_change_sets", head.getString("change_set"));
-        if (headChangeSet && headChangeSet.getString("kind") === "legacy-import") {
+        if (headChangeSet && headChangeSet.getString("kind") === lib.CHANGE_SET_KINDS.legacyImport) {
           part.number = head.getInt("number") + 1;
           part.predecessor = head.id;
           part.stored = stored;
@@ -405,10 +464,34 @@ routerAdd(
       const newDiagnostics = [];
       const seenDiagnostics = {};
       for (const item of diagnostics.concat(serverDiagnostics)) {
-        if (!seenDiagnostics[item.id] && !byId("catalog_import_diagnostics", item.id)) {
+        const stored = reuse(
+          "catalog_import_diagnostics",
+          item.id,
+          (r) =>
+            r.getString("code") === item.code &&
+            r.getString("subject") === item.subject &&
+            r.getString("location") === item.location &&
+            $security.sha256(r.getString("detail")) === $security.sha256(item.detail),
+          `diagnostic ${item.code} at ${item.location}`,
+        );
+        if (!seenDiagnostics[item.id] && !stored) {
           newDiagnostics.push(item);
         }
         seenDiagnostics[item.id] = true;
+      }
+
+      if (collisions.length > 0) {
+        // Not stored under the correlation ID: nothing was decided.
+        reply = {
+          status: 409,
+          body: {
+            outcome: "id_collision",
+            correlationId: correlationId,
+            collisions: collisions,
+            message: "stored records have the derived IDs of this request but other content",
+          },
+        };
+        return;
       }
 
       const unchanged = {
@@ -448,7 +531,7 @@ routerAdd(
 
         const changeSet = record("catalog_change_sets", changeSetId);
         changeSet.set("seq", seq);
-        changeSet.set("kind", "legacy-import");
+        changeSet.set("kind", lib.CHANGE_SET_KINDS.legacyImport);
         changeSet.set("reason", reason);
         changeSet.set("correlation_id", correlationId);
         changeSet.set("actor", actor);
