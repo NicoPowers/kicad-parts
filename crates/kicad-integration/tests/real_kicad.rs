@@ -71,67 +71,6 @@ fn search_roots_shaped_like_program_files_find_kicad() {
 }
 
 #[test]
-fn an_older_kicad_is_reported_as_unsupported() {
-    let dir = tempfile::tempdir().unwrap();
-    let fake = fake_cli(dir.path(), Some("9.0.7"));
-    let options = DiscoveryOptions {
-        user_override: Some(fake.clone()),
-        locations: SearchLocations::Standard,
-    };
-    match discover(&options) {
-        Discovery::Unsupported { cli, version, .. } => {
-            assert_eq!(cli, fake);
-            assert_eq!(version.to_string(), "9.0.7");
-        }
-        other => panic!("expected Unsupported, got {other:?}"),
-    }
-}
-
-/// The fake kicad-cli, copied into `dir` under the real file name, reporting
-/// `version` (or failing like a damaged install when `None`).
-fn fake_cli(dir: &Path, version: Option<&str>) -> PathBuf {
-    let name = if cfg!(windows) {
-        "kicad-cli.exe"
-    } else {
-        "kicad-cli"
-    };
-    let path = dir.join(name);
-    fs::copy(env!("CARGO_BIN_EXE_fake-kicad-cli"), &path).unwrap();
-    if let Some(version) = version {
-        fs::write(dir.join("fake-version.txt"), version).unwrap();
-    }
-    path
-}
-
-#[test]
-fn a_kicad_cli_that_cannot_report_its_version_is_broken() {
-    let dir = tempfile::tempdir().unwrap();
-    let fake = fake_cli(dir.path(), None);
-    let options = DiscoveryOptions {
-        user_override: Some(dir.path().to_path_buf()),
-        locations: SearchLocations::Only(Vec::new()),
-    };
-    match discover(&options) {
-        Discovery::Broken { cli, message, .. } => {
-            assert_eq!(cli, fake);
-            assert!(message.contains("damaged"), "{message}");
-        }
-        other => panic!("expected Broken, got {other:?}"),
-    }
-}
-
-#[test]
-fn a_kicad_nightly_is_reported_as_unsupported() {
-    let dir = tempfile::tempdir().unwrap();
-    fake_cli(dir.path(), Some("10.99.0-1234-gdeadbeef"));
-    let options = DiscoveryOptions {
-        user_override: Some(dir.path().to_path_buf()),
-        locations: SearchLocations::Only(Vec::new()),
-    };
-    assert!(matches!(discover(&options), Discovery::Unsupported { .. }));
-}
-
-#[test]
 fn exports_every_symbol_unit_once_then_serves_the_cache() {
     let kicad = installed_kicad();
     let cache_dir = tempfile::tempdir().unwrap();
@@ -342,4 +281,49 @@ fn names_that_look_like_options_never_reach_kicad_cli() {
         Err(PreviewError::Unexportable(_))
     ));
     assert_eq!(cache.export_count(), 0);
+}
+
+#[test]
+fn names_kicad_cli_writes_with_spaces_still_export() {
+    // kicad-cli writes `A*B` as `A B_unit1.svg`; a synthetic library keeps
+    // the repository catalog out of it.
+    let kicad = installed_kicad();
+    let project = tempfile::tempdir().unwrap();
+    let symbols = project.path().join("symbols");
+    fs::create_dir_all(&symbols).unwrap();
+    let mut library = String::from(
+        "(kicad_symbol_lib\n\t(version 20241209)\n\t(generator \"kicad-parts-test\")\n",
+    );
+    for name in ["A*B", "A?B", "A|B"] {
+        library.push_str(&format!(
+            "\t(symbol \"{name}\"\n\t\t(in_bom yes)\n\t\t(on_board yes)\n\
+             \t\t(property \"Reference\" \"U\" (at 0 3.81 0) (effects (font (size 1.27 1.27))))\n\
+             \t\t(property \"Value\" \"{name}\" (at 0 -3.81 0) (effects (font (size 1.27 1.27))))\n\
+             \t\t(symbol \"{name}_1_1\"\n\
+             \t\t\t(rectangle (start -2.54 2.54) (end 2.54 -2.54) (stroke (width 0.254) (type default)) (fill (type background)))\n\
+             \t\t)\n\t)\n"
+        ));
+    }
+    library.push_str(")\n");
+    fs::write(symbols.join("t.kicad_sym"), library).unwrap();
+
+    let resolver = LibraryResolver::new(Some(project.path().to_path_buf()), None);
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = PreviewCache::new(cache_dir.path().to_path_buf());
+    for name in ["A*B", "A?B", "A|B"] {
+        let symbol = resolver.symbol(&format!("t:{name}")).unwrap();
+        let preview = cache
+            .symbol(&kicad, &symbol)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(preview.images.len(), 1, "{name}");
+        assert_eq!(preview.images[0].unit, Some(1));
+        assert_eq!(
+            preview.images[0]
+                .file
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            "A B_unit1.svg"
+        );
+    }
 }

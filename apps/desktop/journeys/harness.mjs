@@ -37,7 +37,7 @@ export function tempDir(prefix) {
 }
 
 /**
- * A stand-in kicad-cli (built from crates/kicad-integration) copied into a
+ * A stand-in kicad-cli (built from tooling/fake-kicad-cli) copied into a
  * temporary folder as kicad-cli.exe. `version` prints `version`; with
  * `null` it fails like a damaged install.
  */

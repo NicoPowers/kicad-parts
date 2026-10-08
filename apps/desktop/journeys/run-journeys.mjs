@@ -51,6 +51,20 @@ function webview2Version() {
   throw new Error('WebView2 runtime not found; set WEBVIEW2_VERSION');
 }
 
+function portInUse(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, '127.0.0.1');
+    socket.once('connect', () => {
+      socket.end();
+      resolve(true);
+    });
+    socket.once('error', () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+
 function waitForPort(port, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
@@ -73,7 +87,7 @@ function waitForPort(port, timeoutMs) {
 if (!skipBuild) {
   run('trunk', ['build'], path.join(repoRoot, 'apps', 'desktop-ui'));
   run('cargo', ['build', '--locked', '-p', 'kicad-parts-desktop', '--features', 'custom-protocol'], repoRoot);
-  run('cargo', ['build', '--locked', '-p', 'kicad-integration', '--bin', 'fake-kicad-cli'], repoRoot);
+  run('cargo', ['build', '--locked', '-p', 'fake-kicad-cli'], repoRoot);
   if (!visible) run('cargo', ['build', '--locked', '-p', 'journey-desktop'], repoRoot);
 }
 if (!fs.existsSync(appBinary)) {
@@ -83,6 +97,22 @@ if (!fs.existsSync(appBinary)) {
 
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
+
+// A driver left over from an earlier run would answer instead of ours.
+if (await portInUse(driverPort)) {
+  console.error(
+    `port ${driverPort} is already in use, probably by a tauri-driver from an earlier run. ` +
+      'Stop it (for example: taskkill /IM tauri-driver.exe /F) or set TAURI_DRIVER_PORT, then run again.',
+  );
+  process.exit(1);
+}
+if (!visible && !fs.existsSync(journeyDesktop)) {
+  console.error(
+    `missing ${journeyDesktop}, which runs the journeys on a hidden desktop. ` +
+      'Build it with `cargo build --locked -p journey-desktop`, run without --skip-build, or use --visible.',
+  );
+  process.exit(1);
+}
 
 const version = webview2Version();
 const driverCache = path.join(repoRoot, 'target', 'journey-tools', 'msedgedriver');
@@ -94,12 +124,15 @@ const driverArgs = ['--port', String(driverPort), '--native-driver', nativeDrive
 console.log(`mode: ${visible ? 'visible desktop' : 'hidden desktop (journey-desktop)'}`);
 // Killing journey-desktop closes its job, which ends tauri-driver and
 // everything it started.
+// In hidden mode journey-desktop also ends everything if this runner is
+// killed outright, because it watches its parent process.
 const tauriDriver = visible
   ? spawn('tauri-driver', driverArgs, { stdio: ['ignore', 'inherit', 'inherit'] })
   : spawn(journeyDesktop, ['tauri-driver', ...driverArgs], { stdio: ['ignore', 'inherit', 'inherit'] });
 const started = Date.now();
 tauriDriver.on('error', (error) => {
-  console.error(`could not start tauri-driver (cargo install tauri-driver --locked): ${error.message}`);
+  const what = visible ? 'tauri-driver (cargo install tauri-driver --locked)' : `journey-desktop (${journeyDesktop})`;
+  console.error(`could not start ${what}: ${error.message}`);
   process.exit(1);
 });
 

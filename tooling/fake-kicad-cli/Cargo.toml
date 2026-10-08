@@ -1,0 +1,17 @@
+[package]
+name = "fake-kicad-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "A stand-in kicad-cli for tests and journeys of KiCad version handling. Not shipped."
+publish = false
+
+[[bin]]
+name = "fake-kicad-cli"
+path = "src/main.rs"
+test = false
+
+[dev-dependencies]
+kicad-integration = { path = "../../crates/kicad-integration" }
+tempfile = "3.10"

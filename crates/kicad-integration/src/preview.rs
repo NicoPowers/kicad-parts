@@ -144,8 +144,9 @@ impl PreviewCache {
                 out.clone().into(),
                 symbol.library.clone().into(),
             ];
+            let stem = output_stem(name);
             self.export(kicad, &args, &out, |file| {
-                file.strip_prefix(name.as_str())
+                file.strip_prefix(stem.as_str())
                     .and_then(|rest| rest.strip_suffix(".svg"))
                     .is_some_and(|rest| parse_unit_suffix(rest).is_some())
             })
@@ -191,7 +192,7 @@ impl PreviewCache {
                 out.clone().into(),
                 library.into(),
             ];
-            let expected = format!("{name}.svg");
+            let expected = format!("{}.svg", output_stem(name));
             self.export(kicad, &args, &out, |file| file == expected)
         })
     }
@@ -316,6 +317,22 @@ impl PreviewCache {
 
 /// kicad-cli parses a leading `-` as an option, so such a name would either
 /// fail ("Unknown argument") or change what is exported.
+/// The file-name stem kicad-cli writes for `name`: it replaces characters
+/// Windows forbids in file names (`*`, `?`, `|`, and `<`, `>`, `"`, which
+/// KiCad libraries cannot contain anyway) with a space, so `A*B` is written
+/// as `A B_unit1.svg`.
+fn output_stem(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if matches!(c, '*' | '?' | '|' | '<' | '>' | '"') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 fn reject_option_like(name: &str) -> Result<(), PreviewError> {
     if name.starts_with('-') {
         return Err(PreviewError::Unexportable(format!(
@@ -491,6 +508,13 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_stems_follow_kicad_cli_file_naming() {
+        assert_eq!(output_stem("A*B"), "A B");
+        assert_eq!(output_stem("A?B|C"), "A B C");
+        assert_eq!(output_stem("R_US"), "R_US");
+    }
 
     #[test]
     fn unit_suffixes_come_from_kicad_file_names() {
