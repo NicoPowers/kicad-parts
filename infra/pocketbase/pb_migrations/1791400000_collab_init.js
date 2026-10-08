@@ -10,6 +10,10 @@
 // kicad-parts-2254 own that.
 migrate((app) => {
   const users = app.findCollectionByNameOrId("users");
+  // No open sign-up: only a superuser adds team members. PocketBase's
+  // default users collection lets anyone create an account.
+  users.createRule = null;
+  app.save(users);
   const signedIn = "@request.auth.id != ''";
 
   const records = new Collection({
@@ -110,4 +114,7 @@ migrate((app) => {
   for (const name of ["collab_attachments", "collab_commands", "collab_changes", "collab_records"]) {
     app.delete(app.findCollectionByNameOrId(name));
   }
+  const users = app.findCollectionByNameOrId("users");
+  users.createRule = "";
+  app.save(users);
 });
