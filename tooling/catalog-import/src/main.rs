@@ -7,7 +7,6 @@
 //! the command ends; the repository is only read. Exits 1 if anything was
 //! lost.
 
-use catalog::LegacyCatalog;
 use catalog::pocketbase::{ImportCommand, ImportOutcome, read_back, submit_import};
 use catalog_import::services;
 use std::path::PathBuf;
@@ -33,8 +32,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &root.join("fixtures/import/legacy-catalog/manifest.json"),
     )?;
 
-    let commit = services::source_commit(&root);
-    let import = LegacyCatalog::new(&root).import(grouping, commit)?;
+    let import = services::plan(&root, grouping)?;
     let reason = format!(
         "Import the Legacy Catalog grouping {grouping} (database/{grouping}.csv) into canonical Part Revisions"
     );

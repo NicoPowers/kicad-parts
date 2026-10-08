@@ -22,6 +22,7 @@ use catalog::{
     AssetRevisionDeclaration, AssetRevisionId, BindingRole, BindingTarget, CatalogAssetId,
     LicenseDeclaration, ModelTarget, PartRevisionSnapshot, sha256_hex,
 };
+use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use legacy_import_fixture::Manifest;
 use serde::Serialize;
 use serde_json::Value;
@@ -99,6 +100,8 @@ pub struct SubstitutesAccount {
     pub rows: usize,
     pub rows_in_scope: usize,
     pub fields_in_scope: usize,
+    /// In-scope substitute fields per destination.
+    pub destinations: BTreeMap<String, usize>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -322,6 +325,7 @@ impl<'a> Reporter<'a> {
         let mut rebuilt = header_raw.clone().unwrap_or_default();
         let mut scope_ipns = BTreeSet::new();
         let mut matched_heads = BTreeSet::new();
+        let mut primaries: BTreeMap<String, bool> = BTreeMap::new();
         if header_raw.is_none() {
             self.problem(format!(
                 "no Change Set kept the header line of {source_path}"
@@ -367,11 +371,25 @@ impl<'a> Reporter<'a> {
                     ));
                 }
                 let snapshot = &head.snapshot;
-                let primary = snapshot.approved_manufacturer_parts.first();
+                // The row made the primary Approved Manufacturer Part only if
+                // it has the columns and was not kept as an incomplete one;
+                // otherwise the first entry is a substitute.
                 let incomplete = diagnostics.iter().find(|diagnostic| {
                     diagnostic.code == "incomplete-primary-manufacturer-part"
                         && diagnostic.subject == snapshot.ipn
                 });
+                let has_columns = headers.iter().any(|header| {
+                    matches!(
+                        route_column(header),
+                        ColumnRoute::PrimaryMpn | ColumnRoute::PrimaryManufacturer
+                    )
+                });
+                let row_made_primary = has_columns && incomplete.is_none();
+                primaries.insert(snapshot.ipn.clone(), row_made_primary);
+                let primary = snapshot
+                    .approved_manufacturer_parts
+                    .first()
+                    .filter(|_| row_made_primary);
                 let mut snapshot_columns = Vec::new();
                 let mut fact_columns = Vec::new();
                 for (column, value) in headers.iter().zip(row) {
@@ -502,7 +520,13 @@ impl<'a> Reporter<'a> {
             ));
         }
 
-        let substitutes = self.substitutes(&heads, &scope_ipns, &substitute_hashes);
+        let substitutes = self.substitutes(
+            &heads,
+            &scope_ipns,
+            &substitute_hashes,
+            &primaries,
+            &mut explained_diagnostics,
+        );
         let (assets, footprint_paths) =
             self.assets(&heads, &scope_ipns, &mut explained_diagnostics);
         let model_references = self.models(&footprint_paths, &mut explained_diagnostics);
@@ -586,8 +610,11 @@ impl<'a> Reporter<'a> {
         heads: &[Head],
         scope: &BTreeSet<String>,
         hashes: &BTreeSet<String>,
+        primaries: &BTreeMap<String, bool>,
+        explained: &mut BTreeSet<String>,
     ) -> SubstitutesAccount {
         let oracle = self.oracle;
+        let readback = self.readback;
         let document = &oracle.substitutes;
         if !hashes.contains(&document.byte_sha256) {
             self.problem(format!(
@@ -614,6 +641,8 @@ impl<'a> Reporter<'a> {
             }
             account.rows_in_scope += 1;
             account.fields_in_scope += row.len();
+            // Entries come after the primary only if the row made one.
+            let offset = usize::from(primaries.get(&ipn).copied().unwrap_or(false));
             let head = heads.iter().find(|head| head.snapshot.ipn == ipn);
             let found = head.and_then(|head| {
                 let position = head
@@ -621,35 +650,75 @@ impl<'a> Reporter<'a> {
                     .substitutes
                     .iter()
                     .position(|source| source.row_number == row_number)?;
-                // The primary is the first Approved Manufacturer Part.
                 let approved = head
                     .snapshot
                     .approved_manufacturer_parts
-                    .get(position + 1)?;
+                    .get(position + offset)?;
                 Some((approved, &head.provenance.substitutes[position]))
             });
             let Some((approved, source)) = found else {
-                self.problem(format!(
-                    "substitute row {row_number} of {ipn} is not an Approved Manufacturer Part"
-                ));
+                // A row that could not become an Approved Manufacturer Part
+                // must be kept whole by an Import Diagnostic.
+                let location = format!("rows[{row_number}]");
+                let kept = readback.diagnostics.iter().find(|diagnostic| {
+                    let detail: Value =
+                        serde_json::from_str(&diagnostic.detail).unwrap_or_default();
+                    let record: Vec<String> = detail["record"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|value| value.as_str().unwrap_or_default().to_owned())
+                        .collect();
+                    let mut padded = record;
+                    padded.resize(row.len(), String::new());
+                    diagnostic.path == document.path
+                        && diagnostic.location == location
+                        && &padded == row
+                });
+                match kept {
+                    Some(diagnostic) => {
+                        explained.insert(diagnostic.id.clone());
+                        *account
+                            .destinations
+                            .entry(IMPORT_DIAGNOSTIC.to_owned())
+                            .or_default() += row.len();
+                    }
+                    None => self.problem(format!(
+                        "substitute row {row_number} of {ipn} is neither an Approved Manufacturer Part nor an Import Diagnostic"
+                    )),
+                }
                 continue;
             };
             for (column, value) in document.headers.iter().zip(row) {
-                let stored = match route_substitute_column(column) {
-                    SubstituteRoute::Ipn => Some(ipn.clone()),
-                    SubstituteRoute::Mpn => Some(approved.mpn.clone()),
-                    SubstituteRoute::Manufacturer => Some(approved.manufacturer.clone()),
-                    SubstituteRoute::Datasheet => approved.datasheet.clone(),
-                    SubstituteRoute::OperationalFact => source
-                        .operational_facts
-                        .iter()
-                        .find(|fact| &fact.column == column)
-                        .map(|fact| fact.value.clone()),
-                    SubstituteRoute::Unknown => None,
+                let (destination, stored) = match route_substitute_column(column) {
+                    SubstituteRoute::Ipn => (APPROVED_MANUFACTURER_PART, Some(ipn.clone())),
+                    SubstituteRoute::Mpn => {
+                        (APPROVED_MANUFACTURER_PART, Some(approved.mpn.clone()))
+                    }
+                    SubstituteRoute::Manufacturer => (
+                        APPROVED_MANUFACTURER_PART,
+                        Some(approved.manufacturer.clone()),
+                    ),
+                    SubstituteRoute::Datasheet => {
+                        (APPROVED_MANUFACTURER_PART, approved.datasheet.clone())
+                    }
+                    SubstituteRoute::OperationalFact => (
+                        OPERATIONAL_FACT,
+                        source
+                            .operational_facts
+                            .iter()
+                            .find(|fact| &fact.column == column)
+                            .map(|fact| fact.value.clone()),
+                    ),
+                    SubstituteRoute::Unknown => ("lost", None),
                 };
+                *account
+                    .destinations
+                    .entry(destination.to_owned())
+                    .or_default() += 1;
                 if stored.as_deref() != Some(value.as_str()) {
                     self.problem(format!(
-                        "substitute row {row_number} field {column}: oracle {value:?}, stored {stored:?}"
+                        "substitute row {row_number} field {column}: oracle {value:?}, stored {stored:?} in {destination}"
                     ));
                 }
             }
@@ -888,17 +957,25 @@ impl<'a> Reporter<'a> {
                         "{reference}: {} is not the oracle's file",
                         provenance.path
                     ));
-                } else if file.get(start as usize..end as usize) != Some(blob.bytes.as_slice()) {
-                    self.problem(format!(
-                        "{reference}: blob is not bytes {start}..{end} of the oracle's file"
-                    ));
                 } else {
+                    if file.get(start as usize..end as usize) != Some(blob.bytes.as_slice()) {
+                        self.problem(format!(
+                            "{reference}: blob is not bytes {start}..{end} of the oracle's file"
+                        ));
+                    }
+                    // The range must be exactly the whole top-level symbol,
+                    // as KiCad Integration reads the oracle's file.
                     let item = reference.split_once(':').map_or("", |(_, item)| item);
-                    if !blob
-                        .bytes
-                        .starts_with(format!("(symbol \"{item}\"").as_bytes())
-                    {
-                        self.problem(format!("{reference}: blob is not the symbol `{item}`"));
+                    let whole = SymbolLibrary::parse(&file)
+                        .ok()
+                        .and_then(|library| match library.find(item) {
+                            SymbolLookup::Found(entry) => Some(entry.span.clone()),
+                            _ => None,
+                        });
+                    if whole != Some(start as usize..end as usize) {
+                        self.problem(format!(
+                            "{reference}: bytes {start}..{end} are not the whole symbol `{item}` ({whole:?})"
+                        ));
                     }
                 }
             }
