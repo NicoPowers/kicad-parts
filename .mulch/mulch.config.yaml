@@ -5,6 +5,7 @@ domains:
   library-sources: {}
   kicad-integration: {}
   inventory: {}
+  desktop-ui: {}
 governance:
   max_entries: 100
   warn_entries: 150
