@@ -7,8 +7,11 @@
 //!   files, searching project libraries before KiCad's bundled ones.
 //! - [`preview`] exports symbol and footprint SVGs with kicad-cli and caches
 //!   them by library content hash and KiCad version.
+//! - [`library_file`] reads saved symbol libraries and footprints: one
+//!   symbol's exact bytes, file versions and 3D model references.
 
 pub mod discovery;
+pub mod library_file;
 pub mod preview;
 mod process;
 pub mod resolver;

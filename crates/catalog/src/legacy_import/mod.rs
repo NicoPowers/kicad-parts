@@ -16,7 +16,6 @@
 //! The legacy grouping (`g-res`) is provenance only. It is neither a Catalog
 //! Category nor the IPN Family.
 
-mod sexpr;
 mod source;
 
 pub use source::{CsvRecord, CsvTable, input_exists, parse_csv, read_input};
@@ -32,6 +31,7 @@ use crate::part::{
     ApprovedManufacturerPart, AssetBinding, BindingRole, BindingTarget, PART_REVISION_SCHEMA,
     PartRevisionSnapshot, SnapshotField,
 };
+use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
 use kicad_integration::{LibRef, LibraryResolver, ResolveError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -864,45 +864,34 @@ impl<'a> Planner<'a> {
         };
         let path = format!("symbols/{}.kicad_sym", resolved.lib_ref.library);
         let (bytes, file_sha) = self.read_source("symbol-library", &path)?;
-        let (head, children) = sexpr::root_children(&bytes)
+        let library = SymbolLibrary::parse(&bytes)
             .map_err(|error| ImportError(format!("cannot read `{path}`: {error}")))?;
-        if head != "kicad_symbol_lib" {
-            return Err(ImportError(format!(
-                "`{path}` is not a KiCad symbol library"
-            )));
-        }
-        let matches: Vec<_> = children
-            .iter()
-            .filter(|child| {
-                child.head == "symbol" && child.first.as_deref() == Some(&resolved.lib_ref.item)
-            })
-            .collect();
-        let child = match matches.as_slice() {
-            [] => return Ok(AssetOutcome::Unresolved("missing-member".into())),
-            [one] => (*one).clone(),
-            _ => return Ok(AssetOutcome::Unresolved("ambiguous".into())),
+        let entry = match library.find(&resolved.lib_ref.item) {
+            SymbolLookup::Found(entry) => entry.clone(),
+            SymbolLookup::Missing => return Ok(AssetOutcome::Unresolved("missing-member".into())),
+            SymbolLookup::Ambiguous => return Ok(AssetOutcome::Unresolved("ambiguous".into())),
         };
-        let span = bytes[child.span.clone()].to_vec();
-        if String::from_utf8_lossy(&span).contains("(extends") {
+        let span = bytes[entry.span.clone()].to_vec();
+        if let Some(parent) = &entry.extends {
             self.diagnose(ImportDiagnostic::new(
                 "symbol-extends-parent",
                 reference,
                 &path,
                 &format!("symbol={}", resolved.lib_ref.item),
-                format!("symbol `{reference}` extends another symbol, which its Asset Revision does not include"),
-                json!({ "reference": reference }),
+                format!("symbol `{reference}` extends `{parent}`, which its Asset Revision does not include"),
+                json!({ "reference": reference, "extends": parent }),
             ));
         }
         Ok(self.asset_revision(
             AssetKind::Symbol,
             reference,
             "kicad-symbol-entry",
-            sexpr::file_version(&children),
+            library.version.clone(),
             span,
             vec![],
             &path,
             &file_sha,
-            Some([child.span.start as u64, child.span.end as u64]),
+            Some([entry.span.start as u64, entry.span.end as u64]),
         ))
     }
 
@@ -922,14 +911,10 @@ impl<'a> Planner<'a> {
         let LibRef { library, item } = &resolved.lib_ref;
         let path = format!("footprints/{library}.pretty/{item}.kicad_mod");
         let (bytes, file_sha) = self.read_source("footprint", &path)?;
-        let (head, children) = sexpr::root_children(&bytes)
+        let footprint = FootprintFile::parse(&bytes)
             .map_err(|error| ImportError(format!("cannot read `{path}`: {error}")))?;
-        if head != "footprint" && head != "module" {
-            return Err(ImportError(format!("`{path}` is not a KiCad footprint")));
-        }
-        let text = String::from_utf8_lossy(&bytes).into_owned();
         let mut models = Vec::new();
-        for model in sexpr::model_references(&text) {
+        for model in footprint.model_references.clone() {
             let classified = classify_model_reference(&model);
             let target = match &classified.candidate {
                 Some(candidate) if input_exists(self.root(), candidate)? => {
@@ -974,7 +959,7 @@ impl<'a> Planner<'a> {
             AssetKind::Footprint,
             reference,
             "kicad-footprint",
-            sexpr::file_version(&children),
+            footprint.version.clone(),
             bytes,
             models,
             &path,
