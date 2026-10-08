@@ -94,6 +94,24 @@ fn App() -> impl IntoView {
     }
 }
 
+/// `20000` as `20,000`.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut text = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            text.push(',');
+        }
+        text.push(digit);
+    }
+    text
+}
+
+/// `1 part`, `2 parts`, `20,000 parts`.
+fn counted(n: usize, singular: &str, plural: &str) -> String {
+    format!("{} {}", grouped(n), if n == 1 { singular } else { plural })
+}
+
 fn into_load<T>(result: Result<T, String>) -> Load<T> {
     match result {
         Ok(value) => Load::Ready(value),
@@ -108,9 +126,9 @@ fn CatalogBadge(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
             None => view! {
                 <p class="catalog-summary">
                     {format!(
-                        "{} parts in {} categories",
-                        status.catalog.parts,
-                        status.catalog.categories,
+                        "{} in {}",
+                        counted(status.catalog.parts, "part", "parts"),
+                        counted(status.catalog.categories, "category", "categories"),
                     )}
                 </p>
             }
@@ -320,11 +338,15 @@ fn ResultList(
                 Load::Failed(error) => format!("Search failed: {error}"),
                 Load::Ready(response) if response.total == 0 => "No parts match.".to_owned(),
                 Load::Ready(response) if response.total > response.hits.len() => {
-                    format!("Showing {} of {} matching parts", response.hits.len(), response.total)
+                    format!(
+                        "Showing {} of {} matching parts",
+                        grouped(response.hits.len()),
+                        grouped(response.total),
+                    )
                 }
                 Load::Ready(response) => {
                     let noun = if response.total == 1 { "part" } else { "parts" };
-                    format!("{} matching {noun}", response.total)
+                    format!("{} matching {noun}", grouped(response.total))
                 }
             }}
         </p>
