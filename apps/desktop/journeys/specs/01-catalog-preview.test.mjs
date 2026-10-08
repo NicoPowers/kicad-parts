@@ -147,6 +147,41 @@ describe('catalog search with exact KiCad previews', () => {
     await screenshot(browser, '07-unassigned');
   });
 
+  it('shows a single-unit part beside every catalog field without scrolling', async () => {
+    await searchFor(browser, 'KF33BD', '1 matching part');
+    await selectResult(browser, 'KF33BD-TR');
+    await waitForText(browser, '#part-title', 'KF33BD-TR');
+    await waitForPreview(browser, SYMBOL);
+    await waitForPreview(browser, FOOTPRINT);
+    const layout = await browser.execute(() => {
+      const fits = (el) => el.scrollHeight <= el.clientHeight + 1;
+      const previews = document.querySelector('.part-previews');
+      const fields = document.querySelector('.part-fields');
+      return {
+        windowFits: fits(document.scrollingElement),
+        panelFits: fits(document.querySelector('.part-panel')),
+        previewsFit: fits(previews),
+        fieldsFit: fits(fields),
+        fieldsOnTheRight: fields.getBoundingClientRect().left >= previews.getBoundingClientRect().right,
+        collapsibles: document.querySelectorAll('.part-view details').length,
+        rows: fields.querySelectorAll('tbody tr').length,
+        heading: fields.querySelector('h3').textContent.trim(),
+        fieldsHeight: [fields.scrollHeight, fields.clientHeight],
+        previewsHeight: [previews.scrollHeight, previews.clientHeight],
+      };
+    });
+    record({ event: 'layout', part: 'KF33BD-TR', ...layout });
+    await screenshot(browser, '09-part-fields');
+    assert.equal(layout.windowFits, true, 'the window itself never scrolls');
+    assert.equal(layout.panelFits, true, 'the part panel needs no scrolling');
+    assert.equal(layout.previewsFit, true, 'symbol and footprint fit stacked on the left');
+    assert.equal(layout.fieldsFit, true, 'every catalog field fits on the right');
+    assert.equal(layout.fieldsOnTheRight, true);
+    assert.equal(layout.collapsibles, 0, 'catalog fields are always visible');
+    assert.equal(layout.heading, `Catalog fields (${layout.rows})`);
+    await assertAccessible(browser, '09-part-fields');
+  });
+
   it('says when nothing matches', async () => {
     await searchFor(browser, 'no-such-part-xyz', 'No parts match.');
     assert.equal(await browser.execute(() => document.querySelectorAll('.results li').length), 0);

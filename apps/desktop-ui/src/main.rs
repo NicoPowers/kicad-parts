@@ -553,42 +553,60 @@ fn PartView(
     .filter(|(_, value)| !value.is_empty())
     .collect();
     let field_count = part.fields.len();
+    // Previews stack on the left and every catalog field stays visible on
+    // the right, so a typical part needs no scrolling.
     view! {
-        <header class="part-header">
-            <h2 id="part-title">{heading}</h2>
-            <p class="part-description">{summary.description.clone()}</p>
-            <dl class="facts">
-                {facts
-                    .into_iter()
-                    .map(|(name, value)| view! {
-                        <div class="fact">
-                            <dt>{name}</dt>
-                            <dd>{value}</dd>
-                        </div>
-                    })
-                    .collect_view()}
-            </dl>
-        </header>
-        <PreviewSection kind=PreviewKind::Symbol state=symbol />
-        <PreviewSection kind=PreviewKind::Footprint state=footprint />
-        <details class="all-fields">
-            <summary>{format!("All catalog fields ({field_count})")}</summary>
-            <table>
-                <caption class="visually-hidden">"Catalog fields for this part"</caption>
-                <thead>
-                    <tr><th scope="col">"Field"</th><th scope="col">"Value"</th></tr>
-                </thead>
-                <tbody>
-                    {part
-                        .fields
+        <div class="part-view">
+            <header class="part-header">
+                <h2 id="part-title">{heading}</h2>
+                <p class="part-description">{summary.description.clone()}</p>
+                <dl class="facts">
+                    {facts
                         .into_iter()
-                        .map(|field| view! {
-                            <tr><th scope="row">{field.name}</th><td>{field.value}</td></tr>
+                        .map(|(name, value)| view! {
+                            <div class="fact">
+                                <dt>{name}</dt>
+                                <dd>{value}</dd>
+                            </div>
                         })
                         .collect_view()}
-                </tbody>
-            </table>
-        </details>
+                </dl>
+            </header>
+            <div class="part-body">
+                // Each column scrolls on its own when a part needs more room,
+                // so both are focusable for keyboard scrolling.
+                <div class="part-previews" role="region" aria-label="Symbol and footprint" tabindex="0">
+                    <PreviewSection kind=PreviewKind::Symbol state=symbol />
+                    <PreviewSection kind=PreviewKind::Footprint state=footprint />
+                </div>
+                <section class="part-fields" aria-labelledby="fields-heading" tabindex="0">
+                    <h3 id="fields-heading">{format!("Catalog fields ({field_count})")}</h3>
+                    <table aria-labelledby="fields-heading">
+                        <thead>
+                            <tr><th scope="col">"Field"</th><th scope="col">"Value"</th></tr>
+                        </thead>
+                        <tbody>
+                            {part
+                                .fields
+                                .into_iter()
+                                .map(|field| {
+                                    // Long URLs stay on one line; hovering shows all of it.
+                                    let is_url = field.value.starts_with("http://")
+                                        || field.value.starts_with("https://");
+                                    let title = is_url.then(|| field.value.clone());
+                                    view! {
+                                        <tr>
+                                            <th scope="row">{field.name}</th>
+                                            <td class:field-url=is_url title=title>{field.value}</td>
+                                        </tr>
+                                    }
+                                })
+                                .collect_view()}
+                        </tbody>
+                    </table>
+                </section>
+            </div>
+        </div>
     }
 }
 
