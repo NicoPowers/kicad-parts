@@ -1483,7 +1483,9 @@ mod tests {
     #[cfg(windows)]
     fn grandchild_command() -> Command {
         let mut command = Program::PowerShell.command();
-        command.args(["-NoProfile", "-Command", "$p=Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; [Console]::Out.WriteLine($p.Id); Start-Sleep -Seconds 30"]);
+        // Start-Process opens a new console window by default; the
+        // grandchild must stay hidden so tests never pop up on screen.
+        command.args(["-NoProfile", "-Command", "$p=Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -PassThru; [Console]::Out.WriteLine($p.Id); Start-Sleep -Seconds 30"]);
         command
     }
 
