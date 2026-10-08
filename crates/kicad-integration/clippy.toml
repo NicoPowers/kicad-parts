@@ -1,0 +1,5 @@
+# Launch kicad-cli only through `process::run_kicad_cli` so this crate has a
+# single, reviewed process entry point.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "launch kicad-cli through process::run_kicad_cli" },
+]

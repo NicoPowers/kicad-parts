@@ -1,2 +1,6 @@
 [alias]
 xtask = "run --locked --package xtask --"
+
+[resolver]
+# Keep dependency resolution compatible with the pinned 1.85 toolchain.
+incompatible-rust-versions = "fallback"

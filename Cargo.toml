@@ -1,8 +1,20 @@
 [workspace]
-members = ["tooling/afk", "tooling/import-fixture", "tooling/xtask"]
+members = [
+    "crates/catalog-browser",
+    "crates/desktop-contract",
+    "crates/kicad-integration",
+    "crates/legacy-catalog",
+    "tooling/afk",
+    "tooling/import-fixture",
+    "tooling/xtask",
+]
 resolver = "2"
 
 [workspace.package]
 edition = "2024"
 license = "GPL-3.0-or-later"
 rust-version = "1.85"
+
+# Hashing preview libraries in debug builds would otherwise be slow.
+[profile.dev.package.sha2]
+opt-level = 3

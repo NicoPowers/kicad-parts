@@ -1,0 +1,370 @@
+//! The "browse the catalog with exact KiCad previews" use cases.
+//!
+//! The desktop shell wraps each method in a Tauri command and does nothing
+//! else, so everything here is testable without a window.
+
+use base64::Engine;
+use desktop_contract::{
+    AppStatus, CatalogStatus, Field, KicadStatus, PartDetail, PartSummary, PreviewImage,
+    PreviewKind, PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewSet, SearchResponse,
+};
+use kicad_integration::{
+    CacheOutcome, Discovery, DiscoveryOptions, InstallSource, LibraryOrigin, LibraryResolver,
+    PreviewCache, PreviewError, ResolveError, SUPPORTED_MAJOR, SearchLocations, discover,
+    footprint_choices,
+};
+use legacy_catalog::{CatalogPart, LegacyCatalog};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+use std::time::Instant;
+
+/// Largest page of search results the UI may request.
+pub const MAX_SEARCH_LIMIT: usize = 500;
+
+#[derive(Clone, Debug)]
+pub struct BrowserConfig {
+    /// Directory holding `database/`, `symbols/` and `footprints/`.
+    pub catalog_root: PathBuf,
+    /// Application cache directory; previews go under `previews/`.
+    pub cache_dir: PathBuf,
+    /// JSON file holding user settings such as the kicad-cli override.
+    pub settings_file: PathBuf,
+    pub kicad_locations: SearchLocations,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct Settings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kicad_cli_override: Option<PathBuf>,
+}
+
+struct KicadState {
+    settings: Settings,
+    discovery: Discovery,
+}
+
+pub struct CatalogBrowser {
+    config: BrowserConfig,
+    catalog: Result<LegacyCatalog, String>,
+    previews: PreviewCache,
+    kicad: RwLock<KicadState>,
+}
+
+impl CatalogBrowser {
+    /// Loads the catalog and settings and looks for KiCad. Problems become
+    /// part of [`AppStatus`] rather than errors, so the UI can explain them.
+    pub fn open(config: BrowserConfig) -> Self {
+        let catalog = LegacyCatalog::load(&config.catalog_root).map_err(|e| e.to_string());
+        let settings = load_settings(&config.settings_file);
+        let discovery = discover(&discovery_options(&config, &settings));
+        Self {
+            previews: PreviewCache::new(config.cache_dir.join("previews")),
+            catalog,
+            kicad: RwLock::new(KicadState {
+                settings,
+                discovery,
+            }),
+            config,
+        }
+    }
+
+    pub fn status(&self) -> AppStatus {
+        let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
+        let catalog = match &self.catalog {
+            Ok(catalog) => CatalogStatus {
+                root: display(&self.config.catalog_root),
+                parts: catalog.parts().len(),
+                categories: catalog.categories().len(),
+                error: None,
+            },
+            Err(error) => CatalogStatus {
+                root: display(&self.config.catalog_root),
+                parts: 0,
+                categories: 0,
+                error: Some(error.clone()),
+            },
+        };
+        AppStatus {
+            kicad: kicad_status(&kicad.discovery),
+            kicad_override: kicad.settings.kicad_cli_override.as_deref().map(display),
+            catalog,
+        }
+    }
+
+    /// Searches for KiCad again, for example after the user installed it.
+    pub fn rediscover_kicad(&self) -> AppStatus {
+        {
+            let mut kicad = self.kicad.write().unwrap_or_else(|e| e.into_inner());
+            kicad.discovery = discover(&discovery_options(&self.config, &kicad.settings));
+        }
+        self.status()
+    }
+
+    /// Saves (or clears, with `None` or a blank path) the user's kicad-cli
+    /// location and searches again.
+    pub fn set_kicad_override(&self, path: Option<String>) -> Result<AppStatus, String> {
+        let path = path
+            .map(|path| path.trim().trim_matches('"').to_owned())
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from);
+        {
+            let mut kicad = self.kicad.write().unwrap_or_else(|e| e.into_inner());
+            let settings = Settings {
+                kicad_cli_override: path,
+            };
+            save_settings(&self.config.settings_file, &settings)?;
+            kicad.discovery = discover(&discovery_options(&self.config, &settings));
+            kicad.settings = settings;
+        }
+        Ok(self.status())
+    }
+
+    pub fn search(&self, query: &str, limit: usize) -> SearchResponse {
+        let started = Instant::now();
+        let (total, hits) = match &self.catalog {
+            Ok(catalog) => {
+                let results = catalog.search(query, limit.min(MAX_SEARCH_LIMIT));
+                let hits = results
+                    .hits
+                    .iter()
+                    .map(|&position| summary(&catalog.parts()[position]))
+                    .collect();
+                (results.total, hits)
+            }
+            Err(_) => (0, Vec::new()),
+        };
+        SearchResponse {
+            query: query.to_owned(),
+            total,
+            hits,
+            elapsed_micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        }
+    }
+
+    pub fn part(&self, ipn: &str) -> Option<PartDetail> {
+        let part = self.catalog.as_ref().ok()?.find(ipn)?;
+        Some(PartDetail {
+            summary: summary(part),
+            symbol: part.symbol.clone(),
+            footprint: part.footprint.clone(),
+            datasheet: part.datasheet.clone(),
+            fields: part
+                .fields
+                .iter()
+                .map(|(name, value)| Field {
+                    name: name.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    /// The exact kicad-cli preview of a part's symbol (every unit) or
+    /// footprint. Exports on the first view; later views use the cache.
+    pub fn preview(&self, ipn: &str, kind: PreviewKind) -> PreviewOutcome {
+        let problem = |reason, reference: Option<&str>, message: String| {
+            PreviewOutcome::Problem(PreviewProblem {
+                kind,
+                reason,
+                reference: reference.map(str::to_owned),
+                message,
+                command: None,
+                cli_message: None,
+            })
+        };
+        let Some(part) = self.catalog.as_ref().ok().and_then(|c| c.find(ipn)) else {
+            return problem(
+                PreviewProblemReason::UnknownPart,
+                None,
+                format!("Part {ipn} is not in the catalog."),
+            );
+        };
+        let field = match kind {
+            PreviewKind::Symbol => part.symbol.as_deref(),
+            PreviewKind::Footprint => part.footprint.as_deref(),
+        };
+        // Only footprint fields list alternatives, but a stray `;` in a
+        // symbol field is handled the same way.
+        let choices = field.map(footprint_choices).unwrap_or_default();
+        let Some((&reference, alternates)) = choices.split_first() else {
+            return problem(
+                PreviewProblemReason::Unassigned,
+                None,
+                format!("{ipn} has no {} assigned in the catalog.", noun(kind)),
+            );
+        };
+
+        let install = {
+            let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
+            match &kicad.discovery {
+                Discovery::Ready(install) => install.clone(),
+                _ => {
+                    return problem(
+                        PreviewProblemReason::KicadUnavailable,
+                        Some(reference),
+                        "Previews are drawn by KiCad 10's kicad-cli, which is not available."
+                            .into(),
+                    );
+                }
+            }
+        };
+        let resolver = LibraryResolver::new(
+            Some(self.config.catalog_root.clone()),
+            install.share_dir.clone(),
+        );
+        let resolved = match kind {
+            PreviewKind::Symbol => resolver.symbol(reference).map(|symbol| {
+                let library = symbol.library.clone();
+                let origin = symbol.origin;
+                (self.previews.symbol(&install, &symbol), library, origin)
+            }),
+            PreviewKind::Footprint => resolver.footprint(reference).map(|footprint| {
+                let library = footprint.library.clone();
+                let origin = footprint.origin;
+                (
+                    self.previews.footprint(&install, &footprint),
+                    library,
+                    origin,
+                )
+            }),
+        };
+        let (exported, library, origin) = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let reason = match error {
+                    ResolveError::Unassigned => PreviewProblemReason::Unassigned,
+                    _ => PreviewProblemReason::Unresolved,
+                };
+                return problem(reason, Some(reference), capitalize(&error.to_string()));
+            }
+        };
+        match exported {
+            Ok(preview) => PreviewOutcome::Ready(PreviewSet {
+                kind,
+                reference: reference.to_owned(),
+                alternates: alternates
+                    .iter()
+                    .map(|choice| (*choice).to_owned())
+                    .collect(),
+                library_path: display(&library),
+                from_kicad_bundle: origin == LibraryOrigin::KicadBundled,
+                kicad_version: install.version.to_string(),
+                library_sha256: preview.library_sha256,
+                from_cache: preview.cache == CacheOutcome::Hit,
+                images: preview
+                    .images
+                    .iter()
+                    .map(|image| PreviewImage {
+                        unit: image.unit,
+                        data_uri: svg_data_uri(&image.svg),
+                    })
+                    .collect(),
+            }),
+            Err(PreviewError::ExportFailed {
+                command,
+                cli_message,
+            }) => PreviewOutcome::Problem(PreviewProblem {
+                kind,
+                reason: PreviewProblemReason::ExportFailed,
+                reference: Some(reference.to_owned()),
+                message: format!("kicad-cli could not export the {} {reference}.", noun(kind)),
+                command: Some(command),
+                cli_message: Some(cli_message),
+            }),
+            Err(PreviewError::Io(message)) => {
+                problem(PreviewProblemReason::Internal, Some(reference), message)
+            }
+        }
+    }
+
+    /// How many times kicad-cli has exported a preview in this session.
+    pub fn export_count(&self) -> usize {
+        self.previews.export_count()
+    }
+}
+
+fn discovery_options(config: &BrowserConfig, settings: &Settings) -> DiscoveryOptions {
+    DiscoveryOptions {
+        user_override: settings.kicad_cli_override.clone(),
+        locations: config.kicad_locations.clone(),
+    }
+}
+
+fn kicad_status(discovery: &Discovery) -> KicadStatus {
+    match discovery {
+        Discovery::Ready(install) => KicadStatus::Ready {
+            version: install.version.to_string(),
+            cli_path: display(&install.cli),
+            from_override: install.source == InstallSource::UserOverride,
+        },
+        Discovery::Missing { searched } => KicadStatus::Missing {
+            searched: searched.iter().map(|path| display(path)).collect(),
+        },
+        Discovery::Unsupported { cli, version, .. } => KicadStatus::Unsupported {
+            version: version.to_string(),
+            cli_path: display(cli),
+            supported_major: SUPPORTED_MAJOR,
+        },
+        Discovery::OverrideInvalid { path, problem } => KicadStatus::OverrideInvalid {
+            path: display(path),
+            problem: capitalize(problem),
+        },
+        Discovery::Broken { cli, message, .. } => KicadStatus::Broken {
+            cli_path: display(cli),
+            message: message.clone(),
+        },
+    }
+}
+
+fn summary(part: &CatalogPart) -> PartSummary {
+    PartSummary {
+        ipn: part.ipn.clone(),
+        category: part.category.clone(),
+        mpn: part.mpn.clone(),
+        manufacturer: part.manufacturer.clone(),
+        description: part.description.clone(),
+        value: part.value.clone(),
+    }
+}
+
+fn load_settings(path: &Path) -> Settings {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings(path: &Path, settings: &Settings) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    let json = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| format!("cannot save {}: {e}", path.display()))
+}
+
+fn svg_data_uri(svg: &str) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(svg.as_bytes());
+    format!("data:image/svg+xml;base64,{encoded}")
+}
+
+fn noun(kind: PreviewKind) -> &'static str {
+    match kind {
+        PreviewKind::Symbol => "symbol",
+        PreviewKind::Footprint => "footprint",
+    }
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+fn display(path: &Path) -> String {
+    path.display().to_string()
+}
