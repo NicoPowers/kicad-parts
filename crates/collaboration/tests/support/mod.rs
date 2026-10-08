@@ -60,11 +60,7 @@ pub fn start(
     let admin = PocketBaseClient::new(server.url())
         .authenticate("_superusers", &superuser.email, &superuser.password)
         .unwrap();
-    // Guard: an instance must never run without a superuser, or PocketBase
-    // would open its installer in the user's browser.
-    let superusers: Vec<serde_json::Value> =
-        admin.list_records("_superusers", "", "email").unwrap();
-    assert!(!superusers.is_empty());
+    // Guard: PocketBase must not have shown its browser installer.
     server.check_no_installer().unwrap();
     (server, admin)
 }

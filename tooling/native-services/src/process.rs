@@ -184,9 +184,16 @@ mod job {
                 let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
                 if !thread.is_null() {
                     // SAFETY: a valid thread handle, closed right after.
-                    unsafe {
-                        ResumeThread(thread);
-                        CloseHandle(thread);
+                    let previous = unsafe { ResumeThread(thread) };
+                    // SAFETY: as above, closed once.
+                    unsafe { CloseHandle(thread) };
+                    if previous == u32::MAX {
+                        // SAFETY: the snapshot handle from above, closed once.
+                        unsafe { CloseHandle(snapshot) };
+                        return Err(error(format!(
+                            "ResumeThread failed for process {pid}: {}",
+                            std::io::Error::last_os_error()
+                        )));
                     }
                     resumed += 1;
                 }

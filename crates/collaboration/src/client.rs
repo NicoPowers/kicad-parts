@@ -268,7 +268,7 @@ impl PocketBaseClient {
                 .err()
                 .unwrap_or_else(|| CollabError::Protocol("unexpected status".into())));
             }
-            Err(transport) => return Err(CollabError::Transport(transport.to_string())),
+            Err(transport) => return Err(transport_error(&transport)),
         };
         let mut bytes = Vec::new();
         response
@@ -325,7 +325,7 @@ impl PocketBaseClient {
         let response = match result {
             Ok(response) => response,
             Err(ureq::Error::Status(_, response)) => response,
-            Err(transport) => return Err(CollabError::Transport(transport.to_string())),
+            Err(transport) => return Err(transport_error(&transport)),
         };
         let status = response.status();
         let replayed = response.header("X-Collab-Replayed") == Some("true");
@@ -338,6 +338,29 @@ impl PocketBaseClient {
             replayed,
         })
     }
+}
+
+/// A transport error without URL query strings, which can carry file
+/// tokens (`?token=...`).
+fn transport_error(error: &ureq::Error) -> CollabError {
+    CollabError::Transport(without_queries(&error.to_string()))
+}
+
+/// Drops everything from each `?` to the next whitespace.
+fn without_queries(text: &str) -> String {
+    let mut clean = String::with_capacity(text.len());
+    let mut in_query = false;
+    for ch in text.chars() {
+        if ch == '?' {
+            in_query = true;
+        } else if ch.is_whitespace() {
+            in_query = false;
+        }
+        if !in_query {
+            clean.push(ch);
+        }
+    }
+    clean
 }
 
 #[cfg(test)]
@@ -368,6 +391,20 @@ mod tests {
             })
         );
         assert!(reply(200, "not json").json::<Value>().is_err());
+    }
+
+    #[test]
+    fn transport_errors_never_show_url_queries() {
+        assert_eq!(
+            without_queries("http://h/api/files/c/r/f.pdf?token=secret: Connection refused"),
+            "http://h/api/files/c/r/f.pdf Connection refused"
+        );
+        let client = PocketBaseClient::new("http://127.0.0.1:9");
+        let failure = client
+            .download_file("c", "r", "f.pdf", Some("secret-token"))
+            .unwrap_err();
+        assert!(matches!(failure, CollabError::Transport(_)));
+        assert!(!failure.to_string().contains("secret-token"), "{failure}");
     }
 
     #[test]

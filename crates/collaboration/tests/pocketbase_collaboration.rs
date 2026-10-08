@@ -11,7 +11,8 @@ use collaboration::{
     PocketBaseClient, RealtimeConnection, RecordSnapshot, Replica,
 };
 use native_services::Superuser;
-use std::time::Duration;
+use std::sync::Barrier;
+use std::time::{Duration, Instant};
 use support::{CATEGORY_MIGRATION, INIT_MIGRATION, all_migrations, create_member, sign_in};
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -21,6 +22,40 @@ fn applied_seq(outcome: &CommandOutcome) -> u64 {
         CommandOutcome::Applied { seq, .. } => *seq,
         other => panic!("expected an applied command, got {other:?}"),
     }
+}
+
+/// Runs `count` copies of `request` at once: every thread waits at a
+/// barrier, then sends. Panics unless the requests really overlapped (at
+/// least half of them started before the first one finished).
+fn race<T: Send>(count: usize, request: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let barrier = Barrier::new(count);
+    let timed: Vec<(Instant, Instant, T)> = std::thread::scope(|scope| {
+        let racers: Vec<_> = (0..count)
+            .map(|index| {
+                let (barrier, request) = (&barrier, &request);
+                scope.spawn(move || {
+                    barrier.wait();
+                    let started = Instant::now();
+                    let reply = request(index);
+                    (started, Instant::now(), reply)
+                })
+            })
+            .collect();
+        racers
+            .into_iter()
+            .map(|racer| racer.join().unwrap())
+            .collect()
+    });
+    let first_end = timed.iter().map(|(_, end, _)| *end).min().unwrap();
+    let overlapping = timed
+        .iter()
+        .filter(|(started, _, _)| *started < first_end)
+        .count();
+    assert!(
+        overlapping * 2 >= count,
+        "only {overlapping} of {count} requests overlapped"
+    );
+    timed.into_iter().map(|(_, _, reply)| reply).collect()
 }
 
 fn change_of(event: &collaboration::RealtimeEvent) -> ChangeEntry {
@@ -53,6 +88,27 @@ fn authenticated_commands_notify_and_reconcile_a_second_client() {
     // Unauthorised calls are rejected: no token, a superuser token on the
     // users-only route, and a direct write that bypasses the command.
     let anonymous = PocketBaseClient::new(&url);
+    // No open sign-up: an anonymous account creation is refused, so only
+    // members a superuser created can sign in and issue commands.
+    let sign_up = anonymous
+        .post_json(
+            "/api/collections/users/records",
+            &serde_json::json!({
+                "email": "intruder@example.test",
+                "password": "intruder-password-1",
+                "passwordConfirm": "intruder-password-1",
+            }),
+        )
+        .unwrap();
+    assert!(
+        matches!(sign_up.success(), Err(CollabError::Forbidden(_))),
+        "{sign_up:?}"
+    );
+    assert!(
+        anonymous
+            .authenticate("users", "intruder@example.test", "intruder-password-1")
+            .is_err()
+    );
     let first = EditRecord::new("res-1", 0, "Resistor", "10k 0603");
     assert!(matches!(
         anonymous.execute(&first),
@@ -197,29 +253,17 @@ fn authenticated_commands_notify_and_reconcile_a_second_client() {
     }
 
     // Concurrent writers with the same expected revision: exactly one wins.
-    let racers: Vec<_> = (0..8)
-        .map(|index| {
-            let client = if index % 2 == 0 {
-                alice.clone()
-            } else {
-                bob.clone()
-            };
-            std::thread::spawn(move || {
-                client
-                    .execute(&EditRecord::new(
-                        "res-1",
-                        3,
-                        format!("racer {index}"),
-                        "race",
-                    ))
-                    .unwrap()
-            })
-        })
-        .collect();
-    let outcomes: Vec<_> = racers
-        .into_iter()
-        .map(|racer| racer.join().unwrap())
-        .collect();
+    let outcomes = race(8, |index| {
+        let client = if index % 2 == 0 { &alice } else { &bob };
+        client
+            .execute(&EditRecord::new(
+                "res-1",
+                3,
+                format!("racer {index}"),
+                "race",
+            ))
+            .unwrap()
+    });
     assert_eq!(
         outcomes.iter().filter(|reply| reply.status == 200).count(),
         1,
@@ -381,6 +425,41 @@ fn authenticated_commands_notify_and_reconcile_a_second_client() {
     );
     drop(bob_stream);
     server.check_no_installer().unwrap();
+    server.stop();
+}
+
+#[test]
+fn simultaneous_retries_of_one_command_apply_it_once() {
+    let temporary = tempfile::tempdir().unwrap();
+    let migrations = all_migrations();
+    let migrations: Vec<&str> = migrations.iter().map(String::as_str).collect();
+    let options = support::options(temporary.path(), &migrations);
+    let superuser = Superuser::generate();
+    let (server, admin) = support::start(&options, &superuser);
+    let member = create_member(&admin, "erin");
+    let erin = sign_in(server.url(), &member);
+
+    // The same command, with the same correlation ID, sent 16 times at
+    // once (a client retrying aggressively).
+    let command = EditRecord::new("race-1", 0, "Raced", "once");
+    let replies = race(16, |_| erin.execute(&command).unwrap());
+    let fresh: Vec<_> = replies.iter().filter(|reply| !reply.replayed).collect();
+    assert_eq!(fresh.len(), 1, "{replies:#?}");
+    assert_eq!(fresh[0].status, 200);
+    assert!(matches!(
+        fresh[0].outcome,
+        CommandOutcome::Applied {
+            revision: 1,
+            seq: 1,
+            ..
+        }
+    ));
+    for reply in &replies {
+        assert_eq!((reply.status, &reply.body), (200, &fresh[0].body));
+    }
+    assert_eq!(erin.changes_since(0).unwrap().len(), 1);
+    let ledger: Vec<serde_json::Value> = erin.list_records("collab_commands", "", "").unwrap();
+    assert_eq!(ledger.len(), 1);
     server.stop();
 }
 

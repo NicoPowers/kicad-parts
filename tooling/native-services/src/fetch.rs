@@ -63,6 +63,17 @@ impl Cache {
                 "=https",
                 "--retry",
                 "3",
+                // A stalled download fails instead of hanging the tests:
+                // give up on connecting after 30 s, on a transfer slower
+                // than 1 KiB/s for 60 s, and on any attempt after 30 min.
+                "--connect-timeout",
+                "30",
+                "--speed-limit",
+                "1024",
+                "--speed-time",
+                "60",
+                "--max-time",
+                "1800",
                 "--output",
             ])
             .arg(&partial)
@@ -89,8 +100,15 @@ impl Cache {
     }
 
     /// Unpacks a verified archive once into `unpacked/<label>-<sha>` and
-    /// returns that directory. A `.complete` marker makes partial unpacks
-    /// (from a killed run) start over.
+    /// returns that directory. The archive is SHA-256-verified when it is
+    /// downloaded or reused; the unpack happens in a staging directory and
+    /// is moved into place with a `.complete` marker holding that SHA-256,
+    /// so a partial unpack (from a killed run) starts over.
+    ///
+    /// On reuse only the marker is checked: the unpacked files are not
+    /// re-hashed (the Go tree alone has about 14,000). What runs from them
+    /// is checked instead: PocketBase must report the pinned version, and
+    /// the MinIO it builds must match its pinned SHA-256.
     pub fn unpacked(&self, label: &str, asset: &PinnedAsset) -> ServiceResult<PathBuf> {
         let directory = self
             .root

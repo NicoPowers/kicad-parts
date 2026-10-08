@@ -12,6 +12,15 @@
 //! the way an operator would on a new machine: download the backup from
 //! the bucket, unpack it into an empty `pb_data`, and start a fresh
 //! instance.
+//!
+//! PocketBase's file storage is local here (S3 file storage is not
+//! enabled), so managed files travel inside the backup and the plan's
+//! "separately protected objects where enabled" clause does not apply. The
+//! seed that enables S3-backed files owns that proof, because a pb_data
+//! backup excludes files stored in S3. The drill still keeps independent
+//! copies of the canonical export and of each file in a second bucket, as
+//! a reference the restore is compared against that PocketBase did not
+//! write.
 
 mod support;
 
@@ -72,9 +81,9 @@ fn a_backup_in_minio_restores_into_a_blank_instance() {
     let s3 = minio.s3();
     let run = random_name(10);
     let backups_bucket = format!("pb-backups-{run}");
-    let protected_bucket = format!("protected-{run}");
+    let copies_bucket = format!("independent-copies-{run}");
     s3.create_bucket(&backups_bucket).unwrap();
-    s3.create_bucket(&protected_bucket).unwrap();
+    s3.create_bucket(&copies_bucket).unwrap();
 
     // A populated instance: members, revisioned records through the
     // protected command, and PocketBase-managed (protected) files.
@@ -128,15 +137,16 @@ fn a_backup_in_minio_restores_into_a_blank_instance() {
         "PocketBase stores the exact bytes"
     );
 
-    // Separately protected objects: the canonical export and each file,
-    // content-addressed by SHA-256, in their own bucket. A pb_data backup
-    // would not include objects kept only in S3, so they need this copy.
+    // Independent copies: the canonical export and each file,
+    // content-addressed by SHA-256, in their own bucket (see the module
+    // docs: not the plan's S3-backed protected objects, which are not
+    // enabled here).
     let export_key = format!("exports/{run}.json");
-    s3.put_object(&protected_bucket, &export_key, &original_export)
+    s3.put_object(&copies_bucket, &export_key, &original_export)
         .unwrap();
     for (_, bytes) in &files {
         s3.put_object(
-            &protected_bucket,
+            &copies_bucket,
             &format!("blobs/{}", sha256_hex(bytes)),
             bytes,
         )
@@ -179,15 +189,29 @@ fn a_backup_in_minio_restores_into_a_blank_instance() {
     assert_eq!(backup.len() as u64, objects[0].size);
     let backup_hash = sha256_hex(&backup);
 
+    // What the restore must reproduce beyond records: the schema with its
+    // rules, as the API reports it, and (read from data.db once stopped)
+    // the collections, applied migrations and superusers.
+    let original_collections = collections(&admin);
+    let original_superuser_id = admin.auth_id().unwrap().to_owned();
+
     // Destroy the disposable PocketBase state.
     server.stop();
+    let original_tables = system_tables(&options.data_dir.join("data.db"));
+    assert!(
+        original_tables["_migrations"]
+            .iter()
+            .any(|row| row[0].contains("collab_record_category"))
+    );
+    assert_eq!(original_tables["_superusers"].len(), 1);
     fs::remove_dir_all(&original_root).unwrap();
     assert!(!original_root.exists());
 
     // Restore into a blank instance from what the bucket holds.
     let restored_root = temporary.path().join("restored");
     assert!(!restored_root.exists());
-    let options = support::options(&restored_root, &migrations);
+    // No migrations: the schema must come from the backup alone.
+    let options = support::options(&restored_root, &[]);
     let downloaded = s3.get_object(&backups_bucket, &backup_name).unwrap();
     assert_eq!(sha256_hex(&downloaded), backup_hash);
     let archive = restored_root.join("backup.zip");
@@ -204,7 +228,20 @@ fn a_backup_in_minio_restores_into_a_blank_instance() {
         2,
         "the backup holds both managed files: {stored_files:?}"
     );
+    // Before PocketBase touches it (its superuser upsert would otherwise
+    // hide a missing superuser), the unpacked data.db already holds the
+    // same collections, migrations and superusers.
+    assert_eq!(
+        system_tables(&options.data_dir.join("data.db")),
+        original_tables
+    );
     let (server, admin) = support::start(&options, &superuser);
+    assert_eq!(
+        admin.auth_id(),
+        Some(original_superuser_id.as_str()),
+        "the upsert updated the restored superuser instead of creating one"
+    );
+    assert_eq!(collections(&admin), original_collections);
 
     // Records reproduce exactly, and match the separately protected export.
     let restored_export = canonical_export(&admin);
@@ -213,7 +250,7 @@ fn a_backup_in_minio_restores_into_a_blank_instance() {
         String::from_utf8(restored_export).unwrap(),
         String::from_utf8(original_export).unwrap()
     );
-    let protected_export = s3.get_object(&protected_bucket, &export_key).unwrap();
+    let protected_export = s3.get_object(&copies_bucket, &export_key).unwrap();
     assert_eq!(
         sha256_hex(&protected_export),
         sha256_hex(&canonical_export(&admin))
@@ -224,7 +261,7 @@ fn a_backup_in_minio_restores_into_a_blank_instance() {
     assert_eq!(restored_files, original_files);
     for hash in restored_files.values() {
         let blob = s3
-            .get_object(&protected_bucket, &format!("blobs/{hash}"))
+            .get_object(&copies_bucket, &format!("blobs/{hash}"))
             .unwrap();
         assert_eq!(&sha256_hex(&blob), hash);
     }
@@ -253,6 +290,60 @@ fn a_backup_in_minio_restores_into_a_blank_instance() {
     ));
     server.stop();
     minio.stop();
+}
+
+/// Every collection, with its fields, indexes and API rules, as the API
+/// reports them, by name.
+fn collections(admin: &PocketBaseClient) -> BTreeMap<String, Value> {
+    let list: Value = admin
+        .get_with_query("/api/collections", &[("perPage", "500".into())])
+        .unwrap()
+        .json()
+        .unwrap();
+    let items = list["items"].as_array().unwrap();
+    assert!(items.len() < 500);
+    items
+        .iter()
+        .map(|item| (item["name"].as_str().unwrap().to_owned(), item.clone()))
+        .collect()
+}
+
+/// The rows of PocketBase's schema, migration and superuser tables, read
+/// straight from a (stopped) data.db, as text.
+fn system_tables(database: &std::path::Path) -> BTreeMap<&'static str, Vec<Vec<String>>> {
+    let connection =
+        rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    [
+        ("_collections", "SELECT * FROM _collections ORDER BY id"),
+        (
+            "_migrations",
+            "SELECT file, applied FROM _migrations ORDER BY file",
+        ),
+        (
+            "_superusers",
+            "SELECT id, email, password FROM _superusers ORDER BY id",
+        ),
+    ]
+    .into_iter()
+    .map(|(table, query)| {
+        let mut statement = connection.prepare(query).unwrap();
+        let columns = statement.column_count();
+        let rows = statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|index| {
+                        row.get::<_, rusqlite::types::Value>(index)
+                            .map(|value| format!("{value:?}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        (table, rows)
+    })
+    .collect()
 }
 
 /// Every file under `root`, as `/`-separated paths relative to it.

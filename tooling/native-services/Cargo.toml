@@ -14,7 +14,9 @@ hmac = "0.12"
 sha2 = "0.10"
 tar = { version = "0.4", default-features = false }
 ureq = { version = "2", default-features = false }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# Deflate through flate2 only. zip 2.4's `deflate-flate2` does not enable its
+# optional `flate2` dependency by itself, so that is named too.
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
