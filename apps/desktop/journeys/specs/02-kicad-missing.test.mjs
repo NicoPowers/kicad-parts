@@ -65,13 +65,17 @@ describe('KiCad is missing', () => {
     await screenshot(browser, '11-kicad-missing-part');
   });
 
-  it('rejects a path that is not kicad-cli', async () => {
-    await useKicadPath(browser, `${emptyRoot}\\kicad-cli.exe`);
-    await waitForText(browser, `${PROBLEM} h2`, 'The kicad-cli location you entered does not work');
-    assert.match(await textOf(browser, `${PROBLEM} .kicad-problem-details`), /does not exist/);
-    assert.ok(await (await browser.$('button=Clear saved path')).isExisting());
-    await assertAccessible(browser, '12-override-invalid');
-    await screenshot(browser, '12-override-invalid');
+  it('rejects a path that is not kicad-cli without saving it', async () => {
+    const wrong = `${emptyRoot}\\kicad-cli.exe`;
+    await useKicadPath(browser, wrong);
+    await waitForText(browser, `${PROBLEM} .override-rejected`, /^Not saved: .*does not exist$/);
+    // Nothing changed: KiCad is still missing, nothing is saved, and the
+    // typed path stays in the box for correction.
+    assert.equal(await textOf(browser, `${PROBLEM} h2`), 'KiCad 10 was not found');
+    assert.equal(await (await browser.$('#kicad-cli-path')).getValue(), wrong);
+    assert.equal(await (await browser.$('button=Clear saved path')).isExisting(), false);
+    await assertAccessible(browser, '12-override-rejected');
+    await screenshot(browser, '12-override-rejected');
   });
 
   it('recovers when pointed at the installed kicad-cli', async () => {

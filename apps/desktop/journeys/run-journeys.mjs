@@ -1,8 +1,14 @@
 // Builds the desktop app, starts tauri-driver with an msedgedriver that
 // matches the installed WebView2 runtime, and runs every journey in specs/.
 //
-//   npm run journeys                # build, then run
+//   npm run journeys                # build, then run on a hidden desktop
 //   npm run journeys -- --skip-build
+//   npm run journeys -- --visible   # show the app windows (debugging);
+//                                   # JOURNEYS_VISIBLE=1 does the same
+//
+// By default tauri-driver, msedgedriver, the app and WebView2 run on a
+// hidden, run-scoped Win32 desktop (tooling/journey-desktop), so no window
+// appears or takes focus on the user's desktop.
 //
 // Evidence (JUnit results, screenshots, axe results, evidence.jsonl) goes to
 // target/journeys/latest, or JOURNEY_OUT.
@@ -17,6 +23,9 @@ import { appBinary, driverPort, outDir, repoRoot } from './harness.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skipBuild = process.argv.includes('--skip-build');
+const visible =
+  process.argv.includes('--visible') || process.env.JOURNEYS_VISIBLE === '1' || process.platform !== 'win32';
+const journeyDesktop = path.join(repoRoot, 'target', 'debug', 'journey-desktop.exe');
 
 function run(command, args, cwd) {
   console.log(`> ${command} ${args.join(' ')}  (in ${path.relative(repoRoot, cwd) || '.'})`);
@@ -64,6 +73,8 @@ function waitForPort(port, timeoutMs) {
 if (!skipBuild) {
   run('trunk', ['build'], path.join(repoRoot, 'apps', 'desktop-ui'));
   run('cargo', ['build', '--locked', '-p', 'kicad-parts-desktop', '--features', 'custom-protocol'], repoRoot);
+  run('cargo', ['build', '--locked', '-p', 'kicad-integration', '--bin', 'fake-kicad-cli'], repoRoot);
+  if (!visible) run('cargo', ['build', '--locked', '-p', 'journey-desktop'], repoRoot);
 }
 if (!fs.existsSync(appBinary)) {
   console.error(`missing ${appBinary}; run without --skip-build`);
@@ -79,9 +90,14 @@ fs.mkdirSync(driverCache, { recursive: true });
 const nativeDriver = await download(version, driverCache);
 console.log(`WebView2 ${version}; msedgedriver ${nativeDriver}`);
 
-const tauriDriver = spawn('tauri-driver', ['--port', String(driverPort), '--native-driver', nativeDriver], {
-  stdio: ['ignore', 'inherit', 'inherit'],
-});
+const driverArgs = ['--port', String(driverPort), '--native-driver', nativeDriver];
+console.log(`mode: ${visible ? 'visible desktop' : 'hidden desktop (journey-desktop)'}`);
+// Killing journey-desktop closes its job, which ends tauri-driver and
+// everything it started.
+const tauriDriver = visible
+  ? spawn('tauri-driver', driverArgs, { stdio: ['ignore', 'inherit', 'inherit'] })
+  : spawn(journeyDesktop, ['tauri-driver', ...driverArgs], { stdio: ['ignore', 'inherit', 'inherit'] });
+const started = Date.now();
 tauriDriver.on('error', (error) => {
   console.error(`could not start tauri-driver (cargo install tauri-driver --locked): ${error.message}`);
   process.exit(1);
@@ -109,6 +125,12 @@ try {
     { cwd: here, stdio: 'inherit', env: { ...process.env, JOURNEY_OUT: outDir } },
   );
   status = result.status ?? 1;
+  const seconds = ((Date.now() - started) / 1000).toFixed(1);
+  console.log(`journeys took ${seconds} s on the ${visible ? 'visible' : 'hidden'} desktop`);
+  fs.appendFileSync(
+    path.join(outDir, 'evidence.jsonl'),
+    `${JSON.stringify({ event: 'run', mode: visible ? 'visible' : 'hidden', seconds: Number(seconds) })}\n`,
+  );
 } finally {
   tauriDriver.kill();
 }

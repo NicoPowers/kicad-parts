@@ -36,6 +36,37 @@ export function tempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `kicad-parts-${prefix}-`));
 }
 
+/**
+ * A stand-in kicad-cli (built from crates/kicad-integration) copied into a
+ * temporary folder as kicad-cli.exe. `version` prints `version`; with
+ * `null` it fails like a damaged install.
+ */
+export function fakeKicadCli(version) {
+  const built = path.join(
+    repoRoot,
+    'target',
+    'debug',
+    process.platform === 'win32' ? 'fake-kicad-cli.exe' : 'fake-kicad-cli',
+  );
+  assert.ok(fs.existsSync(built), `build the fake first: ${built}`);
+  const dir = tempDir('fake-kicad');
+  const cli = path.join(dir, process.platform === 'win32' ? 'kicad-cli.exe' : 'kicad-cli');
+  fs.copyFileSync(built, cli);
+  if (version !== null) fs.writeFileSync(path.join(dir, 'fake-version.txt'), version);
+  return cli;
+}
+
+/** A data directory whose saved settings already point at `cli`. */
+export function dataDirWithOverride(cli) {
+  const dataDir = tempDir('data');
+  fs.mkdirSync(path.join(dataDir, 'config'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dataDir, 'config', 'settings.json'),
+    JSON.stringify({ kicad_cli_override: cli }),
+  );
+  return dataDir;
+}
+
 /** Path of the installed KiCad 10 kicad-cli (KICAD_CLI overrides). */
 export function installedKicadCli() {
   if (process.env.KICAD_CLI) return process.env.KICAD_CLI;

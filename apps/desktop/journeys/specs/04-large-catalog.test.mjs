@@ -5,7 +5,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { launchApp, record, screenshot, searchFor, tempDir, waitForText } from '../harness.mjs';
+import {
+  assertAccessible,
+  launchApp,
+  record,
+  screenshot,
+  searchFor,
+  tempDir,
+  waitForText,
+} from '../harness.mjs';
 
 const ROWS = 20_000;
 /** Product target: results replace the list within this time of typing,
@@ -76,6 +84,7 @@ describe(`search over ${ROWS} rows`, () => {
       assert.ok(ms < TARGET_MS, `"${query}" took ${ms} ms (target ${TARGET_MS} ms)`);
     }
     await searchFor(browser, '0603', expectedCountText(rows, '0603'));
+    await assertAccessible(browser, '30-large-catalog');
     await screenshot(browser, '30-large-catalog');
   });
 });

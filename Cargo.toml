@@ -8,6 +8,7 @@ members = [
     "crates/legacy-catalog",
     "tooling/afk",
     "tooling/import-fixture",
+    "tooling/journey-desktop",
     "tooling/xtask",
 ]
 resolver = "2"
