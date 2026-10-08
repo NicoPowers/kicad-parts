@@ -1,0 +1,17 @@
+{
+  "name": "kicad-parts-desktop-journeys",
+  "private": true,
+  "type": "module",
+  "description": "Native WebView2 journeys for the KiCad Parts desktop app (tauri-driver + msedgedriver).",
+  "scripts": {
+    "journeys": "node run-journeys.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "axe-core": "^4.10.0",
+    "edgedriver": "^6.1.0",
+    "webdriverio": "^9.0.0"
+  }
+}

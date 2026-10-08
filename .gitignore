@@ -12,3 +12,5 @@ logs/
 /target/
 # Disposable AFK runtime state and evidence bundles
 /.afk/
+# JavaScript tooling for the desktop journeys
+node_modules/
