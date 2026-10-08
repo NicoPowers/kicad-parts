@@ -43,8 +43,11 @@ impl KicadVersion {
             })
     }
 
+    /// KiCad 10 stable releases. Development builds toward the next major
+    /// version are numbered `10.99.x`; their CLI output and file formats can
+    /// change at any time, so they count as unsupported.
     pub fn is_supported(&self) -> bool {
-        self.major == SUPPORTED_MAJOR
+        self.major == SUPPORTED_MAJOR && self.minor < 99
     }
 }
 
@@ -216,9 +219,22 @@ fn probe(cli: PathBuf, source: InstallSource) -> Discovery {
 
 fn override_candidate(path: &Path) -> Option<PathBuf> {
     if path.is_file() {
-        return Some(path.to_path_buf());
+        // Only ever run kicad-cli itself, so a path to kicad.exe or another
+        // program cannot open a GUI or run something unexpected.
+        return is_kicad_cli(path).then(|| path.to_path_buf());
     }
     candidates_under(path).into_iter().next()
+}
+
+fn is_kicad_cli(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy();
+        if cfg!(windows) {
+            name.eq_ignore_ascii_case("kicad-cli.exe")
+        } else {
+            name == "kicad-cli"
+        }
+    })
 }
 
 /// kicad-cli locations under one install root, newest KiCad version first.
@@ -295,7 +311,14 @@ mod tests {
         assert!(version.is_supported());
         assert_eq!(KicadVersion::parse("9.0").unwrap().to_string(), "9.0.0");
         assert!(!KicadVersion::parse("9.0.7").unwrap().is_supported());
-        assert_eq!(KicadVersion::parse("KiCad 10.99.0-123").unwrap().minor, 99);
+        let nightly = KicadVersion::parse("KiCad 10.99.0-123").unwrap();
+        assert_eq!(nightly.minor, 99);
+        assert!(
+            !nightly.is_supported(),
+            "10.99 nightlies are KiCad 11 development"
+        );
+        assert!(KicadVersion::parse("10.1.2").unwrap().is_supported());
+        assert!(!KicadVersion::parse("11.0.0").unwrap().is_supported());
         assert_eq!(KicadVersion::parse("no version"), None);
     }
 
@@ -328,6 +351,26 @@ mod tests {
                 searched: vec![root.path().to_path_buf()]
             }
         );
+    }
+
+    #[test]
+    fn override_must_be_kicad_cli_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let gui = dir
+            .path()
+            .join(if cfg!(windows) { "kicad.exe" } else { "kicad" });
+        fs::write(&gui, b"").unwrap();
+        let options = DiscoveryOptions {
+            user_override: Some(gui.clone()),
+            locations: SearchLocations::Only(Vec::new()),
+        };
+        match discover(&options) {
+            Discovery::OverrideInvalid { path, problem } => {
+                assert_eq!(path, gui);
+                assert!(problem.contains("is not kicad-cli"), "{problem}");
+            }
+            other => panic!("expected OverrideInvalid, got {other:?}"),
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window may call the core Tauri APIs and this app's commands.",
+  "description": "The main window calls only this app's own commands (app_status, search_parts, part_preview, ...), which need no plugin permissions. Add core permissions here only when the UI starts using them.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": []
 }

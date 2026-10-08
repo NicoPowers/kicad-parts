@@ -559,3 +559,7 @@ a {
   color: var(--muted);
   font-weight: 600;
 }
+
+.override-form .override-rejected {
+  margin: 0.6rem 0 0;
+}

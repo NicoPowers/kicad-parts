@@ -4,6 +4,7 @@
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{KicadStatus, PreviewKind, PreviewOutcome, PreviewProblemReason};
 use kicad_integration::SearchLocations;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -153,18 +154,57 @@ fn real_catalog_problems_are_reported_with_their_cause() {
 }
 
 #[test]
-fn an_invalid_override_says_what_is_wrong() {
+fn an_invalid_override_is_explained_and_not_saved() {
     let dir = tempfile::tempdir().unwrap();
     let browser = open_browser(dir.path(), SearchLocations::Standard);
+    let settings = dir.path().join("config").join("settings.json");
     let status = browser
         .set_kicad_override(Some(dir.path().join("nope").display().to_string()))
         .unwrap();
-    match status.kicad {
-        KicadStatus::OverrideInvalid { problem, .. } => {
-            assert!(problem.contains("does not exist"), "{problem}")
-        }
-        other => panic!("expected override problem, got {other:?}"),
-    }
+    let rejected = status.override_rejected.expect("the rejection is reported");
+    assert!(rejected.contains("does not exist"), "{rejected}");
+    // The working discovery and the saved settings are untouched.
+    assert!(status.kicad.is_ready(), "{:?}", status.kicad);
+    assert_eq!(status.kicad_override, None);
+    assert!(!settings.exists());
+
+    // A later successful search clears the message.
+    assert_eq!(browser.rediscover_kicad().override_rejected, None);
+}
+
+#[test]
+fn a_corrupt_settings_file_is_reported_and_replaced_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    fs::create_dir_all(&config).unwrap();
+    let settings = config.join("settings.json");
+    fs::write(&settings, b"{ not json").unwrap();
+
+    let browser = open_browser(dir.path(), SearchLocations::Standard);
+    let status = browser.status();
+    let error = status
+        .settings_error
+        .expect("corrupt settings are reported");
+    assert!(error.contains("not valid settings JSON"), "{error}");
+    assert!(status.kicad.is_ready(), "defaults are in use");
+
+    let installed = match status.kicad {
+        KicadStatus::Ready { cli_path, .. } => cli_path,
+        other => panic!("KiCad 10 is required for this test: {other:?}"),
+    };
+    let saved = browser.set_kicad_override(Some(installed.clone())).unwrap();
+    assert_eq!(saved.settings_error, None);
+    let written: serde_json::Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(written["kicad_cli_override"], installed.as_str());
+    let leftovers: Vec<_> = fs::read_dir(&config)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        leftovers,
+        ["settings.json"],
+        "no temporary file is left behind"
+    );
 }
 
 /// Exports every symbol and footprint the real catalog references and

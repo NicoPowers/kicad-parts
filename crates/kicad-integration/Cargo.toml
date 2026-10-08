@@ -6,6 +6,13 @@ license.workspace = true
 rust-version.workspace = true
 description = "Finds the installed kicad-cli, resolves library references, and caches kicad-cli SVG previews."
 
+# A stand-in kicad-cli for version-handling tests and journeys; not shipped.
+[[bin]]
+name = "fake-kicad-cli"
+path = "tests/support/fake_kicad_cli.rs"
+test = false
+doc = false
+
 [dependencies]
 sha2 = "0.10"
 

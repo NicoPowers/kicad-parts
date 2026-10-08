@@ -73,7 +73,7 @@ fn search_roots_shaped_like_program_files_find_kicad() {
 #[test]
 fn an_older_kicad_is_reported_as_unsupported() {
     let dir = tempfile::tempdir().unwrap();
-    let fake = fake_cli(dir.path(), "9.0.7");
+    let fake = fake_cli(dir.path(), Some("9.0.7"));
     let options = DiscoveryOptions {
         user_override: Some(fake.clone()),
         locations: SearchLocations::Standard,
@@ -87,20 +87,48 @@ fn an_older_kicad_is_reported_as_unsupported() {
     }
 }
 
-#[cfg(windows)]
-fn fake_cli(dir: &Path, version: &str) -> PathBuf {
-    let path = dir.join("kicad-cli.cmd");
-    fs::write(&path, format!("@echo {version}\r\n")).unwrap();
+/// The fake kicad-cli, copied into `dir` under the real file name, reporting
+/// `version` (or failing like a damaged install when `None`).
+fn fake_cli(dir: &Path, version: Option<&str>) -> PathBuf {
+    let name = if cfg!(windows) {
+        "kicad-cli.exe"
+    } else {
+        "kicad-cli"
+    };
+    let path = dir.join(name);
+    fs::copy(env!("CARGO_BIN_EXE_fake-kicad-cli"), &path).unwrap();
+    if let Some(version) = version {
+        fs::write(dir.join("fake-version.txt"), version).unwrap();
+    }
     path
 }
 
-#[cfg(not(windows))]
-fn fake_cli(dir: &Path, version: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("kicad-cli");
-    fs::write(&path, format!("#!/bin/sh\necho {version}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    path
+#[test]
+fn a_kicad_cli_that_cannot_report_its_version_is_broken() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_cli(dir.path(), None);
+    let options = DiscoveryOptions {
+        user_override: Some(dir.path().to_path_buf()),
+        locations: SearchLocations::Only(Vec::new()),
+    };
+    match discover(&options) {
+        Discovery::Broken { cli, message, .. } => {
+            assert_eq!(cli, fake);
+            assert!(message.contains("damaged"), "{message}");
+        }
+        other => panic!("expected Broken, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_kicad_nightly_is_reported_as_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    fake_cli(dir.path(), Some("10.99.0-1234-gdeadbeef"));
+    let options = DiscoveryOptions {
+        user_override: Some(dir.path().to_path_buf()),
+        locations: SearchLocations::Only(Vec::new()),
+    };
+    assert!(matches!(discover(&options), Discovery::Unsupported { .. }));
 }
 
 #[test]
@@ -227,4 +255,91 @@ fn editing_a_library_changes_the_cache_key() {
     assert_ne!(before.library_sha256, after.library_sha256);
     assert_eq!(after.cache, CacheOutcome::Exported);
     assert_eq!(cache.export_count(), 2);
+}
+
+#[test]
+fn de_morgan_body_styles_are_labelled_and_follow_their_unit() {
+    let kicad = installed_kicad();
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = PreviewCache::new(cache_dir.path().to_path_buf());
+    let symbol = resolver(&kicad).symbol("74xx:74LS00").unwrap();
+    let preview = cache.symbol(&kicad, &symbol).unwrap();
+    let order: Vec<_> = preview
+        .images
+        .iter()
+        .map(|image| (image.unit, image.demorgan))
+        .collect();
+    let expected: Vec<_> = (1..=5)
+        .flat_map(|unit| [(Some(unit), false), (Some(unit), true)])
+        .collect();
+    assert_eq!(order, expected);
+    for image in &preview.images {
+        let name = image.file.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("74LS00_unit"), "{name}");
+        assert_eq!(name.ends_with("_demorgan.svg"), image.demorgan, "{name}");
+    }
+}
+
+#[test]
+fn references_match_case_exactly_like_kicad() {
+    let kicad = installed_kicad();
+    let resolver = resolver(&kicad);
+    assert!(resolver.symbol("Device:R").is_ok());
+    assert!(matches!(
+        resolver.symbol("device:R"),
+        Err(kicad_integration::ResolveError::LibraryNotFound { .. })
+    ));
+    assert!(
+        resolver
+            .footprint("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm")
+            .is_ok()
+    );
+    assert!(matches!(
+        resolver.footprint("Package_SO:soic-8_3.9x4.9mm_p1.27mm"),
+        Err(kicad_integration::ResolveError::FootprintNotFound { .. })
+    ));
+    assert!(matches!(
+        resolver.footprint("package_so:SOIC-8_3.9x4.9mm_P1.27mm"),
+        Err(kicad_integration::ResolveError::LibraryNotFound { .. })
+    ));
+
+    // A symbol name in the wrong case reaches kicad-cli, which is
+    // case-sensitive and refuses it.
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = PreviewCache::new(cache_dir.path().to_path_buf());
+    let wrong_case = resolver.symbol("Device:r").unwrap();
+    assert!(matches!(
+        cache.symbol(&kicad, &wrong_case),
+        Err(PreviewError::ExportFailed { .. })
+    ));
+}
+
+#[test]
+fn names_that_look_like_options_never_reach_kicad_cli() {
+    let kicad = installed_kicad();
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = PreviewCache::new(cache_dir.path().to_path_buf());
+    let resolver = resolver(&kicad);
+    for reference in ["power:-12V", "Device:--black-and-white"] {
+        let symbol = resolver.symbol(reference).unwrap();
+        match cache.symbol(&kicad, &symbol) {
+            Err(PreviewError::Unexportable(message)) => assert!(
+                message.contains("kicad-cli cannot export names beginning with '-'"),
+                "{message}"
+            ),
+            other => panic!("{reference}: expected Unexportable, got {other:?}"),
+        }
+    }
+    let project = tempfile::tempdir().unwrap();
+    let pretty = project.path().join("footprints").join("t.pretty");
+    fs::create_dir_all(&pretty).unwrap();
+    fs::write(pretty.join("-x.kicad_mod"), b"").unwrap();
+    let footprint = LibraryResolver::new(Some(project.path().to_path_buf()), None)
+        .footprint("t:-x")
+        .unwrap();
+    assert!(matches!(
+        cache.footprint(&kicad, &footprint),
+        Err(PreviewError::Unexportable(_))
+    ));
+    assert_eq!(cache.export_count(), 0);
 }

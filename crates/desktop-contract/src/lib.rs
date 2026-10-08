@@ -20,6 +20,10 @@ pub struct AppStatus {
     pub kicad: KicadStatus,
     /// The kicad-cli path the user chose, if any.
     pub kicad_override: Option<String>,
+    /// Why the path the user just entered was not saved.
+    pub override_rejected: Option<String>,
+    /// Why the saved settings could not be read (defaults are in use).
+    pub settings_error: Option<String>,
     pub catalog: CatalogStatus,
 }
 
@@ -145,6 +149,8 @@ pub struct PreviewSet {
 pub struct PreviewImage {
     /// Symbol unit number (1-based); `None` for a footprint.
     pub unit: Option<u32>,
+    /// The unit's alternate (De Morgan) body style.
+    pub demorgan: bool,
     /// `data:image/svg+xml;base64,...` of the kicad-cli SVG.
     pub data_uri: String,
 }
@@ -173,6 +179,8 @@ pub enum PreviewProblemReason {
     KicadUnavailable,
     /// kicad-cli ran and failed.
     ExportFailed,
+    /// The name cannot be passed to kicad-cli (it begins with `-`).
+    Unexportable,
     UnknownPart,
     Internal,
 }

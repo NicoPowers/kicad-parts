@@ -27,9 +27,9 @@ use std::time::{Duration, SystemTime};
 
 const CACHE_LAYOUT: &str = "v1";
 /// KiCad's built-in colour theme, so exports do not depend on the user's
-/// editor settings.
+/// editor settings. The cache directory name is derived from it, so a theme
+/// change can never serve images exported with another theme.
 const THEME: &str = "_builtin_default";
-const PROFILE: &str = "builtin-default";
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,13 +44,17 @@ pub enum CacheOutcome {
 pub struct PreviewImage {
     /// Symbol unit number (1-based); `None` for footprints.
     pub unit: Option<u32>,
+    /// True for a unit's alternate (De Morgan) body style, which kicad-cli
+    /// exports as `<SYMBOL>_unit<N>_demorgan.svg` next to the normal one.
+    pub demorgan: bool,
     pub file: PathBuf,
     pub svg: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Preview {
-    /// One image per symbol unit, in unit order, or a single footprint image.
+    /// One image per symbol unit (normal body style, then De Morgan when the
+    /// symbol has one), in unit order, or a single footprint image.
     pub images: Vec<PreviewImage>,
     pub library_sha256: String,
     pub cache: CacheOutcome,
@@ -63,6 +67,8 @@ pub enum PreviewError {
         command: String,
         cli_message: String,
     },
+    /// The name cannot be passed to kicad-cli safely.
+    Unexportable(String),
     Io(String),
 }
 
@@ -73,7 +79,7 @@ impl fmt::Display for PreviewError {
                 command,
                 cli_message,
             } => write!(f, "`{command}` failed: {cli_message}"),
-            Self::Io(message) => f.write_str(message),
+            Self::Unexportable(message) | Self::Io(message) => f.write_str(message),
         }
     }
 }
@@ -120,8 +126,10 @@ impl PreviewCache {
         kicad: &KicadInstall,
         symbol: &ResolvedSymbol,
     ) -> Result<Preview, PreviewError> {
+        let name = &symbol.lib_ref.item;
+        reject_option_like(name)?;
         let library_sha256 = self.library_hash(&symbol.library)?;
-        let entry = self.entry_dir(kicad, "sym", &library_sha256, &symbol.lib_ref.item);
+        let entry = self.entry_dir(kicad, "sym", &library_sha256, name);
         self.cached_or_export(entry, library_sha256, |staging| {
             let out = staging.join("out");
             let args: Vec<OsString> = vec![
@@ -136,7 +144,11 @@ impl PreviewCache {
                 out.clone().into(),
                 symbol.library.clone().into(),
             ];
-            self.export(kicad, &args, &out)
+            self.export(kicad, &args, &out, |file| {
+                file.strip_prefix(name.as_str())
+                    .and_then(|rest| rest.strip_suffix(".svg"))
+                    .is_some_and(|rest| parse_unit_suffix(rest).is_some())
+            })
         })
     }
 
@@ -151,8 +163,10 @@ impl PreviewCache {
         kicad: &KicadInstall,
         footprint: &ResolvedFootprint,
     ) -> Result<Preview, PreviewError> {
+        let name = &footprint.lib_ref.item;
+        reject_option_like(name)?;
         let library_sha256 = self.library_hash(&footprint.library)?;
-        let entry = self.entry_dir(kicad, "fp", &library_sha256, &footprint.lib_ref.item);
+        let entry = self.entry_dir(kicad, "fp", &library_sha256, name);
         self.cached_or_export(entry, library_sha256, |staging| {
             let library = staging
                 .join("in")
@@ -177,7 +191,8 @@ impl PreviewCache {
                 out.clone().into(),
                 library.into(),
             ];
-            self.export(kicad, &args, &out)
+            let expected = format!("{name}.svg");
+            self.export(kicad, &args, &out, |file| file == expected)
         })
     }
 
@@ -191,7 +206,7 @@ impl PreviewCache {
         self.root
             .join(CACHE_LAYOUT)
             .join(format!("kicad-{}", kicad.version))
-            .join(PROFILE)
+            .join(format!("theme{THEME}"))
             .join(format!("{kind}-{library_sha256}"))
             .join(item_dir_name(item))
     }
@@ -237,11 +252,14 @@ impl PreviewCache {
         })
     }
 
+    /// Runs one export. `expected` decides whether an output file name
+    /// belongs to the requested item; anything else fails the export.
     fn export(
         &self,
         kicad: &KicadInstall,
         args: &[OsString],
         out: &Path,
+        expected: impl Fn(&str) -> bool,
     ) -> Result<(), PreviewError> {
         let command = describe_command(args);
         self.exports.fetch_add(1, Ordering::SeqCst);
@@ -252,11 +270,28 @@ impl PreviewCache {
             }
         })?;
         // `fp export` exits 0 even when it fails, so success means an SVG
-        // was actually written.
-        let wrote_svg = svg_files(out)
-            .map(|files| !files.is_empty())
-            .unwrap_or(false);
-        if output.success() && wrote_svg {
+        // was actually written, and only for the requested item.
+        let names: Vec<String> = svg_files(out)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|file| file.file_name()?.to_str().map(str::to_owned))
+            .collect();
+        let unexpected: Vec<&str> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !expected(name))
+            .take(5)
+            .collect();
+        if !unexpected.is_empty() {
+            return Err(PreviewError::ExportFailed {
+                command,
+                cli_message: format!(
+                    "kicad-cli wrote files for something other than the requested item: {}",
+                    unexpected.join(", ")
+                ),
+            });
+        }
+        if output.success() && !names.is_empty() {
             return Ok(());
         }
         Err(PreviewError::ExportFailed {
@@ -277,6 +312,17 @@ impl PreviewCache {
         hashes.insert(library.to_path_buf(), (fingerprint, hash.clone()));
         Ok(hash)
     }
+}
+
+/// kicad-cli parses a leading `-` as an option, so such a name would either
+/// fail ("Unknown argument") or change what is exported.
+fn reject_option_like(name: &str) -> Result<(), PreviewError> {
+    if name.starts_with('-') {
+        return Err(PreviewError::Unexportable(format!(
+            "kicad-cli cannot export names beginning with '-' (`{name}`)."
+        )));
+    }
+    Ok(())
 }
 
 fn failure_message(output: &CliOutput) -> String {
@@ -323,13 +369,24 @@ fn read_images(dir: &Path) -> Result<Vec<PreviewImage>, PreviewError> {
     let mut images = Vec::new();
     for file in svg_files(dir).map_err(|e| io_error("cannot read", dir, e))? {
         let svg = fs::read_to_string(&file).map_err(|e| io_error("cannot read", &file, e))?;
+        let (unit, demorgan) = file
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.rfind("_unit").map(|at| &stem[at..]))
+            .and_then(parse_unit_suffix)
+            .map_or((None, false), |(unit, demorgan)| (Some(unit), demorgan));
         images.push(PreviewImage {
-            unit: unit_number(&file),
+            unit,
+            demorgan,
             file,
             svg,
         });
     }
-    images.sort_by(|a, b| a.unit.cmp(&b.unit).then_with(|| a.file.cmp(&b.file)));
+    images.sort_by(|a, b| {
+        (a.unit, a.demorgan)
+            .cmp(&(b.unit, b.demorgan))
+            .then_with(|| a.file.cmp(&b.file))
+    });
     Ok(images)
 }
 
@@ -347,11 +404,18 @@ fn svg_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// `kicad-cli sym export svg` names files `<SYMBOL>_unit<N>.svg`.
-fn unit_number(file: &Path) -> Option<u32> {
-    let stem = file.file_stem()?.to_str()?;
-    let (_, unit) = stem.rsplit_once("_unit")?;
-    unit.parse().ok()
+/// Parses the `_unit<N>` or `_unit<N>_demorgan` that kicad-cli appends to a
+/// symbol name, returning the unit and whether it is the De Morgan body.
+fn parse_unit_suffix(suffix: &str) -> Option<(u32, bool)> {
+    let rest = suffix.strip_prefix("_unit")?;
+    let (digits, demorgan) = match rest.strip_suffix("_demorgan") {
+        Some(digits) => (digits, true),
+        None => (rest, false),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((digits.parse().ok()?, demorgan))
 }
 
 fn fingerprint(library: &Path) -> Result<Fingerprint, PreviewError> {
@@ -429,10 +493,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unit_numbers_come_from_kicad_file_names() {
-        assert_eq!(unit_number(Path::new("JETSON_NANO_unit3.svg")), Some(3));
-        assert_eq!(unit_number(Path::new("R_unit1.svg")), Some(1));
-        assert_eq!(unit_number(Path::new("R_0603.svg")), None);
+    fn unit_suffixes_come_from_kicad_file_names() {
+        assert_eq!(parse_unit_suffix("_unit3"), Some((3, false)));
+        assert_eq!(parse_unit_suffix("_unit12_demorgan"), Some((12, true)));
+        assert_eq!(parse_unit_suffix("_unit"), None);
+        assert_eq!(parse_unit_suffix("_unit1_other"), None);
+        assert_eq!(parse_unit_suffix("_0603"), None);
     }
 
     #[test]

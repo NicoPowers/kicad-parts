@@ -42,6 +42,10 @@ struct Settings {
 
 struct KicadState {
     settings: Settings,
+    /// Why `settings.json` could not be used, if it could not.
+    settings_error: Option<String>,
+    /// Why the last path the user entered was not saved.
+    override_rejected: Option<String>,
     discovery: Discovery,
 }
 
@@ -57,13 +61,18 @@ impl CatalogBrowser {
     /// part of [`AppStatus`] rather than errors, so the UI can explain them.
     pub fn open(config: BrowserConfig) -> Self {
         let catalog = LegacyCatalog::load(&config.catalog_root).map_err(|e| e.to_string());
-        let settings = load_settings(&config.settings_file);
+        let (settings, settings_error) = match load_settings(&config.settings_file) {
+            Ok(settings) => (settings, None),
+            Err(error) => (Settings::default(), Some(error)),
+        };
         let discovery = discover(&discovery_options(&config, &settings));
         Self {
             previews: PreviewCache::new(config.cache_dir.join("previews")),
             catalog,
             kicad: RwLock::new(KicadState {
                 settings,
+                settings_error,
+                override_rejected: None,
                 discovery,
             }),
             config,
@@ -89,6 +98,8 @@ impl CatalogBrowser {
         AppStatus {
             kicad: kicad_status(&kicad.discovery),
             kicad_override: kicad.settings.kicad_cli_override.as_deref().map(display),
+            override_rejected: kicad.override_rejected.clone(),
+            settings_error: kicad.settings_error.clone(),
             catalog,
         }
     }
@@ -98,12 +109,15 @@ impl CatalogBrowser {
         {
             let mut kicad = self.kicad.write().unwrap_or_else(|e| e.into_inner());
             kicad.discovery = discover(&discovery_options(&self.config, &kicad.settings));
+            kicad.override_rejected = None;
         }
         self.status()
     }
 
-    /// Saves (or clears, with `None` or a blank path) the user's kicad-cli
-    /// location and searches again.
+    /// Uses and saves the user's kicad-cli location, or clears it with
+    /// `None` or a blank path. A path is saved only if it is a working
+    /// KiCad 10 kicad-cli; otherwise nothing changes and the status says why
+    /// in `override_rejected`.
     pub fn set_kicad_override(&self, path: Option<String>) -> Result<AppStatus, String> {
         let path = path
             .map(|path| path.trim().trim_matches('"').to_owned())
@@ -114,9 +128,20 @@ impl CatalogBrowser {
             let settings = Settings {
                 kicad_cli_override: path,
             };
-            save_settings(&self.config.settings_file, &settings)?;
-            kicad.discovery = discover(&discovery_options(&self.config, &settings));
-            kicad.settings = settings;
+            let discovery = discover(&discovery_options(&self.config, &settings));
+            let rejected = settings
+                .kicad_cli_override
+                .as_ref()
+                .and_then(|_| rejection(&discovery));
+            if let Some(problem) = rejected {
+                kicad.override_rejected = Some(problem);
+            } else {
+                save_settings(&self.config.settings_file, &settings)?;
+                kicad.discovery = discovery;
+                kicad.settings = settings;
+                kicad.settings_error = None;
+                kicad.override_rejected = None;
+            }
         }
         Ok(self.status())
     }
@@ -185,9 +210,13 @@ impl CatalogBrowser {
             PreviewKind::Symbol => part.symbol.as_deref(),
             PreviewKind::Footprint => part.footprint.as_deref(),
         };
-        // Only footprint fields list alternatives, but a stray `;` in a
-        // symbol field is handled the same way.
-        let choices = field.map(footprint_choices).unwrap_or_default();
+        // Footprint fields may list `;`-separated alternatives; symbol
+        // fields hold exactly one reference.
+        let choices = match (kind, field) {
+            (_, None) => Vec::new(),
+            (PreviewKind::Symbol, Some(field)) => vec![field],
+            (PreviewKind::Footprint, Some(field)) => footprint_choices(field),
+        };
         let Some((&reference, alternates)) = choices.split_first() else {
             return problem(
                 PreviewProblemReason::Unassigned,
@@ -258,6 +287,7 @@ impl CatalogBrowser {
                     .iter()
                     .map(|image| PreviewImage {
                         unit: image.unit,
+                        demorgan: image.demorgan,
                         data_uri: svg_data_uri(&image.svg),
                     })
                     .collect(),
@@ -273,6 +303,9 @@ impl CatalogBrowser {
                 command: Some(command),
                 cli_message: Some(cli_message),
             }),
+            Err(PreviewError::Unexportable(message)) => {
+                problem(PreviewProblemReason::Unexportable, Some(reference), message)
+            }
             Err(PreviewError::Io(message)) => {
                 problem(PreviewProblemReason::Internal, Some(reference), message)
             }
@@ -329,20 +362,48 @@ fn summary(part: &CatalogPart) -> PartSummary {
     }
 }
 
-fn load_settings(path: &Path) -> Settings {
-    fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+/// Why a user-entered path is not saved, or `None` if it is usable.
+fn rejection(discovery: &Discovery) -> Option<String> {
+    match discovery {
+        Discovery::Ready(_) => None,
+        Discovery::OverrideInvalid { problem, .. } => Some(capitalize(problem)),
+        Discovery::Unsupported { cli, version, .. } => Some(format!(
+            "{} is KiCad {version}; this app needs KiCad {SUPPORTED_MAJOR}.",
+            cli.display()
+        )),
+        Discovery::Broken { message, .. } => Some(capitalize(message)),
+        Discovery::Missing { .. } => Some("No kicad-cli was found there.".into()),
+    }
 }
 
+/// Settings from `path`. A missing file means defaults; an unreadable or
+/// invalid one is an error the UI reports.
+fn load_settings(path: &Path) -> Result<Settings, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Settings::default());
+        }
+        Err(error) => return Err(format!("{} could not be read: {error}", path.display())),
+    };
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("{} is not valid settings JSON: {error}", path.display()))
+}
+
+/// Writes the settings to a temporary file and renames it into place, so a
+/// crash never leaves a half-written `settings.json`.
 fn save_settings(path: &Path, settings: &Settings) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
     let json = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| format!("cannot save {}: {e}", path.display()))
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, json).map_err(|e| format!("cannot save {}: {e}", temp.display()))?;
+    fs::rename(&temp, path).map_err(|e| {
+        let _ = fs::remove_file(&temp);
+        format!("cannot save {}: {e}", path.display())
+    })
 }
 
 fn svg_data_uri(svg: &str) -> String {

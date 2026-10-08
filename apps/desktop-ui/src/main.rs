@@ -36,9 +36,16 @@ fn App() -> impl IntoView {
     let results = RwSignal::new(Load::<SearchResponse>::Loading);
     let selected = RwSignal::new(None::<String>);
     let search_seq = StoredValue::new(0u64);
+    // The kicad-cli path being typed; kept here so it survives the panel
+    // re-rendering when a path is rejected.
+    let override_input = RwSignal::new(String::new());
 
     spawn_local(async move {
-        status.set(into_load(backend::app_status().await));
+        let loaded = into_load(backend::app_status().await);
+        if let Load::Ready(app) = &loaded {
+            override_input.set(app.kicad_override.clone().unwrap_or_default());
+        }
+        status.set(loaded);
     });
 
     Effect::new(move |_| {
@@ -67,9 +74,10 @@ fn App() -> impl IntoView {
             <header class="topbar">
                 <h1 class="brand">"KiCad Parts"</h1>
                 <CatalogBadge status=status />
-                <KicadBadge status=status kicad_epoch=kicad_epoch />
+                <KicadBadge status=status kicad_epoch=kicad_epoch override_input=override_input />
             </header>
-            <KicadProblem status=status kicad_epoch=kicad_epoch />
+            <KicadProblem status=status kicad_epoch=kicad_epoch override_input=override_input />
+            <SettingsProblem status=status />
             <main class="workspace">
                 <section class="search-pane" aria-label="Part search">
                     <label class="search-label" for="part-search">
@@ -146,7 +154,11 @@ fn CatalogBadge(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
 
 /// Header status: the KiCad version in use, with a form to change it.
 #[component]
-fn KicadBadge(status: RwSignal<Load<AppStatus>>, kicad_epoch: RwSignal<u32>) -> impl IntoView {
+fn KicadBadge(
+    status: RwSignal<Load<AppStatus>>,
+    kicad_epoch: RwSignal<u32>,
+    override_input: RwSignal<String>,
+) -> impl IntoView {
     move || match status.get() {
         Load::Loading => view! { <p class="kicad-badge">"Looking for KiCad…"</p> }.into_any(),
         Load::Failed(error) => view! {
@@ -178,7 +190,9 @@ fn KicadBadge(status: RwSignal<Load<AppStatus>>, kicad_epoch: RwSignal<u32>) -> 
                             <OverrideForm
                                 status=status
                                 kicad_epoch=kicad_epoch
-                                current=app.kicad_override.clone()
+                                input=override_input
+                                saved=app.kicad_override.is_some()
+                                rejected=app.override_rejected.clone()
                             />
                         </div>
                     </details>
@@ -195,7 +209,11 @@ fn KicadBadge(status: RwSignal<Load<AppStatus>>, kicad_epoch: RwSignal<u32>) -> 
 
 /// A prominent, actionable panel whenever KiCad is not usable.
 #[component]
-fn KicadProblem(status: RwSignal<Load<AppStatus>>, kicad_epoch: RwSignal<u32>) -> impl IntoView {
+fn KicadProblem(
+    status: RwSignal<Load<AppStatus>>,
+    kicad_epoch: RwSignal<u32>,
+    override_input: RwSignal<String>,
+) -> impl IntoView {
     move || {
         let Load::Ready(app) = status.get() else {
             return ().into_any();
@@ -251,7 +269,9 @@ fn KicadProblem(status: RwSignal<Load<AppStatus>>, kicad_epoch: RwSignal<u32>) -
                 <OverrideForm
                     status=status
                     kicad_epoch=kicad_epoch
-                    current=app.kicad_override.clone()
+                    input=override_input
+                    saved=app.kicad_override.is_some()
+                    rejected=app.override_rejected.clone()
                 />
             </section>
         }
@@ -263,9 +283,14 @@ fn KicadProblem(status: RwSignal<Load<AppStatus>>, kicad_epoch: RwSignal<u32>) -
 fn OverrideForm(
     status: RwSignal<Load<AppStatus>>,
     kicad_epoch: RwSignal<u32>,
-    current: Option<String>,
+    /// The path being typed.
+    input: RwSignal<String>,
+    /// Whether a path is saved (offers "Clear saved path").
+    saved: bool,
+    /// Why the last entered path was not saved.
+    rejected: Option<String>,
 ) -> impl IntoView {
-    let path = RwSignal::new(current.clone().unwrap_or_default());
+    let path = input;
     let busy = RwSignal::new(false);
     let apply = move |result: Result<AppStatus, String>| {
         busy.set(false);
@@ -274,9 +299,12 @@ fn OverrideForm(
     };
     let save = move |value: Option<String>| {
         busy.set(true);
+        if value.is_none() {
+            path.set(String::new());
+        }
         spawn_local(async move { apply(backend::set_kicad_override(value).await) });
     };
-    let has_override = current.is_some();
+    let has_override = saved;
     view! {
         <form
             class="override-form"
@@ -322,7 +350,38 @@ fn OverrideForm(
                         }
                     })}
             </div>
+            {rejected
+                .map(|message| view! {
+                    <p class="problem override-rejected" role="alert">
+                        {format!("Not saved: {message}")}
+                    </p>
+                })}
         </form>
+    }
+}
+
+/// Shown when the saved settings file exists but cannot be used.
+#[component]
+fn SettingsProblem(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
+    move || {
+        let Load::Ready(app) = status.get() else {
+            return ().into_any();
+        };
+        let Some(error) = app.settings_error else {
+            return ().into_any();
+        };
+        view! {
+            <section class="kicad-problem" role="alert" aria-labelledby="settings-problem-title">
+                <h2 id="settings-problem-title">"Saved settings could not be read"</h2>
+                <p>
+                    "Default settings are in use. Saving a kicad-cli path replaces the file."
+                </p>
+                <ul class="kicad-problem-details">
+                    <li>{error}</li>
+                </ul>
+            </section>
+        }
+        .into_any()
     }
 }
 
@@ -572,6 +631,11 @@ fn PreviewSection(kind: PreviewKind, state: RwSignal<Load<PreviewOutcome>>) -> i
 fn PreviewImages(set: PreviewSet) -> impl IntoView {
     let title = kind_title(set.kind);
     let total = set.images.len();
+    let units = {
+        let mut units: Vec<u32> = set.images.iter().filter_map(|image| image.unit).collect();
+        units.dedup();
+        units.len()
+    };
     let source = if set.from_kicad_bundle {
         "KiCad library"
     } else {
@@ -616,12 +680,14 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
                 .images
                 .into_iter()
                 .map(|image| {
+                    let body = if image.demorgan { ", De Morgan" } else { "" };
                     let (caption, alt) = match image.unit {
                         Some(unit) if total > 1 => {
-                            let caption =
-                                format!("Unit {} ({unit} of {total})", unit_label(unit));
-                            let alt = format!("{title} {reference}, unit {} ({unit} of {total})", unit_label(unit));
-                            (caption, alt)
+                            let letter = unit_label(unit);
+                            (
+                                format!("Unit {letter}{body} ({unit} of {units})"),
+                                format!("{title} {reference}, unit {letter}{body} ({unit} of {units})"),
+                            )
                         }
                         _ => (title.to_owned(), format!("{title} {reference}")),
                     };
@@ -689,6 +755,10 @@ fn PreviewProblemView(problem: PreviewProblem) -> impl IntoView {
                 "Check that the library really contains this {noun}, or correct the \
                  catalog reference."
             ),
+        ),
+        PreviewProblemReason::Unexportable => (
+            format!("kicad-cli cannot export this {noun}"),
+            format!("Rename the {noun} in its library so the name does not begin with '-'."),
         ),
         PreviewProblemReason::UnknownPart | PreviewProblemReason::Internal => {
             (format!("The {noun} preview failed"), String::new())

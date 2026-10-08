@@ -2034,6 +2034,8 @@ dependencies = [
  "leptos",
  "serde",
  "serde-wasm-bindgen",
+ "server_fn_macro",
+ "server_fn_macro_default",
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]

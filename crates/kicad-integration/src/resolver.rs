@@ -3,6 +3,7 @@
 //! libraries live and in which order they are searched.
 
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// A `LIBRARY:ITEM` reference, as stored in the catalog.
@@ -147,13 +148,14 @@ impl LibraryResolver {
         let lib_ref = LibRef::parse(reference)?;
         let dir_name = format!("{}.pretty", lib_ref.library);
         let (library, origin) = self.find_library("footprints", &dir_name, &lib_ref)?;
-        let file = library.join(format!("{}.kicad_mod", lib_ref.item));
-        if !file.is_file() {
+        let Some(file) = exact_entry(&library, &format!("{}.kicad_mod", lib_ref.item))
+            .filter(|file| file.is_file())
+        else {
             return Err(ResolveError::FootprintNotFound {
                 lib_ref: lib_ref.to_string(),
                 library,
             });
-        }
+        };
         Ok(ResolvedFootprint {
             lib_ref,
             library,
@@ -175,11 +177,11 @@ impl LibraryResolver {
         let mut searched = Vec::new();
         for (root, origin) in candidates {
             let Some(root) = root else { continue };
-            let path = root.join(kind).join(name);
-            if path_exists(&path) {
+            let dir = root.join(kind);
+            if let Some(path) = exact_entry(&dir, name) {
                 return Ok((path, origin));
             }
-            searched.push(path);
+            searched.push(dir.join(name));
         }
         Err(ResolveError::LibraryNotFound {
             lib_ref: lib_ref.to_string(),
@@ -197,14 +199,21 @@ pub fn footprint_choices(field: &str) -> Vec<&str> {
         .collect()
 }
 
-fn path_exists(path: &Path) -> bool {
-    path.is_file() || path.is_dir()
+/// `dir/name` only if an entry with exactly that name exists. KiCad matches
+/// library and footprint names case-sensitively, but Windows and macOS file
+/// systems usually do not, so `Path::exists` would accept `device:R` for
+/// `Device.kicad_sym`.
+fn exact_entry(dir: &Path, name: &str) -> Option<PathBuf> {
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .find(|entry| entry.file_name() == name)
+        .map(|entry| entry.path())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn parses_and_rejects_references() {
@@ -259,6 +268,16 @@ mod tests {
             .unwrap();
         assert_eq!(listed.lib_ref.item, "R_0603");
         assert_eq!(footprint_choices("a:b;;c:d ;"), vec!["a:b", "c:d"]);
+        // Names match case-sensitively, as in KiCad, even where the file
+        // system does not.
+        assert!(matches!(
+            resolver.footprint("g-res:r_0603"),
+            Err(ResolveError::FootprintNotFound { .. })
+        ));
+        assert!(matches!(
+            resolver.footprint("G-RES:R_0603"),
+            Err(ResolveError::LibraryNotFound { .. })
+        ));
         assert!(matches!(
             resolver.footprint("g-res:R_0402"),
             Err(ResolveError::FootprintNotFound { .. })
