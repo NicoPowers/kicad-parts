@@ -6,6 +6,10 @@
 //! msedgedriver, the Tauri app and WebView2 draw where nobody can see them
 //! and never take focus on the user's desktop. All of them run in a job that
 //! is killed when this helper exits, and the desktop closes with them.
+//!
+//! The helper also watches the process that started it (the journey
+//! runner). If that process dies, even by `taskkill /F`, the helper kills
+//! the job, so no invisible tauri-driver is left holding its port.
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
@@ -15,7 +19,8 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     }
     match hidden::run(&args) {
-        Ok(code) => std::process::ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        // Forward the full 32-bit exit code (Windows codes exceed 255).
+        Ok(code) => std::process::exit(code as i32),
         Err(message) => {
             eprintln!("journey-desktop: {message}");
             std::process::ExitCode::from(1)
@@ -66,21 +71,62 @@ mod hidden {
     use std::mem::{size_of, zeroed};
     use std::ptr::null;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Console::{
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         SetInformationJobObject,
     };
     use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, CreateDesktopW};
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        DESKTOP_CREATEMENU, DESKTOP_CREATEWINDOW, DESKTOP_ENUMERATE, DESKTOP_READOBJECTS,
+        DESKTOP_WRITEOBJECTS,
+    };
     use windows_sys::Win32::System::Threading::{
-        CREATE_SUSPENDED, CreateProcessW, GetExitCodeProcess, INFINITE, PROCESS_INFORMATION,
-        ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW, WaitForSingleObject,
+        CREATE_SUSPENDED, CreateProcessW, GetExitCodeProcess, INFINITE, OpenProcess,
+        PROCESS_INFORMATION, PROCESS_SYNCHRONIZE, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW,
+        TerminateProcess, WaitForMultipleObjects,
     };
 
-    const GENERIC_ALL: u32 = 0x1000_0000;
+    /// Rights on our handle to the desktop: what creating and using windows
+    /// on it requires. Processes started on it open it with their own rights.
+    const DESKTOP_ACCESS: u32 = DESKTOP_CREATEWINDOW
+        | DESKTOP_CREATEMENU
+        | DESKTOP_READOBJECTS
+        | DESKTOP_WRITEOBJECTS
+        | DESKTOP_ENUMERATE;
+
+    /// The process that started this one, from a process snapshot.
+    fn parent_process_id() -> Option<u32> {
+        let me = std::process::id();
+        // SAFETY: a snapshot of all processes; closed below.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let _snapshot = Owned(snapshot, CloseHandle);
+        // SAFETY: zeroed is valid for this C struct; dwSize is set before use.
+        let mut entry: PROCESSENTRY32W = unsafe { zeroed() };
+        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+        // SAFETY: `entry` is a valid, sized out structure.
+        let mut more = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+        while more {
+            if entry.th32ProcessID == me {
+                return Some(entry.th32ParentProcessID);
+            }
+            // SAFETY: as above.
+            more = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        }
+        None
+    }
 
     fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(Some(0)).collect()
@@ -105,11 +151,28 @@ mod hidden {
     }
 
     pub fn run(args: &[String]) -> Result<u32, String> {
+        let parent_id =
+            parent_process_id().ok_or_else(|| "cannot find the parent process".to_owned())?;
+        // SAFETY: opening a process for waiting only.
+        let parent = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, parent_id) };
+        if parent.is_null() {
+            return Err(last_error("OpenProcess(parent)"));
+        }
+        let _parent = Owned(parent, CloseHandle);
+
         let name = format!("kicad-parts-journey-{}", std::process::id());
         // SAFETY: plain Win32 call with a NUL-terminated name and no
         // optional structures.
-        let desktop =
-            unsafe { CreateDesktopW(wide(&name).as_ptr(), null(), null(), 0, GENERIC_ALL, null()) };
+        let desktop = unsafe {
+            CreateDesktopW(
+                wide(&name).as_ptr(),
+                null(),
+                null(),
+                0,
+                DESKTOP_ACCESS,
+                null(),
+            )
+        };
         if desktop.is_null() {
             return Err(last_error("CreateDesktopW"));
         }
@@ -181,12 +244,25 @@ mod hidden {
         let _thread = Owned(process.hThread, CloseHandle);
         // SAFETY: valid job and process handles.
         if unsafe { AssignProcessToJobObject(job, process.hProcess) } == 0 {
-            return Err(last_error("AssignProcessToJobObject"));
+            let error = last_error("AssignProcessToJobObject");
+            // SAFETY: the child is still suspended and outside the job, so
+            // nothing else would end it.
+            unsafe { TerminateProcess(process.hProcess, 1) };
+            return Err(error);
         }
         // SAFETY: the suspended main thread of the child.
         unsafe { ResumeThread(process.hThread) };
-        // SAFETY: waiting on a process handle we own.
-        unsafe { WaitForSingleObject(process.hProcess, INFINITE) };
+        let handles = [process.hProcess, parent];
+        // SAFETY: two valid handles we own; wait for whichever ends first.
+        let woke = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
+        if woke == WAIT_OBJECT_0 + 1 {
+            // SAFETY: a valid job handle; ends every process in it.
+            unsafe { TerminateJobObject(job, 1) };
+            return Err(
+                "the process that started journey-desktop exited; stopped the journey processes"
+                    .into(),
+            );
+        }
         let mut code = 1u32;
         // SAFETY: `code` is a valid out pointer.
         unsafe { GetExitCodeProcess(process.hProcess, &mut code) };
