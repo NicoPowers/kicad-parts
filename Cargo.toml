@@ -9,6 +9,7 @@ members = [
     "crates/kicad-integration",
     "crates/legacy-catalog",
     "tooling/afk",
+    "tooling/catalog-import",
     "tooling/fake-kicad-cli",
     "tooling/import-fixture",
     "tooling/journey-desktop",

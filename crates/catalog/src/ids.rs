@@ -30,6 +30,11 @@ macro_rules! derived_id {
         pub struct $name(String);
 
         impl $name {
+            /// An ID read back from the store.
+            pub fn from_stored(id: &str) -> Self {
+                Self(id.to_owned())
+            }
+
             pub fn as_str(&self) -> &str {
                 &self.0
             }
