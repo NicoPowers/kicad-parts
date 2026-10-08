@@ -1,0 +1,18 @@
+[package]
+name = "catalog"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The Catalog context: Managed Parts, Part Revisions, Catalog Assets and Change Sets, the deterministic Legacy Catalog import, and the PocketBase contract that stores them. No Tauri."
+
+[dependencies]
+collaboration = { path = "../collaboration" }
+csv = "1.3"
+kicad-integration = { path = "../kicad-integration" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3.10"

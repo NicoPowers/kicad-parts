@@ -347,6 +347,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalog"
+version = "0.1.0"
+dependencies = [
+ "collaboration",
+ "csv",
+ "kicad-integration",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "catalog-browser"
 version = "0.1.0"
 dependencies = [

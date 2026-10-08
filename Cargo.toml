@@ -2,6 +2,7 @@
 members = [
     "apps/desktop",
     "apps/desktop-ui",
+    "crates/catalog",
     "crates/catalog-browser",
     "crates/collaboration",
     "crates/desktop-contract",
