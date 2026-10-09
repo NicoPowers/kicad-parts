@@ -73,7 +73,7 @@ describe(`search over ${ROWS} rows`, () => {
   });
 
   it('answers each query within the product target', async () => {
-    await waitForText(browser, '.catalog-summary', '20,000 parts in 1 category');
+    await waitForText(browser, '.catalog-summary', '20,000 parts from 1 CSV file');
     await waitForText(browser, '#result-count', 'Showing 200 of 20,000 matching parts');
     const timings = {};
     for (const query of ['0603', 'maker 7 soic', 'MPN019999', 'no-such-row']) {

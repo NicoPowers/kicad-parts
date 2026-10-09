@@ -134,9 +134,9 @@ fn CatalogBadge(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
             None => view! {
                 <p class="catalog-summary">
                     {format!(
-                        "{} in {}",
+                        "{} from {}",
                         counted(status.catalog.parts, "part", "parts"),
-                        counted(status.catalog.categories, "category", "categories"),
+                        counted(status.catalog.csv_files, "CSV file", "CSV files"),
                     )}
                 </p>
             }
@@ -431,9 +431,9 @@ fn ResultList(
                             move || selected.with(|current| current.as_deref() == Some(&ipn))
                         };
                         // Parts without an MPN are titled by IPN; show the
-                        // category beside it instead of repeating the IPN.
+                        // CSV file beside it instead of repeating the IPN.
                         let (title, aside) = if hit.mpn.is_empty() {
-                            (hit.ipn.clone(), hit.category.clone())
+                            (hit.ipn.clone(), hit.csv_file.clone())
                         } else {
                             (hit.mpn.clone(), hit.ipn.clone())
                         };
@@ -543,11 +543,18 @@ fn PartView(
     } else {
         summary.mpn.clone()
     };
+    // The IPN prefix is the letters before the first dash, such as `RES`.
+    let ipn_prefix = summary
+        .ipn
+        .split_once('-')
+        .map(|(prefix, _)| prefix.to_owned())
+        .unwrap_or_default();
     let facts: Vec<(&str, String)> = [
         ("IPN", summary.ipn.clone()),
         ("Manufacturer", summary.manufacturer.clone()),
         ("Value", summary.value.clone()),
-        ("Category", summary.category.clone()),
+        ("IPN prefix", ipn_prefix),
+        ("Source", summary.csv_file.clone()),
     ]
     .into_iter()
     .filter(|(_, value)| !value.is_empty())

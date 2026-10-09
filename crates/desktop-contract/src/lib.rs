@@ -63,7 +63,8 @@ impl KicadStatus {
 pub struct CatalogStatus {
     pub root: String,
     pub parts: usize,
-    pub categories: usize,
+    /// How many CSV files the catalog was read from.
+    pub csv_files: usize,
     /// Why the catalog could not be loaded, if it could not.
     pub error: Option<String>,
 }
@@ -86,7 +87,8 @@ pub struct SearchResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PartSummary {
     pub ipn: String,
-    pub category: String,
+    /// The CSV file the part was read from, such as `g-res.csv`.
+    pub csv_file: String,
     pub mpn: String,
     pub manufacturer: String,
     pub description: String,

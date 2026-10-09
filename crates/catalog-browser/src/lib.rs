@@ -85,13 +85,13 @@ impl CatalogBrowser {
             Ok(catalog) => CatalogStatus {
                 root: display(&self.config.catalog_root),
                 parts: catalog.parts().len(),
-                categories: catalog.categories().len(),
+                csv_files: catalog.categories().len(),
                 error: None,
             },
             Err(error) => CatalogStatus {
                 root: display(&self.config.catalog_root),
                 parts: 0,
-                categories: 0,
+                csv_files: 0,
                 error: Some(error.clone()),
             },
         };
@@ -354,7 +354,7 @@ fn kicad_status(discovery: &Discovery) -> KicadStatus {
 fn summary(part: &CatalogPart) -> PartSummary {
     PartSummary {
         ipn: part.ipn.clone(),
-        category: part.category.clone(),
+        csv_file: format!("{}.csv", part.category),
         mpn: part.mpn.clone(),
         manufacturer: part.manufacturer.clone(),
         description: part.description.clone(),

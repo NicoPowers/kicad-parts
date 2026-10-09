@@ -33,7 +33,7 @@ describe('catalog search with exact KiCad previews', () => {
   it('opens on the whole catalog with KiCad 10 detected', async () => {
     await waitForText(browser, '#result-count', '178 matching parts');
     await waitForText(browser, '.kicad-badge-ready', /^KiCad 10\.\d+\.\d+$/);
-    assert.equal(await textOf(browser, '.catalog-summary'), '178 parts in 21 categories');
+    assert.equal(await textOf(browser, '.catalog-summary'), '178 parts from 21 CSV files');
     assert.equal(await textOf(browser, '.empty-state h2'), 'No part selected');
     const headings = await browser.execute(() =>
       [...document.querySelectorAll('h1, h2, h3')].map((h) => `${h.tagName}:${h.textContent.trim()}`),

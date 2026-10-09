@@ -37,7 +37,7 @@ fn search_select_and_preview_a_multi_unit_part() {
     let browser = open_browser(dir.path(), SearchLocations::Standard);
     let status = browser.status();
     assert!(status.kicad.is_ready(), "{:?}", status.kicad);
-    assert_eq!((status.catalog.categories, status.catalog.parts), (21, 178));
+    assert_eq!((status.catalog.csv_files, status.catalog.parts), (21, 178));
 
     let results = browser.search("stm32h723", 50);
     assert_eq!(results.total, 1);
