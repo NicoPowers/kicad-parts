@@ -17,5 +17,7 @@ serde_json = "1.0"
 tempfile = "3.10"
 
 [dev-dependencies]
+catalog-browser = { path = "../../crates/catalog-browser" }
+desktop-contract = { path = "../../crates/desktop-contract" }
 # Inspects a rolled-back data.db while PocketBase is stopped.
 rusqlite = { version = "0.37", features = ["bundled"] }

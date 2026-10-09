@@ -4,9 +4,11 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
-    AppStatus, PartDetail, PreviewOutcome, PreviewRequest, SearchRequest, SearchResponse,
+    AppStatus, PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
+    SearchResponse, SignInRequest, TeamEditRequest, TeamPart, TeamRestoreRequest, TeamStatus,
 };
 use kicad_integration::SearchLocations;
 use std::ffi::OsString;
@@ -15,6 +17,7 @@ use std::sync::Arc;
 use tauri::{Manager, State};
 
 type Browser = Arc<CatalogBrowser>;
+type Team = Arc<TeamCatalog>;
 
 /// Launch options. Every option exists so tests and unusual installs can run
 /// the app without touching the user's settings or KiCad search.
@@ -27,6 +30,10 @@ struct LaunchOptions {
     data_dir: Option<PathBuf>,
     /// `--kicad-search-root DIR` (repeatable): look for KiCad only here.
     kicad_search_roots: Vec<PathBuf>,
+    /// `--team-server URL`: the team catalog server to suggest at sign-in.
+    team_server: Option<String>,
+    /// `--team-email EMAIL`: the email to suggest at sign-in.
+    team_email: Option<String>,
 }
 
 impl LaunchOptions {
@@ -39,27 +46,29 @@ impl LaunchOptions {
         while let Some(arg) = args.next() {
             let text = arg.to_string_lossy().into_owned();
             let (name, inline) = match text.split_once('=') {
-                Some((name, value)) => (name.to_owned(), Some(PathBuf::from(value))),
+                Some((name, value)) => (name.to_owned(), Some(OsString::from(value))),
                 None => (text.clone(), None),
             };
             let target = match name.as_str() {
                 "--catalog-root" => Target::CatalogRoot,
                 "--data-dir" => Target::DataDir,
                 "--kicad-search-root" => Target::KicadSearchRoot,
+                "--team-server" => Target::TeamServer,
+                "--team-email" => Target::TeamEmail,
                 // WebView and test drivers may add their own arguments.
                 _ => continue,
             };
             let value = match inline {
                 Some(value) => value,
-                None => args
-                    .next()
-                    .map(PathBuf::from)
-                    .ok_or_else(|| format!("{name} needs a directory"))?,
+                None => args.next().ok_or_else(|| format!("{name} needs a value"))?,
             };
+            let text = || value.to_string_lossy().into_owned();
             match target {
-                Target::CatalogRoot => options.catalog_root = Some(value),
-                Target::DataDir => options.data_dir = Some(value),
-                Target::KicadSearchRoot => options.kicad_search_roots.push(value),
+                Target::CatalogRoot => options.catalog_root = Some(PathBuf::from(&value)),
+                Target::DataDir => options.data_dir = Some(PathBuf::from(&value)),
+                Target::KicadSearchRoot => options.kicad_search_roots.push(PathBuf::from(&value)),
+                Target::TeamServer => options.team_server = Some(text()),
+                Target::TeamEmail => options.team_email = Some(text()),
             }
         }
         Ok(options)
@@ -70,6 +79,8 @@ enum Target {
     CatalogRoot,
     DataDir,
     KicadSearchRoot,
+    TeamServer,
+    TeamEmail,
 }
 
 fn default_catalog_root() -> PathBuf {
@@ -150,7 +161,50 @@ async fn part_preview(
     request: PreviewRequest,
 ) -> Result<PreviewOutcome, String> {
     let browser = browser.inner().clone();
-    blocking(move || browser.preview(&request.ipn, request.kind)).await
+    blocking(move || browser.preview_field(&request.ipn, request.kind, request.field.as_deref()))
+        .await
+}
+
+#[tauri::command]
+async fn team_status(team: State<'_, Team>) -> Result<TeamStatus, String> {
+    let team = team.inner().clone();
+    blocking(move || team.status()).await
+}
+
+#[tauri::command]
+async fn team_sign_in(team: State<'_, Team>, request: SignInRequest) -> Result<TeamStatus, String> {
+    let team = team.inner().clone();
+    blocking(move || team.sign_in(request)).await
+}
+
+#[tauri::command]
+async fn team_sign_out(team: State<'_, Team>) -> Result<TeamStatus, String> {
+    let team = team.inner().clone();
+    blocking(move || team.sign_out()).await
+}
+
+#[tauri::command]
+async fn team_part(team: State<'_, Team>, ipn: String) -> Result<Option<TeamPart>, String> {
+    let team = team.inner().clone();
+    blocking(move || team.part(&ipn)).await?
+}
+
+#[tauri::command]
+async fn team_edit(
+    team: State<'_, Team>,
+    request: TeamEditRequest,
+) -> Result<PublishResult, String> {
+    let team = team.inner().clone();
+    blocking(move || team.edit(request)).await?
+}
+
+#[tauri::command]
+async fn team_restore(
+    team: State<'_, Team>,
+    request: TeamRestoreRequest,
+) -> Result<PublishResult, String> {
+    let team = team.inner().clone();
+    blocking(move || team.restore(request)).await?
 }
 
 fn main() {
@@ -183,6 +237,14 @@ fn main() {
                 kicad_locations,
             });
             app.manage(Arc::new(browser));
+            // Only the server address and email are saved; the session
+            // stays in memory and ends with the app.
+            let team = TeamCatalog::open(
+                config_dir.join("team.json"),
+                options.team_server.clone(),
+                options.team_email.clone(),
+            );
+            app.manage(Arc::new(team));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -192,6 +254,12 @@ fn main() {
             search_parts,
             part_detail,
             part_preview,
+            team_status,
+            team_sign_in,
+            team_sign_out,
+            team_part,
+            team_edit,
+            team_restore,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -212,6 +280,9 @@ mod tests {
             "--kicad-search-root=B",
             "--catalog-root",
             "C",
+            "--team-server=http://127.0.0.1:8090",
+            "--team-email",
+            "a@example.test",
         ]
         .map(OsString::from);
         let options = LaunchOptions::parse(args).unwrap();
@@ -221,6 +292,11 @@ mod tests {
             options.kicad_search_roots,
             [PathBuf::from("A"), PathBuf::from("B")]
         );
+        assert_eq!(
+            options.team_server.as_deref(),
+            Some("http://127.0.0.1:8090")
+        );
+        assert_eq!(options.team_email.as_deref(), Some("a@example.test"));
         assert!(LaunchOptions::parse([OsString::from("--data-dir")]).is_err());
     }
 
@@ -235,6 +311,12 @@ mod tests {
             command::SEARCH_PARTS,
             command::PART_DETAIL,
             command::PART_PREVIEW,
+            command::TEAM_STATUS,
+            command::TEAM_SIGN_IN,
+            command::TEAM_SIGN_OUT,
+            command::TEAM_PART,
+            command::TEAM_EDIT,
+            command::TEAM_RESTORE,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

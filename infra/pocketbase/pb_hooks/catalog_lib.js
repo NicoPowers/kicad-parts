@@ -255,7 +255,7 @@ function editedDetails(body, currentDetails) {
     }
     const key = JSON.stringify([manufacturer, mpn]);
     if (seen[key]) {
-      fail(`${manufacturer} ${mpn} is listed twice`);
+      fail(`the manufacturer part ${manufacturer} ${mpn} is listed twice`);
     }
     seen[key] = true;
     return { manufacturer: manufacturer, mpn: mpn };
@@ -311,7 +311,7 @@ function cadReferences(txApp, fields, currentDetails) {
           cadItem = null;
         }
         if (cadItem && (cadItem.getString("kind") !== role || cadItem.getString("key") !== reference)) {
-          throw new BadRequestError(`catalog_cad_items/${cadItemId} is not the ${role} ${reference}`);
+          throw new BadRequestError(`the stored CAD item ${cadItemId} is not the ${role} ${reference}`);
         }
         const same = previous.find((item) => item.role === role && item.reference === reference);
         if (cadItem && same && same.target.kind === "cad-item-revision" && same.target.cad_item === cadItemId) {
@@ -326,7 +326,7 @@ function cadReferences(txApp, fields, currentDetails) {
           target = { kind: "unresolved", status: same.target.status };
         } else {
           throw new BadRequestError(
-            `${reference} is not a ${role} in the Catalog; an edit can only use symbols and footprints the Catalog already has`,
+            `the ${role} ${reference} is not in the Catalog; an edit can only use symbols and footprints the Catalog already has`,
           );
         }
       }

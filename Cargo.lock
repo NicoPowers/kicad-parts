@@ -365,6 +365,8 @@ name = "catalog-browser"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "catalog",
+ "collaboration",
  "desktop-contract",
  "kicad-integration",
  "legacy-catalog",
@@ -378,7 +380,9 @@ name = "catalog-import"
 version = "0.1.0"
 dependencies = [
  "catalog",
+ "catalog-browser",
  "collaboration",
+ "desktop-contract",
  "kicad-integration",
  "legacy-import-fixture",
  "native-services",

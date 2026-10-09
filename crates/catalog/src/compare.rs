@@ -178,7 +178,12 @@ mod tests {
         assert_eq!(
             differences
                 .iter()
-                .map(|d| (d.what, d.label.as_str(), d.before.as_str(), d.after.as_str()))
+                .map(|d| (
+                    d.what,
+                    d.label.as_str(),
+                    d.before.as_str(),
+                    d.after.as_str()
+                ))
                 .collect::<Vec<_>>(),
             [
                 (DifferenceKind::Field, "Value", "47", "48"),

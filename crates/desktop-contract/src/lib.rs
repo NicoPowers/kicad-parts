@@ -13,6 +13,12 @@ pub mod command {
     pub const SEARCH_PARTS: &str = "search_parts";
     pub const PART_DETAIL: &str = "part_detail";
     pub const PART_PREVIEW: &str = "part_preview";
+    pub const TEAM_STATUS: &str = "team_status";
+    pub const TEAM_SIGN_IN: &str = "team_sign_in";
+    pub const TEAM_SIGN_OUT: &str = "team_sign_out";
+    pub const TEAM_PART: &str = "team_part";
+    pub const TEAM_EDIT: &str = "team_edit";
+    pub const TEAM_RESTORE: &str = "team_restore";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -122,6 +128,10 @@ pub enum PreviewKind {
 pub struct PreviewRequest {
     pub ipn: String,
     pub kind: PreviewKind,
+    /// The Symbol or Footprint field value to preview instead of the CSV
+    /// catalog's, such as the team catalog's current revision.
+    #[serde(default)]
+    pub field: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -185,6 +195,208 @@ pub enum PreviewProblemReason {
     Unexportable,
     UnknownPart,
     Internal,
+}
+
+// ---- The team catalog ----------------------------------------------------
+//
+// The shared, revisioned Catalog on the team's PocketBase server. The app
+// signs in with an email and password, keeps the session only in memory,
+// and saves just the server address and email.
+
+/// The team catalog connection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamStatus {
+    /// The saved or suggested server address, such as
+    /// `http://127.0.0.1:8090`; blank if none.
+    pub server_url: String,
+    /// The saved or suggested email; blank if none.
+    pub email: String,
+    pub session: TeamSession,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TeamSession {
+    SignedOut {
+        /// Why the last sign-in failed, if it did.
+        problem: Option<String>,
+    },
+    SignedIn {
+        name: String,
+        email: String,
+        /// Marked as able to edit the Catalog; otherwise read-only.
+        can_edit: bool,
+        live: LiveUpdates,
+        /// The `seq` of the last Change this app has seen. It grows when
+        /// anyone publishes a Change, which tells the UI to reload.
+        checkpoint: u64,
+    },
+}
+
+impl TeamSession {
+    pub fn is_signed_in(&self) -> bool {
+        matches!(self, Self::SignedIn { .. })
+    }
+}
+
+/// Whether changes made by others arrive by themselves.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LiveUpdates {
+    Connecting,
+    Live,
+    /// The connection dropped; the app reconnects and catches up.
+    Reconnecting {
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SignInRequest {
+    pub server_url: String,
+    pub email: String,
+    pub password: String,
+}
+
+/// One part in the team catalog: its current details and its history.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamPart {
+    pub ipn: String,
+    pub current: RevisionDetails,
+    /// Newest first; the first is the current revision.
+    pub history: Vec<RevisionSummary>,
+}
+
+/// The part details one revision saved.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RevisionDetails {
+    pub number: u32,
+    /// Every field, blanks included, in order.
+    pub fields: Vec<Field>,
+    /// The first is the main one.
+    pub manufacturer_parts: Vec<ManufacturerPart>,
+    /// The exact CAD item revision each symbol and footprint reference uses.
+    pub cad_items: Vec<CadItemUse>,
+}
+
+impl RevisionDetails {
+    pub fn field(&self, name: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| field.value.as_str())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ManufacturerPart {
+    pub manufacturer: String,
+    pub mpn: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CadItemUse {
+    /// `Symbol` or `Footprint`.
+    pub role: String,
+    pub reference: String,
+    /// Plain words, such as `revision 1`, `KiCad library` or `not found`.
+    pub binding: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RevisionSummary {
+    pub number: u32,
+    /// `Imported`, `Edited` or `Restored`.
+    pub action: String,
+    pub actor_name: String,
+    /// When it was saved, as `2026-10-09 18:02 UTC`.
+    pub saved_at: String,
+    pub reason: String,
+    /// For a restore, the revision whose details it copied.
+    pub restored_from: Option<u32>,
+    /// What changed compared with the revision before it.
+    pub changes: Vec<DetailChange>,
+    /// What restoring this revision would change in the current one; empty
+    /// for the current revision.
+    pub restore_changes: Vec<DetailChange>,
+}
+
+/// One difference between two versions of a part's details.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DetailChange {
+    pub label: String,
+    pub before: String,
+    pub after: String,
+}
+
+/// A change to part details: every field with its new value, and the full
+/// list of manufacturer parts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamEditRequest {
+    pub ipn: String,
+    /// The revision the edit starts from.
+    pub expected_revision: u32,
+    pub reason: String,
+    pub fields: Vec<Field>,
+    pub manufacturer_parts: Vec<ManufacturerPart>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamRestoreRequest {
+    pub ipn: String,
+    pub expected_revision: u32,
+    pub restore_revision: u32,
+    pub reason: String,
+}
+
+/// What publishing an edit or a restore did.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum PublishResult {
+    Saved {
+        revision: u32,
+        part: TeamPart,
+    },
+    /// The details would not change, so nothing was saved.
+    NothingToSave {
+        message: String,
+    },
+    /// Someone else saved a revision after the one the edit started from.
+    /// Nothing was saved.
+    Conflict(Box<TeamConflict>),
+    /// The server refused it, for example a symbol the Catalog does not
+    /// have, or no edit access.
+    Refused {
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamConflict {
+    /// The revision the edit started from.
+    pub started_from: u32,
+    /// The revision someone else saved, now the current one.
+    pub theirs: RevisionSummary,
+    /// Every field or list that either side changed.
+    pub rows: Vec<ConflictRow>,
+    /// Their revision with only your changes applied on top: what "save my
+    /// changes on top of theirs" publishes.
+    pub merged: TeamEditRequest,
+    /// For a restore, the revision it would have copied; "restore anyway"
+    /// tries again from their revision.
+    pub restore_revision: Option<u32>,
+    /// The part as it is now.
+    pub part: TeamPart,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConflictRow {
+    pub label: String,
+    pub started_from: String,
+    pub theirs: String,
+    pub yours: String,
+    /// Both sides changed it differently; yours wins if you save on top.
+    pub both_changed: bool,
 }
 
 /// KiCad's letter for a symbol unit: 1 is A, 26 is Z, 27 is AA.

@@ -1,7 +1,10 @@
-//! The "browse the catalog with exact KiCad previews" use cases.
+//! The "browse the catalog with exact KiCad previews" use cases, and the
+//! team catalog ([`team`]): sign in, history, edits and restores.
 //!
 //! The desktop shell wraps each method in a Tauri command and does nothing
 //! else, so everything here is testable without a window.
+
+pub mod team;
 
 use base64::Engine;
 use desktop_contract::{
@@ -189,6 +192,18 @@ impl CatalogBrowser {
     /// The exact kicad-cli preview of a part's symbol (every unit) or
     /// footprint. Exports on the first view; later views use the cache.
     pub fn preview(&self, ipn: &str, kind: PreviewKind) -> PreviewOutcome {
+        self.preview_field(ipn, kind, None)
+    }
+
+    /// Like [`Self::preview`], but previews `field` (a Symbol or Footprint
+    /// field value, such as the team catalog's) instead of the CSV
+    /// catalog's when it is given.
+    pub fn preview_field(
+        &self,
+        ipn: &str,
+        kind: PreviewKind,
+        field: Option<&str>,
+    ) -> PreviewOutcome {
         let problem = |reason, reference: Option<&str>, message: String| {
             PreviewOutcome::Problem(PreviewProblem {
                 kind,
@@ -206,9 +221,10 @@ impl CatalogBrowser {
                 format!("Part {ipn} is not in the catalog."),
             );
         };
-        let field = match kind {
-            PreviewKind::Symbol => part.symbol.as_deref(),
-            PreviewKind::Footprint => part.footprint.as_deref(),
+        let field = match (field, kind) {
+            (Some(field), _) => Some(field.trim()).filter(|field| !field.is_empty()),
+            (None, PreviewKind::Symbol) => part.symbol.as_deref(),
+            (None, PreviewKind::Footprint) => part.footprint.as_deref(),
         };
         // Footprint fields may list `;`-separated alternatives; symbol
         // fields hold exactly one reference.

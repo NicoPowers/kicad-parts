@@ -5,8 +5,8 @@
 //! and `1791600000_catalog_edits.js`).
 
 use crate::csv_import::CsvImport;
-use crate::sha256_hex;
 use crate::part::{DetailField, ManufacturerPart, PartDetails};
+use crate::sha256_hex;
 use collaboration::{CollabError, CollabResult, CorrelationId, PocketBaseClient};
 use serde::Deserialize;
 use serde_json::{Value, json};

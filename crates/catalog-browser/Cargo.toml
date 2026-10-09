@@ -8,6 +8,8 @@ description = "Browse the catalog with kicad-cli previews; the use cases behind 
 
 [dependencies]
 base64 = "0.22"
+catalog = { path = "../catalog" }
+collaboration = { path = "../collaboration" }
 desktop-contract = { path = "../desktop-contract" }
 kicad-integration = { path = "../kicad-integration" }
 legacy-catalog = { path = "../legacy-catalog" }

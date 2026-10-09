@@ -51,7 +51,11 @@ impl CatalogReplica {
 
     /// Applies `change`, whose part revisions are `revisions`, if it is the
     /// next one after the checkpoint.
-    pub fn apply(&mut self, change: &StoredChange, revisions: &[StoredPartRevision]) -> ApplyResult {
+    pub fn apply(
+        &mut self,
+        change: &StoredChange,
+        revisions: &[StoredPartRevision],
+    ) -> ApplyResult {
         if change.seq <= self.checkpoint {
             return ApplyResult::Duplicate;
         }
@@ -61,7 +65,10 @@ impl CatalogReplica {
                 received: change.seq,
             };
         }
-        for revision in revisions.iter().filter(|revision| revision.change == change.id) {
+        for revision in revisions
+            .iter()
+            .filter(|revision| revision.change == change.id)
+        {
             let newer = self
                 .parts
                 .get(&revision.part)

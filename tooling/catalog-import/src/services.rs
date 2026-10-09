@@ -41,6 +41,56 @@ pub fn start(
     Ok((server, admin, superuser))
 }
 
+/// A team member account added to a disposable instance.
+#[derive(Clone)]
+pub struct Member {
+    pub name: String,
+    pub email: String,
+    pub password: String,
+    pub can_edit_catalog: bool,
+}
+
+impl std::fmt::Debug for Member {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Member")
+            .field("email", &self.email)
+            .field("can_edit_catalog", &self.can_edit_catalog)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Adds a verified team member with a random password, marked as able to
+/// edit the Catalog or not.
+pub fn add_member(
+    admin: &PocketBaseClient,
+    name: &str,
+    email: &str,
+    can_edit_catalog: bool,
+) -> Result<Member, String> {
+    let password = native_services::random_token(20);
+    admin
+        .post_json(
+            "/api/collections/users/records",
+            &serde_json::json!({
+                "email": email,
+                "name": name,
+                "password": password,
+                "passwordConfirm": password,
+                "verified": true,
+                "can_edit_catalog": can_edit_catalog,
+            }),
+        )
+        .and_then(|reply| reply.success())
+        .map_err(|error| format!("cannot add {email}: {error}"))?;
+    Ok(Member {
+        name: name.to_owned(),
+        email: email.to_owned(),
+        password,
+        can_edit_catalog,
+    })
+}
+
 /// Marks a source commit whose inputs differ from it.
 pub const DIRTY_SUFFIX: &str = "+dirty";
 
