@@ -1,6 +1,6 @@
 //! `catalog-import pilot [REPOSITORY_ROOT] [GROUPING]`
 //!
-//! Imports one Legacy Catalog grouping (default `g-res`) into a disposable,
+//! Imports one CSV catalog file (default `g-res`) into a disposable,
 //! loopback-only PocketBase, imports it again to show nothing new is
 //! created, reads every Catalog record back, and prints the zero-loss
 //! report against the oracle. The PocketBase and its data are deleted when
@@ -27,14 +27,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .get(1)
         .map(PathBuf::from)
         .unwrap_or_else(services::repository_root);
-    let grouping = args.get(2).map(String::as_str).unwrap_or("g-res");
+    let csv_file = args.get(2).map(String::as_str).unwrap_or("g-res");
     let oracle = legacy_import_fixture::load_manifest(
         &root.join("fixtures/import/legacy-catalog/manifest.json"),
     )?;
 
-    let import = services::plan(&root, grouping)?;
+    let import = services::plan(&root, csv_file)?;
     let reason = format!(
-        "Import the Legacy Catalog grouping {grouping} (database/{grouping}.csv) into canonical Part Revisions"
+        "Import the CSV catalog csv_file {csv_file} (database/{csv_file}.csv) into canonical part revisions"
     );
 
     let state = tempfile::tempdir()?;
@@ -47,7 +47,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let readback = read_back(&admin)?;
     server.stop();
 
-    let report = catalog_import::report(&oracle, grouping, &readback, &root);
+    let report = catalog_import::report(&oracle, csv_file, &readback, &root);
     let mut summary = report.summary();
     summary["import"] = serde_json::json!({
         "first": serde_json::from_str::<serde_json::Value>(&first.body)?,

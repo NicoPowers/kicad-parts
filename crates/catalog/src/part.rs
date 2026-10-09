@@ -1,36 +1,37 @@
-//! The Part Revision snapshot.
+//! Part details: what a revision of a part saves.
 
 use crate::hash::sha256_hex;
 use serde::{Deserialize, Serialize};
 
-/// The schema tag of [`PartRevisionSnapshot`].
-pub const PART_REVISION_SCHEMA: &str = "kicad-parts/part-revision/1";
+/// The schema tag of [`PartDetails`].
+pub const PART_DETAILS_SCHEMA: &str = "kicad-parts/part-details/1";
 
-/// An immutable, complete snapshot of a Managed Part's catalog data.
+/// What a part is and how you design with it, as one revision saves it.
 ///
 /// Serialization is canonical: fields serialize in declaration order and
-/// every collection is an ordered list, so [`PartRevisionSnapshot::canonical_json`]
-/// is byte-for-byte reproducible and its SHA-256 identifies the revision's
-/// content. Operational Facts (supplier part numbers and prices) are never
-/// part of it.
+/// every collection is an ordered list, so [`PartDetails::canonical_json`]
+/// is byte-for-byte reproducible. Its SHA-256 identifies the revision's
+/// content, so any change here, including adding, removing or reordering a
+/// manufacturer part, makes a new revision. Supplier data (supplier part
+/// numbers and prices) is never part of it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct PartRevisionSnapshot {
+pub struct PartDetails {
     pub schema: String,
     pub ipn: String,
-    /// Every semantic source column in source order, blanks included, under
-    /// its exact source name.
-    pub fields: Vec<SnapshotField>,
-    /// The first is the primary manufacturer and MPN.
-    pub approved_manufacturer_parts: Vec<ApprovedManufacturerPart>,
+    /// Every source column that describes the part, in source order, blanks
+    /// included, under its exact source name.
+    pub fields: Vec<DetailField>,
+    /// The first is the main manufacturer part.
+    pub manufacturer_parts: Vec<ManufacturerPart>,
     /// The exact CAD this revision uses, one entry per symbol or footprint
     /// reference in source order.
-    pub asset_bindings: Vec<AssetBinding>,
+    pub cad_references: Vec<CadReference>,
 }
 
-impl PartRevisionSnapshot {
+impl PartDetails {
     pub fn canonical_json(&self) -> String {
-        serde_json::to_string(self).expect("a snapshot always serializes")
+        serde_json::to_string(self).expect("part details always serialize")
     }
 
     pub fn sha256(&self) -> String {
@@ -48,56 +49,53 @@ impl PartRevisionSnapshot {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SnapshotField {
+pub struct DetailField {
     pub name: String,
     pub value: String,
 }
 
-/// A manufacturer and MPN approved to satisfy one IPN.
+/// A manufacturer and their part number (MPN) approved for an IPN. The
+/// part's one datasheet is in its fields, not here.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ApprovedManufacturerPart {
+pub struct ManufacturerPart {
     pub manufacturer: String,
     pub mpn: String,
-    /// Only Approved Manufacturer Parts after the primary carry their own
-    /// datasheet (read from rows of the legacy `substitutes.csv`); the
-    /// primary's datasheet is the part's `Datasheet` field.
-    pub datasheet: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum BindingRole {
+pub enum CadReferenceRole {
     Symbol,
     Footprint,
 }
 
-/// One CAD reference of a Part Revision and what it resolved to.
+/// One symbol or footprint reference of a part, and what it resolved to.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct AssetBinding {
-    pub role: BindingRole,
+pub struct CadReference {
+    pub role: CadReferenceRole,
     /// Position among the references of this role; 0 is the default (KiCad
     /// database libraries list footprint choices separated by `;`).
     pub ordinal: u32,
     /// The reference exactly as the source wrote it, such as `g-pas:R_US`.
     pub reference: String,
-    pub target: BindingTarget,
+    pub target: CadReferenceTarget,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum BindingTarget {
-    /// An exact Asset Revision of a Catalog Asset.
-    AssetRevision {
-        asset: String,
-        asset_revision_sha256: String,
+pub enum CadReferenceTarget {
+    /// One exact revision of a CAD item, named by its CAD item and the
+    /// SHA-256 of that revision's snapshot.
+    CadItemRevision {
+        cad_item: String,
+        snapshot_sha256: String,
     },
-    /// A library outside the Legacy Catalog, such as KiCad's bundled
-    /// `Device` library. Library Sources will own these.
+    /// A library outside the CSV catalog, such as KiCad's bundled `Device`
+    /// library. Library Sources will own these.
     External,
-    /// A local reference that did not resolve; an Import Diagnostic
-    /// explains why.
+    /// A local reference that did not resolve; an import problem says why.
     Unresolved { status: String },
 }
 
@@ -107,39 +105,48 @@ mod tests {
 
     #[test]
     fn canonical_json_is_stable_and_ordered() {
-        let snapshot = PartRevisionSnapshot {
-            schema: PART_REVISION_SCHEMA.into(),
+        let details = PartDetails {
+            schema: PART_DETAILS_SCHEMA.into(),
             ipn: "RES-0000-0470".into(),
             fields: vec![
-                SnapshotField {
+                DetailField {
                     name: "Value".into(),
                     value: "47".into(),
                 },
-                SnapshotField {
+                DetailField {
                     name: "Tolerance".into(),
                     value: String::new(),
                 },
             ],
-            approved_manufacturer_parts: vec![ApprovedManufacturerPart {
+            manufacturer_parts: vec![ManufacturerPart {
                 manufacturer: "Yageo".into(),
                 mpn: "RC0603FR-0747RL".into(),
-                datasheet: None,
             }],
-            asset_bindings: vec![AssetBinding {
-                role: BindingRole::Symbol,
+            cad_references: vec![CadReference {
+                role: CadReferenceRole::Symbol,
                 ordinal: 0,
                 reference: "Device:R".into(),
-                target: BindingTarget::External,
+                target: CadReferenceTarget::External,
             }],
         };
-        let json = snapshot.canonical_json();
+        let json = details.canonical_json();
         assert_eq!(
             json,
-            r#"{"schema":"kicad-parts/part-revision/1","ipn":"RES-0000-0470","fields":[{"name":"Value","value":"47"},{"name":"Tolerance","value":""}],"approved_manufacturer_parts":[{"manufacturer":"Yageo","mpn":"RC0603FR-0747RL","datasheet":null}],"asset_bindings":[{"role":"symbol","ordinal":0,"reference":"Device:R","target":{"kind":"external"}}]}"#
+            r#"{"schema":"kicad-parts/part-details/1","ipn":"RES-0000-0470","fields":[{"name":"Value","value":"47"},{"name":"Tolerance","value":""}],"manufacturer_parts":[{"manufacturer":"Yageo","mpn":"RC0603FR-0747RL"}],"cad_references":[{"role":"symbol","ordinal":0,"reference":"Device:R","target":{"kind":"external"}}]}"#
         );
-        let parsed: PartRevisionSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, snapshot);
-        assert_eq!(parsed.sha256(), snapshot.sha256());
-        assert_eq!(snapshot.field("Tolerance"), Some(""));
+        let parsed: PartDetails = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, details);
+        assert_eq!(parsed.sha256(), details.sha256());
+        assert_eq!(details.field("Tolerance"), Some(""));
+        // Reordering manufacturer parts changes the details, so it makes a
+        // new revision.
+        let mut reordered = details.clone();
+        reordered.manufacturer_parts.push(ManufacturerPart {
+            manufacturer: "Vishay".into(),
+            mpn: "ALT-47".into(),
+        });
+        let before = reordered.sha256();
+        reordered.manufacturer_parts.reverse();
+        assert_ne!(reordered.sha256(), before);
     }
 }

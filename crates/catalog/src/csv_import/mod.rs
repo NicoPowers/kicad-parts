@@ -1,35 +1,37 @@
-//! Turns one grouping of the read-only Legacy Catalog (such as `g-res`,
-//! `database/g-res.csv`) into a [`LegacyImport`]: Managed Parts with their
-//! first Part Revision snapshot, the Catalog Assets, Asset Revisions and
-//! Asset Blobs they use, and every Import Diagnostic. Nothing here writes
-//! anywhere; the same inputs always give the same [`LegacyImport`].
+//! Turns one file of the read-only CSV catalog (such as `g-res`, that is
+//! `database/g-res.csv`) into a [`CsvImport`]: parts with their first
+//! revision, the CAD items, CAD item revisions and blobs they use, and
+//! every import problem. Nothing here writes anywhere; the same inputs
+//! always give the same [`CsvImport`].
 //!
-//! Every source field ends up in exactly one place (see [`route_column`]):
+//! Every source field ends up in exactly one place (see [`route_column`]
+//! and [`route_substitute_column`]):
 //!
-//! - the Part Revision snapshot (the IPN and every semantic column);
-//! - an Approved Manufacturer Part (`MPN`, `Manufacturer`, and the
-//!   substitutes' `MPN`, `Manufacturer` and `Datasheet`);
-//! - an Operational Fact, kept in the revision's [`Provenance`] and never in
-//!   its snapshot (supplier part numbers and prices);
-//! - an Import Diagnostic, for a row that cannot become a Managed Part.
+//! - the part details of the revision: the IPN, every column that
+//!   describes the part, and the manufacturer parts (`MPN` and
+//!   `Manufacturer` of the row, then of each `substitutes.csv` row);
+//! - supplier data, kept in the revision's [`Source`] and never in its
+//!   part details (supplier part numbers and prices);
+//! - an import problem, for anything the import cannot place, such as a
+//!   row that cannot become a part or a substitute with another datasheet.
 //!
-//! The legacy grouping (`g-res`) is provenance only. It is neither a Catalog
-//! Category nor the IPN Family.
+//! The CSV file name (`g-res`) is only part of the source. It is neither a
+//! category nor the IPN prefix.
 
-mod source;
+mod files;
 
-pub use source::{CsvRecord, CsvTable, input_exists, parse_csv, read_input};
+pub use files::{CsvRecord, CsvTable, input_exists, parse_csv, read_input};
 
-use crate::asset::{
-    ASSET_REVISION_SCHEMA, AssetBlob, AssetKind, AssetRevisionDeclaration, CatalogAsset,
-    LicenseDeclaration, ModelReference, ModelTarget,
+use crate::cad_item::{
+    Blob, CAD_ITEM_DETAILS_SCHEMA, CadItem, CadItemDetails, CadItemKind, License, ModelReference,
+    ModelTarget,
 };
 use crate::hash::sha256_hex;
-use crate::ids::{AssetRevisionId, ImportDiagnosticId, ManagedPartId};
+use crate::ids::{CadItemRevisionId, ImportProblemId, PartId};
 use crate::ipn::Ipn;
 use crate::part::{
-    ApprovedManufacturerPart, AssetBinding, BindingRole, BindingTarget, PART_REVISION_SCHEMA,
-    PartRevisionSnapshot, SnapshotField,
+    CadReference, CadReferenceRole, CadReferenceTarget, DetailField, ManufacturerPart,
+    PART_DETAILS_SCHEMA, PartDetails,
 };
 use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
 use kicad_integration::{LibRef, LibraryResolver, ResolveError};
@@ -39,12 +41,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// The schema tag of [`Provenance`] and [`AssetProvenance`].
-pub const PROVENANCE_SCHEMA: &str = "kicad-parts/provenance/1";
-/// The substitutes list of the Legacy Catalog.
+/// The schema tag of [`Source`] and [`CadItemSource`].
+pub const SOURCE_SCHEMA: &str = "kicad-parts/source/1";
+/// The substitutes list of the CSV catalog.
 pub const SUBSTITUTES_PATH: &str = "database/substitutes.csv";
 /// The `source` of everything this module produces.
-pub const LEGACY_SOURCE: &str = "legacy-catalog";
+pub const CSV_CATALOG_SOURCE: &str = "csv-catalog";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportError(pub String);
@@ -60,21 +62,21 @@ impl std::error::Error for ImportError {}
 /// Where a source column's value goes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ColumnRoute {
-    /// The IPN: the snapshot's `ipn` and the Managed Part's identity.
+    /// The IPN: the part details' `ipn` and the part's identity.
     Ipn,
-    /// A field of the Part Revision snapshot, under the column's name.
-    Snapshot,
-    /// The primary Approved Manufacturer Part's MPN.
-    PrimaryMpn,
-    /// The primary Approved Manufacturer Part's manufacturer.
-    PrimaryManufacturer,
-    /// An Operational Fact: kept in Provenance, never in the snapshot.
-    OperationalFact,
+    /// A field of the part details, under the column's name.
+    PartDetails,
+    /// The main manufacturer part's MPN, in the part details.
+    MainMpn,
+    /// The main manufacturer part's manufacturer, in the part details.
+    MainManufacturer,
+    /// Supplier data: kept in the source, never in the part details.
+    SupplierData,
 }
 
-/// The supplier part numbers and prices of the Legacy Catalog. `LCSC` holds
+/// The supplier part numbers and prices of the CSV catalog. `LCSC` holds
 /// LCSC supplier codes such as `C21189`.
-pub const OPERATIONAL_FACT_COLUMNS: [&str; 7] = [
+pub const SUPPLIER_DATA_COLUMNS: [&str; 7] = [
     "LCSC",
     "DigiKey_PN",
     "Mouser_PN",
@@ -84,15 +86,15 @@ pub const OPERATIONAL_FACT_COLUMNS: [&str; 7] = [
     "Price_LastSynced_UTC",
 ];
 
-/// Routes a part CSV column. Unknown and category-specific columns are
-/// semantic: they go into the snapshot under their exact name.
+/// Routes a part CSV column. Unknown and category-specific columns describe
+/// the part: they go into the part details under their exact name.
 pub fn route_column(name: &str) -> ColumnRoute {
     match name {
         "IPN" => ColumnRoute::Ipn,
-        "MPN" => ColumnRoute::PrimaryMpn,
-        "Manufacturer" => ColumnRoute::PrimaryManufacturer,
-        name if OPERATIONAL_FACT_COLUMNS.contains(&name) => ColumnRoute::OperationalFact,
-        _ => ColumnRoute::Snapshot,
+        "MPN" => ColumnRoute::MainMpn,
+        "Manufacturer" => ColumnRoute::MainManufacturer,
+        name if SUPPLIER_DATA_COLUMNS.contains(&name) => ColumnRoute::SupplierData,
+        _ => ColumnRoute::PartDetails,
     }
 }
 
@@ -102,10 +104,12 @@ pub enum SubstituteRoute {
     Ipn,
     Mpn,
     Manufacturer,
+    /// A part has one datasheet, in its part details. A blank datasheet, or
+    /// the part's own, adds nothing; any other becomes an import problem.
     Datasheet,
-    OperationalFact,
-    /// Not a column this import understands: the row becomes an Import
-    /// Diagnostic rather than losing it.
+    SupplierData,
+    /// Not a column this import understands: the row becomes an import
+    /// problem rather than being lost.
     Unknown,
 }
 
@@ -115,12 +119,12 @@ pub fn route_substitute_column(name: &str) -> SubstituteRoute {
         "MPN" => SubstituteRoute::Mpn,
         "Manufacturer" => SubstituteRoute::Manufacturer,
         "Datasheet" => SubstituteRoute::Datasheet,
-        "Supplier" | "SupplierPN" => SubstituteRoute::OperationalFact,
+        "Supplier" | "SupplierPN" => SubstituteRoute::SupplierData,
         _ => SubstituteRoute::Unknown,
     }
 }
 
-/// A read input, as recorded on the Change Set.
+/// A read input, as recorded on the Change.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceFile {
     /// `catalog-csv`, `substitutes-csv`, `symbol-library`, `footprint` or
@@ -133,20 +137,21 @@ pub struct SourceFile {
     pub header_raw: Option<String>,
 }
 
-/// A supplier part number or price, routed away from the snapshot.
+/// One supplier part number or price, kept away from the part details.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct OperationalFact {
+pub struct SupplierData {
     pub column: String,
     pub value: String,
 }
 
-/// Where a Part Revision came from.
+/// Where a part revision came from: one CSV row, exactly.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Provenance {
+pub struct Source {
     pub schema: String,
+    /// Always [`CSV_CATALOG_SOURCE`].
     pub source: String,
-    /// The Legacy Catalog grouping, such as `g-res`.
-    pub legacy_grouping: String,
+    /// The CSV file name without extension, such as `g-res`.
+    pub csv_file: String,
     pub path: String,
     pub byte_sha256: String,
     pub source_commit: Option<String>,
@@ -156,25 +161,26 @@ pub struct Provenance {
     pub record: Vec<String>,
     /// The row's exact bytes.
     pub raw_record: String,
-    pub operational_facts: Vec<OperationalFact>,
-    /// One per substitute that became an Approved Manufacturer Part, in
-    /// order (the primary comes from the row itself).
-    pub substitutes: Vec<SubstituteProvenance>,
+    pub supplier_data: Vec<SupplierData>,
+    /// Every `substitutes.csv` row that added a manufacturer part, in order
+    /// (the main manufacturer part comes from the row itself).
+    pub substitutes: Vec<SubstituteSource>,
 }
 
+/// One `substitutes.csv` row, exactly, including its datasheet.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SubstituteProvenance {
+pub struct SubstituteSource {
     pub path: String,
     pub byte_sha256: String,
     pub row_number: usize,
     pub record: Vec<String>,
     pub raw_record: String,
-    pub operational_facts: Vec<OperationalFact>,
+    pub supplier_data: Vec<SupplierData>,
 }
 
-/// Where an Asset Revision came from.
+/// Where a CAD item revision came from: a file, or one symbol's bytes in it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AssetProvenance {
+pub struct CadItemSource {
     pub schema: String,
     pub source: String,
     /// The file the blob was read from.
@@ -187,45 +193,45 @@ pub struct AssetProvenance {
     pub byte_range: Option<[u64; 2]>,
 }
 
-/// A Managed Part and its first Part Revision.
+/// A part and the revision this import would publish for it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PartDraft {
-    pub id: ManagedPartId,
+    pub id: PartId,
     pub ipn: Ipn,
-    pub snapshot: PartRevisionSnapshot,
+    pub snapshot: PartDetails,
     pub snapshot_json: String,
     pub snapshot_sha256: String,
-    pub provenance: Provenance,
-    pub provenance_json: String,
+    pub source: Source,
+    pub source_json: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AssetRevisionDraft {
-    pub id: AssetRevisionId,
-    pub asset: CatalogAsset,
-    pub declaration: AssetRevisionDeclaration,
-    pub declaration_json: String,
-    pub revision_sha256: String,
-    pub provenance: AssetProvenance,
-    pub provenance_json: String,
+pub struct CadItemRevisionDraft {
+    pub id: CadItemRevisionId,
+    pub cad_item: CadItem,
+    pub snapshot: CadItemDetails,
+    pub snapshot_json: String,
+    pub snapshot_sha256: String,
+    pub source: CadItemSource,
+    pub source_json: String,
 }
 
 /// A problem found while importing, kept rather than dropped.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct ImportDiagnostic {
-    pub id: ImportDiagnosticId,
+pub struct ImportProblem {
+    pub id: ImportProblemId,
     pub code: String,
-    /// What it is about: an IPN, a row (`row=N`), or an asset key.
+    /// What it is about: an IPN, a row (`row=N`), or a CAD item's key.
     pub subject: String,
     pub path: String,
     pub location: String,
     pub message: String,
-    /// Canonical JSON with whatever the diagnostic keeps, such as a whole
-    /// row that could not become a Managed Part.
+    /// Canonical JSON with whatever the problem keeps, such as a whole
+    /// row that could not become a part.
     pub detail_json: String,
 }
 
-impl ImportDiagnostic {
+impl ImportProblem {
     pub fn new(
         code: &str,
         subject: &str,
@@ -236,7 +242,7 @@ impl ImportDiagnostic {
     ) -> Self {
         let detail_json = detail.to_string();
         Self {
-            id: ImportDiagnosticId::new(code, subject, location, &detail_json),
+            id: ImportProblemId::new(code, subject, location, &detail_json),
             code: code.to_owned(),
             subject: subject.to_owned(),
             path: path.to_owned(),
@@ -249,27 +255,29 @@ impl ImportDiagnostic {
 
 /// Everything one import would publish, ordered deterministically.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LegacyImport {
-    pub legacy_grouping: String,
+pub struct CsvImport {
+    pub csv_file: String,
     /// The commit the inputs were read at, as the caller recorded it. The
     /// import tooling appends `+dirty` when any input differs from that
     /// commit, so a dirty tree is never recorded as a clean one.
     pub source_commit: Option<String>,
     pub sources: Vec<SourceFile>,
-    pub blobs: Vec<AssetBlob>,
-    pub asset_revisions: Vec<AssetRevisionDraft>,
+    pub blobs: Vec<Blob>,
+    pub cad_item_revisions: Vec<CadItemRevisionDraft>,
     pub parts: Vec<PartDraft>,
-    pub diagnostics: Vec<ImportDiagnostic>,
+    pub problems: Vec<ImportProblem>,
     /// Rows in the substitutes list.
     pub substitute_rows: usize,
     /// Of those, the rows naming one of this import's IPNs.
     pub substitute_rows_in_scope: usize,
 }
 
-impl LegacyImport {
-    /// The Catalog Assets, one per asset revision, in order.
-    pub fn assets(&self) -> impl Iterator<Item = &CatalogAsset> {
-        self.asset_revisions.iter().map(|revision| &revision.asset)
+impl CsvImport {
+    /// The CAD items, one per CAD item revision, in order.
+    pub fn cad_items(&self) -> impl Iterator<Item = &CadItem> {
+        self.cad_item_revisions
+            .iter()
+            .map(|revision| &revision.cad_item)
     }
 
     /// A hash of everything the import would publish. Equal inputs give
@@ -281,7 +289,7 @@ impl LegacyImport {
             text.push(':');
             text.push_str(value);
         };
-        push(&self.legacy_grouping);
+        push(&self.csv_file);
         push(self.source_commit.as_deref().unwrap_or(""));
         for source in &self.sources {
             push(&source.path);
@@ -290,29 +298,29 @@ impl LegacyImport {
         for blob in &self.blobs {
             push(&blob.sha256);
         }
-        for revision in &self.asset_revisions {
-            push(&revision.revision_sha256);
-            push(&revision.provenance_json);
+        for revision in &self.cad_item_revisions {
+            push(&revision.snapshot_sha256);
+            push(&revision.source_json);
         }
         for part in &self.parts {
             push(&part.snapshot_sha256);
-            push(&part.provenance_json);
+            push(&part.source_json);
         }
-        for diagnostic in &self.diagnostics {
-            push(diagnostic.id.as_str());
+        for problem in &self.problems {
+            push(problem.id.as_str());
         }
         sha256_hex(text)
     }
 }
 
-/// The Legacy Catalog under a repository root, opened read-only.
+/// The CSV catalog under a repository root, opened read-only.
 #[derive(Clone, Debug)]
-pub struct LegacyCatalog {
+pub struct CsvCatalog {
     root: PathBuf,
     resolver: LibraryResolver,
 }
 
-impl LegacyCatalog {
+impl CsvCatalog {
     pub fn new(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
@@ -322,59 +330,59 @@ impl LegacyCatalog {
         }
     }
 
-    /// Plans the import of `database/<grouping>.csv`, for example `g-res`.
+    /// Plans the import of `database/<csv_file>.csv`, for example `g-res`.
     pub fn import(
         &self,
-        grouping: &str,
+        csv_file: &str,
         source_commit: Option<String>,
-    ) -> Result<LegacyImport, ImportError> {
-        if !grouping.starts_with("g-")
-            || !grouping[2..]
+    ) -> Result<CsvImport, ImportError> {
+        if !csv_file.starts_with("g-")
+            || !csv_file[2..]
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
         {
             return Err(ImportError(format!(
-                "`{grouping}` is not a legacy grouping"
+                "`{csv_file}` is not the name of a CSV catalog file"
             )));
         }
-        Planner::new(self, grouping, source_commit).run()
+        Planner::new(self, csv_file, source_commit).run()
     }
 }
 
 struct Planner<'a> {
-    catalog: &'a LegacyCatalog,
-    grouping: String,
+    catalog: &'a CsvCatalog,
+    csv_file: String,
     source_commit: Option<String>,
     sources: BTreeMap<String, SourceFile>,
-    blobs: BTreeMap<String, AssetBlob>,
-    assets: BTreeMap<(AssetKind, String), AssetOutcome>,
-    asset_revisions: Vec<AssetRevisionDraft>,
-    diagnostics: BTreeMap<ImportDiagnosticId, ImportDiagnostic>,
+    blobs: BTreeMap<String, Blob>,
+    cad_items: BTreeMap<(CadItemKind, String), CadItemOutcome>,
+    cad_item_revisions: Vec<CadItemRevisionDraft>,
+    problems: BTreeMap<ImportProblemId, ImportProblem>,
     /// Unresolved local references and the IPNs that use them.
-    unresolved: BTreeMap<(BindingRole, String, String), BTreeSet<String>>,
+    unresolved: BTreeMap<(CadReferenceRole, String, String), BTreeSet<String>>,
 }
 
-/// What a referenced asset resolved to, cached per kind and key.
+/// What a referenced CAD item resolved to, cached per kind and key.
 #[derive(Clone)]
-enum AssetOutcome {
+enum CadItemOutcome {
     Revision {
-        asset: String,
-        revision_sha256: String,
+        cad_item: String,
+        snapshot_sha256: String,
     },
     Unresolved(String),
 }
 
 impl<'a> Planner<'a> {
-    fn new(catalog: &'a LegacyCatalog, grouping: &str, source_commit: Option<String>) -> Self {
+    fn new(catalog: &'a CsvCatalog, csv_file: &str, source_commit: Option<String>) -> Self {
         Self {
             catalog,
-            grouping: grouping.to_owned(),
+            csv_file: csv_file.to_owned(),
             source_commit,
             sources: BTreeMap::new(),
             blobs: BTreeMap::new(),
-            assets: BTreeMap::new(),
-            asset_revisions: Vec::new(),
-            diagnostics: BTreeMap::new(),
+            cad_items: BTreeMap::new(),
+            cad_item_revisions: Vec::new(),
+            problems: BTreeMap::new(),
             unresolved: BTreeMap::new(),
         }
     }
@@ -383,11 +391,11 @@ impl<'a> Planner<'a> {
         &self.catalog.root
     }
 
-    fn diagnose(&mut self, diagnostic: ImportDiagnostic) {
-        self.diagnostics.insert(diagnostic.id.clone(), diagnostic);
+    fn record_problem(&mut self, problem: ImportProblem) {
+        self.problems.insert(problem.id.clone(), problem);
     }
 
-    /// Reads a source file once and records it on the Change Set.
+    /// Reads a source file once and records it for the Change.
     fn read_source(&mut self, role: &str, path: &str) -> Result<(Vec<u8>, String), ImportError> {
         let bytes = read_input(self.root(), path)?;
         let sha = sha256_hex(&bytes);
@@ -403,8 +411,8 @@ impl<'a> Planner<'a> {
         Ok((bytes, sha))
     }
 
-    fn run(mut self) -> Result<LegacyImport, ImportError> {
-        let catalog_path = format!("database/{}.csv", self.grouping);
+    fn run(mut self) -> Result<CsvImport, ImportError> {
+        let catalog_path = format!("database/{}.csv", self.csv_file);
         let (bytes, catalog_sha) = self.read_source("catalog-csv", &catalog_path)?;
         let table = parse_csv(&catalog_path, &bytes)?;
         self.sources
@@ -436,13 +444,13 @@ impl<'a> Planner<'a> {
             let subject = format!("row={}", record.row_number);
             let location = format!("rows[{}]", record.row_number);
             if record.fields.len() > table.headers.len() {
-                self.diagnose(ImportDiagnostic::new(
+                self.record_problem(ImportProblem::new(
                     "row-has-extra-fields",
                     &subject,
                     &catalog_path,
                     &location,
                     format!(
-                        "row {} has {} fields for {} headers; the row is kept here instead of becoming a Managed Part",
+                        "row {} has {} fields for {} headers; the row is kept here instead of becoming a part",
                         record.row_number,
                         record.fields.len(),
                         table.headers.len()
@@ -458,13 +466,13 @@ impl<'a> Planner<'a> {
             let ipn = match Ipn::parse(ipn_text) {
                 Ok(ipn) => ipn,
                 Err(error) => {
-                    self.diagnose(ImportDiagnostic::new(
+                    self.record_problem(ImportProblem::new(
                         "invalid-ipn",
                         &subject,
                         &catalog_path,
                         &location,
                         format!(
-                            "row {}: {error}; the row is kept here instead of becoming a Managed Part",
+                            "row {}: {error}; the row is kept here instead of becoming a part",
                             record.row_number
                         ),
                         row_detail(),
@@ -473,13 +481,13 @@ impl<'a> Planner<'a> {
                 }
             };
             if !seen.insert(ipn.clone()) {
-                self.diagnose(ImportDiagnostic::new(
+                self.record_problem(ImportProblem::new(
                     "duplicate-ipn",
                     &subject,
                     &catalog_path,
                     &location,
                     format!(
-                        "row {} repeats IPN {ipn}; the first row becomes the Managed Part and this row is kept here",
+                        "row {} repeats IPN {ipn}; the first row becomes the part and this row is kept here",
                         record.row_number
                     ),
                     row_detail(),
@@ -509,16 +517,16 @@ impl<'a> Planner<'a> {
                 .unwrap_or_default();
             let in_scope = accepted.iter().any(|accepted| accepted.as_str() == ipn);
             if !in_scope {
-                // Substitutes of other groupings belong to their own import.
-                // A substitute of this IPN Family with no matching row would
-                // otherwise vanish, so it is diagnosed.
-                let families: BTreeSet<&str> = accepted.iter().map(Ipn::family).collect();
+                // Substitutes for other CSV files belong to their imports.
+                // A substitute of this IPN prefix with no matching row would
+                // otherwise vanish, so it is an import problem.
+                let prefixes: BTreeSet<&str> = accepted.iter().map(Ipn::prefix).collect();
                 let orphan = Ipn::parse(&ipn)
-                    .map(|parsed| families.contains(parsed.family()))
+                    .map(|parsed| prefixes.contains(parsed.prefix()))
                     .unwrap_or(false);
                 if orphan {
-                    self.diagnose(ImportDiagnostic::new(
-                        "substitute-without-managed-part",
+                    self.record_problem(ImportProblem::new(
+                        "substitute-without-part",
                         &ipn,
                         SUBSTITUTES_PATH,
                         &format!("rows[{}]", record.row_number),
@@ -538,13 +546,13 @@ impl<'a> Planner<'a> {
             }
             substitute_rows_in_scope += 1;
             if !unknown_columns.is_empty() || record.fields.len() > substitutes.headers.len() {
-                self.diagnose(ImportDiagnostic::new(
+                self.record_problem(ImportProblem::new(
                     "substitute-has-unknown-columns",
                     &ipn,
                     SUBSTITUTES_PATH,
                     &format!("rows[{}]", record.row_number),
                     format!(
-                        "substitute row {} has columns this import does not understand; it is kept here instead of becoming an Approved Manufacturer Part",
+                        "substitute row {} has columns this import does not understand; it is kept here instead of becoming a manufacturer part",
                         record.row_number
                     ),
                     json!({
@@ -576,11 +584,11 @@ impl<'a> Planner<'a> {
 
         for ((role, reference, status), ipns) in std::mem::take(&mut self.unresolved) {
             let (kind, column) = match role {
-                BindingRole::Symbol => ("symbol", "Symbol"),
-                BindingRole::Footprint => ("footprint", "Footprint"),
+                CadReferenceRole::Symbol => ("symbol", "Symbol"),
+                CadReferenceRole::Footprint => ("footprint", "Footprint"),
             };
             let users: Vec<String> = ipns.into_iter().collect();
-            self.diagnose(ImportDiagnostic::new(
+            self.record_problem(ImportProblem::new(
                 &format!("{status}-local-{kind}-reference"),
                 &reference,
                 &catalog_path,
@@ -593,14 +601,14 @@ impl<'a> Planner<'a> {
             ));
         }
 
-        Ok(LegacyImport {
-            legacy_grouping: self.grouping,
+        Ok(CsvImport {
+            csv_file: self.csv_file,
             source_commit: self.source_commit,
             sources: self.sources.into_values().collect(),
             blobs: self.blobs.into_values().collect(),
-            asset_revisions: self.asset_revisions,
+            cad_item_revisions: self.cad_item_revisions,
             parts: drafts,
-            diagnostics: self.diagnostics.into_values().collect(),
+            problems: self.problems.into_values().collect(),
             substitute_rows: substitutes.records.len(),
             substitute_rows_in_scope,
         })
@@ -620,52 +628,54 @@ impl<'a> Planner<'a> {
     ) -> Result<PartDraft, ImportError> {
         let value = |index: usize| record.fields.get(index).cloned().unwrap_or_default();
         let mut fields = Vec::new();
-        let mut operational_facts = Vec::new();
+        let mut supplier_data = Vec::new();
         let mut mpn = None;
         let mut manufacturer = None;
         for (index, header) in headers.iter().enumerate() {
             match route_column(header) {
                 ColumnRoute::Ipn => {}
-                ColumnRoute::Snapshot => fields.push(SnapshotField {
+                ColumnRoute::PartDetails => fields.push(DetailField {
                     name: header.clone(),
                     value: value(index),
                 }),
-                ColumnRoute::PrimaryMpn => mpn = Some(value(index)),
-                ColumnRoute::PrimaryManufacturer => manufacturer = Some(value(index)),
-                ColumnRoute::OperationalFact => operational_facts.push(OperationalFact {
+                ColumnRoute::MainMpn => mpn = Some(value(index)),
+                ColumnRoute::MainManufacturer => manufacturer = Some(value(index)),
+                ColumnRoute::SupplierData => supplier_data.push(SupplierData {
                     column: header.clone(),
                     value: value(index),
                 }),
             }
         }
 
-        let mut approved = Vec::new();
+        let mut manufacturer_parts = Vec::new();
         match (mpn, manufacturer) {
             (Some(mpn), Some(manufacturer)) if !mpn.is_empty() && !manufacturer.is_empty() => {
-                approved.push(ApprovedManufacturerPart {
-                    manufacturer,
-                    mpn,
-                    datasheet: None,
-                });
+                manufacturer_parts.push(ManufacturerPart { manufacturer, mpn });
             }
             (None, None) => {}
             (mpn, manufacturer) => {
-                // Half an Approved Manufacturer Part is not one; keep what
+                // Half a manufacturer part is not one; keep what
                 // the row said.
-                self.diagnose(ImportDiagnostic::new(
-                    "incomplete-primary-manufacturer-part",
+                self.record_problem(ImportProblem::new(
+                    "incomplete-main-manufacturer-part",
                     ipn.as_str(),
                     catalog_path,
                     &format!("rows[IPN={ipn}]"),
                     format!(
-                        "{ipn} has no complete primary manufacturer and MPN; the values are kept here"
+                        "{ipn} has no complete main manufacturer and MPN; the values are kept here"
                     ),
                     json!({ "MPN": mpn, "Manufacturer": manufacturer }),
                 ));
             }
         }
 
-        let mut substitute_provenance = Vec::new();
+        // A part has one datasheet: the one in its part details.
+        let part_datasheet = fields
+            .iter()
+            .find(|field| field.name == "Datasheet")
+            .map(|field| field.value.clone())
+            .unwrap_or_default();
+        let mut substitute_sources = Vec::new();
         for substitute in substitutes {
             let column = |route: SubstituteRoute| {
                 substitute_headers
@@ -673,10 +683,9 @@ impl<'a> Planner<'a> {
                     .position(|header| route_substitute_column(header) == route)
                     .map(|index| substitute.fields.get(index).cloned().unwrap_or_default())
             };
-            let candidate = ApprovedManufacturerPart {
+            let candidate = ManufacturerPart {
                 manufacturer: column(SubstituteRoute::Manufacturer).unwrap_or_default(),
                 mpn: column(SubstituteRoute::Mpn).unwrap_or_default(),
-                datasheet: column(SubstituteRoute::Datasheet),
             };
             let location = format!("rows[{}]", substitute.row_number);
             let detail = json!({
@@ -686,7 +695,7 @@ impl<'a> Planner<'a> {
                 "raw_record": substitute.raw,
             });
             if candidate.mpn.is_empty() || candidate.manufacturer.is_empty() {
-                self.diagnose(ImportDiagnostic::new(
+                self.record_problem(ImportProblem::new(
                     "incomplete-substitute",
                     ipn.as_str(),
                     SUBSTITUTES_PATH,
@@ -699,11 +708,14 @@ impl<'a> Planner<'a> {
                 ));
                 continue;
             }
-            if approved.iter().any(|existing: &ApprovedManufacturerPart| {
-                existing.manufacturer == candidate.manufacturer && existing.mpn == candidate.mpn
-            }) {
-                self.diagnose(ImportDiagnostic::new(
-                    "duplicate-approved-manufacturer-part",
+            if manufacturer_parts
+                .iter()
+                .any(|existing: &ManufacturerPart| {
+                    existing.manufacturer == candidate.manufacturer && existing.mpn == candidate.mpn
+                })
+            {
+                self.record_problem(ImportProblem::new(
+                    "duplicate-manufacturer-part",
                     ipn.as_str(),
                     SUBSTITUTES_PATH,
                     &location,
@@ -715,20 +727,40 @@ impl<'a> Planner<'a> {
                 ));
                 continue;
             }
-            approved.push(candidate);
-            substitute_provenance.push(SubstituteProvenance {
+            // Its datasheet is kept in the row's source either way; one that
+            // differs from the part's is a problem for someone to resolve.
+            let datasheet = column(SubstituteRoute::Datasheet).unwrap_or_default();
+            if !datasheet.is_empty() && datasheet != part_datasheet {
+                self.record_problem(ImportProblem::new(
+                    "substitute-datasheet-differs",
+                    ipn.as_str(),
+                    SUBSTITUTES_PATH,
+                    &location,
+                    format!(
+                        "substitute row {} for {ipn} names a different datasheet; a part has one datasheet, so the part's is kept and this one is recorded here",
+                        substitute.row_number
+                    ),
+                    json!({
+                        "row_number": substitute.row_number,
+                        "datasheet": datasheet,
+                        "part_datasheet": part_datasheet,
+                    }),
+                ));
+            }
+            manufacturer_parts.push(candidate);
+            substitute_sources.push(SubstituteSource {
                 path: SUBSTITUTES_PATH.to_owned(),
                 byte_sha256: substitutes_sha.to_owned(),
                 row_number: substitute.row_number,
                 record: substitute.fields.clone(),
                 raw_record: substitute.raw.clone(),
-                operational_facts: substitute_headers
+                supplier_data: substitute_headers
                     .iter()
                     .enumerate()
                     .filter(|(_, header)| {
-                        route_substitute_column(header) == SubstituteRoute::OperationalFact
+                        route_substitute_column(header) == SubstituteRoute::SupplierData
                     })
-                    .map(|(index, header)| OperationalFact {
+                    .map(|(index, header)| SupplierData {
                         column: header.clone(),
                         value: substitute.fields.get(index).cloned().unwrap_or_default(),
                     })
@@ -736,10 +768,10 @@ impl<'a> Planner<'a> {
             });
         }
 
-        let mut bindings = Vec::new();
+        let mut cad_references = Vec::new();
         for (role, column) in [
-            (BindingRole::Symbol, "Symbol"),
-            (BindingRole::Footprint, "Footprint"),
+            (CadReferenceRole::Symbol, "Symbol"),
+            (CadReferenceRole::Footprint, "Footprint"),
         ] {
             let Some(index) = headers.iter().position(|header| header == column) else {
                 continue;
@@ -752,7 +784,7 @@ impl<'a> Planner<'a> {
                 .collect();
             for (ordinal, reference) in references.into_iter().enumerate() {
                 let target = self.bind(role, reference, ipn)?;
-                bindings.push(AssetBinding {
+                cad_references.push(CadReference {
                     role,
                     ordinal: ordinal as u32,
                     reference: reference.to_owned(),
@@ -761,17 +793,17 @@ impl<'a> Planner<'a> {
             }
         }
 
-        let snapshot = PartRevisionSnapshot {
-            schema: PART_REVISION_SCHEMA.to_owned(),
+        let snapshot = PartDetails {
+            schema: PART_DETAILS_SCHEMA.to_owned(),
             ipn: ipn.as_str().to_owned(),
             fields,
-            approved_manufacturer_parts: approved,
-            asset_bindings: bindings,
+            manufacturer_parts,
+            cad_references,
         };
-        let provenance = Provenance {
-            schema: PROVENANCE_SCHEMA.to_owned(),
-            source: LEGACY_SOURCE.to_owned(),
-            legacy_grouping: self.grouping.clone(),
+        let source = Source {
+            schema: SOURCE_SCHEMA.to_owned(),
+            source: CSV_CATALOG_SOURCE.to_owned(),
+            csv_file: self.csv_file.clone(),
             path: catalog_path.to_owned(),
             byte_sha256: catalog_sha.to_owned(),
             source_commit: self.source_commit.clone(),
@@ -779,64 +811,64 @@ impl<'a> Planner<'a> {
             headers: headers.to_vec(),
             record: record.fields.clone(),
             raw_record: record.raw.clone(),
-            operational_facts,
-            substitutes: substitute_provenance,
+            supplier_data,
+            substitutes: substitute_sources,
         };
         let snapshot_json = snapshot.canonical_json();
         Ok(PartDraft {
-            id: ManagedPartId::for_ipn(ipn),
+            id: PartId::for_ipn(ipn),
             ipn: ipn.clone(),
             snapshot_sha256: sha256_hex(&snapshot_json),
             snapshot_json,
-            provenance_json: serde_json::to_string(&provenance).expect("provenance serializes"),
+            source_json: serde_json::to_string(&source).expect("source serializes"),
             snapshot,
-            provenance,
+            source,
         })
     }
 
     /// Resolves one symbol or footprint reference of `ipn`.
     fn bind(
         &mut self,
-        role: BindingRole,
+        role: CadReferenceRole,
         reference: &str,
         ipn: &Ipn,
-    ) -> Result<BindingTarget, ImportError> {
-        // The oracle's rule: `g-*` libraries are the Legacy Catalog's own;
+    ) -> Result<CadReferenceTarget, ImportError> {
+        // The oracle's rule: `g-*` libraries are the CSV catalog's own;
         // anything else (KiCad's bundled libraries) is external.
         let namespace = reference.split_once(':').map_or(reference, |(lib, _)| lib);
         if !namespace.starts_with("g-") {
-            return Ok(BindingTarget::External);
+            return Ok(CadReferenceTarget::External);
         }
         let kind = match role {
-            BindingRole::Symbol => AssetKind::Symbol,
-            BindingRole::Footprint => AssetKind::Footprint,
+            CadReferenceRole::Symbol => CadItemKind::Symbol,
+            CadReferenceRole::Footprint => CadItemKind::Footprint,
         };
-        let outcome = match self.assets.get(&(kind, reference.to_owned())) {
+        let outcome = match self.cad_items.get(&(kind, reference.to_owned())) {
             Some(outcome) => outcome.clone(),
             None => {
                 let outcome = match role {
-                    BindingRole::Symbol => self.symbol_asset(reference)?,
-                    BindingRole::Footprint => self.footprint_asset(reference)?,
+                    CadReferenceRole::Symbol => self.symbol_cad_item(reference)?,
+                    CadReferenceRole::Footprint => self.footprint_cad_item(reference)?,
                 };
-                self.assets
+                self.cad_items
                     .insert((kind, reference.to_owned()), outcome.clone());
                 outcome
             }
         };
         Ok(match outcome {
-            AssetOutcome::Revision {
-                asset,
-                revision_sha256,
-            } => BindingTarget::AssetRevision {
-                asset,
-                asset_revision_sha256: revision_sha256,
+            CadItemOutcome::Revision {
+                cad_item,
+                snapshot_sha256,
+            } => CadReferenceTarget::CadItemRevision {
+                cad_item,
+                snapshot_sha256,
             },
-            AssetOutcome::Unresolved(status) => {
+            CadItemOutcome::Unresolved(status) => {
                 self.unresolved
                     .entry((role, reference.to_owned(), status.clone()))
                     .or_default()
                     .insert(ipn.as_str().to_owned());
-                BindingTarget::Unresolved { status }
+                CadReferenceTarget::Unresolved { status }
             }
         })
     }
@@ -856,11 +888,11 @@ impl<'a> Planner<'a> {
         }
     }
 
-    fn symbol_asset(&mut self, reference: &str) -> Result<AssetOutcome, ImportError> {
+    fn symbol_cad_item(&mut self, reference: &str) -> Result<CadItemOutcome, ImportError> {
         let resolved = match self.catalog.resolver.symbol(reference) {
             Ok(resolved) => resolved,
             Err(error) => {
-                return Ok(AssetOutcome::Unresolved(Self::unresolved_reference(
+                return Ok(CadItemOutcome::Unresolved(Self::unresolved_reference(
                     reference, &error,
                 )));
             }
@@ -871,22 +903,24 @@ impl<'a> Planner<'a> {
             .map_err(|error| ImportError(format!("cannot read `{path}`: {error}")))?;
         let entry = match library.find(&resolved.lib_ref.item) {
             SymbolLookup::Found(entry) => entry.clone(),
-            SymbolLookup::Missing => return Ok(AssetOutcome::Unresolved("missing-member".into())),
-            SymbolLookup::Ambiguous => return Ok(AssetOutcome::Unresolved("ambiguous".into())),
+            SymbolLookup::Missing => {
+                return Ok(CadItemOutcome::Unresolved("missing-member".into()));
+            }
+            SymbolLookup::Ambiguous => return Ok(CadItemOutcome::Unresolved("ambiguous".into())),
         };
         let span = bytes[entry.span.clone()].to_vec();
         if let Some(parent) = &entry.extends {
-            self.diagnose(ImportDiagnostic::new(
+            self.record_problem(ImportProblem::new(
                 "symbol-extends-parent",
                 reference,
                 &path,
                 &format!("symbol={}", resolved.lib_ref.item),
-                format!("symbol `{reference}` extends `{parent}`, which its Asset Revision does not include"),
+                format!("symbol `{reference}` extends `{parent}`, which its CAD item revision does not include"),
                 json!({ "reference": reference, "extends": parent }),
             ));
         }
-        Ok(self.asset_revision(
-            AssetKind::Symbol,
+        Ok(self.cad_item_revision(
+            CadItemKind::Symbol,
             reference,
             "kicad-symbol-entry",
             library.version.clone(),
@@ -898,15 +932,15 @@ impl<'a> Planner<'a> {
         ))
     }
 
-    fn footprint_asset(&mut self, reference: &str) -> Result<AssetOutcome, ImportError> {
+    fn footprint_cad_item(&mut self, reference: &str) -> Result<CadItemOutcome, ImportError> {
         let resolved = match self.catalog.resolver.footprint(reference) {
             Ok(resolved) => resolved,
             Err(ResolveError::LibraryNotFound { .. }) => {
                 // The oracle checks only for the footprint file itself.
-                return Ok(AssetOutcome::Unresolved("missing-member".into()));
+                return Ok(CadItemOutcome::Unresolved("missing-member".into()));
             }
             Err(error) => {
-                return Ok(AssetOutcome::Unresolved(Self::unresolved_reference(
+                return Ok(CadItemOutcome::Unresolved(Self::unresolved_reference(
                     reference, &error,
                 )));
             }
@@ -921,15 +955,15 @@ impl<'a> Planner<'a> {
             let classified = classify_model_reference(&model);
             let target = match &classified.candidate {
                 Some(candidate) if input_exists(self.root(), candidate)? => {
-                    match self.model_asset(candidate)? {
-                        AssetOutcome::Revision {
-                            asset,
-                            revision_sha256,
-                        } => ModelTarget::AssetRevision {
-                            asset,
-                            asset_revision_sha256: revision_sha256,
+                    match self.model_cad_item(candidate)? {
+                        CadItemOutcome::Revision {
+                            cad_item,
+                            snapshot_sha256,
+                        } => ModelTarget::CadItemRevision {
+                            cad_item,
+                            snapshot_sha256,
                         },
-                        AssetOutcome::Unresolved(status) => ModelTarget::Unresolved { status },
+                        CadItemOutcome::Unresolved(status) => ModelTarget::Unresolved { status },
                     }
                 }
                 Some(_) => ModelTarget::Unresolved {
@@ -940,7 +974,7 @@ impl<'a> Planner<'a> {
                 },
             };
             if let ModelTarget::Unresolved { status } = &target {
-                self.diagnose(ImportDiagnostic::new(
+                self.record_problem(ImportProblem::new(
                     &format!("{status}-3d-model-reference"),
                     reference,
                     &path,
@@ -958,8 +992,8 @@ impl<'a> Planner<'a> {
                 target,
             });
         }
-        Ok(self.asset_revision(
-            AssetKind::Footprint,
+        Ok(self.cad_item_revision(
+            CadItemKind::Footprint,
             reference,
             "kicad-footprint",
             footprint.version.clone(),
@@ -971,13 +1005,13 @@ impl<'a> Planner<'a> {
         ))
     }
 
-    fn model_asset(&mut self, path: &str) -> Result<AssetOutcome, ImportError> {
-        if let Some(outcome) = self.assets.get(&(AssetKind::Model3d, path.to_owned())) {
+    fn model_cad_item(&mut self, path: &str) -> Result<CadItemOutcome, ImportError> {
+        if let Some(outcome) = self.cad_items.get(&(CadItemKind::Model3d, path.to_owned())) {
             return Ok(outcome.clone());
         }
         let (bytes, file_sha) = self.read_source("3d-model", path)?;
-        let outcome = self.asset_revision(
-            AssetKind::Model3d,
+        let outcome = self.cad_item_revision(
+            CadItemKind::Model3d,
             path,
             "3d-model",
             None,
@@ -987,15 +1021,15 @@ impl<'a> Planner<'a> {
             &file_sha,
             None,
         );
-        self.assets
-            .insert((AssetKind::Model3d, path.to_owned()), outcome.clone());
+        self.cad_items
+            .insert((CadItemKind::Model3d, path.to_owned()), outcome.clone());
         Ok(outcome)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn asset_revision(
+    fn cad_item_revision(
         &mut self,
-        kind: AssetKind,
+        kind: CadItemKind,
         key: &str,
         format: &str,
         format_version: Option<String>,
@@ -1004,11 +1038,11 @@ impl<'a> Planner<'a> {
         path: &str,
         file_sha: &str,
         byte_range: Option<[u64; 2]>,
-    ) -> AssetOutcome {
-        let blob = AssetBlob::new(bytes);
-        let asset = CatalogAsset::new(kind, key);
-        let declaration = AssetRevisionDeclaration {
-            schema: ASSET_REVISION_SCHEMA.to_owned(),
+    ) -> CadItemOutcome {
+        let blob = Blob::new(bytes);
+        let cad_item = CadItem::new(kind, key);
+        let snapshot = CadItemDetails {
+            schema: CAD_ITEM_DETAILS_SCHEMA.to_owned(),
             kind,
             key: key.to_owned(),
             format: format.to_owned(),
@@ -1016,31 +1050,31 @@ impl<'a> Planner<'a> {
             blob_sha256: blob.sha256.clone(),
             blob_size: blob.bytes.len() as u64,
             model_references,
-            license: LicenseDeclaration::UndeclaredNeedsReview,
+            license: License::UnknownNeedsReview,
         };
-        let declaration_json = declaration.canonical_json();
-        let revision_sha256 = sha256_hex(&declaration_json);
-        let provenance = AssetProvenance {
-            schema: PROVENANCE_SCHEMA.to_owned(),
-            source: LEGACY_SOURCE.to_owned(),
+        let snapshot_json = snapshot.canonical_json();
+        let snapshot_sha256 = sha256_hex(&snapshot_json);
+        let source = CadItemSource {
+            schema: SOURCE_SCHEMA.to_owned(),
+            source: CSV_CATALOG_SOURCE.to_owned(),
             path: path.to_owned(),
             byte_sha256: file_sha.to_owned(),
             source_commit: self.source_commit.clone(),
             byte_range,
         };
-        let outcome = AssetOutcome::Revision {
-            asset: asset.id.as_str().to_owned(),
-            revision_sha256: revision_sha256.clone(),
+        let outcome = CadItemOutcome::Revision {
+            cad_item: cad_item.id.as_str().to_owned(),
+            snapshot_sha256: snapshot_sha256.clone(),
         };
         self.blobs.entry(blob.sha256.clone()).or_insert(blob);
-        self.asset_revisions.push(AssetRevisionDraft {
-            id: AssetRevisionId::new(&asset.id, &revision_sha256),
-            asset,
-            declaration,
-            declaration_json,
-            revision_sha256,
-            provenance_json: serde_json::to_string(&provenance).expect("provenance serializes"),
-            provenance,
+        self.cad_item_revisions.push(CadItemRevisionDraft {
+            id: CadItemRevisionId::new(&cad_item.id, &snapshot_sha256),
+            cad_item,
+            snapshot,
+            snapshot_json,
+            snapshot_sha256,
+            source_json: serde_json::to_string(&source).expect("source serializes"),
+            source,
         });
         outcome
     }

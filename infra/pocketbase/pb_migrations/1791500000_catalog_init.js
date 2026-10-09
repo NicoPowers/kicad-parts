@@ -3,15 +3,15 @@
 // The Catalog's team-authoritative records (seed kicad-parts-fef6).
 //
 // Terms follow docs/contexts/catalog/CONTEXT.md. Every record is immutable
-// once written except a Managed Part's head pointer. Signed-in members may
-// read everything; nobody writes directly. Writes go through the protected
-// routes in pb_hooks (today: POST /api/catalog/legacy-imports), which run in
-// one transaction, derive record IDs from content (see catalog_lib.js and
-// crates/catalog/src/ids.rs), and keep catalog_change_sets.seq gap-free.
+// once written except a part's current revision pointer. Signed-in members
+// may read everything; nobody writes directly. Writes go through the
+// protected routes in pb_hooks (today: POST /api/catalog/csv-imports), which
+// run in one transaction, derive record IDs from content (see catalog_lib.js
+// and crates/catalog/src/ids.rs), and keep catalog_changes.seq gap-free.
 //
-// Canonical documents (snapshots, declarations, provenance) are stored in
-// text fields, not json fields, so the exact bytes their SHA-256 covers
-// survive a round trip.
+// Canonical documents (revision snapshots and sources) are stored in text
+// fields, not json fields, so the exact bytes their SHA-256 covers survive a
+// round trip.
 migrate((app) => {
   const signedIn = "@request.auth.id != ''";
   const readOnly = {
@@ -31,17 +31,17 @@ migrate((app) => {
     pattern: "^[0-9a-f]{64}$",
   });
 
-  // One reasoned group of revisions published together, numbered without
-  // gaps so replicas can catch up from a checkpoint.
-  const changeSets = new Collection(Object.assign({}, readOnly, {
+  // One saved update with a reason, holding at least one revision, numbered
+  // without gaps so replicas can catch up from a checkpoint.
+  const changes = new Collection(Object.assign({}, readOnly, {
     type: "base",
-    name: "catalog_change_sets",
+    name: "catalog_changes",
     fields: [
       { name: "seq", type: "number", required: true, min: 1, onlyInt: true },
-      // A closed set shared with catalog_lib.js (CHANGE_SET_KINDS) and
-      // crates/catalog (ChangeSetKind). Only legacy-import is published
+      // A closed set shared with catalog_lib.js (CHANGE_KINDS) and
+      // crates/catalog (ChangeKind). Only csv-import is published
       // today; edit and restore are reserved for kicad-parts-2254.
-      { name: "kind", type: "select", required: true, maxSelect: 1, values: ["legacy-import", "edit", "restore"] },
+      { name: "kind", type: "select", required: true, maxSelect: 1, values: ["csv-import", "edit", "restore"] },
       { name: "reason", type: "text", required: true, max: 2000 },
       { name: "correlation_id", type: "text", required: true, max: 100 },
       // "<auth collection>:<record id>", because a superuser is not a users
@@ -51,21 +51,21 @@ migrate((app) => {
       // JSON list of every source file read: role, path, byte_sha256,
       // size and, for CSV files, the exact header line.
       { name: "sources", type: "text", required: true, max: DOCUMENT },
-      // JSON counts of what this Change Set created.
+      // JSON counts of what this Change created.
       { name: "summary", type: "text", required: true, max: 10000 },
       { name: "created", type: "autodate", onCreate: true, onUpdate: false },
     ],
     indexes: [
-      "CREATE UNIQUE INDEX idx_catalog_change_sets_seq ON catalog_change_sets (seq)",
-      "CREATE UNIQUE INDEX idx_catalog_change_sets_correlation ON catalog_change_sets (correlation_id)",
+      "CREATE UNIQUE INDEX idx_catalog_changes_seq ON catalog_changes (seq)",
+      "CREATE UNIQUE INDEX idx_catalog_changes_correlation ON catalog_changes (correlation_id)",
     ],
   }));
-  app.save(changeSets);
+  app.save(changes);
 
   // Exact bytes, addressed by SHA-256. The record ID is derived from it.
   const blobs = new Collection(Object.assign({}, readOnly, {
     type: "base",
-    name: "catalog_asset_blobs",
+    name: "catalog_blobs",
     fields: [
       sha256("sha256"),
       { name: "size", type: "number", required: false, min: 0, onlyInt: true },
@@ -77,68 +77,67 @@ migrate((app) => {
         maxSize: 104857600,
         protected: true,
       },
-      { name: "first_change_set", type: "relation", collectionId: changeSets.id, maxSelect: 1, required: true },
+      { name: "first_change", type: "relation", collectionId: changes.id, maxSelect: 1, required: true },
       { name: "created", type: "autodate", onCreate: true, onUpdate: false },
     ],
-    indexes: ["CREATE UNIQUE INDEX idx_catalog_asset_blobs_sha256 ON catalog_asset_blobs (sha256)"],
+    indexes: ["CREATE UNIQUE INDEX idx_catalog_blobs_sha256 ON catalog_blobs (sha256)"],
   }));
   app.save(blobs);
 
-  const assets = new Collection(Object.assign({}, readOnly, {
+  const cad_items = new Collection(Object.assign({}, readOnly, {
     type: "base",
-    name: "catalog_assets",
+    name: "catalog_cad_items",
     fields: [
       { name: "kind", type: "select", required: true, maxSelect: 1, values: ["symbol", "footprint", "model-3d"] },
       // LIB:NAME for symbols and footprints, the repository path for 3D models
       { name: "key", type: "text", required: true, max: 500 },
-      { name: "first_change_set", type: "relation", collectionId: changeSets.id, maxSelect: 1, required: true },
+      { name: "first_change", type: "relation", collectionId: changes.id, maxSelect: 1, required: true },
       { name: "created", type: "autodate", onCreate: true, onUpdate: false },
     ],
-    indexes: ["CREATE UNIQUE INDEX idx_catalog_assets_kind_key ON catalog_assets (kind, key)"],
+    indexes: ["CREATE UNIQUE INDEX idx_catalog_cad_items_kind_key ON catalog_cad_items (kind, key)"],
   }));
-  app.save(assets);
+  app.save(cad_items);
 
-  const assetRevisions = new Collection(Object.assign({}, readOnly, {
+  const cadItemRevisions = new Collection(Object.assign({}, readOnly, {
     type: "base",
-    name: "catalog_asset_revisions",
+    name: "catalog_cad_item_revisions",
     fields: [
-      { name: "asset", type: "relation", collectionId: assets.id, maxSelect: 1, required: true },
+      { name: "cad_item", type: "relation", collectionId: cad_items.id, maxSelect: 1, required: true },
       { name: "number", type: "number", required: true, min: 1, onlyInt: true },
-      { name: "change_set", type: "relation", collectionId: changeSets.id, maxSelect: 1, required: true },
+      { name: "change", type: "relation", collectionId: changes.id, maxSelect: 1, required: true },
       { name: "blob", type: "relation", collectionId: blobs.id, maxSelect: 1, required: true },
-      // SHA-256 of declaration, the revision's identity within its asset.
-      sha256("revision_sha256"),
-      { name: "declaration", type: "text", required: true, max: DOCUMENT },
-      // Copied from the declaration so it can be filtered; never blank.
-      { name: "license_status", type: "text", required: true, max: 100 },
-      { name: "provenance", type: "text", required: true, max: DOCUMENT },
+      // SHA-256 of snapshot, the revision's identity within its CAD item.
+      sha256("snapshot_sha256"),
+      { name: "snapshot", type: "text", required: true, max: DOCUMENT },
+      // Copied from the snapshot so it can be filtered; never blank.
+      { name: "license", type: "text", required: true, max: 100 },
+      { name: "source", type: "text", required: true, max: DOCUMENT },
       { name: "created", type: "autodate", onCreate: true, onUpdate: false },
     ],
     indexes: [
-      "CREATE UNIQUE INDEX idx_catalog_asset_revisions_hash ON catalog_asset_revisions (asset, revision_sha256)",
-      "CREATE UNIQUE INDEX idx_catalog_asset_revisions_number ON catalog_asset_revisions (asset, number)",
+      "CREATE UNIQUE INDEX idx_catalog_cad_item_revisions_hash ON catalog_cad_item_revisions (cad_item, snapshot_sha256)",
+      "CREATE UNIQUE INDEX idx_catalog_cad_item_revisions_number ON catalog_cad_item_revisions (cad_item, number)",
     ],
   }));
-  app.save(assetRevisions);
-  assetRevisions.fields.add(
-    new RelationField({ name: "predecessor", collectionId: assetRevisions.id, maxSelect: 1 }),
+  app.save(cadItemRevisions);
+  cadItemRevisions.fields.add(
+    new RelationField({ name: "predecessor", collectionId: cadItemRevisions.id, maxSelect: 1 }),
   );
-  app.save(assetRevisions);
+  app.save(cadItemRevisions);
 
   const parts = new Collection(Object.assign({}, readOnly, {
     type: "base",
-    name: "catalog_managed_parts",
+    name: "catalog_parts",
     fields: [
       { name: "ipn", type: "text", required: true, max: 13, pattern: "^[A-Z]{3}-[0-9]{4}-[0-9A-Z]{4}$" },
-      { name: "ipn_family", type: "text", required: true, max: 3 },
-      { name: "ipn_base", type: "text", required: true, max: 8 },
-      { name: "variation", type: "text", required: true, max: 4 },
-      { name: "head_number", type: "number", required: true, min: 1, onlyInt: true },
-      { name: "first_change_set", type: "relation", collectionId: changeSets.id, maxSelect: 1, required: true },
+      { name: "ipn_prefix", type: "text", required: true, max: 3 },
+      { name: "variant", type: "text", required: true, max: 4 },
+      { name: "current_revision_number", type: "number", required: true, min: 1, onlyInt: true },
+      { name: "first_change", type: "relation", collectionId: changes.id, maxSelect: 1, required: true },
       { name: "created", type: "autodate", onCreate: true, onUpdate: false },
       { name: "updated", type: "autodate", onCreate: true, onUpdate: true },
     ],
-    indexes: ["CREATE UNIQUE INDEX idx_catalog_managed_parts_ipn ON catalog_managed_parts (ipn)"],
+    indexes: ["CREATE UNIQUE INDEX idx_catalog_parts_ipn ON catalog_parts (ipn)"],
   }));
   app.save(parts);
 
@@ -146,19 +145,19 @@ migrate((app) => {
     type: "base",
     name: "catalog_part_revisions",
     fields: [
-      { name: "managed_part", type: "relation", collectionId: parts.id, maxSelect: 1, required: true },
+      { name: "part", type: "relation", collectionId: parts.id, maxSelect: 1, required: true },
       { name: "number", type: "number", required: true, min: 1, onlyInt: true },
-      { name: "change_set", type: "relation", collectionId: changeSets.id, maxSelect: 1, required: true },
+      { name: "change", type: "relation", collectionId: changes.id, maxSelect: 1, required: true },
       { name: "snapshot", type: "text", required: true, max: DOCUMENT },
       sha256("snapshot_sha256"),
-      { name: "provenance", type: "text", required: true, max: DOCUMENT },
-      // The exact Asset Revisions the snapshot binds, for integrity and
+      { name: "source", type: "text", required: true, max: DOCUMENT },
+      // The exact CAD item revisions the snapshot binds, for integrity and
       // lookups; the snapshot itself is authoritative.
-      { name: "asset_revisions", type: "relation", collectionId: assetRevisions.id, maxSelect: 999 },
+      { name: "cad_item_revisions", type: "relation", collectionId: cadItemRevisions.id, maxSelect: 999 },
       { name: "created", type: "autodate", onCreate: true, onUpdate: false },
     ],
     indexes: [
-      "CREATE UNIQUE INDEX idx_catalog_part_revisions_number ON catalog_part_revisions (managed_part, number)",
+      "CREATE UNIQUE INDEX idx_catalog_part_revisions_number ON catalog_part_revisions (part, number)",
     ],
   }));
   app.save(partRevisions);
@@ -167,12 +166,31 @@ migrate((app) => {
   );
   app.save(partRevisions);
 
-  parts.fields.add(new RelationField({ name: "head", collectionId: partRevisions.id, maxSelect: 1 }));
+  parts.fields.add(new RelationField({ name: "current_revision", collectionId: partRevisions.id, maxSelect: 1 }));
   app.save(parts);
 
-  const diagnostics = new Collection(Object.assign({}, readOnly, {
+  // One per import run that wrote anything: who ran it, when and why, and
+  // the Change it made, if any (a run that only found import problems makes
+  // no Change).
+  const auditEntries = new Collection(Object.assign({}, readOnly, {
     type: "base",
-    name: "catalog_import_diagnostics",
+    name: "catalog_audit_entries",
+    fields: [
+      { name: "action", type: "text", required: true, max: 100 },
+      { name: "actor", type: "text", required: true, max: 200 },
+      { name: "change", type: "relation", collectionId: changes.id, maxSelect: 1 },
+      { name: "reason", type: "text", required: true, max: 2000 },
+      { name: "correlation_id", type: "text", required: true, max: 100 },
+      // JSON counts of what the run created.
+      { name: "summary", type: "text", required: true, max: 10000 },
+      { name: "created", type: "autodate", onCreate: true, onUpdate: false },
+    ],
+  }));
+  app.save(auditEntries);
+
+  const problems = new Collection(Object.assign({}, readOnly, {
+    type: "base",
+    name: "catalog_import_problems",
     fields: [
       { name: "code", type: "text", required: true, max: 100 },
       { name: "subject", type: "text", required: true, max: 500 },
@@ -180,25 +198,12 @@ migrate((app) => {
       { name: "location", type: "text", required: true, max: 2000 },
       { name: "message", type: "text", required: true, max: 10000 },
       { name: "detail", type: "text", required: true, max: DOCUMENT },
-      { name: "change_set", type: "relation", collectionId: changeSets.id, maxSelect: 1, required: true },
+      // The import run that first found it.
+      { name: "audit_entry", type: "relation", collectionId: auditEntries.id, maxSelect: 1, required: true },
       { name: "created", type: "autodate", onCreate: true, onUpdate: false },
     ],
   }));
-  app.save(diagnostics);
-
-  const auditEvents = new Collection(Object.assign({}, readOnly, {
-    type: "base",
-    name: "catalog_audit_events",
-    fields: [
-      { name: "action", type: "text", required: true, max: 100 },
-      { name: "actor", type: "text", required: true, max: 200 },
-      { name: "change_set", type: "relation", collectionId: changeSets.id, maxSelect: 1, required: true },
-      { name: "reason", type: "text", required: true, max: 2000 },
-      { name: "correlation_id", type: "text", required: true, max: 100 },
-      { name: "created", type: "autodate", onCreate: true, onUpdate: false },
-    ],
-  }));
-  app.save(auditEvents);
+  app.save(problems);
 
   // Correlation-ID ledger: a repeated command replays its stored answer.
   const commands = new Collection({
@@ -221,8 +226,8 @@ migrate((app) => {
   });
   app.save(commands);
 }, (app) => {
-  // Referrers before what they refer to; self-relations and the head
-  // pointer first, so no relation blocks a delete.
+  // Referrers before what they refer to; self-relations and the current
+  // revision pointer first, so no relation blocks a delete.
   const removeField = (name, field) => {
     const collection = app.findCollectionByNameOrId(name);
     collection.fields.removeByName(field);
@@ -230,15 +235,15 @@ migrate((app) => {
   };
   const drop = (name) => app.delete(app.findCollectionByNameOrId(name));
   drop("catalog_commands");
-  drop("catalog_audit_events");
-  drop("catalog_import_diagnostics");
-  removeField("catalog_managed_parts", "head");
+  drop("catalog_import_problems");
+  drop("catalog_audit_entries");
+  removeField("catalog_parts", "current_revision");
   removeField("catalog_part_revisions", "predecessor");
   drop("catalog_part_revisions");
-  drop("catalog_managed_parts");
-  removeField("catalog_asset_revisions", "predecessor");
-  drop("catalog_asset_revisions");
-  drop("catalog_assets");
-  drop("catalog_asset_blobs");
-  drop("catalog_change_sets");
+  drop("catalog_parts");
+  removeField("catalog_cad_item_revisions", "predecessor");
+  drop("catalog_cad_item_revisions");
+  drop("catalog_cad_items");
+  drop("catalog_blobs");
+  drop("catalog_changes");
 });

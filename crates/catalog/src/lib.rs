@@ -1,63 +1,60 @@
-//! The Catalog context: the parts a team designs with, how each is
-//! numbered, how its record has changed, and which exact CAD it uses.
+//! The Catalog context: the parts a team designs with, their numbers, how
+//! their details changed, and which exact CAD items they use.
 //!
 //! The terms are those of `docs/contexts/catalog/CONTEXT.md`. This crate
 //! pins down only what the glossary leaves to the implementation:
 //!
-//! - A **Managed Part** is identified by a [`ManagedPartId`] derived from its
-//!   [`Ipn`], so every import of the same IPN resolves to the same part. The
-//!   IPN itself never changes.
-//! - A **Part Revision** is an immutable [`PartRevisionSnapshot`]. Its
-//!   SHA-256 is taken over the exact canonical JSON text that is stored, so a
-//!   reader can verify it. Revisions are numbered from 1 per part; the
-//!   **Head** is the newest.
-//! - A **Catalog Asset** is one logical symbol, footprint or 3D model,
-//!   identified by its kind and library reference (for example the symbol
-//!   `g-pas:R_US`). An **Asset Revision** is an immutable
-//!   [`AssetRevisionDeclaration`]: the exact [`AssetBlob`] it uses plus its
-//!   format and [`LicenseDeclaration`]. Its revision hash covers that whole
-//!   declaration; [`Provenance`] is attached to the revision but is not part
-//!   of the hash, so re-reading identical content from a moved or edited
-//!   library file finds the same revision.
-//! - An **Asset Blob** is addressed by the SHA-256 of its bytes. For a
-//!   symbol, the blob is the exact byte span of that one symbol inside its
-//!   library file, so editing a neighbouring symbol does not revise it.
-//! - A **Change Set** groups everything one import or edit published, with
-//!   its reason. Supplier part numbers and prices are **Operational Facts**:
-//!   they are kept in the Part Revision's Provenance but never in its
-//!   snapshot, so they can never create a revision.
+//! - A **part** is identified by a [`PartId`] derived from its [`Ipn`], so
+//!   every import of the same IPN finds the same part. The IPN never
+//!   changes.
+//! - A **revision** of a part saves its [`PartDetails`] as canonical JSON
+//!   (the revision's snapshot). The SHA-256 of those exact stored bytes
+//!   identifies the revision, so a reader can check it. Revisions are
+//!   numbered from 1 per part; the **current revision** is the newest.
+//! - A **CAD item** is one symbol, footprint or 3D model, identified by its
+//!   kind and library reference (for example the symbol `g-pas:R_US`). A
+//!   revision of a CAD item saves its [`CadItemDetails`]: the exact
+//!   [`Blob`] it uses, its format and its [`License`]. The revision's
+//!   [`csv_import::CadItemSource`] is stored with it but is not hashed, so
+//!   reading identical content from a moved or edited library file finds
+//!   the same revision.
+//! - A [`Blob`] is exact bytes, addressed by their SHA-256. A symbol's blob
+//!   is the exact bytes of that one symbol in its library file, so editing
+//!   a neighbouring symbol does not revise it.
+//! - A **Change** groups the revisions one import or edit published, with
+//!   its reason. A Change always has at least one revision.
+//! - **Supplier data** (supplier part numbers and prices) is kept in a
+//!   revision's [`Source`], never in its part details, so it never creates
+//!   a revision.
 //!
-//! [`legacy_import`] turns the read-only Legacy Catalog into a
-//! [`LegacyImport`] without touching any store; [`pocketbase`] submits it to
-//! the protected import route and reads the stored records back.
+//! [`csv_import`] turns the read-only CSV catalog into a [`CsvImport`]
+//! without touching any store; [`pocketbase`] submits it to the protected
+//! import route and reads the stored records back.
 
-mod asset;
-mod change_set;
+mod cad_item;
+mod change;
+pub mod csv_import;
 mod hash;
 mod ids;
 mod ipn;
-pub mod legacy_import;
 mod part;
 pub mod pocketbase;
 
-pub use asset::{
-    AssetBlob, AssetKind, AssetRevisionDeclaration, CatalogAsset, LicenseDeclaration,
-    ModelReference, ModelTarget,
+pub use cad_item::{
+    Blob, CadItem, CadItemDetails, CadItemKind, License, ModelReference, ModelTarget,
 };
-pub use change_set::ChangeSetKind;
+pub use change::ChangeKind;
+pub use csv_import::{
+    CadItemRevisionDraft, CsvCatalog, CsvImport, ImportProblem, PartDraft, Source, SourceFile,
+};
 pub use hash::sha256_hex;
 pub use ids::{
-    AssetBlobId, AssetRevisionId, AuditEventId, CatalogAssetId, ChangeSetId, ID_LENGTH,
-    ImportDiagnosticId, ManagedPartId, PartRevisionId, derive_id,
+    AuditEntryId, BlobId, CadItemId, CadItemRevisionId, ChangeId, ID_LENGTH, ImportProblemId,
+    PartId, PartRevisionId, derive_id,
 };
 pub use ipn::{Ipn, IpnError};
-pub use legacy_import::{
-    AssetRevisionDraft, ImportDiagnostic, LegacyCatalog, LegacyImport, PartDraft, Provenance,
-    SourceFile,
-};
 pub use part::{
-    ApprovedManufacturerPart, AssetBinding, BindingRole, BindingTarget, PartRevisionSnapshot,
-    SnapshotField,
+    CadReference, CadReferenceRole, CadReferenceTarget, DetailField, ManufacturerPart, PartDetails,
 };
 
 /// The schema tag every canonical JSON document in this crate carries.

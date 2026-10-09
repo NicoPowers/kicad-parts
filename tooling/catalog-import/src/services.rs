@@ -1,7 +1,7 @@
 //! A disposable PocketBase carrying the repository's schema and hooks.
 
-use catalog::LegacyCatalog;
-use catalog::legacy_import::{ImportError, LegacyImport};
+use catalog::CsvCatalog;
+use catalog::csv_import::{CsvImport, ImportError};
 use collaboration::PocketBaseClient;
 use native_services::{
     PocketBaseOptions, PocketBaseServer, Superuser, pocketbase_binary, random_name,
@@ -75,17 +75,17 @@ pub fn source_commit(repository: &Path, inputs: &[&str]) -> Option<String> {
     })
 }
 
-/// Plans the import of `grouping`, recording the source commit of exactly
+/// Plans the import of `csv_file`, recording the source commit of exactly
 /// the files the import reads.
-pub fn plan(repository: &Path, grouping: &str) -> Result<LegacyImport, ImportError> {
-    let catalog = LegacyCatalog::new(repository);
-    let probe = catalog.import(grouping, None)?;
+pub fn plan(repository: &Path, csv_file: &str) -> Result<CsvImport, ImportError> {
+    let catalog = CsvCatalog::new(repository);
+    let probe = catalog.import(csv_file, None)?;
     let inputs: Vec<&str> = probe
         .sources
         .iter()
         .map(|source| source.path.as_str())
         .collect();
-    catalog.import(grouping, source_commit(repository, &inputs))
+    catalog.import(csv_file, source_commit(repository, &inputs))
 }
 
 /// This repository's root.

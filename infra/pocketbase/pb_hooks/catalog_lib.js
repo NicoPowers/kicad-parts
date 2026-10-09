@@ -4,17 +4,17 @@
 // require(`${__hooks}/catalog_lib.js`) inside a handler. PocketBase does not
 // load this file by itself (only *.pb.js files are hooks).
 
-// The closed set of catalog_change_sets.kind values, shared with the
-// migration (1791500000_catalog_init.js) and crates/catalog (ChangeSetKind);
+// The closed set of catalog_changes.kind values, shared with the
+// migration (1791500000_catalog_init.js) and crates/catalog (ChangeKind);
 // a test in crates/catalog keeps the three in step.
-const CHANGE_SET_KINDS = Object.freeze({
-  legacyImport: "legacy-import",
+const CHANGE_KINDS = Object.freeze({
+  csvImport: "csv-import",
   edit: "edit",
   restore: "restore",
 });
 
-// The Provenance source of rows read from the Legacy Catalog.
-const LEGACY_SOURCE = "legacy-catalog";
+// The `source` value of rows read from the CSV catalog.
+const CSV_CATALOG_SOURCE = "csv-catalog";
 
 // The Catalog's record ID rule, shared with crates/catalog/src/ids.rs:
 // the first 15 hex digits of SHA-256("kicad-parts:<kind>:v1\n<key>").
@@ -144,8 +144,8 @@ function base64Decode(text) {
 }
 
 module.exports = {
-  CHANGE_SET_KINDS: CHANGE_SET_KINDS,
-  LEGACY_SOURCE: LEGACY_SOURCE,
+  CHANGE_KINDS: CHANGE_KINDS,
+  CSV_CATALOG_SOURCE: CSV_CATALOG_SOURCE,
   deriveId: deriveId,
   sha256Bytes: sha256Bytes,
   base64Decode: base64Decode,

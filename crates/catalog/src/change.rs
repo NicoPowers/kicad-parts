@@ -1,27 +1,27 @@
-//! What kind of action published a Change Set.
+//! What kind of action made a Change.
 
-/// The closed set of `catalog_change_sets.kind` values. The migration
+/// The closed set of `catalog_changes.kind` values. The migration
 /// declares them as a select field and the import route's
-/// `CHANGE_SET_KINDS` names them; the test below keeps all three in step.
+/// `CHANGE_KINDS` names them; the test below keeps all three in step.
 ///
-/// Only [`ChangeSetKind::LegacyImport`] is published today. The import route
-/// gives a changed row a successor revision only when its head came from a
-/// legacy import, so an edit can never be mistaken for one.
+/// Only [`ChangeKind::CsvImport`] is published today. The import route
+/// gives a changed row a new revision only when the part's current revision
+/// came from a CSV import, so an edit is never overwritten by one.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum ChangeSetKind {
-    LegacyImport,
+pub enum ChangeKind {
+    CsvImport,
     /// Reserved for kicad-parts-2254.
     Edit,
     /// Reserved for kicad-parts-2254.
     Restore,
 }
 
-impl ChangeSetKind {
-    pub const ALL: [Self; 3] = [Self::LegacyImport, Self::Edit, Self::Restore];
+impl ChangeKind {
+    pub const ALL: [Self; 3] = [Self::CsvImport, Self::Edit, Self::Restore];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::LegacyImport => "legacy-import",
+            Self::CsvImport => "csv-import",
             Self::Edit => "edit",
             Self::Restore => "restore",
         }
@@ -35,7 +35,7 @@ impl ChangeSetKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::legacy_import::LEGACY_SOURCE;
+    use crate::csv_import::CSV_CATALOG_SOURCE;
     use std::path::PathBuf;
 
     fn infra(path: &str) -> String {
@@ -49,7 +49,7 @@ mod tests {
 
     #[test]
     fn kinds_match_the_migration_and_the_route() {
-        let values: Vec<String> = ChangeSetKind::ALL
+        let values: Vec<String> = ChangeKind::ALL
             .iter()
             .map(|kind| format!("\"{}\"", kind.as_str()))
             .collect();
@@ -59,21 +59,23 @@ mod tests {
                 "{{ name: \"kind\", type: \"select\", required: true, maxSelect: 1, values: [{}] }}",
                 values.join(", ")
             )),
-            "the migration's kind values differ from ChangeSetKind"
+            "the migration's kind values differ from ChangeKind"
         );
         let library = infra("pb_hooks/catalog_lib.js");
         for (name, kind) in [
-            ("legacyImport", ChangeSetKind::LegacyImport),
-            ("edit", ChangeSetKind::Edit),
-            ("restore", ChangeSetKind::Restore),
+            ("csvImport", ChangeKind::CsvImport),
+            ("edit", ChangeKind::Edit),
+            ("restore", ChangeKind::Restore),
         ] {
             assert!(
                 library.contains(&format!("  {name}: \"{}\",", kind.as_str())),
                 "catalog_lib.js lacks {name}"
             );
         }
-        assert!(library.contains(&format!("const LEGACY_SOURCE = \"{LEGACY_SOURCE}\";")));
-        assert_eq!(ChangeSetKind::parse("edit"), Some(ChangeSetKind::Edit));
-        assert_eq!(ChangeSetKind::parse("Edit"), None);
+        assert!(library.contains(&format!(
+            "const CSV_CATALOG_SOURCE = \"{CSV_CATALOG_SOURCE}\";"
+        )));
+        assert_eq!(ChangeKind::parse("edit"), Some(ChangeKind::Edit));
+        assert_eq!(ChangeKind::parse("Edit"), None);
     }
 }

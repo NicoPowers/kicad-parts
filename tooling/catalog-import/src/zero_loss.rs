@@ -1,26 +1,28 @@
 //! The zero-loss report: every source field, substitute, CAD reference and
-//! oracle diagnostic of one legacy grouping, found again in the Catalog
+//! oracle diagnostic of one CSV catalog file, found again in the Catalog
 //! records read back from PocketBase.
 //!
 //! The expected side is always the oracle manifest, never this crate's own
 //! reading of the CSV. Each source field must be found in exactly one of
-//! four places, with the same value:
+//! these places, with the same value:
 //!
-//! | destination                  | where it is checked                         |
-//! |------------------------------|---------------------------------------------|
-//! | `part-revision-snapshot`     | the head snapshot's `ipn` or named field    |
-//! | `approved-manufacturer-part` | the head snapshot's primary or a substitute |
-//! | `operational-fact`           | the head revision's Provenance              |
-//! | `import-diagnostic`          | a stored Import Diagnostic's detail         |
+//! | destination                       | where it is checked                              |
+//! |-----------------------------------|--------------------------------------------------|
+//! | `part-details`                    | the current revision's `ipn` or named field     |
+//! | `part-details.manufacturer-parts` | the current revision's manufacturer parts         |
+//! | `supplier-data`                   | the current revision's source                     |
+//! | `import-problem`                  | a stored import problem's detail                  |
+//!
+//! Manufacturer parts are part of the part details; the report names them
+//! separately only to show where each `MPN` and `Manufacturer` went.
 
-use catalog::legacy_import::{
-    AssetProvenance, ColumnRoute, Provenance, SubstituteRoute, route_column,
-    route_substitute_column,
+use catalog::csv_import::{
+    CadItemSource, ColumnRoute, Source, SubstituteRoute, route_column, route_substitute_column,
 };
-use catalog::pocketbase::{CatalogReadback, StoredImportDiagnostic, StoredPartRevision};
+use catalog::pocketbase::{CatalogReadback, StoredImportProblem, StoredPartRevision};
 use catalog::{
-    AssetRevisionDeclaration, AssetRevisionId, BindingRole, BindingTarget, CatalogAssetId,
-    LicenseDeclaration, ModelTarget, PartRevisionSnapshot, sha256_hex,
+    CadItemDetails, CadItemId, CadItemRevisionId, CadReferenceRole, CadReferenceTarget, License,
+    ModelTarget, PartDetails, sha256_hex,
 };
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use legacy_import_fixture::Manifest;
@@ -29,18 +31,18 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-pub const SNAPSHOT: &str = "part-revision-snapshot";
-pub const APPROVED_MANUFACTURER_PART: &str = "approved-manufacturer-part";
-pub const OPERATIONAL_FACT: &str = "operational-fact";
-pub const IMPORT_DIAGNOSTIC: &str = "import-diagnostic";
+pub const PART_DETAILS: &str = "part-details";
+pub const MANUFACTURER_PARTS: &str = "part-details.manufacturer-parts";
+pub const SUPPLIER_DATA: &str = "supplier-data";
+pub const IMPORT_PROBLEM: &str = "import-problem";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ZeroLossReport {
-    pub legacy_grouping: String,
+    pub csv_file: String,
     pub source_path: String,
     pub oracle_byte_sha256: String,
-    /// The CSV's hash as recorded on the Change Set(s).
-    pub change_set_byte_sha256: Vec<String>,
+    /// The CSV's hash as recorded on the Change(s).
+    pub change_byte_sha256: Vec<String>,
     /// The hash of the CSV rebuilt from PocketBase alone: the stored header
     /// line plus every row's stored raw bytes in row order.
     pub rebuilt_byte_sha256: String,
@@ -49,17 +51,17 @@ pub struct ZeroLossReport {
     pub fields: usize,
     /// Fields per destination; they sum to `fields`.
     pub destinations: BTreeMap<String, usize>,
-    /// Where each column went (a column of a row kept as an Import
-    /// Diagnostic goes there instead).
+    /// Where each column went (a column of a row kept as an import problem
+    /// goes there instead).
     pub column_routes: Vec<(String, String)>,
-    pub managed_parts: usize,
+    pub parts: usize,
     pub substitutes: SubstitutesAccount,
-    pub assets: Vec<AssetAccount>,
+    pub cad_items: Vec<CadItemAccount>,
     pub model_references: Vec<ModelAccount>,
-    pub oracle_diagnostics: Vec<DiagnosticAccount>,
-    /// Stored diagnostics no oracle diagnostic or row explains.
-    pub other_diagnostics: Vec<String>,
-    pub change_sets: Vec<ChangeSetAccount>,
+    pub oracle_diagnostics: Vec<ProblemAccount>,
+    /// Stored import problems that no oracle diagnostic or row explains.
+    pub other_problems: Vec<String>,
+    pub changes: Vec<ChangeAccount>,
     /// Every field, with its oracle and stored values.
     pub field_accounts: Vec<FieldAccount>,
     /// Everything that did not match. Empty means lossless.
@@ -96,7 +98,7 @@ pub struct FieldAccount {
 pub struct SubstitutesAccount {
     pub path: String,
     pub oracle_byte_sha256: String,
-    pub change_set_byte_sha256: Vec<String>,
+    pub change_byte_sha256: Vec<String>,
     pub rows: usize,
     pub rows_in_scope: usize,
     pub fields_in_scope: usize,
@@ -105,19 +107,19 @@ pub struct SubstitutesAccount {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct AssetAccount {
+pub struct CadItemAccount {
     pub kind: String,
     pub reference: String,
     pub oracle_status: String,
     pub oracle_asset_path: Option<String>,
     pub oracle_byte_sha256: Option<String>,
     pub parts: usize,
-    pub asset: Option<String>,
-    pub asset_revision: Option<String>,
-    pub revision_sha256: Option<String>,
+    pub cad_item: Option<String>,
+    pub cad_item_revision: Option<String>,
+    pub snapshot_sha256: Option<String>,
     pub blob_sha256: Option<String>,
     pub blob_bytes: Option<usize>,
-    pub license_status: Option<String>,
+    pub license: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -130,7 +132,7 @@ pub struct ModelAccount {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct DiagnosticAccount {
+pub struct ProblemAccount {
     pub code: String,
     pub path: String,
     pub location: String,
@@ -138,52 +140,52 @@ pub struct DiagnosticAccount {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct ChangeSetAccount {
+pub struct ChangeAccount {
     pub id: String,
     pub seq: u64,
     pub kind: String,
     pub reason: String,
     pub source_commit: String,
-    pub audit_events: usize,
+    pub audit_entries: usize,
 }
 
-/// Builds the report for `grouping` (such as `g-res`). `repository` is
+/// Builds the report for `csv_file` (such as `g-res`). `repository` is
 /// read (never written) only to cut each symbol's byte range out of the
 /// library file the oracle hashed.
 pub fn report(
     oracle: &Manifest,
-    grouping: &str,
+    csv_file: &str,
     readback: &CatalogReadback,
     repository: &Path,
 ) -> ZeroLossReport {
-    Reporter::new(oracle, grouping, readback, repository).run()
+    Reporter::new(oracle, csv_file, readback, repository).run()
 }
 
 struct Reporter<'a> {
     oracle: &'a Manifest,
-    grouping: String,
+    csv_file: String,
     readback: &'a CatalogReadback,
     repository: &'a Path,
     problems: Vec<String>,
 }
 
-/// A part's head revision, decoded.
-struct Head<'a> {
+/// A part's current revision, decoded.
+struct CurrentRevision<'a> {
     revision: &'a StoredPartRevision,
-    snapshot: PartRevisionSnapshot,
-    provenance: Provenance,
+    snapshot: PartDetails,
+    source: Source,
 }
 
 impl<'a> Reporter<'a> {
     fn new(
         oracle: &'a Manifest,
-        grouping: &str,
+        csv_file: &str,
         readback: &'a CatalogReadback,
         repository: &'a Path,
     ) -> Self {
         Self {
             oracle,
-            grouping: grouping.to_owned(),
+            csv_file: csv_file.to_owned(),
             readback,
             repository,
             problems: Vec::new(),
@@ -194,50 +196,56 @@ impl<'a> Reporter<'a> {
         self.problems.push(message);
     }
 
-    fn heads(&mut self) -> Vec<Head<'a>> {
-        let mut heads = Vec::new();
+    fn current_revisions(&mut self) -> Vec<CurrentRevision<'a>> {
+        let mut current_revisions = Vec::new();
         let readback = self.readback;
-        for part in &readback.managed_parts {
-            let Some(revision) = readback.part_revision(&part.head) else {
-                self.problem(format!("{}: head {} is missing", part.ipn, part.head));
+        for part in &readback.parts {
+            let Some(revision) = readback.part_revision(&part.current_revision) else {
+                self.problem(format!(
+                    "{}: current revision {} is missing",
+                    part.ipn, part.current_revision
+                ));
                 continue;
             };
             if sha256_hex(&revision.snapshot) != revision.snapshot_sha256 {
                 self.problem(format!("{}: snapshot does not match its hash", part.ipn));
             }
-            if revision.number != part.head_number || revision.managed_part != part.id {
-                self.problem(format!("{}: head pointer is inconsistent", part.ipn));
+            if revision.number != part.current_revision_number || revision.part != part.id {
+                self.problem(format!(
+                    "{}: current revision pointer is inconsistent",
+                    part.ipn
+                ));
             }
-            let snapshot = match serde_json::from_str::<PartRevisionSnapshot>(&revision.snapshot) {
+            let snapshot = match serde_json::from_str::<PartDetails>(&revision.snapshot) {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     self.problem(format!("{}: snapshot does not parse: {error}", part.ipn));
                     continue;
                 }
             };
-            let provenance = match serde_json::from_str::<Provenance>(&revision.provenance) {
-                Ok(provenance) => provenance,
+            let source = match serde_json::from_str::<Source>(&revision.source) {
+                Ok(source) => source,
                 Err(error) => {
-                    self.problem(format!("{}: provenance does not parse: {error}", part.ipn));
+                    self.problem(format!("{}: source does not parse: {error}", part.ipn));
                     continue;
                 }
             };
             if snapshot.ipn != part.ipn {
                 self.problem(format!("{}: snapshot names {}", part.ipn, snapshot.ipn));
             }
-            heads.push(Head {
+            current_revisions.push(CurrentRevision {
                 revision,
                 snapshot,
-                provenance,
+                source,
             });
         }
-        heads
+        current_revisions
     }
 
     fn run(mut self) -> ZeroLossReport {
         let oracle = self.oracle;
         let readback = self.readback;
-        let table = self.grouping.trim_start_matches("g-").to_owned();
+        let table = self.csv_file.trim_start_matches("g-").to_owned();
         let Some(category) = oracle
             .catalog
             .categories
@@ -252,27 +260,41 @@ impl<'a> Reporter<'a> {
         let headers = &document.headers;
         let ipn_column = headers.iter().position(|header| header == "IPN");
 
-        // Change Sets and the source files they recorded.
-        let mut change_sets = Vec::new();
+        // Changes and the source files they recorded.
+        let mut changes = Vec::new();
         let mut csv_hashes = BTreeSet::new();
         let mut substitute_hashes = BTreeSet::new();
         let mut header_raw = None;
-        for change_set in &readback.change_sets {
-            let audit_events = readback
-                .audit_events
+        for change in &readback.changes {
+            let audit_entries = readback
+                .audit_entries
                 .iter()
-                .filter(|event| event.change_set == change_set.id)
+                .filter(|entry| entry.change == change.id)
                 .count();
-            if audit_events != 1 {
+            if audit_entries != 1 {
                 self.problem(format!(
-                    "Change Set {} has {audit_events} Audit Events",
-                    change_set.seq
+                    "Change {} has {audit_entries} audit entries",
+                    change.seq
                 ));
             }
-            if change_set.reason.trim().is_empty() {
-                self.problem(format!("Change Set {} has no reason", change_set.seq));
+            // A Change never has zero revisions.
+            let revisions = readback
+                .part_revisions
+                .iter()
+                .filter(|revision| revision.change == change.id)
+                .count()
+                + readback
+                    .cad_item_revisions
+                    .iter()
+                    .filter(|revision| revision.change == change.id)
+                    .count();
+            if revisions == 0 {
+                self.problem(format!("Change {} has no revisions", change.seq));
             }
-            let sources: Value = serde_json::from_str(&change_set.sources).unwrap_or(Value::Null);
+            if change.reason.trim().is_empty() {
+                self.problem(format!("Change {} has no reason", change.seq));
+            }
+            let sources: Value = serde_json::from_str(&change.sources).unwrap_or(Value::Null);
             for file in sources["files"].as_array().into_iter().flatten() {
                 let path = file["path"].as_str().unwrap_or_default();
                 let sha = file["byte_sha256"].as_str().unwrap_or_default().to_owned();
@@ -285,51 +307,49 @@ impl<'a> Reporter<'a> {
                     substitute_hashes.insert(sha);
                 }
             }
-            change_sets.push(ChangeSetAccount {
-                id: change_set.id.clone(),
-                seq: change_set.seq,
-                kind: change_set.kind.clone(),
-                reason: change_set.reason.clone(),
-                source_commit: change_set.source_commit.clone(),
-                audit_events,
+            changes.push(ChangeAccount {
+                id: change.id.clone(),
+                seq: change.seq,
+                kind: change.kind.clone(),
+                reason: change.reason.clone(),
+                source_commit: change.source_commit.clone(),
+                audit_entries,
             });
         }
         if !csv_hashes.contains(&document.byte_sha256) {
             self.problem(format!(
-                "no Change Set recorded {source_path} with the oracle's byte hash"
+                "no Change recorded {source_path} with the oracle's byte hash"
             ));
         }
 
-        let heads = self.heads();
-        let by_row: BTreeMap<usize, &Head> = heads
+        let current_revisions = self.current_revisions();
+        let by_row: BTreeMap<usize, &CurrentRevision> = current_revisions
             .iter()
-            .filter(|head| head.provenance.path == source_path)
-            .map(|head| (head.provenance.row_number, head))
+            .filter(|current_revision| current_revision.source.path == source_path)
+            .map(|current_revision| (current_revision.source.row_number, current_revision))
             .collect();
-        let diagnostics = &readback.diagnostics;
-        let diagnostic_rows: BTreeMap<usize, (&StoredImportDiagnostic, Value)> = diagnostics
+        let problems = &readback.problems;
+        let problem_rows: BTreeMap<usize, (&StoredImportProblem, Value)> = problems
             .iter()
-            .filter(|diagnostic| diagnostic.path == source_path)
-            .filter_map(|diagnostic| {
-                let detail: Value = serde_json::from_str(&diagnostic.detail).ok()?;
+            .filter(|problem| problem.path == source_path)
+            .filter_map(|problem| {
+                let detail: Value = serde_json::from_str(&problem.detail).ok()?;
                 let row = detail["row_number"].as_u64()? as usize;
                 detail["raw_record"].as_str()?;
-                Some((row, (diagnostic, detail)))
+                Some((row, (problem, detail)))
             })
             .collect();
 
         let mut destinations: BTreeMap<String, usize> = BTreeMap::new();
         let mut column_routes: BTreeMap<String, String> = BTreeMap::new();
         let mut field_accounts = Vec::new();
-        let mut explained_diagnostics = BTreeSet::new();
+        let mut explained_problems = BTreeSet::new();
         let mut rebuilt = header_raw.clone().unwrap_or_default();
         let mut scope_ipns = BTreeSet::new();
         let mut matched_heads = BTreeSet::new();
-        let mut primaries: BTreeMap<String, bool> = BTreeMap::new();
+        let mut rows_with_main_part: BTreeMap<String, bool> = BTreeMap::new();
         if header_raw.is_none() {
-            self.problem(format!(
-                "no Change Set kept the header line of {source_path}"
-            ));
+            self.problem(format!("no Change kept the header line of {source_path}"));
         }
 
         for (index, row) in document.rows.iter().enumerate() {
@@ -353,81 +373,81 @@ impl<'a> Reporter<'a> {
                         stored,
                     });
                 };
-            if let Some(head) = by_row.get(&row_number) {
-                matched_heads.insert(head.revision.id.clone());
-                scope_ipns.insert(head.snapshot.ipn.clone());
-                let provenance = &head.provenance;
-                rebuilt.push_str(&provenance.raw_record);
-                let mut padded = provenance.record.clone();
+            if let Some(current_revision) = by_row.get(&row_number) {
+                matched_heads.insert(current_revision.revision.id.clone());
+                scope_ipns.insert(current_revision.snapshot.ipn.clone());
+                let source = &current_revision.source;
+                rebuilt.push_str(&source.raw_record);
+                let mut padded = source.record.clone();
                 padded.resize(headers.len(), String::new());
-                if &provenance.headers != headers || &padded != row {
+                if &source.headers != headers || &padded != row {
                     self.problems.push(format!(
-                        "row {row_number} ({ipn}): Provenance does not hold the oracle row"
+                        "row {row_number} ({ipn}): Source does not hold the oracle row"
                     ));
                 }
-                if provenance.byte_sha256 != document.byte_sha256 {
+                if source.byte_sha256 != document.byte_sha256 {
                     self.problems.push(format!(
-                        "row {row_number} ({ipn}): Provenance names another version of {source_path}"
+                        "row {row_number} ({ipn}): Source names another version of {source_path}"
                     ));
                 }
-                let snapshot = &head.snapshot;
-                // The row made the primary Approved Manufacturer Part only if
+                let snapshot = &current_revision.snapshot;
+                // The row made the main manufacturer part only if
                 // it has the columns and was not kept as an incomplete one;
                 // otherwise the first entry is a substitute.
-                let incomplete = diagnostics.iter().find(|diagnostic| {
-                    diagnostic.code == "incomplete-primary-manufacturer-part"
-                        && diagnostic.subject == snapshot.ipn
+                let incomplete = problems.iter().find(|problem| {
+                    problem.code == "incomplete-main-manufacturer-part"
+                        && problem.subject == snapshot.ipn
                 });
                 let has_columns = headers.iter().any(|header| {
                     matches!(
                         route_column(header),
-                        ColumnRoute::PrimaryMpn | ColumnRoute::PrimaryManufacturer
+                        ColumnRoute::MainMpn | ColumnRoute::MainManufacturer
                     )
                 });
-                let row_made_primary = has_columns && incomplete.is_none();
-                primaries.insert(snapshot.ipn.clone(), row_made_primary);
-                let primary = snapshot
-                    .approved_manufacturer_parts
+                let row_made_main = has_columns && incomplete.is_none();
+                rows_with_main_part.insert(snapshot.ipn.clone(), row_made_main);
+                let main = snapshot
+                    .manufacturer_parts
                     .first()
-                    .filter(|_| row_made_primary);
+                    .filter(|_| row_made_main);
                 let mut snapshot_columns = Vec::new();
-                let mut fact_columns = Vec::new();
+                let mut supplier_columns = Vec::new();
                 for (column, value) in headers.iter().zip(row) {
                     let route = route_column(column);
                     let (destination, stored) = match route {
-                        ColumnRoute::Ipn => (SNAPSHOT, Some(snapshot.ipn.clone())),
-                        ColumnRoute::Snapshot => {
+                        ColumnRoute::Ipn => (PART_DETAILS, Some(snapshot.ipn.clone())),
+                        ColumnRoute::PartDetails => {
                             snapshot_columns.push(column.clone());
-                            (SNAPSHOT, snapshot.field(column).map(str::to_owned))
+                            (PART_DETAILS, snapshot.field(column).map(str::to_owned))
                         }
-                        ColumnRoute::PrimaryMpn | ColumnRoute::PrimaryManufacturer => {
-                            match (primary, incomplete) {
-                                (Some(primary), _) => (
-                                    APPROVED_MANUFACTURER_PART,
-                                    Some(if route == ColumnRoute::PrimaryMpn {
-                                        primary.mpn.clone()
+                        ColumnRoute::MainMpn | ColumnRoute::MainManufacturer => {
+                            match (main, incomplete) {
+                                (Some(main), _) => (
+                                    MANUFACTURER_PARTS,
+                                    Some(if route == ColumnRoute::MainMpn {
+                                        main.mpn.clone()
                                     } else {
-                                        primary.manufacturer.clone()
+                                        main.manufacturer.clone()
                                     }),
                                 ),
-                                (None, Some(diagnostic)) => {
-                                    explained_diagnostics.insert(diagnostic.id.clone());
-                                    let detail: Value = serde_json::from_str(&diagnostic.detail)
-                                        .unwrap_or_default();
+                                (None, Some(problem)) => {
+                                    explained_problems.insert(problem.id.clone());
+                                    let detail: Value =
+                                        serde_json::from_str(&problem.detail).unwrap_or_default();
                                     (
-                                        IMPORT_DIAGNOSTIC,
+                                        IMPORT_PROBLEM,
                                         detail[column.as_str()].as_str().map(str::to_owned),
                                     )
                                 }
-                                (None, None) => (APPROVED_MANUFACTURER_PART, None),
+                                (None, None) => (MANUFACTURER_PARTS, None),
                             }
                         }
-                        ColumnRoute::OperationalFact => {
-                            fact_columns.push(column.clone());
+                        ColumnRoute::SupplierData => {
+                            supplier_columns.push(column.clone());
                             (
-                                OPERATIONAL_FACT,
-                                provenance
-                                    .operational_facts
+                                SUPPLIER_DATA,
+                                source
+                                    .supplier_data
                                     .iter()
                                     .find(|fact| &fact.column == column)
                                     .map(|fact| fact.value.clone()),
@@ -442,25 +462,25 @@ impl<'a> Reporter<'a> {
                     account(column, destination, value, stored);
                 }
                 // Exactly one place: no extra or repeated snapshot fields or
-                // Operational Facts.
+                // supplier data.
                 let stored_fields: Vec<&String> =
                     snapshot.fields.iter().map(|field| &field.name).collect();
                 if stored_fields != snapshot_columns.iter().collect::<Vec<_>>() {
                     self.problems.push(format!(
-                        "row {row_number} ({ipn}): snapshot fields {stored_fields:?} are not the semantic columns {snapshot_columns:?}"
+                        "row {row_number} ({ipn}): snapshot fields {stored_fields:?} are not the part-details columns {snapshot_columns:?}"
                     ));
                 }
-                let stored_facts: Vec<&String> = provenance
-                    .operational_facts
+                let stored_facts: Vec<&String> = source
+                    .supplier_data
                     .iter()
                     .map(|fact| &fact.column)
                     .collect();
-                if stored_facts != fact_columns.iter().collect::<Vec<_>>() {
+                if stored_facts != supplier_columns.iter().collect::<Vec<_>>() {
                     self.problems.push(format!(
-                        "row {row_number} ({ipn}): Operational Facts {stored_facts:?} are not {fact_columns:?}"
+                        "row {row_number} ({ipn}): supplier data {stored_facts:?} are not {supplier_columns:?}"
                     ));
                 }
-                for fact_column in &fact_columns {
+                for fact_column in &supplier_columns {
                     if let Some(value) = row
                         .get(
                             headers
@@ -470,15 +490,19 @@ impl<'a> Reporter<'a> {
                         )
                         .filter(|value| !value.is_empty())
                     {
-                        if head.revision.snapshot.contains(&format!("\"{value}\"")) {
+                        if current_revision
+                            .revision
+                            .snapshot
+                            .contains(&format!("\"{value}\""))
+                        {
                             self.problems.push(format!(
-                                "row {row_number} ({ipn}): Operational Fact {fact_column}={value} also appears in the snapshot"
+                                "row {row_number} ({ipn}): supplier data {fact_column}={value} also appears in the snapshot"
                             ));
                         }
                     }
                 }
-            } else if let Some((diagnostic, detail)) = diagnostic_rows.get(&row_number) {
-                explained_diagnostics.insert(diagnostic.id.clone());
+            } else if let Some((problem, detail)) = problem_rows.get(&row_number) {
+                explained_problems.insert(problem.id.clone());
                 rebuilt.push_str(detail["raw_record"].as_str().unwrap_or_default());
                 let record: Vec<String> = detail["record"]
                     .as_array()
@@ -490,25 +514,27 @@ impl<'a> Reporter<'a> {
                     let stored = Some(record.get(position).cloned().unwrap_or_default());
                     if stored.as_deref() != Some(value.as_str()) {
                         self.problems.push(format!(
-                            "row {row_number} field {column}: oracle {value:?}, diagnostic kept {stored:?}"
+                            "row {row_number} field {column}: oracle {value:?}, problem kept {stored:?}"
                         ));
                     }
-                    account(column, IMPORT_DIAGNOSTIC, value, stored);
+                    account(column, IMPORT_PROBLEM, value, stored);
                 }
             } else {
                 self.problems.push(format!(
-                    "row {row_number} ({ipn}) is neither a Managed Part nor an Import Diagnostic"
+                    "row {row_number} ({ipn}) is neither a part nor an import problem"
                 ));
                 for (column, value) in headers.iter().zip(row) {
                     account(column, "lost", value, None);
                 }
             }
         }
-        for head in &heads {
-            if head.provenance.path == source_path && !matched_heads.contains(&head.revision.id) {
+        for current_revision in &current_revisions {
+            if current_revision.source.path == source_path
+                && !matched_heads.contains(&current_revision.revision.id)
+            {
                 self.problems.push(format!(
                     "{} comes from row {}, which the oracle does not have",
-                    head.snapshot.ipn, head.provenance.row_number
+                    current_revision.snapshot.ipn, current_revision.source.row_number
                 ));
             }
         }
@@ -521,26 +547,35 @@ impl<'a> Reporter<'a> {
         }
 
         let substitutes = self.substitutes(
-            &heads,
+            &current_revisions,
             &scope_ipns,
             &substitute_hashes,
-            &primaries,
-            &mut explained_diagnostics,
+            &rows_with_main_part,
+            &mut explained_problems,
         );
-        let (assets, footprint_paths) =
-            self.assets(&heads, &scope_ipns, &mut explained_diagnostics);
-        let model_references = self.models(&footprint_paths, &mut explained_diagnostics);
+        let (cad_items, footprint_paths) =
+            self.cad_items(&current_revisions, &scope_ipns, &mut explained_problems);
+        let model_references = self.models(&footprint_paths, &mut explained_problems);
         let oracle_diagnostics =
-            self.oracle_diagnostics(&footprint_paths, &assets, &mut explained_diagnostics);
-        let other_diagnostics = diagnostics
+            self.oracle_diagnostics(&footprint_paths, &cad_items, &mut explained_problems);
+        // Every import problem belongs to the audit entry of the run that
+        // found it.
+        for problem in problems {
+            if !readback
+                .audit_entries
+                .iter()
+                .any(|entry| entry.id == problem.audit_entry)
+            {
+                self.problems.push(format!(
+                    "import problem {} at {} has no audit entry",
+                    problem.code, problem.location
+                ));
+            }
+        }
+        let other_problems = problems
             .iter()
-            .filter(|diagnostic| !explained_diagnostics.contains(&diagnostic.id))
-            .map(|diagnostic| {
-                format!(
-                    "{} {} {}",
-                    diagnostic.code, diagnostic.path, diagnostic.location
-                )
-            })
+            .filter(|problem| !explained_problems.contains(&problem.id))
+            .map(|problem| format!("{} {} {}", problem.code, problem.path, problem.location))
             .collect();
 
         let fields = field_accounts.len();
@@ -551,10 +586,10 @@ impl<'a> Reporter<'a> {
             ));
         }
         ZeroLossReport {
-            legacy_grouping: self.grouping.clone(),
+            csv_file: self.csv_file.clone(),
             source_path,
             oracle_byte_sha256: document.byte_sha256.clone(),
-            change_set_byte_sha256: csv_hashes.into_iter().collect(),
+            change_byte_sha256: csv_hashes.into_iter().collect(),
             rebuilt_byte_sha256,
             rows: document.rows.len(),
             columns: headers.len(),
@@ -569,13 +604,13 @@ impl<'a> Reporter<'a> {
                     )
                 })
                 .collect(),
-            managed_parts: matched_heads.len(),
+            parts: matched_heads.len(),
             substitutes,
-            assets,
+            cad_items,
             model_references,
             oracle_diagnostics,
-            other_diagnostics,
-            change_sets,
+            other_problems,
+            changes,
             field_accounts,
             problems: self.problems,
         }
@@ -583,23 +618,23 @@ impl<'a> Reporter<'a> {
 
     fn empty(self) -> ZeroLossReport {
         ZeroLossReport {
-            legacy_grouping: self.grouping,
+            csv_file: self.csv_file,
             source_path: String::new(),
             oracle_byte_sha256: String::new(),
-            change_set_byte_sha256: vec![],
+            change_byte_sha256: vec![],
             rebuilt_byte_sha256: String::new(),
             rows: 0,
             columns: 0,
             fields: 0,
             destinations: BTreeMap::new(),
             column_routes: vec![],
-            managed_parts: 0,
+            parts: 0,
             substitutes: SubstitutesAccount::default(),
-            assets: vec![],
+            cad_items: vec![],
             model_references: vec![],
             oracle_diagnostics: vec![],
-            other_diagnostics: vec![],
-            change_sets: vec![],
+            other_problems: vec![],
+            changes: vec![],
             field_accounts: vec![],
             problems: self.problems,
         }
@@ -607,10 +642,10 @@ impl<'a> Reporter<'a> {
 
     fn substitutes(
         &mut self,
-        heads: &[Head],
+        current_revisions: &[CurrentRevision],
         scope: &BTreeSet<String>,
         hashes: &BTreeSet<String>,
-        primaries: &BTreeMap<String, bool>,
+        rows_with_main_part: &BTreeMap<String, bool>,
         explained: &mut BTreeSet<String>,
     ) -> SubstitutesAccount {
         let oracle = self.oracle;
@@ -618,7 +653,7 @@ impl<'a> Reporter<'a> {
         let document = &oracle.substitutes;
         if !hashes.contains(&document.byte_sha256) {
             self.problem(format!(
-                "no Change Set recorded {} with the oracle's byte hash",
+                "no Change recorded {} with the oracle's byte hash",
                 document.path
             ));
         }
@@ -626,7 +661,7 @@ impl<'a> Reporter<'a> {
         let mut account = SubstitutesAccount {
             path: document.path.clone(),
             oracle_byte_sha256: document.byte_sha256.clone(),
-            change_set_byte_sha256: hashes.iter().cloned().collect(),
+            change_byte_sha256: hashes.iter().cloned().collect(),
             rows: document.rows.len(),
             ..SubstitutesAccount::default()
         };
@@ -641,28 +676,32 @@ impl<'a> Reporter<'a> {
             }
             account.rows_in_scope += 1;
             account.fields_in_scope += row.len();
-            // Entries come after the primary only if the row made one.
-            let offset = usize::from(primaries.get(&ipn).copied().unwrap_or(false));
-            let head = heads.iter().find(|head| head.snapshot.ipn == ipn);
-            let found = head.and_then(|head| {
-                let position = head
-                    .provenance
+            // Entries come after the main manufacturer part only if the row
+            // made one.
+            let offset = usize::from(rows_with_main_part.get(&ipn).copied().unwrap_or(false));
+            let current = current_revisions
+                .iter()
+                .find(|current| current.snapshot.ipn == ipn);
+            let found = current.and_then(|current| {
+                let position = current
+                    .source
                     .substitutes
                     .iter()
                     .position(|source| source.row_number == row_number)?;
-                let approved = head
-                    .snapshot
-                    .approved_manufacturer_parts
-                    .get(position + offset)?;
-                Some((approved, &head.provenance.substitutes[position]))
+                let manufacturer_part =
+                    current.snapshot.manufacturer_parts.get(position + offset)?;
+                Some((
+                    current,
+                    manufacturer_part,
+                    &current.source.substitutes[position],
+                ))
             });
-            let Some((approved, source)) = found else {
-                // A row that could not become an Approved Manufacturer Part
-                // must be kept whole by an Import Diagnostic.
+            let Some((current, manufacturer_part, source)) = found else {
+                // A row that could not become a manufacturer part
+                // must be kept whole by an import problem.
                 let location = format!("rows[{row_number}]");
-                let kept = readback.diagnostics.iter().find(|diagnostic| {
-                    let detail: Value =
-                        serde_json::from_str(&diagnostic.detail).unwrap_or_default();
+                let kept = readback.problems.iter().find(|problem| {
+                    let detail: Value = serde_json::from_str(&problem.detail).unwrap_or_default();
                     let record: Vec<String> = detail["record"]
                         .as_array()
                         .into_iter()
@@ -671,41 +710,69 @@ impl<'a> Reporter<'a> {
                         .collect();
                     let mut padded = record;
                     padded.resize(row.len(), String::new());
-                    diagnostic.path == document.path
-                        && diagnostic.location == location
-                        && &padded == row
+                    problem.path == document.path && problem.location == location && &padded == row
                 });
                 match kept {
-                    Some(diagnostic) => {
-                        explained.insert(diagnostic.id.clone());
+                    Some(problem) => {
+                        explained.insert(problem.id.clone());
                         *account
                             .destinations
-                            .entry(IMPORT_DIAGNOSTIC.to_owned())
+                            .entry(IMPORT_PROBLEM.to_owned())
                             .or_default() += row.len();
                     }
                     None => self.problem(format!(
-                        "substitute row {row_number} of {ipn} is neither an Approved Manufacturer Part nor an Import Diagnostic"
+                        "substitute row {row_number} of {ipn} is neither a manufacturer part nor an import problem"
                     )),
                 }
                 continue;
             };
+            // The row's source keeps the whole row, datasheet included.
+            let mut padded = source.record.clone();
+            padded.resize(row.len(), String::new());
+            if &padded != row {
+                self.problem(format!(
+                    "substitute row {row_number} of {ipn}: its source does not hold the oracle row"
+                ));
+            }
+            let part_datasheet = current.snapshot.field("Datasheet").unwrap_or_default();
             for (column, value) in document.headers.iter().zip(row) {
                 let (destination, stored) = match route_substitute_column(column) {
-                    SubstituteRoute::Ipn => (APPROVED_MANUFACTURER_PART, Some(ipn.clone())),
+                    SubstituteRoute::Ipn => (MANUFACTURER_PARTS, Some(ipn.clone())),
                     SubstituteRoute::Mpn => {
-                        (APPROVED_MANUFACTURER_PART, Some(approved.mpn.clone()))
+                        (MANUFACTURER_PARTS, Some(manufacturer_part.mpn.clone()))
                     }
                     SubstituteRoute::Manufacturer => (
-                        APPROVED_MANUFACTURER_PART,
-                        Some(approved.manufacturer.clone()),
+                        MANUFACTURER_PARTS,
+                        Some(manufacturer_part.manufacturer.clone()),
                     ),
-                    SubstituteRoute::Datasheet => {
-                        (APPROVED_MANUFACTURER_PART, approved.datasheet.clone())
+                    // A part has one datasheet. A blank one adds nothing and
+                    // the part's own is already in its part details; any
+                    // other must be an import problem.
+                    SubstituteRoute::Datasheet if value.is_empty() => {
+                        (PART_DETAILS, Some(String::new()))
                     }
-                    SubstituteRoute::OperationalFact => (
-                        OPERATIONAL_FACT,
+                    SubstituteRoute::Datasheet if value == part_datasheet => {
+                        (PART_DETAILS, Some(part_datasheet.to_owned()))
+                    }
+                    SubstituteRoute::Datasheet => {
+                        let location = format!("rows[{row_number}]");
+                        let kept = readback.problems.iter().find(|problem| {
+                            problem.code == "substitute-datasheet-differs"
+                                && problem.subject == ipn
+                                && problem.location == location
+                        });
+                        let stored = kept.and_then(|problem| {
+                            explained.insert(problem.id.clone());
+                            let detail: Value =
+                                serde_json::from_str(&problem.detail).unwrap_or_default();
+                            detail["datasheet"].as_str().map(str::to_owned)
+                        });
+                        (IMPORT_PROBLEM, stored)
+                    }
+                    SubstituteRoute::SupplierData => (
+                        SUPPLIER_DATA,
                         source
-                            .operational_facts
+                            .supplier_data
                             .iter()
                             .find(|fact| &fact.column == column)
                             .map(|fact| fact.value.clone()),
@@ -726,15 +793,15 @@ impl<'a> Reporter<'a> {
         account
     }
 
-    /// Checks every symbol and footprint reference of the grouping's rows.
+    /// Checks every symbol and footprint reference of the CSV file's rows.
     /// Returns the accounts and the repository paths of resolved
     /// footprints.
-    fn assets(
+    fn cad_items(
         &mut self,
-        heads: &[Head],
+        current_revisions: &[CurrentRevision],
         scope: &BTreeSet<String>,
         explained: &mut BTreeSet<String>,
-    ) -> (Vec<AssetAccount>, BTreeSet<String>) {
+    ) -> (Vec<CadItemAccount>, BTreeSet<String>) {
         let oracle = self.oracle;
         let mut accounts = Vec::new();
         let readback = self.readback;
@@ -754,40 +821,43 @@ impl<'a> Reporter<'a> {
                 continue;
             }
             let (role, files) = if reference.kind == "symbol" {
-                (BindingRole::Symbol, &oracle.assets.symbols)
+                (CadReferenceRole::Symbol, &oracle.assets.symbols)
             } else {
-                (BindingRole::Footprint, &oracle.assets.footprints)
+                (CadReferenceRole::Footprint, &oracle.assets.footprints)
             };
             let oracle_file = reference
                 .asset_path
                 .as_ref()
                 .and_then(|path| files.iter().find(|file| &file.path == path));
-            let mut account = AssetAccount {
+            let mut account = CadItemAccount {
                 kind: reference.kind.clone(),
                 reference: reference.reference.clone(),
                 oracle_status: reference.status.clone(),
                 oracle_asset_path: reference.asset_path.clone(),
                 oracle_byte_sha256: oracle_file.map(|file| file.byte_sha256.clone()),
                 parts: users.len(),
-                asset: None,
-                asset_revision: None,
-                revision_sha256: None,
+                cad_item: None,
+                cad_item_revision: None,
+                snapshot_sha256: None,
                 blob_sha256: None,
                 blob_bytes: None,
-                license_status: None,
+                license: None,
             };
             let mut targets = BTreeSet::new();
             for ipn in &users {
-                let Some(head) = heads.iter().find(|head| &&head.snapshot.ipn == ipn) else {
+                let Some(current_revision) = current_revisions
+                    .iter()
+                    .find(|current_revision| &&current_revision.snapshot.ipn == ipn)
+                else {
                     self.problem(format!(
-                        "{ipn} uses {} but is not a Managed Part",
+                        "{ipn} uses {} but is not a part",
                         reference.reference
                     ));
                     continue;
                 };
-                let bindings: Vec<_> = head
+                let bindings: Vec<_> = current_revision
                     .snapshot
-                    .asset_bindings
+                    .cad_references
                     .iter()
                     .filter(|binding| {
                         binding.role == role && binding.reference == reference.reference
@@ -813,47 +883,49 @@ impl<'a> Reporter<'a> {
                 accounts.push(account);
                 continue;
             }
-            let target: BindingTarget =
+            let target: CadReferenceTarget =
                 serde_json::from_str(targets.iter().next().expect("one target")).expect("parses");
             match (&target, reference.local, reference.status.as_str()) {
-                (BindingTarget::External, false, _) => {}
+                (CadReferenceTarget::External, false, _) => {}
                 (
-                    BindingTarget::AssetRevision {
-                        asset,
-                        asset_revision_sha256,
+                    CadReferenceTarget::CadItemRevision {
+                        cad_item,
+                        snapshot_sha256,
                     },
                     true,
                     "resolved",
                 ) => {
-                    self.check_asset_revision(
+                    self.check_cad_item_revision(
                         &mut account,
-                        asset,
-                        asset_revision_sha256,
+                        cad_item,
+                        snapshot_sha256,
                         oracle_file.map(|file| file.byte_sha256.as_str()),
                     );
-                    if role == BindingRole::Footprint {
+                    if role == CadReferenceRole::Footprint {
                         if let Some(path) = &reference.asset_path {
                             footprint_paths.insert(path.clone());
                         }
                     }
                 }
-                (BindingTarget::Unresolved { status }, true, oracle_status)
+                (CadReferenceTarget::Unresolved { status }, true, oracle_status)
                     if status == oracle_status =>
                 {
-                    let column = if role == BindingRole::Symbol {
+                    let column = if role == CadReferenceRole::Symbol {
                         "Symbol"
                     } else {
                         "Footprint"
                     };
                     let code = format!("{status}-local-{}-reference", reference.kind);
                     let location = format!("{column}={}", reference.reference);
-                    match readback.diagnostics.iter().find(|diagnostic| {
-                        diagnostic.code == code && diagnostic.location == location
-                    }) {
-                        Some(diagnostic) => {
-                            explained.insert(diagnostic.id.clone());
+                    match readback
+                        .problems
+                        .iter()
+                        .find(|problem| problem.code == code && problem.location == location)
+                    {
+                        Some(problem) => {
+                            explained.insert(problem.id.clone());
                         }
-                        None => self.problem(format!("no Import Diagnostic {code} for {location}")),
+                        None => self.problem(format!("no import problem {code} for {location}")),
                     }
                 }
                 (target, local, status) => self.problem(format!(
@@ -866,82 +938,77 @@ impl<'a> Reporter<'a> {
         (accounts, footprint_paths)
     }
 
-    fn check_asset_revision(
+    fn check_cad_item_revision(
         &mut self,
-        account: &mut AssetAccount,
-        asset_id: &str,
-        revision_sha256: &str,
+        account: &mut CadItemAccount,
+        cad_item_id: &str,
+        snapshot_sha256: &str,
         oracle_file_sha: Option<&str>,
     ) {
         let readback = self.readback;
         let reference = account.reference.clone();
-        account.asset = Some(asset_id.to_owned());
-        account.revision_sha256 = Some(revision_sha256.to_owned());
-        let Some(asset) = readback.asset(asset_id) else {
-            self.problem(format!("{reference}: Catalog Asset {asset_id} is missing"));
+        account.cad_item = Some(cad_item_id.to_owned());
+        account.snapshot_sha256 = Some(snapshot_sha256.to_owned());
+        let Some(cad_item) = readback.cad_item(cad_item_id) else {
+            self.problem(format!("{reference}: CAD item {cad_item_id} is missing"));
             return;
         };
-        if asset.kind != account.kind || asset.key != reference {
+        if cad_item.kind != account.kind || cad_item.key != reference {
             self.problem(format!(
-                "{reference}: Catalog Asset is {} {}",
-                asset.kind, asset.key
+                "{reference}: CAD item is {} {}",
+                cad_item.kind, cad_item.key
             ));
         }
         let revision_id =
-            AssetRevisionId::new(&CatalogAssetId::from_stored(asset_id), revision_sha256);
-        account.asset_revision = Some(revision_id.to_string());
-        let Some(revision) = readback.asset_revision(revision_id.as_str()) else {
+            CadItemRevisionId::new(&CadItemId::from_stored(cad_item_id), snapshot_sha256);
+        account.cad_item_revision = Some(revision_id.to_string());
+        let Some(revision) = readback.cad_item_revision(revision_id.as_str()) else {
             self.problem(format!(
-                "{reference}: Asset Revision {revision_id} is missing"
+                "{reference}: CAD item revision {revision_id} is missing"
             ));
             return;
         };
-        if sha256_hex(&revision.declaration) != revision_sha256
-            || revision.revision_sha256 != revision_sha256
+        if sha256_hex(&revision.snapshot) != snapshot_sha256
+            || revision.snapshot_sha256 != snapshot_sha256
         {
             self.problem(format!(
-                "{reference}: declaration does not match its revision hash"
+                "{reference}: snapshot does not match its revision hash"
             ));
         }
-        let Ok(declaration) =
-            serde_json::from_str::<AssetRevisionDeclaration>(&revision.declaration)
-        else {
-            self.problem(format!("{reference}: declaration does not parse"));
+        let Ok(snapshot) = serde_json::from_str::<CadItemDetails>(&revision.snapshot) else {
+            self.problem(format!("{reference}: snapshot does not parse"));
             return;
         };
-        account.license_status = Some(revision.license_status.clone());
-        if declaration.license != LicenseDeclaration::UndeclaredNeedsReview
-            || revision.license_status != declaration.license.status()
+        account.license = Some(revision.license.clone());
+        if snapshot.license != License::UnknownNeedsReview
+            || revision.license != snapshot.license.status()
         {
-            self.problem(format!("{reference}: License Declaration is not explicit"));
+            self.problem(format!("{reference}: license is not explicit"));
         }
         let Some(blob) = readback.blob(&revision.blob) else {
-            self.problem(format!(
-                "{reference}: Asset Blob {} is missing",
-                revision.blob
-            ));
+            self.problem(format!("{reference}: blob {} is missing", revision.blob));
             return;
         };
         account.blob_sha256 = Some(blob.sha256.clone());
         account.blob_bytes = Some(blob.bytes.len());
-        if blob.sha256 != declaration.blob_sha256 || sha256_hex(&blob.bytes) != blob.sha256 {
+        if blob.sha256 != snapshot.blob_sha256 || sha256_hex(&blob.bytes) != blob.sha256 {
             self.problem(format!(
                 "{reference}: stored blob is not the declared bytes"
             ));
         }
-        let Ok(provenance) = serde_json::from_str::<AssetProvenance>(&revision.provenance) else {
-            self.problem(format!("{reference}: provenance does not parse"));
+        let Ok(source) = serde_json::from_str::<CadItemSource>(&revision.source) else {
+            self.problem(format!("{reference}: source does not parse"));
             return;
         };
-        if Some(provenance.path.as_str()) != account.oracle_asset_path.as_deref()
-            || Some(provenance.byte_sha256.as_str()) != oracle_file_sha
+        if Some(source.path.as_str()) != account.oracle_asset_path.as_deref()
+            || Some(source.byte_sha256.as_str()) != oracle_file_sha
         {
             self.problem(format!(
-                "{reference}: Provenance names {} {}, the oracle {:?} {:?}",
-                provenance.path, provenance.byte_sha256, account.oracle_asset_path, oracle_file_sha
+                "{reference}: Source names {} {}, the oracle {:?} {:?}",
+                source.path, source.byte_sha256, account.oracle_asset_path, oracle_file_sha
             ));
         }
-        match provenance.byte_range {
+        match source.byte_range {
             // A whole file: the blob is the file the oracle hashed.
             None => {
                 if Some(blob.sha256.as_str()) != oracle_file_sha {
@@ -950,12 +1017,11 @@ impl<'a> Reporter<'a> {
             }
             // One symbol: the blob is that byte range of the oracle's file.
             Some([start, end]) => {
-                let file =
-                    std::fs::read(self.repository.join(&provenance.path)).unwrap_or_default();
+                let file = std::fs::read(self.repository.join(&source.path)).unwrap_or_default();
                 if Some(sha256_hex(&file).as_str()) != oracle_file_sha {
                     self.problem(format!(
                         "{reference}: {} is not the oracle's file",
-                        provenance.path
+                        source.path
                     ));
                 } else {
                     if file.get(start as usize..end as usize) != Some(blob.bytes.as_slice()) {
@@ -994,15 +1060,14 @@ impl<'a> Reporter<'a> {
             if !footprint_paths.contains(&model.source_footprint) {
                 continue;
             }
-            // The footprint's stored declaration must list the reference.
-            let declaration = readback.asset_revisions.iter().find_map(|revision| {
-                let provenance: AssetProvenance =
-                    serde_json::from_str(&revision.provenance).ok()?;
-                (provenance.path == model.source_footprint).then_some(())?;
-                serde_json::from_str::<AssetRevisionDeclaration>(&revision.declaration).ok()
+            // The footprint's stored snapshot must list the reference.
+            let snapshot = readback.cad_item_revisions.iter().find_map(|revision| {
+                let source: CadItemSource = serde_json::from_str(&revision.source).ok()?;
+                (source.path == model.source_footprint).then_some(())?;
+                serde_json::from_str::<CadItemDetails>(&revision.snapshot).ok()
             });
-            let stored = declaration.and_then(|declaration| {
-                declaration
+            let stored = snapshot.and_then(|snapshot| {
+                snapshot
                     .model_references
                     .into_iter()
                     .find(|stored| stored.reference == model.reference)
@@ -1024,9 +1089,9 @@ impl<'a> Reporter<'a> {
                     }
                     match (&stored.target, model.status.as_str()) {
                         (
-                            ModelTarget::AssetRevision {
-                                asset,
-                                asset_revision_sha256,
+                            ModelTarget::CadItemRevision {
+                                cad_item,
+                                snapshot_sha256,
                             },
                             "resolved",
                         ) => {
@@ -1038,47 +1103,47 @@ impl<'a> Reporter<'a> {
                                     .find(|file| &file.path == path)
                                     .map(|file| file.byte_sha256.clone())
                             });
-                            let mut account = AssetAccount {
+                            let mut account = CadItemAccount {
                                 kind: "model-3d".into(),
                                 reference: model.asset_path.clone().unwrap_or_default(),
                                 oracle_status: model.status.clone(),
                                 oracle_asset_path: model.asset_path.clone(),
                                 oracle_byte_sha256: oracle_sha.clone(),
                                 parts: 0,
-                                asset: None,
-                                asset_revision: None,
-                                revision_sha256: None,
+                                cad_item: None,
+                                cad_item_revision: None,
+                                snapshot_sha256: None,
                                 blob_sha256: None,
                                 blob_bytes: None,
-                                license_status: None,
+                                license: None,
                             };
-                            self.check_asset_revision(
+                            self.check_cad_item_revision(
                                 &mut account,
-                                asset,
-                                asset_revision_sha256,
+                                cad_item,
+                                snapshot_sha256,
                                 oracle_sha.as_deref(),
                             );
-                            format!("asset-revision {asset_revision_sha256}")
+                            format!("cad-item-revision {snapshot_sha256}")
                         }
                         (ModelTarget::Unresolved { status }, oracle_status)
                             if status == oracle_status =>
                         {
                             let code = format!("{status}-3d-model-reference");
                             let location = format!("model={}", model.reference);
-                            match readback.diagnostics.iter().find(|diagnostic| {
-                                diagnostic.code == code
-                                    && diagnostic.path == model.source_footprint
-                                    && diagnostic.location == location
+                            match readback.problems.iter().find(|problem| {
+                                problem.code == code
+                                    && problem.path == model.source_footprint
+                                    && problem.location == location
                             }) {
-                                Some(diagnostic) => {
-                                    explained.insert(diagnostic.id.clone());
+                                Some(problem) => {
+                                    explained.insert(problem.id.clone());
                                 }
                                 None => self.problem(format!(
-                                    "no Import Diagnostic {code} for {location} in {}",
+                                    "no import problem {code} for {location} in {}",
                                     model.source_footprint
                                 )),
                             }
-                            format!("unresolved ({status}) + import diagnostic")
+                            format!("unresolved ({status}) + import problem")
                         }
                         (target, status) => {
                             self.problem(format!(
@@ -1101,55 +1166,55 @@ impl<'a> Reporter<'a> {
         accounts
     }
 
-    /// Every oracle diagnostic about this grouping's CAD must be stored as an
-    /// Import Diagnostic with the same code and location (and, for 3D
+    /// Every oracle diagnostic about this CSV file's CAD must be stored as an
+    /// import problem with the same code and location (and, for 3D
     /// models, the same footprint path and message).
     fn oracle_diagnostics(
         &mut self,
         footprint_paths: &BTreeSet<String>,
-        assets: &[AssetAccount],
+        cad_items: &[CadItemAccount],
         explained: &mut BTreeSet<String>,
-    ) -> Vec<DiagnosticAccount> {
-        let references: BTreeSet<String> = assets
+    ) -> Vec<ProblemAccount> {
+        let references: BTreeSet<String> = cad_items
             .iter()
-            .map(|asset| {
-                let column = if asset.kind == "symbol" {
+            .map(|cad_item| {
+                let column = if cad_item.kind == "symbol" {
                     "Symbol"
                 } else {
                     "Footprint"
                 };
-                format!("{column}={}", asset.reference)
+                format!("{column}={}", cad_item.reference)
             })
             .collect();
         let oracle = self.oracle;
         let readback = self.readback;
         let mut accounts = Vec::new();
-        for diagnostic in &oracle.diagnostics {
-            let model = footprint_paths.contains(&diagnostic.path);
-            let reference = diagnostic.code.ends_with("-reference")
-                && references.contains(&diagnostic.location);
+        for problem in &oracle.diagnostics {
+            let model = footprint_paths.contains(&problem.path);
+            let reference =
+                problem.code.ends_with("-reference") && references.contains(&problem.location);
             if !model && !reference {
                 continue;
             }
-            let stored = readback.diagnostics.iter().find(|stored| {
-                stored.code == diagnostic.code
-                    && stored.location == diagnostic.location
+            let stored = readback.problems.iter().find(|stored| {
+                stored.code == problem.code
+                    && stored.location == problem.location
                     && (!model
-                        || (stored.path == diagnostic.path && stored.message == diagnostic.message))
+                        || (stored.path == problem.path && stored.message == problem.message))
             });
             match stored {
                 Some(stored) => {
                     explained.insert(stored.id.clone());
                 }
                 None => self.problem(format!(
-                    "oracle diagnostic {} {} {} has no Import Diagnostic",
-                    diagnostic.code, diagnostic.path, diagnostic.location
+                    "oracle diagnostic {} {} {} has no import problem",
+                    problem.code, problem.path, problem.location
                 )),
             }
-            accounts.push(DiagnosticAccount {
-                code: diagnostic.code.clone(),
-                path: diagnostic.path.clone(),
-                location: diagnostic.location.clone(),
+            accounts.push(ProblemAccount {
+                code: problem.code.clone(),
+                path: problem.path.clone(),
+                location: problem.location.clone(),
                 stored: stored.map(|stored| stored.id.clone()),
             });
         }

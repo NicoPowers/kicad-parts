@@ -1,4 +1,4 @@
-//! The resistor grouping imported into a real, disposable PocketBase and
+//! The resistor CSV file (g-res) imported into a real, disposable PocketBase and
 //! proved lossless against the legacy import oracle.
 //!
 //! Each test starts its own PocketBase on a random 127.0.0.1 port with a
@@ -6,15 +6,16 @@
 //! read; changed inputs are made in temp copies.
 
 use catalog::pocketbase::{
-    CatalogReadback, ImportCommand, ImportOutcome, LEGACY_IMPORT_ROUTE, read_back, submit_import,
+    CSV_IMPORT_ROUTE, CatalogReadback, ImportCommand, ImportOutcome, read_back, submit_import,
 };
-use catalog::{LegacyCatalog, PartRevisionSnapshot, sha256_hex};
+use catalog::{CsvCatalog, PartDetails, sha256_hex};
 use catalog_import::services;
 use collaboration::{CollabError, PocketBaseClient};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const REASON: &str = "Import the Legacy Catalog resistor grouping (database/g-res.csv) into canonical Part Revisions";
+const REASON: &str =
+    "Import the CSV catalog resistor csv_file (database/g-res.csv) into canonical part revisions";
 
 /// Every file the resistor import reads.
 const INPUTS: [&str; 4] = [
@@ -58,9 +59,22 @@ fn applied(reply: &catalog::pocketbase::ImportReply) -> catalog::pocketbase::Cou
     }
 }
 
-fn head(readback: &CatalogReadback, ipn: &str) -> (u32, PartRevisionSnapshot) {
+/// The audit entry and the number of import problems of a run that changed
+/// nothing in the catalog.
+fn nothing_changed(reply: &catalog::pocketbase::ImportReply) -> (String, u64) {
+    match &reply.outcome {
+        ImportOutcome::NothingChanged {
+            audit_entry_id,
+            problems_recorded,
+            ..
+        } => (audit_entry_id.clone(), *problems_recorded),
+        other => panic!("expected nothing changed, got {other:?}: {}", reply.body),
+    }
+}
+
+fn current_revision(readback: &CatalogReadback, ipn: &str) -> (u32, PartDetails) {
     let part = readback.part(ipn).unwrap();
-    let revision = readback.part_revision(&part.head).unwrap();
+    let revision = readback.part_revision(&part.current_revision).unwrap();
     (
         revision.number,
         serde_json::from_str(&revision.snapshot).unwrap(),
@@ -108,61 +122,51 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
     ));
     let direct = member
         .post_json(
-            "/api/collections/catalog_managed_parts/records",
+            "/api/collections/catalog_parts/records",
             &serde_json::json!({ "ipn": "RES-9999-9999" }),
         )
         .unwrap();
     assert!(direct.success().is_err(), "{direct:?}");
     assert_eq!(read_back(&admin).unwrap(), CatalogReadback::default());
 
-    // The first import publishes exactly one reasoned Change Set.
+    // The first import publishes exactly one reasoned Change.
     let first = submit_import(&admin, &command).unwrap();
     assert_eq!(first.status, 200, "{}", first.body);
     let created = applied(&first);
     assert_eq!(
-        (
-            created.managed_parts,
-            created.part_revisions,
-            created.successor_revisions
-        ),
+        (created.parts, created.part_revisions, created.updated_parts),
         (29, 29, 0)
     );
     assert_eq!(
-        (created.assets, created.asset_revisions, created.blobs),
+        (created.cad_items, created.cad_item_revisions, created.blobs),
         (2, 2, 2)
     );
-    assert_eq!(created.diagnostics, 1);
+    assert_eq!(created.problems, 1);
     let stored = read_back(&admin).unwrap();
-    assert_eq!(stored.change_sets.len(), 1);
-    let change_set = &stored.change_sets[0];
+    assert_eq!(stored.changes.len(), 1);
+    let change = &stored.changes[0];
     assert_eq!(
-        (
-            change_set.seq,
-            change_set.kind.as_str(),
-            change_set.reason.as_str()
-        ),
-        (1, "legacy-import", REASON)
+        (change.seq, change.kind.as_str(), change.reason.as_str()),
+        (1, "csv-import", REASON)
     );
     assert_eq!(
-        Some(change_set.source_commit.as_str()),
+        Some(change.source_commit.as_str()),
         import.source_commit.as_deref()
     );
-    assert_eq!(stored.audit_events.len(), 1);
-    assert_eq!(stored.audit_events[0].change_set, change_set.id);
+    assert_eq!(stored.audit_entries.len(), 1);
+    assert_eq!(stored.audit_entries[0].change, change.id);
 
     // Members can read what was published.
-    let visible: Vec<serde_json::Value> = member
-        .list_records("catalog_managed_parts", "", "ipn")
-        .unwrap();
+    let visible: Vec<serde_json::Value> = member.list_records("catalog_parts", "", "ipn").unwrap();
     assert_eq!(visible.len(), 29);
     // ...but cannot create, update or delete any of it directly.
-    let part_id = stored.managed_parts[0].id.clone();
-    let revision_id = stored.managed_parts[0].head.clone();
+    let part_id = stored.parts[0].id.clone();
+    let revision_id = stored.parts[0].current_revision.clone();
     for (collection, id) in [
-        ("catalog_managed_parts", &part_id),
+        ("catalog_parts", &part_id),
         ("catalog_part_revisions", &revision_id),
-        ("catalog_change_sets", &change_set.id),
-        ("catalog_asset_blobs", &stored.asset_blobs[0].id),
+        ("catalog_changes", &change.id),
+        ("catalog_blobs", &stored.blobs[0].id),
     ] {
         let path = format!("/api/collections/{collection}/records/{id}");
         let update = member
@@ -183,18 +187,14 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
         let record = stored.part(part.ipn.as_str()).unwrap();
         assert_eq!(record.id, part.id.as_str());
         assert_eq!(
-            (
-                record.ipn_family.as_str(),
-                record.ipn_base.as_str(),
-                record.variation.as_str()
-            ),
-            (part.ipn.family(), part.ipn.base(), part.ipn.variation())
+            (record.ipn_prefix.as_str(), record.variant.as_str()),
+            (part.ipn.prefix(), part.ipn.variant())
         );
-        assert_eq!(record.head_number, 1);
-        let revision = stored.part_revision(&record.head).unwrap();
+        assert_eq!(record.current_revision_number, 1);
+        let revision = stored.part_revision(&record.current_revision).unwrap();
         assert_eq!(revision.snapshot, part.snapshot_json);
         assert_eq!(revision.predecessor, "");
-        assert_eq!(revision.asset_revisions.len(), 2);
+        assert_eq!(revision.cad_item_revisions.len(), 2);
     }
 
     // The zero-loss report, read back from PocketBase, against the oracle.
@@ -205,14 +205,17 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
         serde_json::to_string_pretty(&report.summary()).unwrap()
     );
     assert_eq!((report.rows, report.columns, report.fields), (29, 16, 464));
-    assert_eq!(report.destinations["part-revision-snapshot"], 29 * 7);
-    assert_eq!(report.destinations["approved-manufacturer-part"], 29 * 2);
-    assert_eq!(report.destinations["operational-fact"], 29 * 7);
-    assert!(!report.destinations.contains_key("import-diagnostic"));
+    assert_eq!(report.destinations["part-details"], 29 * 7);
+    assert_eq!(
+        report.destinations["part-details.manufacturer-parts"],
+        29 * 2
+    );
+    assert_eq!(report.destinations["supplier-data"], 29 * 7);
+    assert!(!report.destinations.contains_key("import-problem"));
     assert_eq!(report.rebuilt_byte_sha256, report.oracle_byte_sha256);
-    assert_eq!(report.assets.len(), 2);
+    assert_eq!(report.cad_items.len(), 2);
     assert_eq!(report.oracle_diagnostics.len(), 1);
-    assert!(report.other_diagnostics.is_empty());
+    assert!(report.other_problems.is_empty());
     assert_eq!(
         (report.substitutes.rows, report.substitutes.rows_in_scope),
         (0, 0)
@@ -232,16 +235,16 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
             report.problems
         );
     };
-    let head_of = |copy: &mut CatalogReadback, ipn: &str| -> usize {
-        let head = copy.part(ipn).unwrap().head.clone();
+    let current_revision_of = |copy: &mut CatalogReadback, ipn: &str| -> usize {
+        let current_revision = copy.part(ipn).unwrap().current_revision.clone();
         copy.part_revisions
             .iter()
-            .position(|revision| revision.id == head)
+            .position(|revision| revision.id == current_revision)
             .unwrap()
     };
     fails(
         &|copy| {
-            let index = head_of(copy, "RES-0000-0470");
+            let index = current_revision_of(copy, "RES-0000-0470");
             let revision = &mut copy.part_revisions[index];
             revision.snapshot = revision.snapshot.replace("\"47\"", "\"48\"");
             revision.snapshot_sha256 = sha256_hex(&revision.snapshot);
@@ -250,15 +253,15 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
     );
     fails(
         &|copy| {
-            let index = head_of(copy, "RES-0000-0470");
+            let index = current_revision_of(copy, "RES-0000-0470");
             let revision = &mut copy.part_revisions[index];
-            revision.provenance = revision.provenance.replace("\"C23182\"", "\"\"");
+            revision.source = revision.source.replace("\"C23182\"", "\"\"");
         },
         "field LCSC",
     );
     fails(
         &|copy| {
-            let index = head_of(copy, "RES-0000-0470");
+            let index = current_revision_of(copy, "RES-0000-0470");
             let revision = &mut copy.part_revisions[index];
             revision.snapshot = revision
                 .snapshot
@@ -268,45 +271,38 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
         "field Tolerance",
     );
     fails(
-        &|copy| {
-            copy.managed_parts
-                .retain(|part| part.ipn != "RES-0000-1000")
-        },
-        "neither a Managed Part nor an Import Diagnostic",
+        &|copy| copy.parts.retain(|part| part.ipn != "RES-0000-1000"),
+        "neither a part nor an import problem",
     );
-    fails(&|copy| copy.diagnostics.clear(), "no Import Diagnostic");
+    fails(&|copy| copy.problems.clear(), "no import problem");
     fails(
-        &|copy| copy.asset_blobs[0].bytes.push(b' '),
+        &|copy| copy.blobs[0].bytes.push(b' '),
         "stored blob is not the declared bytes",
     );
-    fails(&|copy| copy.audit_events.clear(), "has 0 Audit Events");
+    fails(&|copy| copy.audit_entries.clear(), "has 0 audit entries");
     // The stored header line and row bytes must rebuild the file exactly.
     fails(
         &|copy| {
             let mut sources: serde_json::Value =
-                serde_json::from_str(&copy.change_sets[0].sources).unwrap();
+                serde_json::from_str(&copy.changes[0].sources).unwrap();
             for file in sources["files"].as_array_mut().unwrap() {
                 if file["path"] == "database/g-res.csv" {
                     let header = format!("{} ", file["header_raw"].as_str().unwrap());
                     file["header_raw"] = header.into();
                 }
             }
-            copy.change_sets[0].sources = sources.to_string();
+            copy.changes[0].sources = sources.to_string();
         },
         "rebuilt from PocketBase",
     );
     fails(
         &|copy| {
-            let index = head_of(copy, "RES-0000-0470");
+            let index = current_revision_of(copy, "RES-0000-0470");
             let revision = &mut copy.part_revisions[index];
-            let mut provenance: serde_json::Value =
-                serde_json::from_str(&revision.provenance).unwrap();
-            let raw = provenance["raw_record"]
-                .as_str()
-                .unwrap()
-                .replace('\n', "\r\n");
-            provenance["raw_record"] = raw.into();
-            revision.provenance = provenance.to_string();
+            let mut source: serde_json::Value = serde_json::from_str(&revision.source).unwrap();
+            let raw = source["raw_record"].as_str().unwrap().replace('\n', "\r\n");
+            source["raw_record"] = raw.into();
+            revision.source = source.to_string();
         },
         "rebuilt from PocketBase",
     );
@@ -314,41 +310,34 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
     fails(
         &|copy| {
             let revision = copy
-                .asset_revisions
+                .cad_item_revisions
                 .iter_mut()
-                .find(|revision| revision.declaration.contains("\"kind\":\"symbol\""))
+                .find(|revision| revision.snapshot.contains("\"kind\":\"symbol\""))
                 .unwrap();
-            let mut provenance: serde_json::Value =
-                serde_json::from_str(&revision.provenance).unwrap();
-            let end = provenance["byte_range"][1].as_u64().unwrap();
-            provenance["byte_range"][1] = (end - 1).into();
-            revision.provenance = provenance.to_string();
+            let mut source: serde_json::Value = serde_json::from_str(&revision.source).unwrap();
+            let end = source["byte_range"][1].as_u64().unwrap();
+            source["byte_range"][1] = (end - 1).into();
+            revision.source = source.to_string();
             let blob_id = revision.blob.clone();
-            let blob = copy
-                .asset_blobs
-                .iter_mut()
-                .find(|b| b.id == blob_id)
-                .unwrap();
+            let blob = copy.blobs.iter_mut().find(|b| b.id == blob_id).unwrap();
             blob.bytes.pop();
         },
         "are not the whole symbol",
     );
     fails(
-        &|copy| copy.asset_revisions[0].license_status = "MIT".into(),
-        "License Declaration is not explicit",
+        &|copy| copy.cad_item_revisions[0].license = "MIT".into(),
+        "license is not explicit",
     );
-    // A part bound to a different Asset Revision than its peers.
+    // A part bound to a different CAD item revision than its peers.
     fails(
         &|copy| {
-            let index = head_of(copy, "RES-0000-0470");
+            let index = current_revision_of(copy, "RES-0000-0470");
             let revision = &mut copy.part_revisions[index];
             let mut snapshot: serde_json::Value = serde_json::from_str(&revision.snapshot).unwrap();
-            snapshot["asset_bindings"][1]["target"]["asset_revision_sha256"] =
-                "0".repeat(64).into();
-            revision.snapshot = serde_json::to_string(
-                &serde_json::from_value::<PartRevisionSnapshot>(snapshot).unwrap(),
-            )
-            .unwrap();
+            snapshot["cad_references"][1]["target"]["snapshot_sha256"] = "0".repeat(64).into();
+            revision.snapshot =
+                serde_json::to_string(&serde_json::from_value::<PartDetails>(snapshot).unwrap())
+                    .unwrap();
             revision.snapshot_sha256 = sha256_hex(&revision.snapshot);
         },
         "binds 2 different targets",
@@ -356,7 +345,7 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
     // A field in the snapshot that no source column put there.
     fails(
         &|copy| {
-            let index = head_of(copy, "RES-0000-0470");
+            let index = current_revision_of(copy, "RES-0000-0470");
             let revision = &mut copy.part_revisions[index];
             revision.snapshot = revision.snapshot.replace(
                 "\"fields\":[",
@@ -364,7 +353,7 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
             );
             revision.snapshot_sha256 = sha256_hex(&revision.snapshot);
         },
-        "are not the semantic columns",
+        "are not the part-details columns",
     );
 
     // Repeating the command replays its stored answer and writes nothing.
@@ -373,8 +362,8 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
     assert_eq!((replay.status, &replay.body), (200, &first.body));
     assert_eq!(read_back(&admin).unwrap(), stored);
 
-    // A fresh import of the unchanged inputs is a no-op: no Change Set,
-    // revision, asset or blob.
+    // A fresh import of the unchanged inputs is a no-op: no Change,
+    // revision, CAD item or blob.
     let again = services::plan(&root, "g-res").unwrap();
     let mut retry = ImportCommand::new(&again, REASON);
     retry.correlation_id.push_str("-again");
@@ -398,11 +387,11 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
 }
 
 #[test]
-fn changed_rows_get_successors_or_diagnostics_and_bad_requests_write_nothing() {
+fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_nothing() {
     let root = repository();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-    let original = LegacyCatalog::new(&root).import("g-res", None).unwrap();
+    let original = CsvCatalog::new(&root).import("g-res", None).unwrap();
     applied(&submit_import(&admin, &ImportCommand::new(&original, REASON)).unwrap());
     let initial = read_back(&admin).unwrap();
 
@@ -411,93 +400,106 @@ fn changed_rows_get_successors_or_diagnostics_and_bad_requests_write_nothing() {
     let mut body = command.body();
     body["correlationId"] = "tampered-snapshot".into();
     body["parts"][0]["snapshotSha256"] = sha256_hex("not the snapshot").into();
-    let reply = admin.post_json(LEGACY_IMPORT_ROUTE, &body).unwrap();
+    let reply = admin.post_json(CSV_IMPORT_ROUTE, &body).unwrap();
     assert_eq!(reply.status, 400, "{}", reply.body);
     let mut body = command.body();
     body["correlationId"] = "tampered-blob".into();
     body["blobs"][0]["base64"] = catalog::pocketbase::base64(b"other bytes").into();
     assert_eq!(
-        admin.post_json(LEGACY_IMPORT_ROUTE, &body).unwrap().status,
+        admin.post_json(CSV_IMPORT_ROUTE, &body).unwrap().status,
         400
     );
     let mut body = command.body();
     body["correlationId"] = "tampered-id".into();
     body["parts"][0]["id"] = "aaaaaaaaaaaaaaa".into();
     assert_eq!(
-        admin.post_json(LEGACY_IMPORT_ROUTE, &body).unwrap().status,
+        admin.post_json(CSV_IMPORT_ROUTE, &body).unwrap().status,
         400
     );
     let mut body = command.body();
     body["correlationId"] = "no-reason".into();
     body["reason"] = "   ".into();
     assert_eq!(
-        admin.post_json(LEGACY_IMPORT_ROUTE, &body).unwrap().status,
+        admin.post_json(CSV_IMPORT_ROUTE, &body).unwrap().status,
         400
     );
     assert_eq!(read_back(&admin).unwrap(), initial);
 
-    // A changed semantic field becomes a successor revision; a changed
-    // Operational Fact creates no revision but keeps the new row as an
-    // Import Diagnostic. Nothing else is touched.
+    // A changed part detail makes a new revision in a new Change; nothing
+    // else is touched.
     let copy = tempfile::tempdir().unwrap();
     copy_inputs(copy.path());
     let csv_path = copy.path().join("database/g-res.csv");
-    let csv = fs::read_to_string(&csv_path).unwrap();
-    let csv = csv
-        .replace(
-            "\"RES 47 OHM 1% 1/10W 0603\",\"47\"",
-            "\"RES 47 OHM 1% 1/10W 0603\",\"47R\"",
-        )
-        .replace("\"C22775\"", "\"C99999\"");
+    let csv = fs::read_to_string(&csv_path).unwrap().replace(
+        "\"RES 47 OHM 1% 1/10W 0603\",\"47\"",
+        "\"RES 47 OHM 1% 1/10W 0603\",\"47R\"",
+    );
     fs::write(&csv_path, &csv).unwrap();
-    let changed = LegacyCatalog::new(copy.path())
-        .import("g-res", None)
-        .unwrap();
+    let changed = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
     let reply = submit_import(&admin, &ImportCommand::new(&changed, REASON)).unwrap();
     let created = applied(&reply);
     assert_eq!(
-        (
-            created.managed_parts,
-            created.part_revisions,
-            created.successor_revisions
-        ),
+        (created.parts, created.part_revisions, created.updated_parts),
         (0, 1, 1)
     );
     assert_eq!(
-        (created.assets, created.asset_revisions, created.blobs),
+        (created.cad_items, created.cad_item_revisions, created.blobs),
         (0, 0, 0)
     );
-    assert_eq!(created.diagnostics, 1);
+    assert_eq!(created.problems, 0);
     let after = read_back(&admin).unwrap();
-    assert_eq!(after.change_sets.len(), 2);
-    assert_eq!(after.change_sets[1].seq, 2);
-    let (number, snapshot) = head(&after, "RES-0000-0470");
-    assert_eq!((number, snapshot.field("Value")), (2, Some("47R")));
-    let successor = after
-        .part_revision(&after.part("RES-0000-0470").unwrap().head)
+    assert_eq!(after.changes.len(), 2);
+    assert_eq!(after.changes[1].seq, 2);
+    let (number, details) = current_revision(&after, "RES-0000-0470");
+    assert_eq!((number, details.field("Value")), (2, Some("47R")));
+    let newest = after
+        .part_revision(&after.part("RES-0000-0470").unwrap().current_revision)
         .unwrap();
-    let predecessor = after.part_revision(&successor.predecessor).unwrap();
-    // The first revision is immutable.
+    let previous = after.part_revision(&newest.predecessor).unwrap();
+    // The first revision never changes.
     assert_eq!(
-        Some(predecessor),
-        initial.part_revision(&initial.part("RES-0000-0470").unwrap().head)
+        Some(previous),
+        initial.part_revision(&initial.part("RES-0000-0470").unwrap().current_revision)
     );
-    assert_eq!(head(&after, "RES-0000-1000").0, 1);
-    let kept = after
-        .diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic.code == "legacy-row-changed-without-semantic-change")
-        .unwrap();
-    assert_eq!(kept.subject, "RES-0000-1000");
-    assert!(kept.detail.contains("C99999"), "{}", kept.detail);
 
-    // A head not published by a legacy import (simulated by relabelling
-    // the latest Change Set, as a future Catalog edit would) is never
-    // overwritten: the changed row becomes a diagnostic instead.
-    let latest = &after.change_sets[1];
+    // A re-import that only changes supplier data (here an LCSC code) makes
+    // no Change. The new row is kept as an import problem, recorded against
+    // the audit entry of that run.
+    let csv = csv.replace("\"C22775\"", "\"C99999\"");
+    fs::write(&csv_path, &csv).unwrap();
+    let supplier_only = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
+    let reply = submit_import(&admin, &ImportCommand::new(&supplier_only, REASON)).unwrap();
+    let (audit_entry_id, recorded) = nothing_changed(&reply);
+    assert_eq!(recorded, 1);
+    let supplier = read_back(&admin).unwrap();
+    assert_eq!(supplier.changes, after.changes);
+    assert_eq!(supplier.part_revisions, after.part_revisions);
+    assert_eq!(supplier.audit_entries.len(), after.audit_entries.len() + 1);
+    let entry = supplier
+        .audit_entries
+        .iter()
+        .find(|entry| entry.id == audit_entry_id)
+        .unwrap();
+    assert_eq!(entry.change, "");
+    let kept = supplier
+        .problems
+        .iter()
+        .find(|problem| problem.code == "csv-row-changed-without-part-details-change")
+        .unwrap();
+    assert_eq!(
+        (kept.subject.as_str(), kept.audit_entry.as_str()),
+        ("RES-0000-1000", audit_entry_id.as_str())
+    );
+    assert!(kept.detail.contains("C99999"), "{}", kept.detail);
+    assert_eq!(current_revision(&supplier, "RES-0000-1000").0, 1);
+
+    // A current revision not made by a CSV import (simulated by relabelling
+    // the latest Change, as a future Catalog edit would) is never
+    // overwritten: the changed row becomes an import problem instead.
+    let latest = &after.changes[1];
     admin
         .patch_json(
-            &format!("/api/collections/catalog_change_sets/records/{}", latest.id),
+            &format!("/api/collections/catalog_changes/records/{}", latest.id),
             &serde_json::json!({ "kind": "edit" }),
         )
         .unwrap()
@@ -505,55 +507,52 @@ fn changed_rows_get_successors_or_diagnostics_and_bad_requests_write_nothing() {
         .unwrap();
     let csv = csv.replace("\"47R\"", "\"47.0\"");
     fs::write(&csv_path, &csv).unwrap();
-    let conflicting = LegacyCatalog::new(copy.path())
-        .import("g-res", None)
-        .unwrap();
+    let conflicting = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
     let reply = submit_import(&admin, &ImportCommand::new(&conflicting, REASON)).unwrap();
-    let created = applied(&reply);
-    assert_eq!((created.part_revisions, created.diagnostics), (0, 1));
+    assert_eq!(nothing_changed(&reply).1, 1, "{}", reply.body);
     let last = read_back(&admin).unwrap();
-    assert_eq!(head(&last, "RES-0000-0470"), head(&after, "RES-0000-0470"));
-    assert!(last.diagnostics.iter().any(|diagnostic| diagnostic.code
-        == "legacy-row-conflicts-with-head"
-        && diagnostic.subject == "RES-0000-0470"));
+    assert_eq!(last.changes.len(), 2);
+    assert_eq!(
+        current_revision(&last, "RES-0000-0470"),
+        current_revision(&after, "RES-0000-0470")
+    );
+    assert!(last.problems.iter().any(|problem| problem.code
+        == "csv-row-conflicts-with-current-revision"
+        && problem.subject == "RES-0000-0470"));
 
     // The kind is a closed set, so a mistyped kind cannot be stored.
     let mistyped = admin
         .patch_json(
-            &format!("/api/collections/catalog_change_sets/records/{}", latest.id),
+            &format!("/api/collections/catalog_changes/records/{}", latest.id),
             &serde_json::json!({ "kind": "Edit" }),
         )
         .unwrap();
     assert!(mistyped.success().is_err(), "{mistyped:?}");
 
-    // A head without Legacy Catalog Provenance (as an edit's might be) is
-    // answered with a diagnostic that keeps the row, not a server error.
-    let head_id = last.part("RES-0000-1001").unwrap().head.clone();
+    // A current revision without a CSV source (as an edit's might be) is
+    // answered with an import problem that keeps the row, not a server error.
+    let current_revision_id = last.part("RES-0000-1001").unwrap().current_revision.clone();
     admin
         .patch_json(
-            &format!("/api/collections/catalog_part_revisions/records/{head_id}"),
-            &serde_json::json!({ "provenance": "not a Legacy Catalog row" }),
+            &format!("/api/collections/catalog_part_revisions/records/{current_revision_id}"),
+            &serde_json::json!({ "source": "not a CSV catalog row" }),
         )
         .unwrap()
         .success()
         .unwrap();
     let mut command = ImportCommand::new(&conflicting, REASON);
-    command.correlation_id.push_str("-provenance");
+    command.correlation_id.push_str("-source");
     let reply = submit_import(&admin, &command).unwrap();
-    assert_eq!(applied(&reply).diagnostics, 1, "{}", reply.body);
+    assert_eq!(nothing_changed(&reply).1, 1, "{}", reply.body);
     let kept = read_back(&admin).unwrap();
-    let diagnostic = kept
-        .diagnostics
+    let problem = kept
+        .problems
         .iter()
-        .find(|diagnostic| diagnostic.code == "head-without-legacy-provenance")
+        .find(|problem| problem.code == "current-revision-without-csv-source")
         .unwrap();
-    assert_eq!(diagnostic.subject, "RES-0000-1001");
-    assert!(
-        diagnostic.detail.contains("raw_record"),
-        "{}",
-        diagnostic.detail
-    );
-    assert_eq!(head(&kept, "RES-0000-1001").0, 1);
+    assert_eq!(problem.subject, "RES-0000-1001");
+    assert!(problem.detail.contains("raw_record"), "{}", problem.detail);
+    assert_eq!(current_revision(&kept, "RES-0000-1001").0, 1);
 
     // A stored record whose derived ID matches but whose content does not
     // is an ID collision: refused, with nothing written.
@@ -564,14 +563,14 @@ fn changed_rows_get_successors_or_diagnostics_and_bad_requests_write_nothing() {
             .unwrap()
             .success()
             .unwrap();
-        // (read_back itself refuses a tampered blob, so count Change Sets.)
-        let change_sets = || {
+        // (read_back itself refuses a tampered blob, so count Changes.)
+        let changes = || {
             admin
-                .list_records::<serde_json::Value>("catalog_change_sets", "", "seq")
+                .list_records::<serde_json::Value>("catalog_changes", "", "seq")
                 .unwrap()
                 .len()
         };
-        let before = change_sets();
+        let before = changes();
         let mut command = ImportCommand::new(&conflicting, REASON);
         command
             .correlation_id
@@ -587,53 +586,59 @@ fn changed_rows_get_successors_or_diagnostics_and_bad_requests_write_nothing() {
                 .any(|c| c.contains(collection) && c.contains(id)),
             "{collisions:?}"
         );
-        assert_eq!(change_sets(), before);
+        assert_eq!(changes(), before);
         admin
             .patch_json(&path, &serde_json::json!({ field: original }))
             .unwrap()
             .success()
             .unwrap();
     };
-    let diagnostic = &kept.diagnostics[0];
+    let problem = &kept.problems[0];
     collides(
-        "catalog_import_diagnostics",
-        &diagnostic.id,
+        "catalog_import_problems",
+        &problem.id,
         "detail",
         "{}",
-        &diagnostic.detail,
+        &problem.detail,
     );
-    let revision = &kept.asset_revisions[0];
+    let revision = &kept.cad_item_revisions[0];
     collides(
-        "catalog_asset_revisions",
+        "catalog_cad_item_revisions",
         &revision.id,
-        "revision_sha256",
+        "snapshot_sha256",
         &"0".repeat(64),
-        &revision.revision_sha256,
+        &revision.snapshot_sha256,
     );
-    let blob = &kept.asset_blobs[0];
+    let blob = &kept.blobs[0];
     collides(
-        "catalog_asset_blobs",
+        "catalog_blobs",
         &blob.id,
         "sha256",
         &"f".repeat(64),
         &blob.sha256,
     );
-    let asset = &kept.assets[0];
-    collides("catalog_assets", &asset.id, "key", "g-x:Other", &asset.key);
+    let cad_item = &kept.cad_items[0];
+    collides(
+        "catalog_cad_items",
+        &cad_item.id,
+        "key",
+        "g-x:Other",
+        &cad_item.key,
+    );
     assert_eq!(read_back(&admin).unwrap(), kept);
     server.stop();
 }
 
 #[test]
 fn the_oracle_still_matches_the_checked_in_catalog() {
-    // The import must leave every Legacy Catalog input byte-for-byte as
+    // The import must leave every CSV catalog input byte-for-byte as
     // the oracle recorded it.
     let root = repository();
     let actual = legacy_import_fixture::build_manifest(&root).unwrap();
     assert!(legacy_import_fixture::compare(&oracle(), &actual).is_empty());
 }
 
-/// Copies the Legacy Catalog trees the oracle reads into `target`.
+/// Copies the CSV catalog trees the oracle reads into `target`.
 fn copy_catalog(target: &Path) {
     fn copy_tree(from: &Path, to: &Path) {
         fs::create_dir_all(to).unwrap();
@@ -653,7 +658,7 @@ fn copy_catalog(target: &Path) {
 }
 
 #[test]
-fn substitutes_become_approved_manufacturer_parts_end_to_end() {
+fn substitutes_become_manufacturer_parts_end_to_end() {
     // The checked-in substitutes list has only a header, so a temp copy of
     // the catalog gets synthetic rows; database/ itself is never edited.
     let copy = tempfile::tempdir().unwrap();
@@ -670,6 +675,7 @@ fn substitutes_become_approved_manufacturer_parts_end_to_end() {
         "RES-0000-0470,ALT-47,Vishay,https://example.test/47.pdf,DigiKey,541-47-ND\n",
         "RES-0000-0470,RC0603FR-0747RL,Yageo,,,\n",
         "RES-0000-1500,ALT-150,Panasonic,,Mouser,667-150\n",
+        "RES-0000-0470,ALT2-47,Bourns,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,,\n",
         "RES-9999-0001,X,Y,,,\n",
     ));
     fs::write(&substitutes, text).unwrap();
@@ -677,9 +683,7 @@ fn substitutes_become_approved_manufacturer_parts_end_to_end() {
 
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
-    let import = LegacyCatalog::new(copy.path())
-        .import("g-res", None)
-        .unwrap();
+    let import = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
     applied(&submit_import(&admin, &ImportCommand::new(&import, REASON)).unwrap());
     let stored = read_back(&admin).unwrap();
     server.stop();
@@ -690,51 +694,143 @@ fn substitutes_become_approved_manufacturer_parts_end_to_end() {
         "{}",
         serde_json::to_string_pretty(&report.summary()).unwrap()
     );
-    // The blank MPN leaves RES-0000-1500 without a primary: both cells are
-    // kept by the diagnostic, and its substitute is the first entry.
-    assert_eq!(report.destinations["import-diagnostic"], 2);
-    let (_, snapshot) = head(&stored, "RES-0000-1500");
-    let first = &snapshot.approved_manufacturer_parts[0];
+    // The blank MPN leaves RES-0000-1500 without a main: both cells are
+    // kept by the problem, and its substitute is the first entry.
+    assert_eq!(report.destinations["import-problem"], 2);
+    let (_, snapshot) = current_revision(&stored, "RES-0000-1500");
+    let first = &snapshot.manufacturer_parts[0];
     assert_eq!(
         (first.manufacturer.as_str(), first.mpn.as_str()),
         ("Panasonic", "ALT-150")
     );
-    let (_, snapshot) = head(&stored, "RES-0000-0470");
-    assert_eq!(snapshot.approved_manufacturer_parts.len(), 2);
-    assert_eq!(
-        snapshot.approved_manufacturer_parts[1].datasheet.as_deref(),
-        Some("https://example.test/47.pdf")
+    let (_, details) = current_revision(&stored, "RES-0000-0470");
+    let mpns: Vec<&str> = details
+        .manufacturer_parts
+        .iter()
+        .map(|part| part.mpn.as_str())
+        .collect();
+    assert_eq!(mpns, ["RC0603FR-0747RL", "ALT-47", "ALT2-47"]);
+    // A part has one datasheet: Vishay's different one is an import problem.
+    assert!(
+        stored
+            .problems
+            .iter()
+            .any(|problem| problem.code == "substitute-datasheet-differs"
+                && problem.detail.contains("https://example.test/47.pdf"))
     );
     let substitutes = &report.substitutes;
-    assert_eq!((substitutes.rows, substitutes.rows_in_scope), (4, 3));
+    assert_eq!((substitutes.rows, substitutes.rows_in_scope), (5, 4));
+    // IPN, MPN and Manufacturer of the three accepted rows.
     assert_eq!(
-        substitutes.destinations["approved-manufacturer-part"],
-        2 * 4
+        substitutes.destinations["part-details.manufacturer-parts"],
+        3 * 3
     );
-    assert_eq!(substitutes.destinations["operational-fact"], 2 * 2);
-    // The repeated primary is kept whole by a diagnostic.
-    assert_eq!(substitutes.destinations["import-diagnostic"], 6);
-    // The orphan RES substitute is diagnosed but outside the report's rows.
+    assert_eq!(substitutes.destinations["supplier-data"], 3 * 2);
+    // The blank datasheet and the part's own add nothing to the details.
+    assert_eq!(substitutes.destinations["part-details"], 2);
+    // The repeated main part (6 fields) and the different datasheet.
+    assert_eq!(substitutes.destinations["import-problem"], 6 + 1);
+    // The orphan RES substitute is an import problem outside the report's rows.
     assert!(
         report
-            .other_diagnostics
+            .other_problems
             .iter()
-            .any(|line| line.starts_with("substitute-without-managed-part"))
+            .any(|line| line.starts_with("substitute-without-part"))
     );
 }
 
-/// A blob-only import request for the route.
+#[test]
+fn adding_or_removing_a_manufacturer_part_makes_a_new_revision() {
+    // Manufacturer parts are part details, so adding or removing a
+    // substitutes.csv row on re-import makes a new revision.
+    let copy = tempfile::tempdir().unwrap();
+    copy_inputs(copy.path());
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
+    let submit = |correlation: &str| {
+        let import = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
+        let mut command = ImportCommand::new(&import, REASON);
+        command.correlation_id.push_str(correlation);
+        submit_import(&admin, &command).unwrap()
+    };
+    applied(&submit("-first"));
+
+    let substitutes = copy.path().join("database/substitutes.csv");
+    let header = fs::read_to_string(&substitutes).unwrap();
+    fs::write(
+        &substitutes,
+        format!("{header}RES-0000-0470,ALT-47,Vishay,,DigiKey,541-47-ND\n"),
+    )
+    .unwrap();
+    let created = applied(&submit("-added"));
+    assert_eq!((created.part_revisions, created.updated_parts), (1, 1));
+    let stored = read_back(&admin).unwrap();
+    let (number, details) = current_revision(&stored, "RES-0000-0470");
+    assert_eq!(number, 2);
+    assert_eq!(details.manufacturer_parts[1].mpn, "ALT-47");
+    assert_eq!(stored.changes.len(), 2);
+
+    fs::write(&substitutes, &header).unwrap();
+    applied(&submit("-removed"));
+    let (number, details) = current_revision(&read_back(&admin).unwrap(), "RES-0000-0470");
+    assert_eq!((number, details.manufacturer_parts.len()), (3, 1));
+    server.stop();
+}
+
+/// An import request carrying one 3D model CAD item revision whose blob is
+/// `bytes`, hashed as `sha`.
 fn blob_request(correlation: &str, sha: &str, bytes: &[u8]) -> serde_json::Value {
+    let cad_item = catalog::CadItem::new(
+        catalog::CadItemKind::Model3d,
+        &format!("3d-models/{correlation}.step"),
+    );
+    let details = catalog::CadItemDetails {
+        schema: "kicad-parts/cad-item-details/1".into(),
+        kind: cad_item.kind,
+        key: cad_item.key.clone(),
+        format: "3d-model".into(),
+        format_version: None,
+        blob_sha256: sha.into(),
+        blob_size: bytes.len() as u64,
+        model_references: vec![],
+        license: catalog::License::UnknownNeedsReview,
+    };
+    let snapshot = details.canonical_json();
+    let snapshot_sha256 = sha256_hex(&snapshot);
+    let id = catalog::CadItemRevisionId::new(&cad_item.id, &snapshot_sha256);
     serde_json::json!({
         "correlationId": correlation,
         "reason": "check blob hashing",
-        "legacyGrouping": "g-res",
+        "csvFile": "g-res",
         "sourceCommit": null,
         "sources": [{ "role": "test", "path": "blob", "byteSha256": sha, "size": bytes.len(), "headerRaw": null }],
         "blobs": [{ "sha256": sha, "size": bytes.len(), "base64": catalog::pocketbase::base64(bytes) }],
-        "assetRevisions": [],
+        "cadItemRevisions": [{
+            "id": id,
+            "cadItemId": cad_item.id,
+            "kind": "model-3d",
+            "key": cad_item.key,
+            "snapshotSha256": snapshot_sha256,
+            "snapshot": snapshot,
+            "source": "{\"schema\":\"kicad-parts/source/1\",\"source\":\"test\"}",
+        }],
         "parts": [],
-        "diagnostics": [],
+        "problems": [],
+    })
+}
+
+/// The old blob-only request shape, kept to show it is refused.
+fn unused_blob_request(correlation: &str, sha: &str, bytes: &[u8]) -> serde_json::Value {
+    serde_json::json!({
+        "correlationId": correlation,
+        "reason": "check blob hashing",
+        "csvFile": "g-res",
+        "sourceCommit": null,
+        "sources": [{ "role": "test", "path": "blob", "byteSha256": sha, "size": bytes.len(), "headerRaw": null }],
+        "blobs": [{ "sha256": sha, "size": bytes.len(), "base64": catalog::pocketbase::base64(bytes) }],
+        "cadItemRevisions": [],
+        "parts": [],
+        "problems": [],
     })
 }
 
@@ -759,7 +855,7 @@ fn the_route_hashes_blob_bytes_exactly() {
         let wrong = String::from_utf8(wrong).unwrap();
         let refused = admin
             .post_json(
-                LEGACY_IMPORT_ROUTE,
+                CSV_IMPORT_ROUTE,
                 &blob_request(&format!("wrong-{size}"), &wrong, &bytes),
             )
             .unwrap();
@@ -767,7 +863,7 @@ fn the_route_hashes_blob_bytes_exactly() {
         // ...and the right one is accepted.
         let accepted = admin
             .post_json(
-                LEGACY_IMPORT_ROUTE,
+                CSV_IMPORT_ROUTE,
                 &blob_request(&format!("right-{size}"), &sha, &bytes),
             )
             .unwrap();
@@ -780,13 +876,19 @@ fn the_route_hashes_blob_bytes_exactly() {
             stored_sizes.push(size);
         }
     }
+    // A blob that no CAD item revision uses is refused: it could belong to
+    // no Change.
+    let bytes = b"unused".to_vec();
+    let unused = admin
+        .post_json(
+            CSV_IMPORT_ROUTE,
+            &unused_blob_request("unused", &sha256_hex(&bytes), &bytes),
+        )
+        .unwrap();
+    assert_eq!(unused.status, 400, "{}", unused.body);
     // read_back re-hashes every downloaded blob and fails on a mismatch.
     let stored = read_back(&admin).unwrap();
-    let mut lengths: Vec<usize> = stored
-        .asset_blobs
-        .iter()
-        .map(|blob| blob.bytes.len())
-        .collect();
+    let mut lengths: Vec<usize> = stored.blobs.iter().map(|blob| blob.bytes.len()).collect();
     lengths.sort();
     assert_eq!(lengths, stored_sizes);
     server.stop();
@@ -798,7 +900,7 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
     let state = tempfile::tempdir().unwrap();
     let options = services::options(&root, state.path());
     let (server, admin, superuser) = services::start(&root, state.path()).unwrap();
-    let import = LegacyCatalog::new(&root).import("g-res", None).unwrap();
+    let import = CsvCatalog::new(&root).import("g-res", None).unwrap();
     applied(&submit_import(&admin, &ImportCommand::new(&import, REASON)).unwrap());
     server.stop();
 
@@ -865,9 +967,6 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
         .unwrap();
     let mut command = ImportCommand::new(&import, REASON);
     command.correlation_id.push_str("-after-rollback");
-    assert_eq!(
-        applied(&submit_import(&admin, &command).unwrap()).managed_parts,
-        29
-    );
+    assert_eq!(applied(&submit_import(&admin, &command).unwrap()).parts, 29);
     server.stop();
 }

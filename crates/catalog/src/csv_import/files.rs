@@ -1,4 +1,4 @@
-//! Read-only, fail-closed access to Legacy Catalog files and their exact
+//! Read-only, fail-closed access to CSV catalog files and their exact
 //! CSV records.
 
 use super::ImportError;
