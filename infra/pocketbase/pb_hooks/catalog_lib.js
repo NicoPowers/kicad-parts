@@ -16,6 +16,11 @@ const CHANGE_KINDS = Object.freeze({
 // The `source` value of rows read from the CSV catalog.
 const CSV_CATALOG_SOURCE = "csv-catalog";
 
+// Schema tags shared with crates/catalog (PART_DETAILS_SCHEMA and
+// SOURCE_SCHEMA); a test there keeps them in step.
+const PART_DETAILS_SCHEMA = "kicad-parts/part-details/1";
+const SOURCE_SCHEMA = "kicad-parts/source/1";
+
 // The Catalog's record ID rule, shared with crates/catalog/src/ids.rs:
 // the first 15 hex digits of SHA-256("kicad-parts:<kind>:v1\n<key>").
 function deriveId(kind, key) {
@@ -143,9 +148,454 @@ function base64Decode(text) {
   return out;
 }
 
+// ---- Edits and restores --------------------------------------------------
+//
+// POST /api/catalog/edits and POST /api/catalog/restores (see
+// catalog_edits.pb.js) publish one new revision of one part. Both run
+// publishPartRevision in one transaction:
+//
+//   1. replay the stored answer if the correlation ID was used before for
+//      the same request (409 correlation_reused for a different one);
+//   2. answer 409 conflict, with the part's current revision, if the
+//      caller expected another current revision;
+//   3. build the new part details: for an edit, from the caller's fields
+//      and manufacturer parts; for a restore, an exact copy of the older
+//      revision's details, CAD item revisions included;
+//   4. answer 422 noop if they equal the current revision's details;
+//   5. otherwise save one Change, the new revision, the part's move to it,
+//      and one audit entry.
+//
+// Applied and no-op answers are stored under the correlation ID; conflicts
+// are not, so a retry is checked again against the current revision.
+
+// Who may publish edits and restores: superusers, and team members whose
+// account is marked can_edit_catalog. Returns the actor or throws.
+function catalogEditor(e) {
+  const auth = e.auth;
+  const collection = auth.collection().name;
+  if (collection === "users" && !auth.getBool("can_edit_catalog")) {
+    throw new ForbiddenError("you can view the Catalog but not edit it; ask an admin for edit access");
+  }
+  const name = collection === "users" ? auth.getString("name") || auth.getString("email") : auth.getString("email");
+  return { id: collection + ":" + auth.id, name: name };
+}
+
+// Reads and checks the request fields both routes share.
+function commonRequest(body) {
+  const fail = (message) => {
+    throw new BadRequestError(message);
+  };
+  const text = (name, max) => {
+    const value = body[name];
+    if (typeof value !== "string" || value.length === 0) {
+      fail(`${name} is required`);
+    }
+    if (value.length > max) {
+      fail(`${name} is longer than ${max} characters`);
+    }
+    return value;
+  };
+  const correlationId = text("correlationId", 100);
+  if (!/^[A-Za-z0-9_.:-]+$/.test(correlationId)) {
+    fail("correlationId may only contain letters, digits and _ . : -");
+  }
+  const reason = text("reason", 2000);
+  if (reason.trim().length === 0) {
+    fail("reason is required");
+  }
+  const ipn = text("ipn", 13);
+  if (!/^[A-Z]{3}-[0-9]{4}-[0-9A-Z]{4}$/.test(ipn)) {
+    fail(`${ipn} is not an IPN`);
+  }
+  const expectedRevision = body.expectedRevision;
+  if (typeof expectedRevision !== "number" || !Number.isInteger(expectedRevision) || expectedRevision < 1) {
+    fail("expectedRevision must be the number of the part's current revision");
+  }
+  return { correlationId: correlationId, reason: reason, ipn: ipn, expectedRevision: expectedRevision };
+}
+
+// The new fields and manufacturer parts of an edit, checked against the
+// current revision: an edit may change field values, but never add, drop,
+// rename or reorder fields, so supplier data (which is never a field)
+// cannot enter the part details.
+function editedDetails(body, currentDetails) {
+  const fail = (message) => {
+    throw new BadRequestError(message);
+  };
+  const fields = body.fields;
+  if (!Array.isArray(fields)) {
+    fail("fields must be a list");
+  }
+  const currentFields = currentDetails.fields || [];
+  if (fields.length !== currentFields.length) {
+    fail(`fields must list the same ${currentFields.length} fields as the current revision, in the same order`);
+  }
+  const checkedFields = fields.map((field, index) => {
+    if (!field || field.name !== currentFields[index].name) {
+      fail(`field ${index + 1} must be ${currentFields[index].name}; an edit cannot add, remove, rename or reorder fields`);
+    }
+    if (typeof field.value !== "string" || field.value.length > 10000) {
+      fail(`the value of ${field.name} must be text of at most 10000 characters`);
+    }
+    return { name: field.name, value: field.value };
+  });
+  const parts = body.manufacturerParts;
+  if (!Array.isArray(parts) || parts.length > 100) {
+    fail("manufacturerParts must be a list of at most 100");
+  }
+  const seen = {};
+  const checkedParts = parts.map((part) => {
+    const manufacturer = part && typeof part.manufacturer === "string" ? part.manufacturer : "";
+    const mpn = part && typeof part.mpn === "string" ? part.mpn : "";
+    if (manufacturer.trim().length === 0 || mpn.trim().length === 0) {
+      fail("every manufacturer part needs a manufacturer and an MPN");
+    }
+    if (manufacturer.length > 500 || mpn.length > 500) {
+      fail("a manufacturer or MPN is longer than 500 characters");
+    }
+    const key = JSON.stringify([manufacturer, mpn]);
+    if (seen[key]) {
+      fail(`${manufacturer} ${mpn} is listed twice`);
+    }
+    seen[key] = true;
+    return { manufacturer: manufacturer, mpn: mpn };
+  });
+  return { fields: checkedFields, manufacturerParts: checkedParts };
+}
+
+// The CAD references of new part details, read from their Symbol and
+// Footprint fields the way the CSV import reads them (`;` separates
+// footprint choices). Each reference to the CSV catalog's own libraries
+// (`g-*`) is bound to one exact CAD item revision:
+// - a reference the current revision already binds keeps its exact
+//   revision, so editing another field never moves a CAD binding;
+// - any other reference binds the current revision of the CAD item with
+//   exactly that library reference;
+// - a reference that the current revision kept as unresolved stays so;
+// - anything else is refused: an edit can only use CAD items the Catalog
+//   already has.
+// Other libraries (such as KiCad's own) are external, as in the import.
+function cadReferences(txApp, fields, currentDetails) {
+  const value = (name) => {
+    const field = fields.find((item) => item.name === name);
+    return field ? field.value : null;
+  };
+  const latestRevision = (cadItemId) => {
+    const found = txApp.findRecordsByFilter("catalog_cad_item_revisions", "cad_item = {:id}", "-number", 1, 0, {
+      id: cadItemId,
+    });
+    return found.length > 0 ? found[0] : null;
+  };
+  const previous = currentDetails.cad_references || [];
+  const references = [];
+  for (const [role, column] of [["symbol", "Symbol"], ["footprint", "Footprint"]]) {
+    const text = value(column);
+    if (text === null) {
+      continue;
+    }
+    const names = text
+      .split(";")
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0);
+    names.forEach((reference, ordinal) => {
+      const library = reference.indexOf(":") >= 0 ? reference.substring(0, reference.indexOf(":")) : reference;
+      let target;
+      if (!library.startsWith("g-")) {
+        target = { kind: "external" };
+      } else {
+        const cadItemId = deriveId("cad-item", role + "\n" + reference);
+        let cadItem = null;
+        try {
+          cadItem = txApp.findRecordById("catalog_cad_items", cadItemId);
+        } catch (_) {
+          cadItem = null;
+        }
+        if (cadItem && (cadItem.getString("kind") !== role || cadItem.getString("key") !== reference)) {
+          throw new BadRequestError(`catalog_cad_items/${cadItemId} is not the ${role} ${reference}`);
+        }
+        const same = previous.find((item) => item.role === role && item.reference === reference);
+        if (cadItem && same && same.target.kind === "cad-item-revision" && same.target.cad_item === cadItemId) {
+          target = { kind: "cad-item-revision", cad_item: cadItemId, snapshot_sha256: same.target.snapshot_sha256 };
+        } else if (cadItem) {
+          const latest = latestRevision(cadItemId);
+          if (!latest) {
+            throw new BadRequestError(`the ${role} ${reference} has no revision`);
+          }
+          target = { kind: "cad-item-revision", cad_item: cadItemId, snapshot_sha256: latest.getString("snapshot_sha256") };
+        } else if (same && same.target.kind === "unresolved") {
+          target = { kind: "unresolved", status: same.target.status };
+        } else {
+          throw new BadRequestError(
+            `${reference} is not a ${role} in the Catalog; an edit can only use symbols and footprints the Catalog already has`,
+          );
+        }
+      }
+      references.push({ role: role, ordinal: ordinal, reference: reference, target: target });
+    });
+  }
+  return references;
+}
+
+// The CAD item revision IDs a snapshot binds, for the relation field.
+function boundCadItemRevisions(details) {
+  const bound = [];
+  for (const reference of details.cad_references || []) {
+    if (reference.target && reference.target.kind === "cad-item-revision") {
+      bound.push(deriveId("cad-item-revision", reference.target.cad_item + "\n" + reference.target.snapshot_sha256));
+    }
+  }
+  return bound;
+}
+
+// What a client needs to show a revision someone else published.
+function describeRevision(txApp, revision) {
+  let change = null;
+  try {
+    change = txApp.findRecordById("catalog_changes", revision.getString("change"));
+  } catch (_) {
+    change = null;
+  }
+  return {
+    id: revision.id,
+    number: revision.getInt("number"),
+    snapshot: revision.getString("snapshot"),
+    snapshotSha256: revision.getString("snapshot_sha256"),
+    changeKind: change ? change.getString("kind") : "",
+    reason: change ? change.getString("reason") : "",
+    actorName: change ? change.getString("actor_name") : "",
+    created: change ? change.getString("created") : "",
+  };
+}
+
+// kind is CHANGE_KINDS.edit or CHANGE_KINDS.restore.
+function publishPartRevision(e, kind) {
+  const actor = catalogEditor(e);
+  const body = e.requestInfo().body || {};
+  const request = commonRequest(body);
+  let restoreRevision = 0;
+  if (kind === CHANGE_KINDS.restore) {
+    restoreRevision = body.restoreRevision;
+    if (typeof restoreRevision !== "number" || !Number.isInteger(restoreRevision) || restoreRevision < 1) {
+      throw new BadRequestError("restoreRevision must be the number of an earlier revision");
+    }
+  } else if (!Array.isArray(body.fields) || !Array.isArray(body.manufacturerParts)) {
+    throw new BadRequestError("an edit needs fields and manufacturerParts");
+  }
+  // The request's identity, from validated values in a fixed order (the
+  // parsed body is a Go map, whose key order varies).
+  const requestHash = $security.sha256(
+    JSON.stringify([
+      kind,
+      request.ipn,
+      request.expectedRevision,
+      request.reason,
+      kind === CHANGE_KINDS.restore
+        ? restoreRevision
+        : [
+            body.fields.map((field) => [field && field.name, field && field.value]),
+            body.manufacturerParts.map((part) => [part && part.manufacturer, part && part.mpn]),
+          ],
+    ]),
+  );
+
+  let reply = null;
+  $app.runInTransaction((txApp) => {
+    const byId = (collection, id) => {
+      try {
+        return txApp.findRecordById(collection, id);
+      } catch (_) {
+        return null;
+      }
+    };
+    const first = (collection, filter, params, sort) => {
+      const found = txApp.findRecordsByFilter(collection, filter, sort || "", 1, 0, params);
+      return found.length > 0 ? found[0] : null;
+    };
+
+    const prior = first("catalog_commands", "correlation_id = {:id}", { id: request.correlationId });
+    if (prior) {
+      if (prior.getString("actor") !== actor.id || prior.getString("request_hash") !== requestHash) {
+        reply = {
+          status: 409,
+          body: {
+            outcome: "correlation_reused",
+            correlationId: request.correlationId,
+            message: "this correlation ID was already used for a different command",
+          },
+        };
+        return;
+      }
+      reply = { status: prior.getInt("status"), body: JSON.parse(prior.getString("result")), replayed: true };
+      return;
+    }
+
+    const partId = deriveId("part", request.ipn);
+    const part = byId("catalog_parts", partId);
+    if (!part || part.getString("ipn") !== request.ipn) {
+      throw new NotFoundError(`${request.ipn} is not a part in the Catalog`);
+    }
+    const current = byId("catalog_part_revisions", part.getString("current_revision"));
+    if (!current) {
+      throw new Error(`${request.ipn} has no current revision`);
+    }
+    if (request.expectedRevision !== current.getInt("number")) {
+      reply = {
+        status: 409,
+        body: {
+          outcome: "conflict",
+          correlationId: request.correlationId,
+          ipn: request.ipn,
+          expectedRevision: request.expectedRevision,
+          currentRevision: describeRevision(txApp, current),
+          message: `someone else changed ${request.ipn} first: its current revision is ${current.getInt("number")}, not ${request.expectedRevision}`,
+        },
+      };
+      return;
+    }
+    const currentDetails = JSON.parse(current.getString("snapshot"));
+    if (currentDetails.schema !== PART_DETAILS_SCHEMA || currentDetails.ipn !== request.ipn) {
+      throw new Error(`the current revision of ${request.ipn} is not ${PART_DETAILS_SCHEMA} part details`);
+    }
+
+    let snapshot;
+    let source;
+    let restored = null;
+    if (kind === CHANGE_KINDS.restore) {
+      restored = first("catalog_part_revisions", "part = {:part} && number = {:number}", {
+        part: partId,
+        number: restoreRevision,
+      });
+      if (!restored) {
+        throw new NotFoundError(`${request.ipn} has no revision ${restoreRevision}`);
+      }
+      // The exact stored bytes, so the restored revision has the same
+      // details and the same CAD item revisions.
+      snapshot = restored.getString("snapshot");
+      source = {
+        schema: SOURCE_SCHEMA,
+        source: CHANGE_KINDS.restore,
+        restored_revision: { id: restored.id, number: restored.getInt("number") },
+        previous_revision: { id: current.id, number: current.getInt("number") },
+      };
+    } else {
+      const edited = editedDetails(body, currentDetails);
+      // Serialized in the field order of crates/catalog PartDetails, so the
+      // stored bytes are its canonical JSON.
+      snapshot = JSON.stringify({
+        schema: PART_DETAILS_SCHEMA,
+        ipn: request.ipn,
+        fields: edited.fields,
+        manufacturer_parts: edited.manufacturerParts,
+        cad_references: cadReferences(txApp, edited.fields, currentDetails),
+      });
+      source = {
+        schema: SOURCE_SCHEMA,
+        source: CHANGE_KINDS.edit,
+        previous_revision: { id: current.id, number: current.getInt("number") },
+      };
+    }
+    const snapshotSha256 = $security.sha256(snapshot);
+
+    let status;
+    let result;
+    if (snapshotSha256 === current.getString("snapshot_sha256")) {
+      status = 422;
+      result = {
+        outcome: "noop",
+        correlationId: request.correlationId,
+        ipn: request.ipn,
+        revision: { id: current.id, number: current.getInt("number") },
+        message:
+          kind === CHANGE_KINDS.restore
+            ? `revision ${restoreRevision} has the same details as the current revision`
+            : "the edit changes nothing",
+      };
+    } else {
+      const record = (name, id) => {
+        const made = new Record(txApp.findCollectionByNameOrId(name));
+        made.set("id", id);
+        return made;
+      };
+      const last = first("catalog_changes", "seq > 0", {}, "-seq");
+      const seq = last ? last.getInt("seq") + 1 : 1;
+      const number = current.getInt("number") + 1;
+      const changeId = deriveId("change", request.correlationId);
+      const revisionId = deriveId("part-revision", partId + "\n" + number);
+      const bound = boundCadItemRevisions(JSON.parse(snapshot));
+      const summary = JSON.stringify({ ipn: request.ipn, partRevisions: 1, revision: number, restoredRevision: restoreRevision || null });
+
+      const change = record("catalog_changes", changeId);
+      change.set("seq", seq);
+      change.set("kind", kind);
+      change.set("reason", request.reason);
+      change.set("correlation_id", request.correlationId);
+      change.set("actor", actor.id);
+      change.set("actor_name", actor.name);
+      change.set("sources", JSON.stringify({ parts: [request.ipn] }));
+      change.set("summary", summary);
+      txApp.save(change);
+
+      const revision = record("catalog_part_revisions", revisionId);
+      revision.set("part", partId);
+      revision.set("number", number);
+      revision.set("predecessor", current.id);
+      revision.set("change", changeId);
+      revision.set("snapshot", snapshot);
+      revision.set("snapshot_sha256", snapshotSha256);
+      revision.set("source", JSON.stringify(source));
+      revision.set("cad_item_revisions", bound);
+      txApp.save(revision);
+
+      part.set("current_revision", revisionId);
+      part.set("current_revision_number", number);
+      txApp.save(part);
+
+      const auditEntryId = deriveId("audit-entry", request.correlationId);
+      const audit = record("catalog_audit_entries", auditEntryId);
+      audit.set("action", "catalog." + kind);
+      audit.set("actor", actor.id);
+      audit.set("actor_name", actor.name);
+      audit.set("change", changeId);
+      audit.set("reason", request.reason);
+      audit.set("correlation_id", request.correlationId);
+      audit.set("summary", summary);
+      txApp.save(audit);
+
+      status = 200;
+      result = {
+        outcome: "applied",
+        correlationId: request.correlationId,
+        ipn: request.ipn,
+        changeId: changeId,
+        seq: seq,
+        auditEntryId: auditEntryId,
+        revision: { id: revisionId, number: number, snapshotSha256: snapshotSha256 },
+        cadItemRevisions: bound,
+      };
+    }
+
+    const ledger = new Record(txApp.findCollectionByNameOrId("catalog_commands"));
+    ledger.set("correlation_id", request.correlationId);
+    ledger.set("actor", actor.id);
+    ledger.set("request_hash", requestHash);
+    ledger.set("status", status);
+    ledger.set("result", JSON.stringify(result));
+    txApp.save(ledger);
+    reply = { status: status, body: result };
+  });
+
+  if (reply.replayed) {
+    e.response.header().set("X-Collab-Replayed", "true");
+  }
+  return e.json(reply.status, reply.body);
+}
+
 module.exports = {
   CHANGE_KINDS: CHANGE_KINDS,
   CSV_CATALOG_SOURCE: CSV_CATALOG_SOURCE,
+  PART_DETAILS_SCHEMA: PART_DETAILS_SCHEMA,
+  SOURCE_SCHEMA: SOURCE_SCHEMA,
+  publishPartRevision: publishPartRevision,
   deriveId: deriveId,
   sha256Bytes: sha256Bytes,
   base64Decode: base64Decode,

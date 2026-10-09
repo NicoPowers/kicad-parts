@@ -4,15 +4,18 @@
 /// declares them as a select field and the import route's
 /// `CHANGE_KINDS` names them; the test below keeps all three in step.
 ///
-/// Only [`ChangeKind::CsvImport`] is published today. The import route
-/// gives a changed row a new revision only when the part's current revision
-/// came from a CSV import, so an edit is never overwritten by one.
+/// The import route gives a changed row a new revision only when the
+/// part's current revision came from a CSV import, so an edit or a restore
+/// is never overwritten by one.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ChangeKind {
+    /// Published by `POST /api/catalog/csv-imports`.
     CsvImport,
-    /// Reserved for kicad-parts-2254.
+    /// A change to one part's details, published by
+    /// `POST /api/catalog/edits`.
     Edit,
-    /// Reserved for kicad-parts-2254.
+    /// A new revision copying an earlier one's details, published by
+    /// `POST /api/catalog/restores`.
     Restore,
 }
 
@@ -74,6 +77,15 @@ mod tests {
         }
         assert!(library.contains(&format!(
             "const CSV_CATALOG_SOURCE = \"{CSV_CATALOG_SOURCE}\";"
+        )));
+        // The edit route writes part details and sources with these tags.
+        assert!(library.contains(&format!(
+            "const PART_DETAILS_SCHEMA = \"{}\";",
+            crate::PART_DETAILS_SCHEMA
+        )));
+        assert!(library.contains(&format!(
+            "const SOURCE_SCHEMA = \"{}\";",
+            crate::csv_import::SOURCE_SCHEMA
         )));
         assert_eq!(ChangeKind::parse("edit"), Some(ChangeKind::Edit));
         assert_eq!(ChangeKind::parse("Edit"), None);

@@ -1,10 +1,13 @@
-//! The Catalog's PocketBase contract: the protected import route
-//! (`infra/pocketbase/pb_hooks/catalog_csv_imports.pb.js`) and the `catalog_*`
-//! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`).
+//! The Catalog's PocketBase contract: the protected routes
+//! (`infra/pocketbase/pb_hooks/catalog_csv_imports.pb.js` for CSV imports,
+//! `catalog_edits.pb.js` for edits and restores) and the `catalog_*`
+//! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`
+//! and `1791600000_catalog_edits.js`).
 
 use crate::csv_import::CsvImport;
 use crate::sha256_hex;
-use collaboration::{CollabError, CollabResult, PocketBaseClient};
+use crate::part::{DetailField, ManufacturerPart, PartDetails};
+use collaboration::{CollabError, CollabResult, CorrelationId, PocketBaseClient};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -184,6 +187,300 @@ pub fn submit_import(
     }
 }
 
+/// The route that publishes a change to one part's details.
+pub const EDIT_ROUTE: &str = "/api/catalog/edits";
+
+/// The route that publishes a copy of an earlier revision as a new one.
+pub const RESTORE_ROUTE: &str = "/api/catalog/restores";
+
+/// A change to one part's details: every field of the current revision (the
+/// same names in the same order, with new values) and the full list of
+/// manufacturer parts. The server reads the new CAD references from the
+/// `Symbol` and `Footprint` fields and binds exact CAD item revisions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditCommand {
+    pub correlation_id: CorrelationId,
+    pub reason: String,
+    pub ipn: String,
+    /// The number of the revision the edit starts from.
+    pub expected_revision: u32,
+    pub fields: Vec<DetailField>,
+    pub manufacturer_parts: Vec<ManufacturerPart>,
+}
+
+impl EditCommand {
+    /// An edit of `current` (the part's current revision, numbered
+    /// `expected_revision`) with a fresh correlation ID, starting from its
+    /// details unchanged.
+    pub fn starting_from(current: &PartDetails, expected_revision: u32, reason: &str) -> Self {
+        Self {
+            correlation_id: CorrelationId::generate(),
+            reason: reason.to_owned(),
+            ipn: current.ipn.clone(),
+            expected_revision,
+            fields: current.fields.clone(),
+            manufacturer_parts: current.manufacturer_parts.clone(),
+        }
+    }
+
+    /// Sets the value of the field named exactly `name`. Returns false if
+    /// the details have no such field.
+    pub fn set_field(&mut self, name: &str, value: &str) -> bool {
+        match self.fields.iter_mut().find(|field| field.name == name) {
+            Some(field) => {
+                field.value = value.to_owned();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn body(&self) -> Value {
+        json!({
+            "correlationId": self.correlation_id,
+            "reason": self.reason,
+            "ipn": self.ipn,
+            "expectedRevision": self.expected_revision,
+            "fields": self.fields.iter().map(|field| json!({
+                "name": field.name,
+                "value": field.value,
+            })).collect::<Vec<_>>(),
+            "manufacturerParts": self.manufacturer_parts.iter().map(|part| json!({
+                "manufacturer": part.manufacturer,
+                "mpn": part.mpn,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// A new revision of one part whose details are an exact copy of revision
+/// `restore_revision`, CAD item revisions included.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreCommand {
+    pub correlation_id: CorrelationId,
+    pub reason: String,
+    pub ipn: String,
+    pub expected_revision: u32,
+    pub restore_revision: u32,
+}
+
+impl RestoreCommand {
+    pub fn new(ipn: &str, expected_revision: u32, restore_revision: u32, reason: &str) -> Self {
+        Self {
+            correlation_id: CorrelationId::generate(),
+            reason: reason.to_owned(),
+            ipn: ipn.to_owned(),
+            expected_revision,
+            restore_revision,
+        }
+    }
+
+    pub fn body(&self) -> Value {
+        json!({
+            "correlationId": self.correlation_id,
+            "reason": self.reason,
+            "ipn": self.ipn,
+            "expectedRevision": self.expected_revision,
+            "restoreRevision": self.restore_revision,
+        })
+    }
+}
+
+/// What the edit or restore route answered.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PublishReply {
+    pub status: u16,
+    pub outcome: PublishOutcome,
+    /// The answer was replayed from the correlation-ID ledger.
+    pub replayed: bool,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum PublishOutcome {
+    /// 200: one Change holding the new revision, the part moved to it, and
+    /// one audit entry.
+    #[serde(rename_all = "camelCase")]
+    Applied {
+        correlation_id: String,
+        ipn: String,
+        change_id: String,
+        seq: u64,
+        audit_entry_id: String,
+        revision: PublishedRevision,
+        /// The exact CAD item revisions the new revision binds.
+        cad_item_revisions: Vec<String>,
+    },
+    /// 422: the details would not change; nothing was written.
+    #[serde(rename_all = "camelCase")]
+    Noop {
+        correlation_id: String,
+        ipn: String,
+        revision: RevisionNumber,
+        message: String,
+    },
+    /// 409: someone else published a revision first. Nothing was written.
+    #[serde(rename_all = "camelCase")]
+    Conflict {
+        correlation_id: String,
+        ipn: String,
+        expected_revision: u32,
+        current_revision: ConflictingRevision,
+        message: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    CorrelationReused {
+        correlation_id: String,
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedRevision {
+    pub id: String,
+    pub number: u32,
+    pub snapshot_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct RevisionNumber {
+    pub id: String,
+    pub number: u32,
+}
+
+/// The part's current revision when a command expected another one.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictingRevision {
+    pub id: String,
+    pub number: u32,
+    /// Its part details as canonical JSON.
+    pub snapshot: String,
+    pub snapshot_sha256: String,
+    pub change_kind: String,
+    pub reason: String,
+    pub actor_name: String,
+    pub created: String,
+}
+
+impl ConflictingRevision {
+    pub fn details(&self) -> CollabResult<PartDetails> {
+        serde_json::from_str(&self.snapshot)
+            .map_err(|error| CollabError::Protocol(format!("revision {}: {error}", self.number)))
+    }
+}
+
+/// Submits an edit. Applied, no-op, conflict and correlation-reuse answers
+/// are `Ok`; inspect the outcome. Bad input (400), 401, 403 and 404 are
+/// errors.
+pub fn submit_edit(client: &PocketBaseClient, command: &EditCommand) -> CollabResult<PublishReply> {
+    publish(client, EDIT_ROUTE, &command.body())
+}
+
+/// Submits a restore; answers as [`submit_edit`].
+pub fn submit_restore(
+    client: &PocketBaseClient,
+    command: &RestoreCommand,
+) -> CollabResult<PublishReply> {
+    publish(client, RESTORE_ROUTE, &command.body())
+}
+
+fn publish(client: &PocketBaseClient, route: &str, body: &Value) -> CollabResult<PublishReply> {
+    let reply = client.post_json(route, body)?;
+    match reply.status {
+        200 | 409 | 422 => {
+            let outcome: PublishOutcome = serde_json::from_str(&reply.body)
+                .map_err(|parse| CollabError::Protocol(format!("{parse}: {}", reply.body)))?;
+            Ok(PublishReply {
+                status: reply.status,
+                outcome,
+                replayed: reply.replayed,
+                body: reply.body,
+            })
+        }
+        _ => Err(reply.success().err().unwrap_or_else(|| {
+            CollabError::Protocol(format!("unexpected status {}", reply.status))
+        })),
+    }
+}
+
+/// The part with `ipn`, if the Catalog has it.
+pub fn part_by_ipn(client: &PocketBaseClient, ipn: &str) -> CollabResult<Option<StoredPart>> {
+    let filter = format!("ipn = {}", Value::from(ipn));
+    Ok(client
+        .list_records("catalog_parts", &filter, "ipn")?
+        .into_iter()
+        .next())
+}
+
+/// Every revision of the part with ID `part_id`, oldest first.
+pub fn part_revisions(
+    client: &PocketBaseClient,
+    part_id: &str,
+) -> CollabResult<Vec<StoredPartRevision>> {
+    let filter = format!("part = {}", Value::from(part_id));
+    client.list_records("catalog_part_revisions", &filter, "number")
+}
+
+/// `id = "a" || id = "b" || ...` filters of at most 40 IDs each, which keeps
+/// request URLs short.
+fn id_filters(ids: &[&str]) -> Vec<String> {
+    ids.chunks(40)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|id| format!("id = {}", Value::from(*id)))
+                .collect::<Vec<_>>()
+                .join(" || ")
+        })
+        .collect()
+}
+
+/// The Changes with these IDs, in `seq` order.
+pub fn changes_by_id(client: &PocketBaseClient, ids: &[&str]) -> CollabResult<Vec<StoredChange>> {
+    let mut changes = Vec::new();
+    for filter in id_filters(ids) {
+        changes.extend(client.list_records::<StoredChange>("catalog_changes", &filter, "seq")?);
+    }
+    changes.sort_by_key(|change| change.seq);
+    Ok(changes)
+}
+
+/// The CAD item revisions with these IDs.
+pub fn cad_item_revisions_by_id(
+    client: &PocketBaseClient,
+    ids: &[&str],
+) -> CollabResult<Vec<StoredCadItemRevision>> {
+    let mut revisions = Vec::new();
+    for filter in id_filters(ids) {
+        revisions.extend(client.list_records::<StoredCadItemRevision>(
+            "catalog_cad_item_revisions",
+            &filter,
+            "cad_item,number",
+        )?);
+    }
+    Ok(revisions)
+}
+
+/// Every Change after `checkpoint`, in `seq` order.
+pub fn changes_since(
+    client: &PocketBaseClient,
+    checkpoint: u64,
+) -> CollabResult<Vec<StoredChange>> {
+    client.list_records("catalog_changes", &format!("seq > {checkpoint}"), "seq")
+}
+
+/// The part revisions one Change published.
+pub fn revisions_in_change(
+    client: &PocketBaseClient,
+    change_id: &str,
+) -> CollabResult<Vec<StoredPartRevision>> {
+    let filter = format!("change = {}", Value::from(change_id));
+    client.list_records("catalog_part_revisions", &filter, "part,number")
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct StoredChange {
     pub id: String,
@@ -192,6 +489,12 @@ pub struct StoredChange {
     pub reason: String,
     pub correlation_id: String,
     pub actor: String,
+    /// The actor's name or email when the Change was made.
+    #[serde(default)]
+    pub actor_name: String,
+    /// When the Change was saved, as PocketBase writes dates.
+    #[serde(default)]
+    pub created: String,
     pub source_commit: String,
     /// JSON: `{ csv_file, files: [SourceFile] }`.
     pub sources: String,
@@ -286,6 +589,9 @@ pub struct StoredAuditEntry {
     pub id: String,
     pub action: String,
     pub actor: String,
+    /// The actor's name or email when the entry was made.
+    #[serde(default)]
+    pub actor_name: String,
     /// The Change the run made, or empty if it only recorded import problems.
     pub change: String,
     pub reason: String,

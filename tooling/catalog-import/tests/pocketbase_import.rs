@@ -6,11 +6,13 @@
 //! read; changed inputs are made in temp copies.
 
 use catalog::pocketbase::{
-    CSV_IMPORT_ROUTE, CatalogReadback, ImportCommand, ImportOutcome, read_back, submit_import,
+    CSV_IMPORT_ROUTE, CatalogReadback, EditCommand, ImportCommand, ImportOutcome, RestoreCommand,
+    read_back, submit_edit, submit_import, submit_restore,
 };
 use catalog::{CsvCatalog, PartDetails, sha256_hex};
 use catalog_import::services;
 use collaboration::{CollabError, PocketBaseClient};
+use native_services::PocketBaseServer;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -78,6 +80,32 @@ fn current_revision(readback: &CatalogReadback, ipn: &str) -> (u32, PartDetails)
         revision.number,
         serde_json::from_str(&revision.snapshot).unwrap(),
     )
+}
+
+/// Sets one column of one stored record in a stopped instance's data.db.
+/// PocketBase refuses to change Catalog records, so tests that need a
+/// tampered record edit the database file directly.
+fn tamper(state: &Path, table: &str, column: &str, id: &str, value: &str) {
+    let connection = rusqlite::Connection::open(state.join("pb_data").join("data.db")).unwrap();
+    let changed = connection
+        .execute(
+            &format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2"),
+            rusqlite::params![value, id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1, "{table}/{id}");
+}
+
+/// Stops `server` and starts it again on the same data, signed in as a new
+/// superuser.
+fn restart(
+    root: &Path,
+    state: &Path,
+    server: PocketBaseServer,
+) -> (PocketBaseServer, PocketBaseClient) {
+    server.stop();
+    let (server, admin, _superuser) = services::start(root, state).unwrap();
+    (server, admin)
 }
 
 #[test]
@@ -532,55 +560,65 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         kept.detail
     );
     assert_eq!(current_revision(&supplier, "RES-0000-1002").0, 2);
-    let changes_before_conflict = supplier.changes.len();
+    let changes_before_edit = supplier.changes.len();
 
-    // A current revision not made by a CSV import (simulated by relabelling
-    // the latest Change, as a future Catalog edit would) is never
-    // overwritten: the changed row becomes an import problem instead.
-    let latest = &after.changes[1];
-    admin
-        .patch_json(
-            &format!("/api/collections/catalog_changes/records/{}", latest.id),
-            &serde_json::json!({ "kind": "edit" }),
-        )
-        .unwrap()
-        .success()
-        .unwrap();
+    // A current revision published by an edit is never overwritten by a
+    // CSV import: the changed row becomes an import problem instead.
+    let edit = {
+        let (number, details) = current_revision(&supplier, "RES-0000-0470");
+        let mut command = EditCommand::starting_from(&details, number, "Note the exact value");
+        command.set_field("Value", "47 Ohm");
+        command
+    };
+    let edited = submit_edit(&admin, &edit).unwrap();
+    assert_eq!(edited.status, 200, "{}", edited.body);
+    let after_edit = read_back(&admin).unwrap();
+    assert_eq!(after_edit.changes.len(), changes_before_edit + 1);
+    assert_eq!(after_edit.changes.last().unwrap().kind, "edit");
     let csv = csv.replace("\"47R\"", "\"47.0\"");
     fs::write(&csv_path, &csv).unwrap();
     let conflicting = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
     let reply = submit_import(&admin, &ImportCommand::new(&conflicting, REASON)).unwrap();
     assert_eq!(nothing_changed(&reply).1, 1, "{}", reply.body);
     let last = read_back(&admin).unwrap();
-    assert_eq!(last.changes.len(), changes_before_conflict);
+    assert_eq!(last.changes, after_edit.changes);
     assert_eq!(
         current_revision(&last, "RES-0000-0470"),
-        current_revision(&after, "RES-0000-0470")
+        current_revision(&after_edit, "RES-0000-0470")
+    );
+    assert_eq!(
+        current_revision(&last, "RES-0000-0470").1.field("Value"),
+        Some("47 Ohm")
     );
     assert!(last.problems.iter().any(|problem| problem.code
         == "csv-row-conflicts-with-current-revision"
         && problem.subject == "RES-0000-0470"));
 
-    // The kind is a closed set, so a mistyped kind cannot be stored.
-    let mistyped = admin
+    // Nobody can relabel a Change, not even a superuser.
+    let relabel = admin
         .patch_json(
-            &format!("/api/collections/catalog_changes/records/{}", latest.id),
-            &serde_json::json!({ "kind": "Edit" }),
+            &format!(
+                "/api/collections/catalog_changes/records/{}",
+                after.changes[1].id
+            ),
+            &serde_json::json!({ "kind": "edit" }),
         )
         .unwrap();
-    assert!(mistyped.success().is_err(), "{mistyped:?}");
+    assert_eq!(relabel.status, 403, "{}", relabel.body);
 
-    // A current revision without a CSV source (as an edit's might be) is
-    // answered with an import problem that keeps the row, not a server error.
-    let current_revision_id = last.part("RES-0000-1001").unwrap().current_revision.clone();
-    admin
-        .patch_json(
-            &format!("/api/collections/catalog_part_revisions/records/{current_revision_id}"),
-            &serde_json::json!({ "source": "not a CSV catalog row" }),
-        )
-        .unwrap()
-        .success()
-        .unwrap();
+    // A current revision whose details match the row but whose source is
+    // not a CSV row (here a restore of revision 1 after an edit) is answered
+    // with an import problem that keeps the row, not a server error.
+    let edit = {
+        let (number, details) = current_revision(&last, "RES-0000-1001");
+        let mut command = EditCommand::starting_from(&details, number, "Try another value");
+        command.set_field("Value", "1.0k");
+        command
+    };
+    assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
+    let restore = RestoreCommand::new("RES-0000-1001", 2, 1, "Back to the imported details");
+    let restored = submit_restore(&admin, &restore).unwrap();
+    assert_eq!(restored.status, 200, "{}", restored.body);
     let mut command = ImportCommand::new(&conflicting, REASON);
     command.correlation_id.push_str("-source");
     let reply = submit_import(&admin, &command).unwrap();
@@ -593,17 +631,17 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         .unwrap();
     assert_eq!(problem.subject, "RES-0000-1001");
     assert!(problem.detail.contains("raw_record"), "{}", problem.detail);
-    assert_eq!(current_revision(&kept, "RES-0000-1001").0, 1);
+    assert_eq!(current_revision(&kept, "RES-0000-1001").0, 3);
 
     // A stored record whose derived ID matches but whose content does not
-    // is an ID collision: refused, with nothing written.
-    let collides = |collection: &str, id: &str, field: &str, value: &str, original: &str| {
-        let path = format!("/api/collections/{collection}/records/{id}");
-        admin
-            .patch_json(&path, &serde_json::json!({ field: value }))
-            .unwrap()
-            .success()
-            .unwrap();
+    // is an ID collision: refused, with nothing written. Stored records
+    // cannot be changed through PocketBase, so each case edits the stopped
+    // instance's data.db directly, then puts the value back.
+    let mut running = Some((server, admin));
+    let mut collides = |table: &str, id: &str, column: &str, value: &str, original: &str| {
+        tamper(state.path(), table, column, id, value);
+        let (server, _) = running.take().unwrap();
+        let (server, admin) = restart(&root, state.path(), server);
         // (read_back itself refuses a tampered blob, so count Changes.)
         let changes = || {
             admin
@@ -615,7 +653,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         let mut command = ImportCommand::new(&conflicting, REASON);
         command
             .correlation_id
-            .push_str(&format!("-collision-{collection}"));
+            .push_str(&format!("-collision-{table}"));
         let reply = submit_import(&admin, &command).unwrap();
         assert_eq!(reply.status, 409, "{}", reply.body);
         let ImportOutcome::IdCollision { collisions, .. } = &reply.outcome else {
@@ -624,15 +662,12 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         assert!(
             collisions
                 .iter()
-                .any(|c| c.contains(collection) && c.contains(id)),
+                .any(|c| c.contains(table) && c.contains(id)),
             "{collisions:?}"
         );
         assert_eq!(changes(), before);
-        admin
-            .patch_json(&path, &serde_json::json!({ field: original }))
-            .unwrap()
-            .success()
-            .unwrap();
+        tamper(state.path(), table, column, id, original);
+        running = Some(restart(&root, state.path(), server));
     };
     let problem = &kept.problems[0];
     collides(
@@ -666,6 +701,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         "g-x:Other",
         &cad_item.key,
     );
+    let (server, admin) = running.take().unwrap();
     assert_eq!(read_back(&admin).unwrap(), kept);
     server.stop();
 }
@@ -946,12 +982,40 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
     let (server, admin, superuser) = services::start(&root, state.path()).unwrap();
     let import = CsvCatalog::new(&root).import("g-res", None).unwrap();
     applied(&submit_import(&admin, &ImportCommand::new(&import, REASON)).unwrap());
+    // Edits and a restore populate the edit migration's fields too.
+    let stored = read_back(&admin).unwrap();
+    let (number, details) = current_revision(&stored, "RES-0000-0470");
+    let mut edit = EditCommand::starting_from(&details, number, "Before the rollback");
+    edit.set_field("Value", "47R");
+    assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
+    let restore = RestoreCommand::new("RES-0000-0470", 2, 1, "Before the rollback");
+    assert_eq!(submit_restore(&admin, &restore).unwrap().status, 200);
+    let users_rule = |data_dir: &Path| -> (String, String) {
+        let database = rusqlite::Connection::open_with_flags(
+            data_dir.join("data.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        database
+            .query_row(
+                "SELECT updateRule, fields FROM _collections WHERE name = 'users'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
     server.stop();
+    let (rule, fields) = users_rule(&options.data_dir);
+    assert_eq!(
+        rule,
+        "(id = @request.auth.id) && @request.body.can_edit_catalog:isset = false"
+    );
+    assert!(fields.contains("can_edit_catalog"));
 
     let binary = native_services::pocketbase_binary(&root).unwrap();
     let mut command = std::process::Command::new(&binary);
     command
-        .args(["migrate", "down", "1"])
+        .args(["migrate", "down", "2"])
         .arg("--dir")
         .arg(&options.data_dir)
         .arg("--migrationsDir")
@@ -969,7 +1033,9 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
     .unwrap();
     let said = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.status.success() && said.contains("Reverted 1791500000_catalog_init.js"),
+        output.status.success()
+            && said.contains("Reverted 1791600000_catalog_edits.js")
+            && said.contains("Reverted 1791500000_catalog_init.js"),
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
@@ -1001,10 +1067,18 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
         "{tables:?}"
     );
     let migrations = names("SELECT file FROM _migrations");
-    assert!(!migrations.iter().any(|file| file.contains("catalog_init")));
+    assert!(
+        !migrations
+            .iter()
+            .any(|file| file.contains("catalog_init") || file.contains("catalog_edits"))
+    );
     drop(database);
+    // The users collection is back as it was: no edit mark, the old rule.
+    let (rule, fields) = users_rule(&options.data_dir);
+    assert_eq!(rule, "id = @request.auth.id");
+    assert!(!fields.contains("can_edit_catalog"), "{fields}");
 
-    // Starting again re-applies it, and the import works on the new schema.
+    // Starting again re-applies both, and the import works on the new schema.
     let server = native_services::PocketBaseServer::start(&binary, &options, &superuser).unwrap();
     let admin = PocketBaseClient::new(server.url())
         .authenticate("_superusers", &superuser.email, &superuser.password)

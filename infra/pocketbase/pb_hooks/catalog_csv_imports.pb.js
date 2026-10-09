@@ -56,6 +56,7 @@ routerAdd(
     const lib = require(`${__hooks}/catalog_lib.js`);
     const body = e.requestInfo().body || {};
     const actor = "_superusers:" + e.auth.id;
+    const actorName = e.auth.getString("email");
 
     const fail = (message) => {
       throw new BadRequestError(message);
@@ -568,6 +569,7 @@ routerAdd(
           change.set("reason", reason);
           change.set("correlation_id", correlationId);
           change.set("actor", actor);
+          change.set("actor_name", actorName);
           change.set("source_commit", sourceCommit);
           change.set("sources", JSON.stringify({ csv_file: csvFile, files: sources }));
           change.set("summary", JSON.stringify(created));
@@ -579,6 +581,7 @@ routerAdd(
         const audit = record("catalog_audit_entries", auditEntryId);
         audit.set("action", "catalog.csv-import");
         audit.set("actor", actor);
+        audit.set("actor_name", actorName);
         audit.set("change", changeId);
         audit.set("reason", reason);
         audit.set("correlation_id", correlationId);

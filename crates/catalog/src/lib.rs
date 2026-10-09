@@ -21,29 +21,37 @@
 //! - A [`Blob`] is exact bytes, addressed by their SHA-256. A symbol's blob
 //!   is the exact bytes of that one symbol in its library file, so editing
 //!   a neighbouring symbol does not revise it.
-//! - A **Change** groups the revisions one import or edit published, with
-//!   its reason. A Change always has at least one revision.
+//! - A **Change** groups the revisions one import, edit or restore
+//!   published, with its reason. A Change always has at least one revision.
+//!   A restore adds a new revision that copies an older one's details; it
+//!   never changes the older revision.
 //! - **Supplier data** (supplier part numbers and prices) is kept in a
 //!   revision's [`Source`], never in its part details, so it never creates
 //!   a revision.
 //!
 //! [`csv_import`] turns the read-only CSV catalog into a [`CsvImport`]
-//! without touching any store; [`pocketbase`] submits it to the protected
-//! import route and reads the stored records back.
+//! without touching any store; [`pocketbase`] submits imports, edits and
+//! restores to the protected routes and reads the stored records back;
+//! [`replica`] keeps a local copy of every part's current revision in step
+//! with the server; [`compare_details`] lists what differs between two
+//! revisions.
 
 mod cad_item;
 mod change;
+mod compare;
 pub mod csv_import;
 mod hash;
 mod ids;
 mod ipn;
 mod part;
 pub mod pocketbase;
+pub mod replica;
 
 pub use cad_item::{
     Blob, CadItem, CadItemDetails, CadItemKind, License, ModelReference, ModelTarget,
 };
 pub use change::ChangeKind;
+pub use compare::{DetailDifference, DifferenceKind, compare_details, describe_binding};
 pub use csv_import::{
     CadItemRevisionDraft, CsvCatalog, CsvImport, ImportProblem, PartDraft, Source, SourceFile,
 };
@@ -54,7 +62,8 @@ pub use ids::{
 };
 pub use ipn::{Ipn, IpnError};
 pub use part::{
-    CadReference, CadReferenceRole, CadReferenceTarget, DetailField, ManufacturerPart, PartDetails,
+    CadReference, CadReferenceRole, CadReferenceTarget, DetailField, ManufacturerPart,
+    PART_DETAILS_SCHEMA, PartDetails,
 };
 
 /// The schema tag every canonical JSON document in this crate carries.
