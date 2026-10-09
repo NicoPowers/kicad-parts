@@ -1,81 +1,79 @@
 # Inventory
 
-Usable stock of Managed Parts across local and partner sites. It answers who owns stock, who holds it, where it is, and what it may be used for, without claiming more precision than the evidence supports.
+The parts you have in stock, at your own sites and at partners. Inventory tracks who owns stock, who holds it, where it is, and what it can be used for. It never claims more precision than the counts support.
 
 ## Language
 
 ### Stock
 
-**Stock Holding**:
-The smallest pool of one Managed Part's stock that can be allocated on its own. Everything in it shares the same owner, custodian, site, state, and use constraints.
-_Avoid_: inventory record, lot, bin
+**Stock pool**:
+All of one part's stock that shares the same owner, holder, site, status and restrictions. It is the smallest amount you can reserve on its own.
+_Avoid_: Stock Holding, lot, bin
 
-**Stock Container**:
-Optional physical detail about a carrier of stock, such as a reel, tray, or bag, with its lot and date code.
-_Avoid_: package, holding
+**Container**:
+A physical reel, tray or bag of stock, with its lot and date code. Recording containers is optional.
+_Avoid_: Stock Container, package
 
-**Partner Stock Balance**:
-A quantity reported by a partner, with its source, as-of time, confidence, and evidence. It carries no container or lot detail the partner did not report.
-_Avoid_: partner reel, virtual lot
+**Partner count**:
+A quantity a partner reports, with when and how they reported it and how sure it is. It never invents reels or lots the partner did not report.
+_Avoid_: Partner Stock Balance, partner reel
 
-**Quantity Confidence**:
-How certain a quantity is, from an exact count to an estimate such as a partly used reel.
-_Avoid_: accuracy, precision
+**Confidence**:
+How sure a quantity is, from an exact count to an estimate such as a part-used reel.
+_Avoid_: Quantity Confidence, accuracy
 
-**In-Transit Stock**:
-The single position stock occupies between leaving one site and being received at another. It is counted exactly once.
-_Avoid_: shipped stock, pending stock
+**In transit**:
+Stock that has left one site and not yet arrived at another. It is counted once, in one place.
+_Avoid_: In-Transit Stock, shipped stock
 
 ### Who and where
 
-**Recorded Owner**:
-The party that owns the stock.
-_Avoid_: vendor, supplier, owner company
+**Owner**:
+Who owns the stock.
+_Avoid_: Recorded Owner, vendor
 
-**Custodian**:
-The party that physically holds the stock, which may differ from its Recorded Owner.
-_Avoid_: holder, location
+**Holder**:
+Who physically has the stock, which may not be the owner.
+_Avoid_: Custodian, location
 
-**Inventory Site**:
-A place where stock is held, such as the team's lab or an assembly house.
-_Avoid_: warehouse, location
+**Site**:
+A place where stock is kept, such as your lab or an assembly house.
+_Avoid_: Inventory Site, warehouse
 
-**Storage Location**:
-A specific place within an Inventory Site, such as a shelf or bin.
-_Avoid_: site, position
+**Location**:
+A spot within a site, such as a shelf or bin.
+_Avoid_: Storage Location
 
-**Stock Source**:
-The supplier or origin the stock came from.
-_Avoid_: vendor, owner
+**Supplier**:
+Where the stock was bought or came from.
+_Avoid_: Stock Source, vendor, owner
 
-### Eligibility
+### Using stock
 
-**Stock State**:
-The condition that decides whether stock can be used right now, such as available, quarantined, or in transit.
-_Avoid_: status
+**Status**:
+Whether stock can be used right now: available, quarantined or in transit.
+_Avoid_: Stock State
 
-**Use Constraint**:
-A restriction on which demand stock may satisfy, such as stock reserved by contract for one customer's builds.
-_Avoid_: restriction flag, tag
+**Restriction**:
+A limit on what stock may be used for, such as stock kept for one customer's builds.
+_Avoid_: Use Constraint, flag, tag
 
-### Changes and allocation
+**Stock move**:
+A recorded change to the quantity, owner, holder, site or location of stock. Reservations and minimum stock are never stock moves.
+_Avoid_: Stock Movement, transaction, adjustment
 
-**Stock Movement**:
-A recorded change to the quantity, Recorded Owner, Custodian, Inventory Site, or Storage Location of stock. Reservations and floors are never Stock Movements.
-_Avoid_: transaction, adjustment
-
-**Named Demand**:
+**Demand**:
 A specific need for parts, such as a number of builds of one KiCad project.
-_Avoid_: requirement, order
+_Avoid_: Named Demand, requirement, order
 
-**Material Reservation**:
-A time-bounded claim on stock for one Named Demand. It never changes the quantity on hand.
-_Avoid_: allocation, hold
+**Reservation**:
+A time-limited claim on stock for one demand. It does not change the quantity in stock.
+_Avoid_: Material Reservation, allocation, hold
 
-**Stock Floor**:
-A standing minimum to keep at an Inventory Site, such as "Keep local". It never changes the quantity on hand.
-_Avoid_: safety stock, buffer
+**Minimum stock**:
+A standing amount to keep at a site, such as "Keep local". It does not change the quantity in stock.
+_Avoid_: Stock Floor, safety stock, buffer
 
-**Allocatable Quantity**:
-What can be given to one Named Demand after eligibility, other reservations, and protected floors. There is no universal "available" total.
-_Avoid_: available, free stock
+**Available for a build**:
+How much stock one demand can use after statuses, restrictions, other reservations and minimum stock. There is no single "available" number for every build.
+_Avoid_: Allocatable Quantity, free stock
