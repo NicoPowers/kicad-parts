@@ -383,6 +383,9 @@ routerAdd(
       const updatedParts = [];
       const serverProblems = [];
       let unchangedParts = 0;
+      // The exact bytes of the substitutes.csv rows a source records.
+      const substitutesCsvRows = (source) =>
+        (Array.isArray(source.substitutes_csv_rows) ? source.substitutes_csv_rows : []).map((row) => row.raw_record);
       for (const part of parts) {
         for (const bound of part.bound) {
           if (!revisionExists(bound)) {
@@ -424,25 +427,34 @@ routerAdd(
                   path: newSource.path,
                   row_number: newSource.row_number,
                   raw_record: newSource.raw_record,
+                  substitutes_csv_rows: substitutesCsvRows(newSource),
                 }),
               ),
             );
-          } else if (previousSource.raw_record !== newSource.raw_record) {
+          } else if (
+            previousSource.raw_record !== newSource.raw_record ||
+            JSON.stringify(substitutesCsvRows(previousSource)) !== JSON.stringify(substitutesCsvRows(newSource))
+          ) {
+            // The part's row or one of its substitutes.csv rows changed while
+            // its part details did not, so only supplier data changed (such
+            // as an LCSC code or a SupplierPN).
             serverProblems.push(
               problem(
                 "csv-row-changed-without-part-details-change",
                 part.ipn,
                 newSource.path || "",
                 location,
-                `the source row of ${part.ipn} changed but its part details did not (for example only its supplier data); the new row is kept here and no revision is created`,
+                `the CSV rows of ${part.ipn} changed but its part details did not (for example only its supplier data); the new rows are kept here and no revision is created`,
                 // Only the rows identify it, so a later file version with
-                // the same row adds nothing.
+                // the same rows adds nothing.
                 JSON.stringify({
                   current_revision_number: currentRevision.getInt("number"),
                   path: newSource.path,
                   row_number: newSource.row_number,
                   previous_raw_record: previousSource.raw_record,
                   raw_record: newSource.raw_record,
+                  previous_substitutes_csv_rows: substitutesCsvRows(previousSource),
+                  substitutes_csv_rows: substitutesCsvRows(newSource),
                 }),
               ),
             );
@@ -469,6 +481,7 @@ routerAdd(
                 path: part.parsedSource.path,
                 row_number: part.parsedSource.row_number,
                 raw_record: part.parsedSource.raw_record,
+                substitutes_csv_rows: substitutesCsvRows(part.parsedSource),
                 snapshot: part.snapshot,
               }),
             ),

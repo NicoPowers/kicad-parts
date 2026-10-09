@@ -1,4 +1,4 @@
-//! The zero-loss report: every source field, substitute, CAD reference and
+//! The zero-loss report: every source field, substitutes.csv row, CAD reference and
 //! oracle diagnostic of one CSV catalog file, found again in the Catalog
 //! records read back from PocketBase.
 //!
@@ -17,7 +17,8 @@
 //! separately only to show where each `MPN` and `Manufacturer` went.
 
 use catalog::csv_import::{
-    CadItemSource, ColumnRoute, Source, SubstituteRoute, route_column, route_substitute_column,
+    CadItemSource, ColumnRoute, Source, SubstitutesCsvColumn, route_column,
+    route_substitutes_csv_column,
 };
 use catalog::pocketbase::{CatalogReadback, StoredImportProblem, StoredPartRevision};
 use catalog::{
@@ -55,7 +56,7 @@ pub struct ZeroLossReport {
     /// goes there instead).
     pub column_routes: Vec<(String, String)>,
     pub parts: usize,
-    pub substitutes: SubstitutesAccount,
+    pub substitutes_csv_rows: SubstitutesCsvAccount,
     pub cad_items: Vec<CadItemAccount>,
     pub model_references: Vec<ModelAccount>,
     pub oracle_diagnostics: Vec<ProblemAccount>,
@@ -95,14 +96,14 @@ pub struct FieldAccount {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub struct SubstitutesAccount {
+pub struct SubstitutesCsvAccount {
     pub path: String,
     pub oracle_byte_sha256: String,
     pub change_byte_sha256: Vec<String>,
     pub rows: usize,
     pub rows_in_scope: usize,
     pub fields_in_scope: usize,
-    /// In-scope substitute fields per destination.
+    /// Fields of in-scope substitutes.csv rows, per destination.
     pub destinations: BTreeMap<String, usize>,
 }
 
@@ -263,7 +264,7 @@ impl<'a> Reporter<'a> {
         // Changes and the source files they recorded.
         let mut changes = Vec::new();
         let mut csv_hashes = BTreeSet::new();
-        let mut substitute_hashes = BTreeSet::new();
+        let mut substitutes_csv_hashes = BTreeSet::new();
         let mut header_raw = None;
         for change in &readback.changes {
             let audit_entries = readback
@@ -304,7 +305,7 @@ impl<'a> Reporter<'a> {
                     }
                     csv_hashes.insert(sha);
                 } else if path == oracle.substitutes.path {
-                    substitute_hashes.insert(sha);
+                    substitutes_csv_hashes.insert(sha);
                 }
             }
             changes.push(ChangeAccount {
@@ -393,7 +394,7 @@ impl<'a> Reporter<'a> {
                 let snapshot = &current_revision.snapshot;
                 // The row made the main manufacturer part only if
                 // it has the columns and was not kept as an incomplete one;
-                // otherwise the first entry is a substitute.
+                // otherwise the first entry comes from substitutes.csv.
                 let incomplete = problems.iter().find(|problem| {
                     problem.code == "incomplete-main-manufacturer-part"
                         && problem.subject == snapshot.ipn
@@ -546,10 +547,10 @@ impl<'a> Reporter<'a> {
             ));
         }
 
-        let substitutes = self.substitutes(
+        let substitutes_csv_rows = self.substitutes_csv_rows(
             &current_revisions,
             &scope_ipns,
-            &substitute_hashes,
+            &substitutes_csv_hashes,
             &rows_with_main_part,
             &mut explained_problems,
         );
@@ -605,7 +606,7 @@ impl<'a> Reporter<'a> {
                 })
                 .collect(),
             parts: matched_heads.len(),
-            substitutes,
+            substitutes_csv_rows,
             cad_items,
             model_references,
             oracle_diagnostics,
@@ -629,7 +630,7 @@ impl<'a> Reporter<'a> {
             destinations: BTreeMap::new(),
             column_routes: vec![],
             parts: 0,
-            substitutes: SubstitutesAccount::default(),
+            substitutes_csv_rows: SubstitutesCsvAccount::default(),
             cad_items: vec![],
             model_references: vec![],
             oracle_diagnostics: vec![],
@@ -640,14 +641,14 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    fn substitutes(
+    fn substitutes_csv_rows(
         &mut self,
         current_revisions: &[CurrentRevision],
         scope: &BTreeSet<String>,
         hashes: &BTreeSet<String>,
         rows_with_main_part: &BTreeMap<String, bool>,
         explained: &mut BTreeSet<String>,
-    ) -> SubstitutesAccount {
+    ) -> SubstitutesCsvAccount {
         let oracle = self.oracle;
         let readback = self.readback;
         let document = &oracle.substitutes;
@@ -658,12 +659,12 @@ impl<'a> Reporter<'a> {
             ));
         }
         let ipn_column = document.headers.iter().position(|header| header == "IPN");
-        let mut account = SubstitutesAccount {
+        let mut account = SubstitutesCsvAccount {
             path: document.path.clone(),
             oracle_byte_sha256: document.byte_sha256.clone(),
             change_byte_sha256: hashes.iter().cloned().collect(),
             rows: document.rows.len(),
-            ..SubstitutesAccount::default()
+            ..SubstitutesCsvAccount::default()
         };
         for (index, row) in document.rows.iter().enumerate() {
             let row_number = index + 1;
@@ -685,7 +686,7 @@ impl<'a> Reporter<'a> {
             let found = current.and_then(|current| {
                 let position = current
                     .source
-                    .substitutes
+                    .substitutes_csv_rows
                     .iter()
                     .position(|source| source.row_number == row_number)?;
                 let manufacturer_part =
@@ -693,7 +694,7 @@ impl<'a> Reporter<'a> {
                 Some((
                     current,
                     manufacturer_part,
-                    &current.source.substitutes[position],
+                    &current.source.substitutes_csv_rows[position],
                 ))
             });
             let Some((current, manufacturer_part, source)) = found else {
@@ -721,7 +722,7 @@ impl<'a> Reporter<'a> {
                             .or_default() += row.len();
                     }
                     None => self.problem(format!(
-                        "substitute row {row_number} of {ipn} is neither a manufacturer part nor an import problem"
+                        "substitutes.csv row {row_number} of {ipn} is neither a manufacturer part nor an import problem"
                     )),
                 }
                 continue;
@@ -731,33 +732,33 @@ impl<'a> Reporter<'a> {
             padded.resize(row.len(), String::new());
             if &padded != row {
                 self.problem(format!(
-                    "substitute row {row_number} of {ipn}: its source does not hold the oracle row"
+                    "substitutes.csv row {row_number} of {ipn}: its source does not hold the oracle row"
                 ));
             }
             let part_datasheet = current.snapshot.field("Datasheet").unwrap_or_default();
             for (column, value) in document.headers.iter().zip(row) {
-                let (destination, stored) = match route_substitute_column(column) {
-                    SubstituteRoute::Ipn => (MANUFACTURER_PARTS, Some(ipn.clone())),
-                    SubstituteRoute::Mpn => {
+                let (destination, stored) = match route_substitutes_csv_column(column) {
+                    SubstitutesCsvColumn::Ipn => (MANUFACTURER_PARTS, Some(ipn.clone())),
+                    SubstitutesCsvColumn::Mpn => {
                         (MANUFACTURER_PARTS, Some(manufacturer_part.mpn.clone()))
                     }
-                    SubstituteRoute::Manufacturer => (
+                    SubstitutesCsvColumn::Manufacturer => (
                         MANUFACTURER_PARTS,
                         Some(manufacturer_part.manufacturer.clone()),
                     ),
                     // A part has one datasheet. A blank one adds nothing and
                     // the part's own is already in its part details; any
                     // other must be an import problem.
-                    SubstituteRoute::Datasheet if value.is_empty() => {
+                    SubstitutesCsvColumn::Datasheet if value.is_empty() => {
                         (PART_DETAILS, Some(String::new()))
                     }
-                    SubstituteRoute::Datasheet if value == part_datasheet => {
+                    SubstitutesCsvColumn::Datasheet if value == part_datasheet => {
                         (PART_DETAILS, Some(part_datasheet.to_owned()))
                     }
-                    SubstituteRoute::Datasheet => {
+                    SubstitutesCsvColumn::Datasheet => {
                         let location = format!("rows[{row_number}]");
                         let kept = readback.problems.iter().find(|problem| {
-                            problem.code == "substitute-datasheet-differs"
+                            problem.code == "substitutes-csv-datasheet-differs"
                                 && problem.subject == ipn
                                 && problem.location == location
                         });
@@ -769,7 +770,7 @@ impl<'a> Reporter<'a> {
                         });
                         (IMPORT_PROBLEM, stored)
                     }
-                    SubstituteRoute::SupplierData => (
+                    SubstitutesCsvColumn::SupplierData => (
                         SUPPLIER_DATA,
                         source
                             .supplier_data
@@ -777,7 +778,7 @@ impl<'a> Reporter<'a> {
                             .find(|fact| &fact.column == column)
                             .map(|fact| fact.value.clone()),
                     ),
-                    SubstituteRoute::Unknown => ("lost", None),
+                    SubstitutesCsvColumn::Unknown => ("lost", None),
                 };
                 *account
                     .destinations
@@ -785,7 +786,7 @@ impl<'a> Reporter<'a> {
                     .or_default() += 1;
                 if stored.as_deref() != Some(value.as_str()) {
                     self.problem(format!(
-                        "substitute row {row_number} field {column}: oracle {value:?}, stored {stored:?} in {destination}"
+                        "substitutes.csv row {row_number} field {column}: oracle {value:?}, stored {stored:?} in {destination}"
                     ));
                 }
             }

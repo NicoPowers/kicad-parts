@@ -5,7 +5,7 @@
 //! always give the same [`CsvImport`].
 //!
 //! Every source field ends up in exactly one place (see [`route_column`]
-//! and [`route_substitute_column`]):
+//! and [`route_substitutes_csv_column`]):
 //!
 //! - the part details of the revision: the IPN, every column that
 //!   describes the part, and the manufacturer parts (`MPN` and
@@ -13,7 +13,8 @@
 //! - supplier data, kept in the revision's [`Source`] and never in its
 //!   part details (supplier part numbers and prices);
 //! - an import problem, for anything the import cannot place, such as a
-//!   row that cannot become a part or a substitute with another datasheet.
+//!   row that cannot become a part or a substitutes.csv row with another
+//!   datasheet.
 //!
 //! The CSV file name (`g-res`) is only part of the source. It is neither a
 //! category nor the IPN prefix.
@@ -43,7 +44,7 @@ use std::path::{Path, PathBuf};
 
 /// The schema tag of [`Source`] and [`CadItemSource`].
 pub const SOURCE_SCHEMA: &str = "kicad-parts/source/1";
-/// The substitutes list of the CSV catalog.
+/// The CSV catalog file that lists extra manufacturer parts per IPN.
 pub const SUBSTITUTES_PATH: &str = "database/substitutes.csv";
 /// The `source` of everything this module produces.
 pub const CSV_CATALOG_SOURCE: &str = "csv-catalog";
@@ -98,9 +99,9 @@ pub fn route_column(name: &str) -> ColumnRoute {
     }
 }
 
-/// Where a substitutes column's value goes.
+/// Where a substitutes.csv column's value goes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SubstituteRoute {
+pub enum SubstitutesCsvColumn {
     Ipn,
     Mpn,
     Manufacturer,
@@ -113,14 +114,14 @@ pub enum SubstituteRoute {
     Unknown,
 }
 
-pub fn route_substitute_column(name: &str) -> SubstituteRoute {
+pub fn route_substitutes_csv_column(name: &str) -> SubstitutesCsvColumn {
     match name {
-        "IPN" => SubstituteRoute::Ipn,
-        "MPN" => SubstituteRoute::Mpn,
-        "Manufacturer" => SubstituteRoute::Manufacturer,
-        "Datasheet" => SubstituteRoute::Datasheet,
-        "Supplier" | "SupplierPN" => SubstituteRoute::SupplierData,
-        _ => SubstituteRoute::Unknown,
+        "IPN" => SubstitutesCsvColumn::Ipn,
+        "MPN" => SubstitutesCsvColumn::Mpn,
+        "Manufacturer" => SubstitutesCsvColumn::Manufacturer,
+        "Datasheet" => SubstitutesCsvColumn::Datasheet,
+        "Supplier" | "SupplierPN" => SubstitutesCsvColumn::SupplierData,
+        _ => SubstitutesCsvColumn::Unknown,
     }
 }
 
@@ -164,12 +165,12 @@ pub struct Source {
     pub supplier_data: Vec<SupplierData>,
     /// Every `substitutes.csv` row that added a manufacturer part, in order
     /// (the main manufacturer part comes from the row itself).
-    pub substitutes: Vec<SubstituteSource>,
+    pub substitutes_csv_rows: Vec<SubstitutesCsvRow>,
 }
 
 /// One `substitutes.csv` row, exactly, including its datasheet.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SubstituteSource {
+pub struct SubstitutesCsvRow {
     pub path: String,
     pub byte_sha256: String,
     pub row_number: usize,
@@ -266,10 +267,10 @@ pub struct CsvImport {
     pub cad_item_revisions: Vec<CadItemRevisionDraft>,
     pub parts: Vec<PartDraft>,
     pub problems: Vec<ImportProblem>,
-    /// Rows in the substitutes list.
-    pub substitute_rows: usize,
+    /// Rows in substitutes.csv.
+    pub substitutes_csv_row_count: usize,
     /// Of those, the rows naming one of this import's IPNs.
-    pub substitute_rows_in_scope: usize,
+    pub substitutes_csv_rows_in_scope: usize,
 }
 
 impl CsvImport {
@@ -420,13 +421,13 @@ impl<'a> Planner<'a> {
             .expect("just read")
             .header_raw = Some(table.header_raw.clone());
 
-        let (substitute_bytes, substitutes_sha) =
+        let (substitutes_csv_bytes, substitutes_csv_sha) =
             self.read_source("substitutes-csv", SUBSTITUTES_PATH)?;
-        let substitutes = parse_csv(SUBSTITUTES_PATH, &substitute_bytes)?;
+        let substitutes_csv = parse_csv(SUBSTITUTES_PATH, &substitutes_csv_bytes)?;
         self.sources
             .get_mut(SUBSTITUTES_PATH)
             .expect("just read")
-            .header_raw = Some(substitutes.header_raw.clone());
+            .header_raw = Some(substitutes_csv.header_raw.clone());
 
         let ipn_column = table.headers.iter().position(|header| header == "IPN");
         let mut parts = Vec::new();
@@ -498,27 +499,27 @@ impl<'a> Planner<'a> {
             parts.push((ipn, record));
         }
 
-        // Substitutes, grouped by the IPN they serve (file order kept).
+        // substitutes.csv rows, grouped by the IPN they serve (file order kept).
         let mut by_ipn: BTreeMap<String, Vec<&CsvRecord>> = BTreeMap::new();
-        let substitute_ipn = substitutes
+        let substitutes_csv_ipn = substitutes_csv
             .headers
             .iter()
             .position(|header| header == "IPN");
-        let unknown_columns: Vec<&String> = substitutes
+        let unknown_columns: Vec<&String> = substitutes_csv
             .headers
             .iter()
-            .filter(|header| route_substitute_column(header) == SubstituteRoute::Unknown)
+            .filter(|header| route_substitutes_csv_column(header) == SubstitutesCsvColumn::Unknown)
             .collect();
-        let mut substitute_rows_in_scope = 0;
-        for record in &substitutes.records {
-            let ipn = substitute_ipn
+        let mut substitutes_csv_rows_in_scope = 0;
+        for record in &substitutes_csv.records {
+            let ipn = substitutes_csv_ipn
                 .and_then(|column| record.fields.get(column))
                 .cloned()
                 .unwrap_or_default();
             let in_scope = accepted.iter().any(|accepted| accepted.as_str() == ipn);
             if !in_scope {
-                // Substitutes for other CSV files belong to their imports.
-                // A substitute of this IPN prefix with no matching row would
+                // substitutes.csv rows for other CSV files belong to their imports.
+                // A substitutes.csv row of this IPN prefix with no matching part would
                 // otherwise vanish, so it is an import problem.
                 let prefixes: BTreeSet<&str> = accepted.iter().map(Ipn::prefix).collect();
                 let orphan = Ipn::parse(&ipn)
@@ -526,17 +527,17 @@ impl<'a> Planner<'a> {
                     .unwrap_or(false);
                 if orphan {
                     self.record_problem(ImportProblem::new(
-                        "substitute-without-part",
+                        "substitutes-csv-row-without-part",
                         &ipn,
                         SUBSTITUTES_PATH,
                         &format!("rows[{}]", record.row_number),
                         format!(
-                            "substitute row {} names {ipn}, which is not a row of {catalog_path}",
+                            "substitutes.csv row {} names {ipn}, which is not a row of {catalog_path}",
                             record.row_number
                         ),
                         json!({
                             "row_number": record.row_number,
-                            "headers": substitutes.headers,
+                            "headers": substitutes_csv.headers,
                             "record": record.fields,
                             "raw_record": record.raw,
                         }),
@@ -544,20 +545,20 @@ impl<'a> Planner<'a> {
                 }
                 continue;
             }
-            substitute_rows_in_scope += 1;
-            if !unknown_columns.is_empty() || record.fields.len() > substitutes.headers.len() {
+            substitutes_csv_rows_in_scope += 1;
+            if !unknown_columns.is_empty() || record.fields.len() > substitutes_csv.headers.len() {
                 self.record_problem(ImportProblem::new(
-                    "substitute-has-unknown-columns",
+                    "substitutes-csv-row-has-unknown-columns",
                     &ipn,
                     SUBSTITUTES_PATH,
                     &format!("rows[{}]", record.row_number),
                     format!(
-                        "substitute row {} has columns this import does not understand; it is kept here instead of becoming a manufacturer part",
+                        "substitutes.csv row {} has columns this import does not understand; it is kept here instead of becoming a manufacturer part",
                         record.row_number
                     ),
                     json!({
                         "row_number": record.row_number,
-                        "headers": substitutes.headers,
+                        "headers": substitutes_csv.headers,
                         "record": record.fields,
                         "raw_record": record.raw,
                     }),
@@ -569,16 +570,16 @@ impl<'a> Planner<'a> {
 
         let mut drafts = Vec::new();
         for (ipn, record) in parts {
-            let substitutes_for = by_ipn.remove(ipn.as_str()).unwrap_or_default();
+            let substitutes_csv_rows_for = by_ipn.remove(ipn.as_str()).unwrap_or_default();
             drafts.push(self.part(
                 &catalog_path,
                 &catalog_sha,
                 &table.headers,
                 &ipn,
                 record,
-                &substitutes.headers,
-                &substitutes_sha,
-                &substitutes_for,
+                &substitutes_csv.headers,
+                &substitutes_csv_sha,
+                &substitutes_csv_rows_for,
             )?);
         }
 
@@ -609,8 +610,8 @@ impl<'a> Planner<'a> {
             cad_item_revisions: self.cad_item_revisions,
             parts: drafts,
             problems: self.problems.into_values().collect(),
-            substitute_rows: substitutes.records.len(),
-            substitute_rows_in_scope,
+            substitutes_csv_row_count: substitutes_csv.records.len(),
+            substitutes_csv_rows_in_scope,
         })
     }
 
@@ -622,9 +623,9 @@ impl<'a> Planner<'a> {
         headers: &[String],
         ipn: &Ipn,
         record: &CsvRecord,
-        substitute_headers: &[String],
-        substitutes_sha: &str,
-        substitutes: &[&CsvRecord],
+        substitutes_csv_headers: &[String],
+        substitutes_csv_sha: &str,
+        rows_for_part: &[&CsvRecord],
     ) -> Result<PartDraft, ImportError> {
         let value = |index: usize| record.fields.get(index).cloned().unwrap_or_default();
         let mut fields = Vec::new();
@@ -675,34 +676,40 @@ impl<'a> Planner<'a> {
             .find(|field| field.name == "Datasheet")
             .map(|field| field.value.clone())
             .unwrap_or_default();
-        let mut substitute_sources = Vec::new();
-        for substitute in substitutes {
-            let column = |route: SubstituteRoute| {
-                substitute_headers
+        let mut substitutes_csv_rows = Vec::new();
+        for substitutes_row in rows_for_part {
+            let column = |route: SubstitutesCsvColumn| {
+                substitutes_csv_headers
                     .iter()
-                    .position(|header| route_substitute_column(header) == route)
-                    .map(|index| substitute.fields.get(index).cloned().unwrap_or_default())
+                    .position(|header| route_substitutes_csv_column(header) == route)
+                    .map(|index| {
+                        substitutes_row
+                            .fields
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_default()
+                    })
             };
             let candidate = ManufacturerPart {
-                manufacturer: column(SubstituteRoute::Manufacturer).unwrap_or_default(),
-                mpn: column(SubstituteRoute::Mpn).unwrap_or_default(),
+                manufacturer: column(SubstitutesCsvColumn::Manufacturer).unwrap_or_default(),
+                mpn: column(SubstitutesCsvColumn::Mpn).unwrap_or_default(),
             };
-            let location = format!("rows[{}]", substitute.row_number);
+            let location = format!("rows[{}]", substitutes_row.row_number);
             let detail = json!({
-                "row_number": substitute.row_number,
-                "headers": substitute_headers,
-                "record": substitute.fields,
-                "raw_record": substitute.raw,
+                "row_number": substitutes_row.row_number,
+                "headers": substitutes_csv_headers,
+                "record": substitutes_row.fields,
+                "raw_record": substitutes_row.raw,
             });
             if candidate.mpn.is_empty() || candidate.manufacturer.is_empty() {
                 self.record_problem(ImportProblem::new(
-                    "incomplete-substitute",
+                    "incomplete-substitutes-csv-row",
                     ipn.as_str(),
                     SUBSTITUTES_PATH,
                     &location,
                     format!(
-                        "substitute row {} for {ipn} lacks a manufacturer or MPN",
-                        substitute.row_number
+                        "substitutes.csv row {} for {ipn} lacks a manufacturer or MPN",
+                        substitutes_row.row_number
                     ),
                     detail,
                 ));
@@ -720,8 +727,8 @@ impl<'a> Planner<'a> {
                     SUBSTITUTES_PATH,
                     &location,
                     format!(
-                        "substitute row {} repeats {} {} for {ipn}",
-                        substitute.row_number, candidate.manufacturer, candidate.mpn
+                        "substitutes.csv row {} repeats {} {} for {ipn}",
+                        substitutes_row.row_number, candidate.manufacturer, candidate.mpn
                     ),
                     detail,
                 ));
@@ -729,40 +736,44 @@ impl<'a> Planner<'a> {
             }
             // Its datasheet is kept in the row's source either way; one that
             // differs from the part's is a problem for someone to resolve.
-            let datasheet = column(SubstituteRoute::Datasheet).unwrap_or_default();
+            let datasheet = column(SubstitutesCsvColumn::Datasheet).unwrap_or_default();
             if !datasheet.is_empty() && datasheet != part_datasheet {
                 self.record_problem(ImportProblem::new(
-                    "substitute-datasheet-differs",
+                    "substitutes-csv-datasheet-differs",
                     ipn.as_str(),
                     SUBSTITUTES_PATH,
                     &location,
                     format!(
-                        "substitute row {} for {ipn} names a different datasheet; a part has one datasheet, so the part's is kept and this one is recorded here",
-                        substitute.row_number
+                        "substitutes.csv row {} for {ipn} names a different datasheet; a part has one datasheet, so the part's is kept and this one is recorded here",
+                        substitutes_row.row_number
                     ),
                     json!({
-                        "row_number": substitute.row_number,
+                        "row_number": substitutes_row.row_number,
                         "datasheet": datasheet,
                         "part_datasheet": part_datasheet,
                     }),
                 ));
             }
             manufacturer_parts.push(candidate);
-            substitute_sources.push(SubstituteSource {
+            substitutes_csv_rows.push(SubstitutesCsvRow {
                 path: SUBSTITUTES_PATH.to_owned(),
-                byte_sha256: substitutes_sha.to_owned(),
-                row_number: substitute.row_number,
-                record: substitute.fields.clone(),
-                raw_record: substitute.raw.clone(),
-                supplier_data: substitute_headers
+                byte_sha256: substitutes_csv_sha.to_owned(),
+                row_number: substitutes_row.row_number,
+                record: substitutes_row.fields.clone(),
+                raw_record: substitutes_row.raw.clone(),
+                supplier_data: substitutes_csv_headers
                     .iter()
                     .enumerate()
                     .filter(|(_, header)| {
-                        route_substitute_column(header) == SubstituteRoute::SupplierData
+                        route_substitutes_csv_column(header) == SubstitutesCsvColumn::SupplierData
                     })
                     .map(|(index, header)| SupplierData {
                         column: header.clone(),
-                        value: substitute.fields.get(index).cloned().unwrap_or_default(),
+                        value: substitutes_row
+                            .fields
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_default(),
                     })
                     .collect(),
             });
@@ -812,7 +823,7 @@ impl<'a> Planner<'a> {
             record: record.fields.clone(),
             raw_record: record.raw.clone(),
             supplier_data,
-            substitutes: substitute_sources,
+            substitutes_csv_rows,
         };
         let snapshot_json = snapshot.canonical_json();
         Ok(PartDraft {

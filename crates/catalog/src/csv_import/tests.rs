@@ -5,7 +5,7 @@ const SYMBOLS: &str = "(kicad_symbol_lib\n\t(version 20241209)\n\t(symbol \"R_US
 const FOOTPRINT: &str = "(footprint \"R_0603\"\n\t(version 20241229)\n\t(model \"${KICAD9_3DMODEL_DIR}/R.step\")\n\t(model \"${GITPLM_PARTS}/3d-models/local.step\")\n\t(model \"${GITPLM_3DMODELS}/gone.step\")\n)\n";
 
 /// A small repository with every case the import must keep.
-fn fixture(csv: &str, substitutes: &str) -> tempfile::TempDir {
+fn fixture(csv: &str, substitutes_csv_rows: &str) -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     let path = root.path();
     for directory in [
@@ -17,7 +17,7 @@ fn fixture(csv: &str, substitutes: &str) -> tempfile::TempDir {
         fs::create_dir_all(path.join(directory)).unwrap();
     }
     fs::write(path.join("database/g-res.csv"), csv).unwrap();
-    fs::write(path.join("database/substitutes.csv"), substitutes).unwrap();
+    fs::write(path.join("database/substitutes.csv"), substitutes_csv_rows).unwrap();
     fs::write(path.join("symbols/g-pas.kicad_sym"), SYMBOLS).unwrap();
     fs::write(
         path.join("footprints/g-res.pretty/R_0603.kicad_mod"),
@@ -35,8 +35,8 @@ fn routes_every_field_and_binds_exact_cad_items() {
     let csv = format!(
         "{HEADER}RES-0000-0470,MPN47,Yageo,47,g-pas:R_US,g-res:R_0603,C23182,0.10\nRES-0000-1000,MPN100,Yageo,100,Device:R,g-res:R_0603;g-res:Missing\n"
     );
-    let substitutes = "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\nRES-0000-0470,ALT47,Vishay,https://ds,DigiKey,541-47\nRES-0000-0470,MPN47,Yageo,,,\nRES-0000-9999,X,Y,,,\nCAP-0000-0001,C,D,,,\n";
-    let root = fixture(&csv, substitutes);
+    let substitutes_csv_rows = "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\nRES-0000-0470,ALT47,Vishay,https://ds,DigiKey,541-47\nRES-0000-0470,MPN47,Yageo,,,\nRES-0000-9999,X,Y,,,\nCAP-0000-0001,C,D,,,\n";
+    let root = fixture(&csv, substitutes_csv_rows);
     let import = CsvCatalog::new(root.path())
         .import("g-res", Some("abc123".into()))
         .unwrap();
@@ -78,9 +78,9 @@ fn routes_every_field_and_binds_exact_cad_items() {
         ]
     );
     assert!(!first.snapshot_json.contains("C23182"));
-    assert_eq!(first.source.substitutes.len(), 1);
+    assert_eq!(first.source.substitutes_csv_rows.len(), 1);
     assert_eq!(
-        first.source.substitutes[0].supplier_data[1],
+        first.source.substitutes_csv_rows[0].supplier_data[1],
         SupplierData {
             column: "SupplierPN".into(),
             value: "541-47".into()
@@ -211,9 +211,9 @@ fn routes_every_field_and_binds_exact_cad_items() {
         .collect();
     for expected in [
         ("duplicate-manufacturer-part", "rows[2]"),
-        // The part has no datasheet, so the substitute's is another one.
-        ("substitute-datasheet-differs", "rows[1]"),
-        ("substitute-without-part", "rows[3]"),
+        // The part has no datasheet, so the substitutes.csv row's is another one.
+        ("substitutes-csv-datasheet-differs", "rows[1]"),
+        ("substitutes-csv-row-without-part", "rows[3]"),
         (
             "unresolved-3d-model-reference",
             "model=${KICAD9_3DMODEL_DIR}/R.step",
@@ -229,16 +229,19 @@ fn routes_every_field_and_binds_exact_cad_items() {
     ] {
         assert!(codes.contains(&expected), "{expected:?} not in {codes:?}");
     }
-    // A substitute of another IPN prefix is another import's business.
+    // A substitutes.csv row of another IPN prefix is another import's business.
     assert!(!codes.iter().any(|(_, location)| *location == "rows[4]"));
     assert_eq!(
-        (import.substitute_rows, import.substitute_rows_in_scope),
+        (
+            import.substitutes_csv_row_count,
+            import.substitutes_csv_rows_in_scope
+        ),
         (4, 2)
     );
 }
 
 #[test]
-fn rows_that_cannot_become_parts_are_kept_as_diagnostics() {
+fn rows_that_cannot_become_parts_are_kept_as_import_problems() {
     let csv = format!(
         "{HEADER}res-0000-0001,M,Y,1,,,,\nRES-0000-0002,M,Y,2,,,,\nRES-0000-0002,M2,Y,2,,,,\n,,,,,,,\nRES-0000-0003,M,Y,3,,,,,extra\nRES-0000-0004,,Y,4,,,,\n"
     );
@@ -272,7 +275,7 @@ fn rows_that_cannot_become_parts_are_kept_as_diagnostics() {
 }
 
 #[test]
-fn the_real_resistor_grouping_imports_deterministically_without_writing() {
+fn the_resistor_csv_file_imports_deterministically_without_writing() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let inputs = [
         "database/g-res.csv",
@@ -301,7 +304,7 @@ fn the_real_resistor_grouping_imports_deterministically_without_writing() {
 }
 
 #[test]
-fn refuses_unknown_groupings() {
+fn refuses_names_that_are_not_csv_catalog_files() {
     let root = fixture(HEADER, "IPN\n");
     let catalog = CsvCatalog::new(root.path());
     assert!(catalog.import("res", None).is_err());
@@ -347,11 +350,11 @@ fn model_references_classify_like_the_oracle() {
 #[test]
 fn a_part_has_one_datasheet() {
     let csv = "IPN,MPN,Manufacturer,Datasheet\nRES-0000-0470,MPN47,Yageo,https://part\n";
-    let substitutes = "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\nRES-0000-0470,A,Vishay,,,\nRES-0000-0470,B,Bourns,https://part,,\nRES-0000-0470,C,Panasonic,https://other,,\n";
-    let root = fixture(csv, substitutes);
+    let substitutes_csv_rows = "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\nRES-0000-0470,A,Vishay,,,\nRES-0000-0470,B,Bourns,https://part,,\nRES-0000-0470,C,Panasonic,https://other,,\n";
+    let root = fixture(csv, substitutes_csv_rows);
     let import = CsvCatalog::new(root.path()).import("g-res", None).unwrap();
     let details = &import.parts[0].snapshot;
-    // Every substitute is a manufacturer part; only the part keeps a
+    // Every substitutes.csv row is a manufacturer part; only the part keeps a
     // datasheet.
     let mpns: Vec<&str> = details
         .manufacturer_parts
@@ -367,7 +370,7 @@ fn a_part_has_one_datasheet() {
         .iter()
         .map(|problem| (problem.code.as_str(), problem.location.as_str()))
         .collect();
-    assert_eq!(problems, [("substitute-datasheet-differs", "rows[3]")]);
-    let kept = &import.parts[0].source.substitutes[2];
+    assert_eq!(problems, [("substitutes-csv-datasheet-differs", "rows[3]")]);
+    let kept = &import.parts[0].source.substitutes_csv_rows[2];
     assert_eq!(kept.record[3], "https://other");
 }

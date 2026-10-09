@@ -1,4 +1,4 @@
-//! `catalog-import pilot [REPOSITORY_ROOT] [GROUPING]`
+//! `catalog-import pilot [REPOSITORY_ROOT] [CSV_FILE]`
 //!
 //! Imports one CSV catalog file (default `g-res`) into a disposable,
 //! loopback-only PocketBase, imports it again to show nothing new is
@@ -21,7 +21,7 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) != Some("pilot") {
-        return Err("usage: catalog-import pilot [REPOSITORY_ROOT] [GROUPING]".into());
+        return Err("usage: catalog-import pilot [REPOSITORY_ROOT] [CSV_FILE]".into());
     }
     let root = args
         .get(1)
@@ -33,9 +33,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let import = services::plan(&root, csv_file)?;
-    let reason = format!(
-        "Import the CSV catalog csv_file {csv_file} (database/{csv_file}.csv) into canonical part revisions"
-    );
+    let reason = format!("Import the parts from database/{csv_file}.csv");
 
     let state = tempfile::tempdir()?;
     let (server, admin, _superuser) = services::start(&services::repository_root(), state.path())?;

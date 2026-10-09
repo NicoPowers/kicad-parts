@@ -14,8 +14,7 @@ use collaboration::{CollabError, PocketBaseClient};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const REASON: &str =
-    "Import the CSV catalog resistor csv_file (database/g-res.csv) into canonical part revisions";
+const REASON: &str = "Import the resistors from database/g-res.csv";
 
 /// Every file the resistor import reads.
 const INPUTS: [&str; 4] = [
@@ -82,7 +81,7 @@ fn current_revision(readback: &CatalogReadback, ipn: &str) -> (u32, PartDetails)
 }
 
 #[test]
-fn the_resistor_grouping_imports_idempotently_and_losslessly() {
+fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     let root = repository();
     let before = input_hashes(&root);
     let state = tempfile::tempdir().unwrap();
@@ -217,7 +216,10 @@ fn the_resistor_grouping_imports_idempotently_and_losslessly() {
     assert_eq!(report.oracle_diagnostics.len(), 1);
     assert!(report.other_problems.is_empty());
     assert_eq!(
-        (report.substitutes.rows, report.substitutes.rows_in_scope),
+        (
+            report.substitutes_csv_rows.rows,
+            report.substitutes_csv_rows.rows_in_scope
+        ),
         (0, 0)
     );
 
@@ -493,6 +495,45 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     assert!(kept.detail.contains("C99999"), "{}", kept.detail);
     assert_eq!(current_revision(&supplier, "RES-0000-1000").0, 1);
 
+    // The same holds for a substitutes.csv row: changing only its SupplierPN
+    // makes no Change, and the new row is kept in an import problem.
+    let substitutes_csv = copy.path().join("database/substitutes.csv");
+    let header = fs::read_to_string(&substitutes_csv).unwrap();
+    fs::write(
+        &substitutes_csv,
+        format!("{header}RES-0000-1002,ALT-10K,Vishay,,DigiKey,541-47-ND\n"),
+    )
+    .unwrap();
+    let with_row = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
+    let reply = submit_import(&admin, &ImportCommand::new(&with_row, REASON)).unwrap();
+    assert_eq!(applied(&reply).updated_parts, 1);
+    fs::write(
+        &substitutes_csv,
+        format!("{header}RES-0000-1002,ALT-10K,Vishay,,DigiKey,541-47-CHANGED\n"),
+    )
+    .unwrap();
+    let supplier_pn_only = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
+    let reply = submit_import(&admin, &ImportCommand::new(&supplier_pn_only, REASON)).unwrap();
+    let (audit_entry_id, recorded) = nothing_changed(&reply);
+    assert_eq!(recorded, 1);
+    let supplier = read_back(&admin).unwrap();
+    let kept = supplier
+        .problems
+        .iter()
+        .find(|problem| {
+            problem.code == "csv-row-changed-without-part-details-change"
+                && problem.subject == "RES-0000-1002"
+        })
+        .unwrap();
+    assert_eq!(kept.audit_entry, audit_entry_id);
+    assert!(
+        kept.detail.contains("541-47-CHANGED") && kept.detail.contains("541-47-ND"),
+        "{}",
+        kept.detail
+    );
+    assert_eq!(current_revision(&supplier, "RES-0000-1002").0, 2);
+    let changes_before_conflict = supplier.changes.len();
+
     // A current revision not made by a CSV import (simulated by relabelling
     // the latest Change, as a future Catalog edit would) is never
     // overwritten: the changed row becomes an import problem instead.
@@ -511,7 +552,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     let reply = submit_import(&admin, &ImportCommand::new(&conflicting, REASON)).unwrap();
     assert_eq!(nothing_changed(&reply).1, 1, "{}", reply.body);
     let last = read_back(&admin).unwrap();
-    assert_eq!(last.changes.len(), 2);
+    assert_eq!(last.changes.len(), changes_before_conflict);
     assert_eq!(
         current_revision(&last, "RES-0000-0470"),
         current_revision(&after, "RES-0000-0470")
@@ -658,8 +699,8 @@ fn copy_catalog(target: &Path) {
 }
 
 #[test]
-fn substitutes_become_manufacturer_parts_end_to_end() {
-    // The checked-in substitutes list has only a header, so a temp copy of
+fn substitutes_csv_rows_become_manufacturer_parts_end_to_end() {
+    // The checked-in substitutes.csv has only a header, so a temp copy of
     // the catalog gets synthetic rows; database/ itself is never edited.
     let copy = tempfile::tempdir().unwrap();
     copy_catalog(copy.path());
@@ -669,8 +710,8 @@ fn substitutes_become_manufacturer_parts_end_to_end() {
         "\"RES-0000-1500\",\"\"",
     );
     fs::write(&csv_path, csv).unwrap();
-    let substitutes = copy.path().join("database/substitutes.csv");
-    let mut text = fs::read_to_string(&substitutes).unwrap();
+    let substitutes_csv_rows = copy.path().join("database/substitutes.csv");
+    let mut text = fs::read_to_string(&substitutes_csv_rows).unwrap();
     text.push_str(concat!(
         "RES-0000-0470,ALT-47,Vishay,https://example.test/47.pdf,DigiKey,541-47-ND\n",
         "RES-0000-0470,RC0603FR-0747RL,Yageo,,,\n",
@@ -678,7 +719,7 @@ fn substitutes_become_manufacturer_parts_end_to_end() {
         "RES-0000-0470,ALT2-47,Bourns,https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L,,\n",
         "RES-9999-0001,X,Y,,,\n",
     ));
-    fs::write(&substitutes, text).unwrap();
+    fs::write(&substitutes_csv_rows, text).unwrap();
     let oracle = legacy_import_fixture::build_manifest(copy.path()).unwrap();
 
     let state = tempfile::tempdir().unwrap();
@@ -695,7 +736,7 @@ fn substitutes_become_manufacturer_parts_end_to_end() {
         serde_json::to_string_pretty(&report.summary()).unwrap()
     );
     // The blank MPN leaves RES-0000-1500 without a main: both cells are
-    // kept by the problem, and its substitute is the first entry.
+    // kept by the problem, and its substitutes.csv row is the first entry.
     assert_eq!(report.destinations["import-problem"], 2);
     let (_, snapshot) = current_revision(&stored, "RES-0000-1500");
     let first = &snapshot.manufacturer_parts[0];
@@ -711,31 +752,34 @@ fn substitutes_become_manufacturer_parts_end_to_end() {
         .collect();
     assert_eq!(mpns, ["RC0603FR-0747RL", "ALT-47", "ALT2-47"]);
     // A part has one datasheet: Vishay's different one is an import problem.
-    assert!(
-        stored
-            .problems
-            .iter()
-            .any(|problem| problem.code == "substitute-datasheet-differs"
-                && problem.detail.contains("https://example.test/47.pdf"))
+    assert!(stored.problems.iter().any(|problem| problem.code
+        == "substitutes-csv-datasheet-differs"
+        && problem.detail.contains("https://example.test/47.pdf")));
+    let substitutes_csv_rows = &report.substitutes_csv_rows;
+    assert_eq!(
+        (
+            substitutes_csv_rows.rows,
+            substitutes_csv_rows.rows_in_scope
+        ),
+        (5, 4)
     );
-    let substitutes = &report.substitutes;
-    assert_eq!((substitutes.rows, substitutes.rows_in_scope), (5, 4));
     // IPN, MPN and Manufacturer of the three accepted rows.
     assert_eq!(
-        substitutes.destinations["part-details.manufacturer-parts"],
+        substitutes_csv_rows.destinations["part-details.manufacturer-parts"],
         3 * 3
     );
-    assert_eq!(substitutes.destinations["supplier-data"], 3 * 2);
+    assert_eq!(substitutes_csv_rows.destinations["supplier-data"], 3 * 2);
     // The blank datasheet and the part's own add nothing to the details.
-    assert_eq!(substitutes.destinations["part-details"], 2);
+    assert_eq!(substitutes_csv_rows.destinations["part-details"], 2);
     // The repeated main part (6 fields) and the different datasheet.
-    assert_eq!(substitutes.destinations["import-problem"], 6 + 1);
-    // The orphan RES substitute is an import problem outside the report's rows.
+    assert_eq!(substitutes_csv_rows.destinations["import-problem"], 6 + 1);
+    // The orphan RES row of substitutes.csv is an import problem outside the
+    // report's rows.
     assert!(
         report
             .other_problems
             .iter()
-            .any(|line| line.starts_with("substitute-without-part"))
+            .any(|line| line.starts_with("substitutes-csv-row-without-part"))
     );
 }
 
@@ -755,10 +799,10 @@ fn adding_or_removing_a_manufacturer_part_makes_a_new_revision() {
     };
     applied(&submit("-first"));
 
-    let substitutes = copy.path().join("database/substitutes.csv");
-    let header = fs::read_to_string(&substitutes).unwrap();
+    let substitutes_csv_rows = copy.path().join("database/substitutes.csv");
+    let header = fs::read_to_string(&substitutes_csv_rows).unwrap();
     fs::write(
-        &substitutes,
+        &substitutes_csv_rows,
         format!("{header}RES-0000-0470,ALT-47,Vishay,,DigiKey,541-47-ND\n"),
     )
     .unwrap();
@@ -770,7 +814,7 @@ fn adding_or_removing_a_manufacturer_part_makes_a_new_revision() {
     assert_eq!(details.manufacturer_parts[1].mpn, "ALT-47");
     assert_eq!(stored.changes.len(), 2);
 
-    fs::write(&substitutes, &header).unwrap();
+    fs::write(&substitutes_csv_rows, &header).unwrap();
     applied(&submit("-removed"));
     let (number, details) = current_revision(&read_back(&admin).unwrap(), "RES-0000-0470");
     assert_eq!((number, details.manufacturer_parts.len()), (3, 1));
