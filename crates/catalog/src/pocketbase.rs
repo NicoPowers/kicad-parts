@@ -901,5 +901,76 @@ mod tests {
                 ..
             }
         ));
+        let conflict: ImportOutcome = serde_json::from_str(
+            r#"{"outcome":"conflict","correlationId":"c","conflicts":[{"ipn":"RES-0000-0470","expectedRevision":1,"currentRevision":{"id":"r","number":2,"snapshot":"{}","snapshotSha256":"s","changeKind":"edit","reason":"x","actor":"users:u","actorName":"A","created":"t"}},{"ipn":"RES-0000-9999","expectedRevision":3,"currentRevision":null}],"message":"m"}"#,
+        )
+        .unwrap();
+        let ImportOutcome::Conflict { conflicts, .. } = conflict else {
+            panic!("not a conflict");
+        };
+        assert_eq!(
+            conflicts
+                .iter()
+                .map(|c| (
+                    c.expected_revision,
+                    c.current_revision.as_ref().map(|r| r.number)
+                ))
+                .collect::<Vec<_>>(),
+            [(1, Some(2)), (3, None)]
+        );
+    }
+
+    #[test]
+    fn import_commands_send_rows_and_expected_revisions() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("database")).unwrap();
+        std::fs::write(
+            root.path().join("database/g-res.csv"),
+            "IPN,Value\nRES-0000-0470,47\nRES-0000-1000,100\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("database/substitutes.csv"),
+            "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n",
+        )
+        .unwrap();
+        let import = crate::CsvCatalog::new(root.path())
+            .import("g-res", None)
+            .unwrap();
+        let state = ImportState {
+            current_revisions: [("RES-0000-1000".to_owned(), 4)].into(),
+            latest_imports: vec![],
+        };
+        let body = ImportCommand::new(&import, "r").expecting(&state).body();
+        let expected: Vec<(&str, u64)> = body["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|part| {
+                (
+                    part["ipn"].as_str().unwrap(),
+                    part["expectedRevision"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(expected, [("RES-0000-0470", 0), ("RES-0000-1000", 4)]);
+        assert_eq!(body["allowOlderCheckout"], false);
+        let csv = body["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["role"] == "catalog-csv")
+            .unwrap();
+        assert_eq!(
+            csv["rows"],
+            json!(["RES-0000-0470,47\n", "RES-0000-1000,100\n"])
+        );
+        let substitutes = body["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["role"] == "substitutes-csv")
+            .unwrap();
+        assert_eq!(substitutes["rows"], json!([]));
     }
 }

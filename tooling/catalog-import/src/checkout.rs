@@ -116,3 +116,72 @@ fn is_ancestor(repository: &Path, ancestor: &str, descendant: &str) -> Ancestry 
         _ => Ancestry::Unknown,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(csv_file: &str, source_commit: &str) -> ImportState {
+        ImportState {
+            current_revisions: Default::default(),
+            latest_imports: vec![LatestImport {
+                csv_file: csv_file.to_owned(),
+                csv_import_number: 1,
+                source_commit: source_commit.to_owned(),
+                audit_entry: "a".repeat(15),
+            }],
+        }
+    }
+
+    /// This repository's HEAD commit (read only).
+    fn head() -> String {
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(crate::services::repository_root())
+            .args(["rev-parse", "HEAD"]);
+        let output = native_services::run_hidden("git", &mut command).unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn an_empty_catalog_or_the_same_commit_is_accepted() {
+        let root = crate::services::repository_root();
+        assert_eq!(check_checkout(&root, None, &ImportState::default()), Ok(()));
+        assert_eq!(check_checkout(&root, None, &state("g-res", "")), Ok(()));
+        let head = head();
+        let dirty = format!("{head}{DIRTY_SUFFIX}");
+        assert_eq!(
+            check_checkout(&root, Some(&head), &state("g-res", &dirty)),
+            Ok(())
+        );
+        assert_eq!(
+            check_checkout(&root, Some(&dirty), &state("g-res", &head)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_commit_that_cannot_be_checked_is_refused() {
+        let root = crate::services::repository_root();
+        let head = head();
+        // A commit this repository does not have.
+        let unknown = "0123456789abcdef0123456789abcdef01234567";
+        let refused = check_checkout(&root, Some(&head), &state("g-cap", unknown)).unwrap_err();
+        assert!(
+            refused.contains("which this checkout does not have")
+                && refused.contains("database/g-cap.csv")
+                && refused.contains("0123456789ab"),
+            "{refused}"
+        );
+        // Files not read from a git commit.
+        let refused = check_checkout(&root, None, &state("g-res", &head)).unwrap_err();
+        assert!(refused.contains("not read from a git commit"), "{refused}");
+        // A recorded commit that is not a commit ID never reaches git.
+        let refused = check_checkout(&root, Some(&head), &state("g-res", "--all")).unwrap_err();
+        assert!(
+            refused.contains("not a commit ID (5 characters)"),
+            "{refused}"
+        );
+    }
+}

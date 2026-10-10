@@ -136,7 +136,7 @@ routerAdd(
 
     const allowOlderCheckout = body.allowOlderCheckout === undefined || body.allowOlderCheckout === null ? false : body.allowOlderCheckout;
     if (typeof allowOlderCheckout !== "boolean") {
-      fail("allowOlderCheckout must be true or false");
+      fail("the allowOlderCheckout setting must be true or false");
     }
 
     // ---- Validate the request on its own -------------------------------
@@ -160,7 +160,7 @@ routerAdd(
       const headerRaw = source.headerRaw === null || source.headerRaw === undefined ? null : text(source, "headerRaw", DOCUMENT, false);
       const isCsv = CSV_ROLES.indexOf(role) >= 0;
       if (!isCsv && source.rows !== undefined && source.rows !== null) {
-        fail(`only CSV files have rows, not ${path}`);
+        fail(`rows are kept only for CSV files, not for ${path}`);
       }
       return {
         role: role,
@@ -314,7 +314,7 @@ routerAdd(
       }
       const expectedRevision = part.expectedRevision;
       if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
-        fail(`expectedRevision of ${ipn} must be the number of its current revision, or 0 for a new part`);
+        fail(`the expected revision of ${ipn} must be the number of its current revision, or 0 for a new part`);
       }
       return {
         id: id,

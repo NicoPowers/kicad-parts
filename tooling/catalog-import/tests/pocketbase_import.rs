@@ -498,6 +498,71 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         admin.post_json(CSV_IMPORT_ROUTE, &body).unwrap().status,
         400
     );
+    // The rows a run records must be exactly the file with its byte hash,
+    // and each part needs the current revision it expects.
+    let refused = |name: &str, change: &dyn Fn(&mut serde_json::Value), says: &str| {
+        let mut body = command.body();
+        body["correlationId"] = name.into();
+        change(&mut body);
+        let reply = admin.post_json(CSV_IMPORT_ROUTE, &body).unwrap();
+        assert_eq!(reply.status, 400, "{name}: {}", reply.body);
+        assert!(reply.body.contains(says), "{name}: {}", reply.body);
+    };
+    let csv_source = |body: &mut serde_json::Value| -> usize {
+        body["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|source| source["role"] == "catalog-csv")
+            .unwrap()
+    };
+    refused(
+        "tampered-row",
+        &|body| {
+            let index = csv_source(body);
+            body["sources"][index]["rows"][0] = "\"RES-0000-0000\"\n".into();
+        },
+        "are not the file with its byte hash",
+    );
+    refused(
+        "dropped-rows",
+        &|body| {
+            let index = csv_source(body);
+            body["sources"][index]
+                .as_object_mut()
+                .unwrap()
+                .remove("rows");
+        },
+        "must be a list of text",
+    );
+    refused(
+        "rows-of-a-footprint",
+        &|body| {
+            let index = body["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|source| source["role"] == "footprint")
+                .unwrap();
+            body["sources"][index]["rows"] = serde_json::json!([]);
+        },
+        "kept only for CSV files",
+    );
+    refused(
+        "no-expected-revision",
+        &|body| {
+            body["parts"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("expectedRevision");
+        },
+        "expected revision of RES-0000-0000",
+    );
+    refused(
+        "allow-as-text",
+        &|body| body["allowOlderCheckout"] = "yes".into(),
+        "allowOlderCheckout setting must be true or false",
+    );
     assert_eq!(read_back(&admin).unwrap(), initial);
 
     // A changed part detail makes a new revision in a new Change; nothing
