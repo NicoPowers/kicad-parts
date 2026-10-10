@@ -5,8 +5,9 @@
 //!   and records its version.
 //! - [`resolver`] turns catalog references such as `g-pas:R_US` into library
 //!   files, searching project libraries before KiCad's bundled ones.
-//! - [`preview`] exports symbol and footprint SVGs with kicad-cli and caches
-//!   them by library content hash and KiCad version.
+//! - [`preview`] exports symbol and footprint SVGs with kicad-cli, from
+//!   library files or from a CAD item revision's stored bytes, and caches
+//!   them by content hash and KiCad version.
 //! - [`library_file`] reads saved symbol libraries and footprints: one
 //!   symbol's exact bytes, file versions and 3D model references.
 
@@ -20,7 +21,10 @@ pub use discovery::{
     Discovery, DiscoveryOptions, InstallSource, KicadInstall, KicadVersion, SUPPORTED_MAJOR,
     SearchLocations, discover,
 };
-pub use preview::{CacheOutcome, Preview, PreviewCache, PreviewError, PreviewImage};
+pub use preview::{
+    CacheOutcome, MAX_RUNNING, Preview, PreviewCache, PreviewError, PreviewImage, Selection,
+    StoredItem, remove_old_cache, sha256_hex,
+};
 pub use resolver::{
     LibRef, LibraryOrigin, LibraryResolver, ResolveError, ResolvedFootprint, ResolvedSymbol,
     footprint_choices,

@@ -327,3 +327,110 @@ fn names_kicad_cli_writes_with_spaces_still_export() {
         );
     }
 }
+
+/// The SVG without its `<title>`, which holds the export time.
+fn drawing(svg: &str) -> String {
+    svg.lines()
+        .filter(|line| !line.trim_start().starts_with("<title>"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn stored_bytes_are_drawn_even_after_the_local_library_changes() {
+    use kicad_integration::library_file::SymbolLibrary;
+    use kicad_integration::{LibRef, StoredItem, sha256_hex};
+
+    let kicad = installed_kicad();
+    // What the team catalog stored: the R_US entry exactly as the
+    // repository's library has it.
+    let original = fs::read(repo_root().join("symbols").join("g-pas.kicad_sym")).unwrap();
+    let library = SymbolLibrary::parse(&original).unwrap();
+    let kicad_integration::library_file::SymbolLookup::Found(entry) = library.find("R_US") else {
+        panic!("g-pas has R_US");
+    };
+    let stored_bytes = original[entry.span.clone()].to_vec();
+    let item = StoredItem {
+        lib_ref: LibRef::parse("g-pas:R_US").unwrap(),
+        blob_sha256: sha256_hex(&stored_bytes),
+        format_version: library.version.clone(),
+    };
+
+    // A temporary copy of the library where someone has since redrawn R_US.
+    let project = tempfile::tempdir().unwrap();
+    let symbols = project.path().join("symbols");
+    fs::create_dir_all(&symbols).unwrap();
+    let text = String::from_utf8(original.clone()).unwrap();
+    let start = entry.span.start;
+    let redrawn = format!(
+        "{}{}{}",
+        &text[..start],
+        text[start..entry.span.end].replacen(
+            "(symbol \"R_US_0_1\"",
+            "(symbol \"R_US_0_1\"\n\t\t\t(circle (center 0 0) (radius 5) (stroke (width 0.5) (type default)) (fill (type none)))",
+            1
+        ),
+        &text[entry.span.end..]
+    );
+    assert_ne!(redrawn, text, "the test changes the drawing");
+    fs::write(symbols.join("g-pas.kicad_sym"), redrawn).unwrap();
+
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = PreviewCache::new(cache_dir.path().to_path_buf());
+    let changed_local = LibraryResolver::new(Some(project.path().to_path_buf()), None)
+        .symbol("g-pas:R_US")
+        .unwrap();
+    let local = cache.symbol(&kicad, &changed_local).unwrap();
+    let stored = cache
+        .stored_symbol(&kicad, &item, || Ok(stored_bytes.clone()), None)
+        .unwrap();
+    let unchanged = cache
+        .symbol(&kicad, &resolver(&kicad).symbol("g-pas:R_US").unwrap())
+        .unwrap();
+
+    assert_eq!(stored.library_sha256, item.blob_sha256);
+    assert_eq!(stored.images.len(), 1);
+    assert_ne!(
+        drawing(&stored.images[0].svg),
+        drawing(&local.images[0].svg)
+    );
+    assert_eq!(
+        drawing(&stored.images[0].svg),
+        drawing(&unchanged.images[0].svg)
+    );
+}
+
+#[test]
+fn stored_footprints_are_drawn_from_their_bytes() {
+    use kicad_integration::{LibRef, StoredItem, sha256_hex};
+
+    let kicad = installed_kicad();
+    let file = repo_root()
+        .join("footprints")
+        .join("g-res.pretty")
+        .join("R_0603_1608Metric.kicad_mod");
+    let bytes = fs::read(&file).unwrap();
+    let item = StoredItem {
+        lib_ref: LibRef::parse("g-res:R_0603_1608Metric").unwrap(),
+        blob_sha256: sha256_hex(&bytes),
+        format_version: None,
+    };
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = PreviewCache::new(cache_dir.path().to_path_buf());
+    let stored = cache
+        .stored_footprint(&kicad, &item, || Ok(bytes.clone()), None)
+        .unwrap();
+    let local = cache
+        .footprint(
+            &kicad,
+            &resolver(&kicad)
+                .footprint("g-res:R_0603_1608Metric")
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(stored.images.len(), 1);
+    assert_eq!(
+        drawing(&stored.images[0].svg),
+        drawing(&local.images[0].svg)
+    );
+}
