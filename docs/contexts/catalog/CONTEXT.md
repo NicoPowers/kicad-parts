@@ -25,7 +25,7 @@ _Avoid_: Off-BOM, no-BOM, virtual part
 ### Details and history
 
 **Part details**:
-What a part is and how you design with it: its description, value, symbol, footprint, datasheet and manufacturer parts. Only a change to part details creates a revision.
+What a part is: its description, value, datasheet and manufacturer parts. Every revision of the part shares them, so changing them is recorded in the history but adds no revision.
 _Avoid_: semantic change, attributes
 
 **Supplier data**:
@@ -33,12 +33,16 @@ Supplier part numbers and prices. They belong to Procurement and never create a 
 _Avoid_: Operational Fact
 
 **Revision**:
-A saved copy of a part's details or of a CAD item, which never changes afterwards. Every change, including restoring old details, adds a new revision.
+A saved copy of the exact symbol, footprint and 3D model a part uses, or of one CAD item's content, which never changes afterwards. Only a change to CAD adds a revision, and only if the new revision can replace the old one; otherwise it is a new part with its own IPN.
 _Avoid_: Part Revision, Asset Revision, version, edit
 
 **Current revision**:
-The newest revision of a part or CAD item.
+The newest revision of a part or CAD item that is not archived.
 _Avoid_: Head, latest
+
+**Archived**:
+A revision hidden from KiCad's part chooser and from the app, so nobody new picks it. Designs that already use it still find it, and nothing is deleted.
+_Avoid_: withdrawn, deleted, retired, obsolete
 
 **Change**:
 One saved update with a reason, such as an import or an edit. It can add revisions to several parts and CAD items at once.
@@ -55,7 +59,7 @@ A group of similar parts that share the same fields, such as chip resistors. A s
 _Avoid_: Catalog Category, type, class, IPN prefix
 
 **Manufacturer part**:
-A manufacturer and their part number (MPN) approved for an IPN. A part can have several, and the first is the main one.
+A manufacturer and their part number (MPN) approved for an IPN. A part can have several, the first is the main one, and every revision of the part shares them.
 _Avoid_: Approved Manufacturer Part, substitute, alternate, AVL entry
 
 ### CAD items
