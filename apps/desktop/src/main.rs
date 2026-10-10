@@ -10,7 +10,7 @@ use desktop_contract::{
     AppStatus, PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
     SearchResponse, SignInRequest, TeamEditRequest, TeamPart, TeamRestoreRequest, TeamStatus,
 };
-use kicad_integration::SearchLocations;
+use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -108,6 +108,22 @@ fn normalize(path: &Path) -> PathBuf {
     normal
 }
 
+/// The app's cache folder. On Windows, Tauri's cache folder is the folder
+/// WebView2 keeps its `EBWebView` data in, so the cache goes to a sibling
+/// folder named `<identifier>-cache` instead; clearing either then never
+/// touches the other. Elsewhere the cache folder is already separate.
+fn cache_dir_apart(app_cache_dir: &Path, webview_data_dir: &Path) -> PathBuf {
+    if app_cache_dir != webview_data_dir {
+        return app_cache_dir.to_path_buf();
+    }
+    let mut name = app_cache_dir
+        .file_name()
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from("kicad-parts"));
+    name.push("-cache");
+    app_cache_dir.with_file_name(name)
+}
+
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
@@ -162,11 +178,13 @@ async fn part_detail(
 #[tauri::command]
 async fn part_preview(
     browser: State<'_, Browser>,
+    team: State<'_, Team>,
     request: PreviewRequest,
 ) -> Result<PreviewOutcome, String> {
-    let browser = browser.inner().clone();
-    blocking(move || browser.preview_field(&request.ipn, request.kind, request.field.as_deref()))
-        .await
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    // Team parts are drawn from the stored bytes of the exact CAD item
+    // revision they use.
+    blocking(move || browser.preview_request(&request, Some(&team))).await
 }
 
 #[tauri::command]
@@ -224,7 +242,17 @@ fn main() {
         .setup(move |app| {
             let (config_dir, cache_dir) = match &options.data_dir {
                 Some(dir) => (dir.join("config"), dir.join("cache")),
-                None => (app.path().app_config_dir()?, app.path().app_cache_dir()?),
+                None => {
+                    let shared = app.path().app_cache_dir()?;
+                    let cache_dir = cache_dir_apart(&shared, &app.path().app_local_data_dir()?);
+                    if cache_dir != shared {
+                        // Earlier versions kept previews next to WebView2's
+                        // data; remove them in the background.
+                        let old = shared.join("previews");
+                        std::thread::spawn(move || remove_old_cache(&old));
+                    }
+                    (app.path().app_config_dir()?, cache_dir)
+                }
             };
             let kicad_locations = if options.kicad_search_roots.is_empty() {
                 SearchLocations::Standard
@@ -327,6 +355,18 @@ mod tests {
                 "no Tauri command named {name}"
             );
         }
+    }
+
+    #[test]
+    fn the_cache_folder_is_kept_apart_from_webview_data() {
+        let local = Path::new("C:/Users/a/AppData/Local/org.kicadparts.desktop");
+        assert_eq!(
+            cache_dir_apart(local, local),
+            Path::new("C:/Users/a/AppData/Local/org.kicadparts.desktop-cache")
+        );
+        let cache = Path::new("/home/a/.cache/org.kicadparts.desktop");
+        let data = Path::new("/home/a/.local/share/org.kicadparts.desktop");
+        assert_eq!(cache_dir_apart(cache, data), cache);
     }
 
     #[test]
