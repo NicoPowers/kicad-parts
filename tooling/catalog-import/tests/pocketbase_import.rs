@@ -528,7 +528,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     assert_eq!(reply.status, 400, "{}", reply.body);
     let mut body = command.body();
     body["correlationId"] = "tampered-blob".into();
-    body["blobs"][0]["base64"] = catalog::pocketbase::base64(b"other bytes").into();
+    body["blobs"][0]["text"] = "other bytes".into();
     assert_eq!(
         admin.post_json(CSV_IMPORT_ROUTE, &body).unwrap().status,
         400
@@ -1074,9 +1074,29 @@ fn header_only_csv_sources(correlation: &str) -> Vec<serde_json::Value> {
     ]
 }
 
+/// How a test request sends a blob's bytes.
+#[derive(Clone, Copy)]
+enum BlobForm {
+    Base64,
+    /// Only for bytes that are UTF-8.
+    Text,
+}
+
+/// The `blobs` entry for `bytes`, hashed as `sha`.
+fn blob_entry(sha: &str, bytes: &[u8], form: BlobForm) -> serde_json::Value {
+    match form {
+        BlobForm::Base64 => {
+            serde_json::json!({ "sha256": sha, "size": bytes.len(), "base64": catalog::pocketbase::base64(bytes) })
+        }
+        BlobForm::Text => {
+            serde_json::json!({ "sha256": sha, "size": bytes.len(), "text": std::str::from_utf8(bytes).unwrap() })
+        }
+    }
+}
+
 /// An import request carrying one 3D model CAD item revision whose blob is
 /// `bytes`, hashed as `sha`.
-fn blob_request(correlation: &str, sha: &str, bytes: &[u8]) -> serde_json::Value {
+fn blob_request(correlation: &str, sha: &str, bytes: &[u8], form: BlobForm) -> serde_json::Value {
     let cad_item = catalog::CadItem::new(
         catalog::CadItemKind::Model3d,
         &format!("3d-models/{correlation}.step"),
@@ -1105,7 +1125,7 @@ fn blob_request(correlation: &str, sha: &str, bytes: &[u8]) -> serde_json::Value
             .into_iter()
             .chain([serde_json::json!({ "role": "test", "path": "blob", "byteSha256": sha, "size": bytes.len(), "headerRaw": null })])
             .collect::<Vec<_>>(),
-        "blobs": [{ "sha256": sha, "size": bytes.len(), "base64": catalog::pocketbase::base64(bytes) }],
+        "blobs": [blob_entry(sha, bytes, form)],
         "cadItemRevisions": [{
             "id": id,
             "cadItemId": cad_item.id,
@@ -1132,17 +1152,35 @@ fn unused_blob_request(correlation: &str, sha: &str, bytes: &[u8]) -> serde_json
             .into_iter()
             .chain([serde_json::json!({ "role": "test", "path": "blob", "byteSha256": sha, "size": bytes.len(), "headerRaw": null })])
             .collect::<Vec<_>>(),
-        "blobs": [{ "sha256": sha, "size": bytes.len(), "base64": catalog::pocketbase::base64(bytes) }],
+        "blobs": [blob_entry(sha, bytes, BlobForm::Base64)],
         "cadItemRevisions": [],
         "parts": [],
         "problems": [],
     })
 }
 
+/// `size` bytes of UTF-8 text with one-, two-, three- and four-byte
+/// characters, padded with `x` so that the length is exact.
+fn utf8_text(size: usize) -> Vec<u8> {
+    let mut text = String::new();
+    for ch in ['a', 'é', '€', '😀', '\n', '"', '\\'].into_iter().cycle() {
+        if text.len() + ch.len_utf8() > size {
+            break;
+        }
+        text.push(ch);
+    }
+    while text.len() < size {
+        text.push('x');
+    }
+    text.into_bytes()
+}
+
 #[test]
 fn the_route_hashes_blob_bytes_exactly() {
-    // The route's own SHA-256 and base64 (catalog_lib.js) against Rust's
-    // sha2, across SHA-256 padding boundaries and one large blob.
+    // The route's two ways of hashing a blob against Rust's sha2, across
+    // SHA-256 padding boundaries and one large blob: bytes that are not
+    // UTF-8 come as base64 and are hashed by the route's own SHA-256
+    // (catalog_lib.js); UTF-8 text is hashed and stored by PocketBase.
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
     assert_eq!(
@@ -1151,36 +1189,57 @@ fn the_route_hashes_blob_bytes_exactly() {
     );
     let sizes = [0usize, 1, 55, 56, 63, 64, 119, 120, 300_000];
     let mut stored_sizes = Vec::new();
-    for size in sizes {
-        let bytes: Vec<u8> = (0..size).map(|i| ((i * 131 + 7) % 256) as u8).collect();
-        let sha = sha256_hex(&bytes);
-        // A hash off by one hex digit is refused...
-        let mut wrong = sha.clone().into_bytes();
-        wrong[63] = if wrong[63] == b'0' { b'1' } else { b'0' };
-        let wrong = String::from_utf8(wrong).unwrap();
-        let refused = admin
-            .post_json(
-                CSV_IMPORT_ROUTE,
-                &blob_request(&format!("wrong-{size}"), &wrong, &bytes),
-            )
-            .unwrap();
-        assert_eq!(refused.status, 400, "{size} bytes: {}", refused.body);
-        // ...and the right one is accepted.
-        let accepted = admin
-            .post_json(
-                CSV_IMPORT_ROUTE,
-                &blob_request(&format!("right-{size}"), &sha, &bytes),
-            )
-            .unwrap();
-        if size == 0 {
-            // PocketBase cannot store an empty file; the route must refuse
-            // it cleanly rather than store a blob without bytes.
-            assert_eq!(accepted.status, 400, "{}", accepted.body);
-        } else {
-            assert_eq!(accepted.status, 200, "{size} bytes: {}", accepted.body);
-            stored_sizes.push(size);
+    for (form, name) in [(BlobForm::Base64, "base64"), (BlobForm::Text, "text")] {
+        for size in sizes {
+            let bytes: Vec<u8> = match form {
+                BlobForm::Base64 => (0..size).map(|i| ((i * 131 + 7) % 256) as u8).collect(),
+                BlobForm::Text => utf8_text(size),
+            };
+            assert_eq!(bytes.len(), size);
+            let sha = sha256_hex(&bytes);
+            // A hash off by one hex digit is refused...
+            let mut wrong = sha.clone().into_bytes();
+            wrong[63] = if wrong[63] == b'0' { b'1' } else { b'0' };
+            let wrong = String::from_utf8(wrong).unwrap();
+            let refused = admin
+                .post_json(
+                    CSV_IMPORT_ROUTE,
+                    &blob_request(&format!("wrong-{name}-{size}"), &wrong, &bytes, form),
+                )
+                .unwrap();
+            assert_eq!(refused.status, 400, "{name} {size} bytes: {}", refused.body);
+            // ...and the right one is accepted.
+            let accepted = admin
+                .post_json(
+                    CSV_IMPORT_ROUTE,
+                    &blob_request(&format!("right-{name}-{size}"), &sha, &bytes, form),
+                )
+                .unwrap();
+            if size == 0 {
+                // PocketBase cannot store an empty file; the route must
+                // refuse it cleanly rather than store a blob without bytes.
+                assert_eq!(accepted.status, 400, "{}", accepted.body);
+            } else {
+                assert_eq!(
+                    accepted.status, 200,
+                    "{name} {size} bytes: {}",
+                    accepted.body
+                );
+                stored_sizes.push(size);
+            }
         }
     }
+    // A blob gives its bytes one way only.
+    let bytes = b"both".to_vec();
+    let mut both = blob_request("both", &sha256_hex(&bytes), &bytes, BlobForm::Text);
+    both["blobs"][0]["base64"] = catalog::pocketbase::base64(&bytes).into();
+    let reply = admin.post_json(CSV_IMPORT_ROUTE, &both).unwrap();
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert!(
+        reply.body.contains("either text or base64"),
+        "{}",
+        reply.body
+    );
     // A blob that no CAD item revision uses is refused: it could belong to
     // no Change.
     let bytes = b"unused".to_vec();
@@ -1191,10 +1250,22 @@ fn the_route_hashes_blob_bytes_exactly() {
         )
         .unwrap();
     assert_eq!(unused.status, 400, "{}", unused.body);
+    // PocketBase refuses a request over the route's size limit as soon as
+    // it reads the length, so the client sees either the 413 or the
+    // connection closing while it still sends; nothing is written either
+    // way. (submit_import refuses to send such a request at all.)
+    let mut huge = blob_request("huge", &sha256_hex(b"x"), b"x", BlobForm::Text);
+    huge["padding"] = "x".repeat(catalog::pocketbase::IMPORT_BODY_LIMIT).into();
+    match admin.post_json(CSV_IMPORT_ROUTE, &huge) {
+        Ok(reply) => assert_eq!(reply.status, 413, "{}", reply.body),
+        Err(CollabError::Transport(_)) => {}
+        Err(other) => panic!("{other}"),
+    }
     // read_back re-hashes every downloaded blob and fails on a mismatch.
     let stored = read_back(&admin).unwrap();
     let mut lengths: Vec<usize> = stored.blobs.iter().map(|blob| blob.bytes.len()).collect();
     lengths.sort();
+    stored_sizes.sort();
     assert_eq!(lengths, stored_sizes);
     server.stop();
 }

@@ -4,6 +4,7 @@
 //! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`
 //! and `1791600000_catalog_edits.js`).
 
+use crate::cad_item::Blob;
 use crate::csv_import::{CsvImport, SourceFile};
 use crate::part::{DetailField, ManufacturerPart, PartDetails};
 use crate::sha256_hex;
@@ -14,6 +15,12 @@ use std::collections::BTreeMap;
 
 /// The route that publishes a CSV catalog import.
 pub const CSV_IMPORT_ROUTE: &str = "/api/catalog/csv-imports";
+
+/// The largest import request the route accepts, in bytes (32 MiB, set by
+/// `IMPORT_BODY_LIMIT` in `catalog_csv_imports.pb.js`). An import is one
+/// request so that it is one transaction; the largest import of the CSV
+/// catalog today (g-con, with a 1.5 MiB 3D model) is about 2.3 MiB.
+pub const IMPORT_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Every Catalog collection, in dependency order.
 pub const COLLECTIONS: [&str; 9] = [
@@ -155,11 +162,7 @@ impl<'a> ImportCommand<'a> {
                 }
                 file
             }).collect::<Vec<_>>(),
-            "blobs": import.blobs.iter().map(|blob| json!({
-                "sha256": blob.sha256,
-                "size": blob.bytes.len(),
-                "base64": base64(&blob.bytes),
-            })).collect::<Vec<_>>(),
+            "blobs": import.blobs.iter().map(blob_body).collect::<Vec<_>>(),
             "cadItemRevisions": import.cad_item_revisions.iter().map(|revision| json!({
                 "id": revision.id,
                 "cadItemId": revision.cad_item.id,
@@ -187,6 +190,21 @@ impl<'a> ImportCommand<'a> {
                 "detail": problem.detail_json,
             })).collect::<Vec<_>>(),
         })
+    }
+}
+
+/// One blob as the import route takes it: as `text` when its bytes are
+/// UTF-8, which the route hashes and stores with PocketBase's own fast code,
+/// and as `base64` otherwise, which the route decodes and hashes in
+/// JavaScript at about 3 s per MiB.
+fn blob_body(blob: &Blob) -> Value {
+    match std::str::from_utf8(&blob.bytes) {
+        Ok(text) => json!({ "sha256": blob.sha256, "size": blob.bytes.len(), "text": text }),
+        Err(_) => json!({
+            "sha256": blob.sha256,
+            "size": blob.bytes.len(),
+            "base64": base64(&blob.bytes),
+        }),
     }
 }
 
@@ -388,7 +406,15 @@ pub fn submit_import(
     client: &PocketBaseClient,
     command: &ImportCommand<'_>,
 ) -> CollabResult<ImportReply> {
-    let reply = client.post_json(CSV_IMPORT_ROUTE, &command.body())?;
+    let body = command.body();
+    let size = serde_json::to_vec(&body).map_or(0, |bytes| bytes.len());
+    if size > IMPORT_BODY_LIMIT {
+        return Err(CollabError::Protocol(format!(
+            "the import of {} is {size} bytes, more than the {IMPORT_BODY_LIMIT} bytes the import route accepts in one request; nothing was sent",
+            command.import.csv_file
+        )));
+    }
+    let reply = client.post_json(CSV_IMPORT_ROUTE, &body)?;
     match reply.status {
         200 | 409 | 422 => {
             let outcome: ImportOutcome = serde_json::from_str(&reply.body)
@@ -1038,6 +1064,52 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(1, Some(2)), (3, None)]
         );
+    }
+
+    #[test]
+    fn blobs_go_as_text_when_they_are_utf8_and_as_base64_otherwise() {
+        let text = blob_body(&Blob::new("ISO-10303-21;\né\n".into()));
+        assert_eq!(text["text"], "ISO-10303-21;\né\n");
+        assert_eq!(text["size"], 17);
+        assert!(text.get("base64").is_none());
+        let binary = blob_body(&Blob::new(vec![0xff, 0xfe, 0x00]));
+        assert_eq!(binary["base64"], "//4A");
+        assert!(binary.get("text").is_none());
+    }
+
+    #[test]
+    fn an_import_over_the_size_limit_is_not_sent() {
+        let root = tempfile::tempdir().unwrap();
+        for directory in ["database", "footprints/g-big.pretty", "3d-models"] {
+            std::fs::create_dir_all(root.path().join(directory)).unwrap();
+        }
+        std::fs::write(
+            root.path().join("database/g-big.csv"),
+            "IPN,Footprint\nBIG-0000-0001,g-big:Big\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("database/substitutes.csv"),
+            "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("footprints/g-big.pretty/Big.kicad_mod"),
+            "(footprint \"Big\" (model \"${GITPLM_PARTS}/3d-models/big.step\"))",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("3d-models/big.step"),
+            "x".repeat(IMPORT_BODY_LIMIT),
+        )
+        .unwrap();
+        let import = crate::CsvCatalog::new(root.path())
+            .import("g-big", None)
+            .unwrap();
+        // Nothing listens on this port; the size check comes first.
+        let client = PocketBaseClient::new("http://127.0.0.1:9");
+        let error = submit_import(&client, &ImportCommand::new(&import, "r")).unwrap_err();
+        assert!(error.to_string().contains("nothing was sent"), "{error}");
     }
 
     #[test]

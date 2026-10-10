@@ -7,7 +7,7 @@
 //   { correlationId, reason, csvFile, sourceCommit, allowOlderCheckout,
 //     expectedCsvImport,
 //     sources: [{ role, path, byteSha256, size, headerRaw, rows }],
-//     blobs: [{ sha256, size, base64 }],
+//     blobs: [{ sha256, size, text | base64 }],
 //     cadItemRevisions: [{ id, cadItemId, kind, key, snapshotSha256,
 //                          snapshot, source }],
 //     parts: [{ id, ipn, expectedRevision, snapshot, snapshotSha256,
@@ -88,6 +88,12 @@
 // replayed byte for byte (with X-Collab-Replayed: true) without writing
 // anything. Conflicts and newer_import_run are not stored, so a retry is
 // checked again.
+//
+// A request may be at most 32 MiB (IMPORT_BODY_LIMIT in
+// crates/catalog/src/pocketbase.rs, which refuses a bigger one before
+// sending it); PocketBase answers 413 to anything larger. The largest
+// import of the CSV catalog today (g-con) is about 2 MiB.
+const IMPORT_BODY_LIMIT = 32 * 1024 * 1024;
 routerAdd(
   "POST",
   "/api/catalog/csv-imports",
@@ -213,15 +219,38 @@ routerAdd(
     const catalogCsv = onlySource("catalog-csv", `database/${csvFile}.csv`);
     const substitutesCsv = onlySource("substitutes-csv", "database/substitutes.csv");
 
+    // A blob comes as `text` when its bytes are UTF-8 (every real CAD file
+    // so far) and as `base64` otherwise. Text is hashed and stored by
+    // PocketBase's own Go code: $security.sha256(text) and toBytes(text)
+    // both turn the same text into the same UTF-8 bytes, so the stored
+    // bytes are exactly the hashed ones, at about 50 ms per MiB. Base64 is
+    // decoded and hashed here in JavaScript (about 3 s per MiB), because
+    // PocketBase has no way to hash bytes that are not text.
     const blobs = list("blobs").map((blob) => {
       if (!isSha(blob.sha256)) {
         fail("blob sha256 is invalid");
       }
-      const bytes = lib.base64Decode(blob.base64);
-      if (bytes === null) {
-        fail(`blob ${blob.sha256} is not base64`);
+      const hasText = blob.text !== undefined && blob.text !== null;
+      const hasBase64 = blob.base64 !== undefined && blob.base64 !== null;
+      if (hasText === hasBase64) {
+        fail(`blob ${blob.sha256} must have either text or base64`);
       }
-      if (bytes.length !== blob.size || lib.sha256Bytes(bytes) !== blob.sha256) {
+      let bytes;
+      let sha256;
+      if (hasText) {
+        if (typeof blob.text !== "string") {
+          fail(`the text of blob ${blob.sha256} must be a string`);
+        }
+        bytes = toBytes(blob.text);
+        sha256 = $security.sha256(blob.text);
+      } else {
+        bytes = lib.base64Decode(blob.base64);
+        if (bytes === null) {
+          fail(`blob ${blob.sha256} is not base64`);
+        }
+        sha256 = lib.sha256Bytes(bytes);
+      }
+      if (bytes.length !== blob.size || sha256 !== blob.sha256) {
         fail(`blob ${blob.sha256} does not match its bytes`);
       }
       if (bytes.length === 0) {
@@ -965,5 +994,6 @@ routerAdd(
     }
     return e.json(reply.status, reply.body);
   },
+  $apis.bodyLimit(IMPORT_BODY_LIMIT),
   $apis.requireSuperuserAuth(),
 );
