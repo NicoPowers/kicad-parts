@@ -288,3 +288,58 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     );
     team.sign_out();
 }
+
+#[test]
+fn after_going_back_to_earlier_content_previews_draw_each_revisions_own_cad() {
+    let root = services::repository_root();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let member = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
+    let changed = tempfile::tempdir().unwrap();
+    changed_catalog(&root, changed.path());
+    // Content A, then B (the redrawn symbol and footprint), then A again:
+    // CAD item revisions 1, 2 and 3, and part revisions 1, 2 and 3.
+    for (step, catalog_root) in [
+        ("A", &root),
+        ("B", &changed.path().to_path_buf()),
+        ("A again", &root),
+    ] {
+        let import = catalog::CsvCatalog::new(catalog_root)
+            .import("g-res", None)
+            .unwrap();
+        let state = catalog::pocketbase::read_import_state(&admin).unwrap();
+        let mut command = ImportCommand::new(&import, "Import the resistors").expecting(&state);
+        command
+            .correlation_id
+            .push_str(&format!("-{}", step.replace(' ', "-")));
+        let reply = submit_import(&admin, &command).unwrap();
+        assert_eq!(reply.status, 200, "{step}: {}", reply.body);
+    }
+    let url = server.url().to_owned();
+    let data = tempfile::tempdir().unwrap();
+    // The local library is the redrawn one, so a drawing from it would show.
+    let browser = open_browser(changed.path(), data.path());
+    let original = open_browser(&root, &data.path().join("original"));
+    let redrawn = open_browser(changed.path(), &data.path().join("redrawn"));
+    let team = TeamCatalog::open(data.path().join("team.json"), Some(url.clone()), None);
+    sign_in_live(&team, &url, &member);
+    assert_eq!(team.part(IPN).unwrap().unwrap().current.number, 3);
+
+    for kind in [PreviewKind::Symbol, PreviewKind::Footprint] {
+        let content_a = drawing(&ready(original.preview_request(&request(kind, None), None)));
+        let content_b = drawing(&ready(redrawn.preview_request(&request(kind, None), None)));
+        assert_ne!(content_a, content_b);
+        // Part revision 3 binds CAD item revision 3, which has content A.
+        for (part_revision, cad_revision, content) in
+            [(3, 3, &content_a), (2, 2, &content_b), (1, 1, &content_a)]
+        {
+            let stored =
+                ready(browser.preview_request(&request(kind, Some(part_revision)), Some(&team)));
+            assert_eq!(stored.cad_item_revision, Some(cad_revision), "{kind:?}");
+            assert_eq!(stored.note, None);
+            assert_eq!(&drawing(&stored), content, "{kind:?} {part_revision}");
+        }
+    }
+    team.sign_out();
+    server.stop();
+}

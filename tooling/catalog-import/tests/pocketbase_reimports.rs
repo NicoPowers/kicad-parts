@@ -7,10 +7,14 @@
 //! read; every changed input is a temp copy.
 
 use catalog::pocketbase::{
-    CatalogReadback, EditCommand, ImportCommand, ImportOutcome, ImportReply, read_back,
-    read_import_state, submit_edit, submit_import,
+    CatalogReadback, EditCommand, ImportCommand, ImportOutcome, ImportReply, RestoreCommand,
+    StoredCadItemRevision, read_back, read_import_state, submit_edit, submit_import,
+    submit_restore,
 };
-use catalog::{CsvCatalog, CsvImport, PartDetails, sha256_hex};
+use catalog::{
+    CadItemDetails, CadItemId, CadItemKind, CadItemRevisionId, CadReferenceRole,
+    CadReferenceTarget, CsvCatalog, CsvImport, ModelTarget, PartDetails, sha256_hex,
+};
 use catalog_import::{ZeroLossReport, services};
 use collaboration::PocketBaseClient;
 use std::fs;
@@ -777,4 +781,266 @@ fn import_problems_of_earlier_runs_explain_no_rows() {
         report.other_problems
     );
     server.stop();
+}
+
+const FOOTPRINT: &str = "footprints/g-res.pretty/R_0603_1608Metric.kicad_mod";
+const SYMBOLS: &str = "symbols/g-pas.kicad_sym";
+const MODEL: &str = "3d-models/D_SOD-923.step";
+
+/// Every revision of the CAD item `kind` `key`, by number.
+fn revisions_of<'a>(
+    stored: &'a CatalogReadback,
+    kind: CadItemKind,
+    key: &str,
+) -> Vec<&'a StoredCadItemRevision> {
+    let id = CadItemId::new(kind, key);
+    let mut revisions: Vec<_> = stored
+        .cad_item_revisions
+        .iter()
+        .filter(|revision| revision.cad_item == id.as_str())
+        .collect();
+    revisions.sort_by_key(|revision| revision.number);
+    revisions
+}
+
+/// The revision number `details` binds for its first `role` reference.
+fn bound_number(details: &PartDetails, role: CadReferenceRole) -> u32 {
+    details
+        .cad_references
+        .iter()
+        .find(|reference| reference.role == role)
+        .map(|reference| match &reference.target {
+            CadReferenceTarget::CadItemRevision { number, .. } => *number,
+            other => panic!("{} is bound to {other:?}", reference.reference),
+        })
+        .unwrap()
+}
+
+/// Checks that `kind` `key` has revisions 1..=`count`, each the successor
+/// of the one before, with the ID derived from its number, and that every
+/// part whose current revision uses it binds the newest one. Returns the
+/// revisions.
+fn numbered_and_current<'a>(
+    stored: &'a CatalogReadback,
+    kind: CadItemKind,
+    key: &str,
+    count: u32,
+) -> Vec<&'a StoredCadItemRevision> {
+    let revisions = revisions_of(stored, kind, key);
+    let cad_item = CadItemId::new(kind, key);
+    let numbers: Vec<u32> = revisions.iter().map(|revision| revision.number).collect();
+    assert_eq!(numbers, (1..=count).collect::<Vec<_>>(), "{key}");
+    for pair in revisions.windows(2) {
+        assert_eq!(pair[1].predecessor, pair[0].id, "{key}");
+    }
+    for revision in &revisions {
+        assert_eq!(
+            revision.id,
+            CadItemRevisionId::new(&cad_item, revision.number).as_str()
+        );
+    }
+    let newest = revisions.last().unwrap();
+    let role = match kind {
+        CadItemKind::Symbol => Some(CadReferenceRole::Symbol),
+        CadItemKind::Footprint => Some(CadReferenceRole::Footprint),
+        CadItemKind::Model3d => None,
+    };
+    if let Some(role) = role {
+        let mut users = 0;
+        for part in &stored.parts {
+            let revision = stored.part_revision(&part.current_revision).unwrap();
+            let details: PartDetails = serde_json::from_str(&revision.snapshot).unwrap();
+            let uses = details.cad_references.iter().any(|reference| {
+                reference.role == role
+                    && matches!(&reference.target, CadReferenceTarget::CadItemRevision { cad_item: id, .. } if id == cad_item.as_str())
+            });
+            if uses {
+                users += 1;
+                assert_eq!(bound_number(&details, role), count, "{}", part.ipn);
+                assert!(
+                    revision.cad_item_revisions.contains(&newest.id),
+                    "{}",
+                    part.ipn
+                );
+            }
+        }
+        assert_eq!(users, 29, "every resistor uses {key}");
+    }
+    revisions
+}
+
+/// Imports `root` and expects `outcome`; then the zero-loss report must be
+/// lossless.
+fn import_step(
+    admin: &PocketBaseClient,
+    root: &Path,
+    step: &str,
+    expected: &str,
+) -> CatalogReadback {
+    let reply = import_reading_first(admin, &plan(root), "");
+    assert_eq!(outcome(&reply), expected, "{step}: {}", reply.body);
+    let stored = read_back(admin).unwrap();
+    lossless_report(root, &stored, step);
+    stored
+}
+
+#[test]
+fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
+    let before = catalog_hashes();
+    let copy = tempfile::tempdir().unwrap();
+    let root = copy.path();
+    copy_catalog(root);
+    // The resistor footprint names KiCad's own 3D model, which is not
+    // stored; point it at a model in the CSV catalog instead, so the 3D
+    // model case is covered too.
+    replace_once(
+        root,
+        FOOTPRINT,
+        "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+        "${GITPLM_PARTS}/3d-models/D_SOD-923.step",
+    );
+    let footprint_a = fs::read_to_string(root.join(FOOTPRINT)).unwrap();
+    let symbols_a = fs::read_to_string(root.join(SYMBOLS)).unwrap();
+    let model_a = fs::read(root.join(MODEL)).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
+    let footprint = "g-res:R_0603_1608Metric";
+    let symbol = "g-pas:R_US";
+
+    import_step(&admin, root, "content A", "applied");
+    // Footprint A, B, A: revisions 1, 2 and 3, with 3 current.
+    replace_once(
+        root,
+        FOOTPRINT,
+        "(tags \"resistor\")",
+        "(tags \"resistor B\")",
+    );
+    import_step(&admin, root, "footprint B", "applied");
+    fs::write(root.join(FOOTPRINT), &footprint_a).unwrap();
+    let stored = import_step(&admin, root, "footprint A again", "applied");
+    let revisions = numbered_and_current(&stored, CadItemKind::Footprint, footprint, 3);
+    assert_eq!(revisions[2].snapshot_sha256, revisions[0].snapshot_sha256);
+    assert_ne!(revisions[1].snapshot_sha256, revisions[0].snapshot_sha256);
+    // The bytes are stored once, shared by revisions 1 and 3.
+    assert_eq!(revisions[2].blob, revisions[0].blob);
+    let blob = stored.blob(&revisions[0].blob).unwrap();
+    assert_eq!(
+        stored
+            .blobs
+            .iter()
+            .filter(|stored| stored.sha256 == blob.sha256)
+            .count(),
+        1
+    );
+    assert_eq!(blob.bytes, footprint_a.as_bytes());
+    // Importing the same content again adds nothing, and replays.
+    let noop = import_reading_first(&admin, &plan(root), "");
+    assert_eq!(outcome(&noop), "noop", "{}", noop.body);
+    let replay = import_reading_first(&admin, &plan(root), "");
+    assert_eq!((replay.status, replay.replayed), (422, true));
+    assert_eq!(read_back(&admin).unwrap(), stored);
+
+    // The same for a symbol.
+    replace_once(
+        root,
+        SYMBOLS,
+        "\t(symbol \"R_US\"\n",
+        "\t(symbol \"R_US\"\n\t\t(property \"Note\" \"content B\"\n\t\t\t(at 0 0 0)\n\t\t)\n",
+    );
+    import_step(&admin, root, "symbol B", "applied");
+    fs::write(root.join(SYMBOLS), &symbols_a).unwrap();
+    let stored = import_step(&admin, root, "symbol A again", "applied");
+    let symbols = numbered_and_current(&stored, CadItemKind::Symbol, symbol, 3);
+    assert_eq!(symbols[2].snapshot_sha256, symbols[0].snapshot_sha256);
+    assert_eq!(symbols[2].blob, symbols[0].blob);
+    let noop = import_reading_first(&admin, &plan(root), "");
+    assert_eq!(outcome(&noop), "noop", "{}", noop.body);
+
+    // The same for the footprint's 3D model. A new 3D model revision is
+    // new footprint content (its snapshot names the model's number), so
+    // the footprint gets revisions 4 and 5 and the parts bind 5.
+    let mut model_b = model_a.clone();
+    model_b.extend_from_slice(b"/* content B */\n");
+    fs::write(root.join(MODEL), &model_b).unwrap();
+    import_step(&admin, root, "3D model B", "applied");
+    fs::write(root.join(MODEL), &model_a).unwrap();
+    let stored = import_step(&admin, root, "3D model A again", "applied");
+    let models = numbered_and_current(&stored, CadItemKind::Model3d, MODEL, 3);
+    assert_eq!(models[2].snapshot_sha256, models[0].snapshot_sha256);
+    assert_eq!(models[2].blob, models[0].blob);
+    let footprints = numbered_and_current(&stored, CadItemKind::Footprint, footprint, 5);
+    let newest: CadItemDetails = serde_json::from_str(&footprints[4].snapshot).unwrap();
+    let model_numbers: Vec<u32> = newest
+        .model_references
+        .iter()
+        .filter_map(|model| match &model.target {
+            ModelTarget::CadItemRevision { number, .. } => Some(*number),
+            ModelTarget::Unresolved { .. } => None,
+        })
+        .collect();
+    assert_eq!(model_numbers, [3]);
+    // Footprint revisions 3 and 5 have the same bytes, so one blob.
+    assert_eq!(footprints[4].blob, footprints[2].blob);
+    let noop = import_reading_first(&admin, &plan(root), "");
+    assert_eq!(outcome(&noop), "noop", "{}", noop.body);
+    let cad_item_revisions = stored.cad_item_revisions.len();
+
+    // An edit after that binds the current revisions, and adds none.
+    let ipn = "RES-0000-0470";
+    let (number, details) = current_revision(&stored, ipn);
+    assert_eq!(number, 7);
+    let mut edit = EditCommand::starting_from(&details, number, "Note the exact value");
+    edit.set_field("Value", "47 Ohm");
+    assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
+    let edited = read_back(&admin).unwrap();
+    let (number, details) = current_revision(&edited, ipn);
+    assert_eq!(number, 8);
+    assert_eq!(bound_number(&details, CadReferenceRole::Footprint), 5);
+    assert_eq!(bound_number(&details, CadReferenceRole::Symbol), 3);
+    assert_eq!(edited.cad_item_revisions.len(), cad_item_revisions);
+    lossless_report(root, &edited, "edit after the imports");
+
+    // Restoring revision 1: the symbol's revision 1 has the same content as
+    // its current revision 3, so the restore binds 3. The footprint's
+    // revision 1 names 3D model revision 1, so its content is no longer
+    // current (revision 5 names model revision 3), and the restore keeps
+    // revision 1: the part gets back exactly the CAD it had. A restore adds
+    // no CAD item revision.
+    let restore = RestoreCommand::new(ipn, 8, 1, "Go back to the first import");
+    let reply = submit_restore(&admin, &restore).unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let restored = read_back(&admin).unwrap();
+    let (number, details) = current_revision(&restored, ipn);
+    assert_eq!(number, 9);
+    assert_eq!(bound_number(&details, CadReferenceRole::Symbol), 3);
+    assert_eq!(bound_number(&details, CadReferenceRole::Footprint), 1);
+    let first = restored
+        .part_revisions
+        .iter()
+        .find(|revision| revision.part == restored.part(ipn).unwrap().id && revision.number == 1)
+        .unwrap();
+    let first_details: PartDetails = serde_json::from_str(&first.snapshot).unwrap();
+    assert_eq!(details.fields, first_details.fields);
+    assert_eq!(details.manufacturer_parts, first_details.manufacturer_parts);
+    let current = restored
+        .part_revision(&restored.part(ipn).unwrap().current_revision)
+        .unwrap();
+    assert_eq!(details.canonical_json(), current.snapshot);
+    let mut bound = current.cad_item_revisions.clone();
+    bound.sort();
+    let mut expected = vec![
+        CadItemRevisionId::new(&CadItemId::new(CadItemKind::Symbol, symbol), 3).to_string(),
+        CadItemRevisionId::new(&CadItemId::new(CadItemKind::Footprint, footprint), 1).to_string(),
+    ];
+    expected.sort();
+    assert_eq!(bound, expected);
+    assert_eq!(restored.cad_item_revisions, edited.cad_item_revisions);
+    lossless_report(root, &restored, "restore after the imports");
+
+    server.stop();
+    assert_eq!(
+        catalog_hashes(),
+        before,
+        "the tests changed the CSV catalog"
+    );
 }

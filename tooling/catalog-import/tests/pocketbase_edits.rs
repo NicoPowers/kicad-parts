@@ -1067,10 +1067,35 @@ routerAdd("POST", "/api/test/save-part", (e) => {
   }
   return e.json(200, { saved: true });
 }, $apis.requireSuperuserAuth());
+
+// Saves a copy of a CAD item's newest revision as revision `number`, with
+// the derived ID unless `id` is given, and the newest as predecessor unless
+// `noPredecessor`.
+routerAdd("POST", "/api/test/save-cad-item-revision", (e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  const body = e.requestInfo().body;
+  const newest = $app.findRecordsByFilter("catalog_cad_item_revisions", "cad_item = {:id}", "-number", 1, 0, {
+    id: body.cadItem,
+  })[0];
+  const made = new Record($app.findCollectionByNameOrId("catalog_cad_item_revisions"));
+  made.set("id", body.id || lib.deriveId("cad-item-revision", body.cadItem + "\n" + body.number));
+  for (const name of ["cad_item", "change", "blob", "snapshot_sha256", "snapshot", "license", "source"]) {
+    made.set(name, newest.getString(name));
+  }
+  made.set("number", body.number);
+  made.set("predecessor", body.noPredecessor ? "" : newest.id);
+  try {
+    $app.save(made);
+  } catch (error) {
+    return e.json(409, { refused: String(error) });
+  }
+  return e.json(200, { saved: true });
+}, $apis.requireSuperuserAuth());
 "#;
 
 #[test]
 fn server_code_cannot_move_a_part_backwards_or_skip_a_revision() {
+    // The same holds for CAD item revisions: see the end of this test.
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let hooks = state.path().join("hooks");
@@ -1117,6 +1142,27 @@ fn server_code_cannot_move_a_part_backwards_or_skip_a_revision() {
     assert_eq!(
         (part.current_revision.as_str(), part.current_revision_number),
         (second.as_str(), 2)
+    );
+
+    // A CAD item's current revision is its newest, so server code can only
+    // add the revision numbered right after it, with the derived ID.
+    let cad_item = after_edit.cad_item_revisions[0].cad_item.clone();
+    let save_cad = |body: Value| {
+        admin
+            .post_json("/api/test/save-cad-item-revision", &body)
+            .unwrap()
+    };
+    let skip = save_cad(json!({ "cadItem": cad_item, "number": 3 }));
+    assert_eq!(skip.status, 409, "{}", skip.body);
+    assert!(skip.body.contains("must be number 2"), "{}", skip.body);
+    let unlinked = save_cad(json!({ "cadItem": cad_item, "number": 2, "noPredecessor": true }));
+    assert_eq!(unlinked.status, 409, "{}", unlinked.body);
+    let forged = save_cad(json!({ "cadItem": cad_item, "number": 2, "id": "aaaaaaaaaaaaaaa" }));
+    assert_eq!(forged.status, 409, "{}", forged.body);
+    assert!(forged.body.contains("ID derived"), "{}", forged.body);
+    assert_eq!(
+        read_back(&admin).unwrap().cad_item_revisions,
+        after_edit.cad_item_revisions
     );
     server.stop();
 }
