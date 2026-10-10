@@ -37,8 +37,9 @@ export const baselinesDir = path.join(here, 'baselines');
  * pass. A pixel counts as different when its colour moved more than
  * PIXEL_THRESHOLD (pixelmatch's 0-1 colour distance), anti-aliased edges
  * included. The screenshot fails when more than MAX_DIFFERENT_PIXELS
- * differ. Repeated runs differ by 0 pixels (the app draws without the GPU,
- * which otherwise changes edge smoothing when it sleeps or resets).
+ * differ. Repeated runs differ by 0 pixels: --software-rendering draws
+ * without the GPU and in whole tiles, since a sleeping or reset GPU, or a
+ * partly redrawn tile, changes edge smoothing.
  * Journey 01 checks that small real changes (one character, one colour
  * token, the corner radius) fail.
  */

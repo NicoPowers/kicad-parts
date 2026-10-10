@@ -39,9 +39,10 @@ struct LaunchOptions {
     /// their screenshots are 1280x800 on every machine.
     display_scale: Option<f64>,
     /// `--software-rendering` (Windows only, no value): WebView2 draws
-    /// without the GPU. The journeys use it so screenshots are drawn the
-    /// same way even when the GPU sleeps or resets, which changes how text
-    /// and curves are smoothed.
+    /// without the GPU and always redraws whole tiles. The journeys use it
+    /// so screenshots are drawn the same way every run: a sleeping or reset
+    /// GPU, or a partly redrawn tile, changes how text and curves are
+    /// smoothed.
     software_rendering: bool,
 }
 
@@ -115,8 +116,8 @@ fn parse_scale(text: &str) -> Result<f64, String> {
         })
 }
 
-/// The browser switches the launch options need: a fixed scale and drawing
-/// without the GPU.
+/// The browser switches the launch options need: a fixed scale, and
+/// drawing without the GPU in whole tiles.
 fn webview_switches(display_scale: Option<f64>, software_rendering: bool) -> Vec<String> {
     let mut switches = Vec::new();
     if let Some(scale) = display_scale {
@@ -124,6 +125,7 @@ fn webview_switches(display_scale: Option<f64>, software_rendering: bool) -> Vec
     }
     if software_rendering {
         switches.push("--disable-gpu".to_owned());
+        switches.push("--disable-partial-raster".to_owned());
     }
     switches
 }
@@ -448,14 +450,21 @@ mod tests {
     #[test]
     fn the_switches_are_added_after_the_drivers_switches() {
         let both = webview_switches(Some(1.0), true);
-        assert_eq!(both, ["--force-device-scale-factor=1", "--disable-gpu"]);
         assert_eq!(
-            with_switches("", &both),
-            "--force-device-scale-factor=1 --disable-gpu"
+            both,
+            [
+                "--force-device-scale-factor=1",
+                "--disable-gpu",
+                "--disable-partial-raster"
+            ]
+        );
+        assert_eq!(
+            with_switches("", &both[..1]),
+            "--force-device-scale-factor=1"
         );
         assert_eq!(
             with_switches("--remote-debugging-port=0 ", &both),
-            "--remote-debugging-port=0 --force-device-scale-factor=1 --disable-gpu"
+            "--remote-debugging-port=0 --force-device-scale-factor=1 --disable-gpu --disable-partial-raster"
         );
         assert_eq!(
             webview_switches(Some(1.25), false),
