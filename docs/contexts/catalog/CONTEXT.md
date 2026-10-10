@@ -29,7 +29,7 @@ What a part is and how you design with it: its description, value, symbol, footp
 _Avoid_: semantic change, attributes
 
 **Supplier data**:
-Supplier part numbers and prices. They belong to Procurement and never create a revision; the Catalog only keeps them in a revision's source.
+Supplier part numbers and prices. They belong to Procurement and never create a revision; the Catalog only keeps them as part of what each CSV import read.
 _Avoid_: Operational Fact
 
 **Revision**:
