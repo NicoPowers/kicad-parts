@@ -56,6 +56,8 @@ Close the desktop app. The command then stops the team server and deletes its da
 
 The team server keeps its data in `target/local-team-server/run-<number>` while it runs, never in your system temp folder. The data includes the accounts' password hashes. If the command is killed outright (for example from Task Manager), the team server still stops, because it runs in a job that Windows ends with the command, but the folder stays behind until the next time you start the command, which deletes it.
 
+If the team server will not start and says its data "cannot be upgraded", the data was saved by an older version of the team server, before CAD item revisions were numbered like part revisions. That data is never changed. To start fresh, stop the command, delete the `target/local-team-server` folder, and start the command again. If you run PocketBase on a data folder of your own, delete or move that `pb_data` folder instead.
+
 Without `--desktop`, the command prints the address and accounts and waits for you to press Enter or Ctrl+C, so you can open the app yourself.
 
 ## How signing in works
