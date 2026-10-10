@@ -22,6 +22,7 @@ import {
   startTeamServer,
   tempDir,
   textOf,
+  waitForLiveUpdates,
   waitForPreview,
   waitForText,
 } from '../harness.mjs';
@@ -127,6 +128,7 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
     await (await browser.$('aria/Password')).setValue(account.password);
     await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();
     await waitForText(browser, BADGE, `Team catalog · ${account.name}`);
+    await waitForLiveUpdates(browser);
     await browser.waitUntil(async () => (await sourceFact()) === 'Team catalog, revision 1', {
       timeout: 20_000,
       timeoutMsg: 'the part never showed the team catalog revision',
@@ -180,6 +182,11 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
     // A note, not an error: the drawing is still useful.
     assert.equal(await browser.execute(() => document.querySelectorAll('.part-previews [role="alert"]').length), 0);
     await browser.execute(() => document.querySelector('.kicad-settings').open = false);
+    // The badge says live updates are reconnecting, since the server is gone.
+    await browser.waitUntil(
+      async () => browser.execute((s) => document.querySelector(s)?.classList.contains('kicad-badge-problem'), BADGE),
+      { timeout: 20_000, timeoutMsg: 'the team badge never showed the lost connection' },
+    );
     await assertAccessible(browser, '52-team-preview-fallback');
     await screenshot(browser, '52-team-preview-fallback');
   });

@@ -5,13 +5,16 @@
 import { remote } from 'webdriverio';
 import { spawn } from 'node:child_process';
 import axe from 'axe-core';
+import pixelmatch from 'pixelmatch';
+import { PNG } from 'pngjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+const here = path.dirname(fileURLToPath(import.meta.url));
+export const repoRoot = path.resolve(here, '../../..');
 export const outDir = process.env.JOURNEY_OUT ?? path.join(repoRoot, 'target', 'journeys', 'latest');
 export const appBinary = path.join(
   repoRoot,
@@ -21,20 +24,55 @@ export const appBinary = path.join(
 );
 export const driverPort = Number(process.env.TAURI_DRIVER_PORT ?? 4444);
 
-/** The viewport every screenshot is taken at (the window's configured inner size). */
+/** The viewport every screenshot is taken at (the window's configured inner
+ * size). The app runs with --display-scale=1, so one CSS pixel is one
+ * screenshot pixel whatever the Windows display scaling is. */
 export const VIEWPORT = { width: 1280, height: 800 };
 
+/** Reviewed screenshots that each new screenshot is compared with. */
+export const baselinesDir = path.join(here, 'baselines');
+
+/**
+ * How different a screenshot may be from its baseline and still pass.
+ * A pixel counts as different when its colour moved more than
+ * PIXEL_THRESHOLD (pixelmatch's 0-1 colour distance; anti-aliased edges are
+ * ignored). The screenshot fails when more than MAX_DIFFERENT_PIXELS differ:
+ * repeated runs differ by 0-2 pixels, and one changed character is about
+ * 30-80 pixels.
+ */
+export const VISUAL_LIMITS = { PIXEL_THRESHOLD: 0.1, MAX_DIFFERENT_PIXELS: 20 };
+
 const screenshotsDir = path.join(outDir, 'screenshots');
+const diffsDir = path.join(outDir, 'diffs');
 const a11yDir = path.join(outDir, 'accessibility');
 const evidenceFile = path.join(outDir, 'evidence.jsonl');
+/** One line per screenshot: how it compared with its baseline. */
+export const visualResultsFile = path.join(outDir, 'visual-results.jsonl');
+const updateBaselines = process.env.JOURNEYS_UPDATE_BASELINES === '1';
 
 export function record(entry) {
   fs.mkdirSync(outDir, { recursive: true });
   fs.appendFileSync(evidenceFile, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
 }
 
+/** Temporary files of one run. The runner empties it before and after. */
+export const runTempRoot = path.join(os.tmpdir(), 'kicad-parts-journeys');
+const specName = path.basename(process.argv.find((arg) => arg.endsWith('.test.mjs')) ?? 'journey');
+const tempNamesUsed = new Map();
+
+/**
+ * A new, empty folder such as <temp>/kicad-parts-journeys/02-no-kicad.
+ * The name is fixed rather than random, so paths the app shows look the
+ * same in every run's screenshots.
+ */
 export function tempDir(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `kicad-parts-${prefix}-`));
+  const base = `${specName.slice(0, 2)}-${prefix}`;
+  const count = (tempNamesUsed.get(base) ?? 0) + 1;
+  tempNamesUsed.set(base, count);
+  const dir = path.join(runTempRoot, count === 1 ? base : `${base}-${count}`);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 /**
@@ -99,7 +137,7 @@ export async function launchApp({ args = [], dataDir = tempDir('data') } = {}) {
       'tauri:options': {
         application: appBinary,
         // msedgedriver treats these as browser switches: use --name=value.
-        args: [`--data-dir=${dataDir}`, ...args],
+        args: [`--data-dir=${dataDir}`, '--display-scale=1', ...args],
       },
     },
   });
@@ -116,55 +154,229 @@ export async function launchApp({ args = [], dataDir = tempDir('data') } = {}) {
   record({ event: 'launch', args, viewport });
   assert.equal(viewport.width, VIEWPORT.width, 'stable viewport width');
   assert.equal(viewport.height, VIEWPORT.height, 'stable viewport height');
+  assert.equal(viewport.devicePixelRatio, 1, 'the display scale is pinned to 1');
   return app;
 }
 
-/** Saves a screenshot of the current state after layout settles. */
-export async function screenshot(browser, name) {
+/**
+ * Saves a screenshot of the current state after layout settles, then
+ * compares it with its baseline (see compareWithBaseline).
+ *
+ * `hide` lists selectors whose text changes from run to run, such as a
+ * server port; save times (<time>) are always hidden. Their text is made
+ * transparent and hatched for the screenshot only, so the layout stays real.
+ * @param {{ hide?: string[] }} options
+ */
+export async function screenshot(browser, name, { hide = [] } = {}) {
+  hide = ['time', ...hide];
   fs.mkdirSync(screenshotsDir, { recursive: true });
   // Remove the text caret and focus ring so repeated runs match.
   await browser.execute(() => {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   });
+  const hidden = await browser.execute((selectors) => {
+    const elements = selectors.flatMap((s) => [...document.querySelectorAll(s)]);
+    for (const el of elements) {
+      // CSSOM, not a style attribute or <style> element, which the CSP blocks.
+      el.style.setProperty('color', 'transparent', 'important');
+      el.style.setProperty('-webkit-text-fill-color', 'transparent', 'important');
+      el.style.setProperty(
+        'background-image',
+        'repeating-linear-gradient(135deg, #98a2b3 0 1px, transparent 1px 5px)',
+        'important',
+      );
+      el.dataset.journeyHidden = '';
+    }
+    return elements.length;
+  }, hide);
   await browser.execute(
     () =>
       new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))),
   );
   const file = path.join(screenshotsDir, `${name}.png`);
   await browser.saveScreenshot(file);
-  record({ event: 'screenshot', name, file });
+  await browser.execute(() => {
+    for (const el of document.querySelectorAll('[data-journey-hidden]')) {
+      for (const property of ['color', '-webkit-text-fill-color', 'background-image']) el.style.removeProperty(property);
+      delete el.dataset.journeyHidden;
+    }
+  });
+  record({ event: 'screenshot', name, file, hidden });
+  compareWithBaseline(name, file);
   return file;
 }
 
 /**
- * Runs axe-core against the live document, writes the full result, and
- * fails on any violation.
+ * Compares a screenshot with baselines/<name>.png and appends the outcome
+ * to visual-results.jsonl; the runner reports and fails on it after the
+ * journeys. A screenshot that differs keeps an image of the differences in
+ * diffs/. With --update-baselines the screenshot becomes the new baseline,
+ * which is the only way a baseline changes.
+ */
+function compareWithBaseline(name, file) {
+  const actual = PNG.sync.read(fs.readFileSync(file));
+  assert.deepEqual(
+    { width: actual.width, height: actual.height },
+    VIEWPORT,
+    `screenshot ${name} is ${actual.width}x${actual.height}, not ${VIEWPORT.width}x${VIEWPORT.height}: is the display scale pinned?`,
+  );
+  const baseline = path.join(baselinesDir, `${name}.png`);
+  const result = { name, status: 'same', differentPixels: 0 };
+  if (updateBaselines) {
+    fs.mkdirSync(baselinesDir, { recursive: true });
+    fs.writeFileSync(baseline, smallPng(actual));
+    result.status = 'updated';
+  } else if (!fs.existsSync(baseline)) {
+    result.status = 'missing';
+  } else {
+    const expected = PNG.sync.read(fs.readFileSync(baseline));
+    if (expected.width !== actual.width || expected.height !== actual.height) {
+      result.status = 'changed';
+      result.reason = `the baseline is ${expected.width}x${expected.height}`;
+    } else {
+      const diff = new PNG({ width: actual.width, height: actual.height });
+      result.differentPixels = pixelmatch(expected.data, actual.data, diff.data, actual.width, actual.height, {
+        threshold: VISUAL_LIMITS.PIXEL_THRESHOLD,
+      });
+      if (result.differentPixels > 0) {
+        fs.mkdirSync(diffsDir, { recursive: true });
+        result.diff = path.join(diffsDir, `${name}.png`);
+        fs.writeFileSync(result.diff, smallPng(diff));
+      }
+      if (result.differentPixels > VISUAL_LIMITS.MAX_DIFFERENT_PIXELS) result.status = 'changed';
+    }
+  }
+  fs.appendFileSync(visualResultsFile, `${JSON.stringify(result)}\n`);
+}
+
+/** Re-encodes a PNG with the strongest compression, to keep baselines small. */
+function smallPng(png) {
+  return PNG.sync.write(png, { deflateLevel: 9, filterType: -1 });
+}
+
+/**
+ * Runs axe-core against the live document, writes the full result to
+ * accessibility/<name>.json, and fails on any violation.
+ *
+ * axe leaves a colour contrast check incomplete when it cannot see the
+ * text's background: the text is cut off by a scrolled list
+ * (elmPartiallyObscured) or partly under another element, such as an open
+ * menu (bgOverlap). Each such element is checked again where axe can
+ * measure it, scrolled into view and with the covering elements made
+ * invisible, then the page is put back. The journey fails on any contrast
+ * violation and on any contrast check that is still incomplete.
  */
 export async function assertAccessible(browser, name) {
   fs.mkdirSync(a11yDir, { recursive: true });
   await browser.execute(axe.source);
-  const results = await browser.executeAsync((done) => {
-    // eslint-disable-next-line no-undef
-    window.axe
-      .run(document, { resultTypes: ['violations', 'incomplete'] })
-      .then((r) =>
-        done({
-          violations: r.violations.map((v) => ({
-            id: v.id,
-            impact: v.impact,
-            help: v.help,
-            nodes: v.nodes.map((n) => n.target.join(' ')),
-          })),
-          incomplete: r.incomplete.map((v) => ({ id: v.id, nodes: v.nodes.length })),
-          passes: r.passes.length,
-        }),
-      )
-      .catch((error) => done({ error: String(error) }));
+  const results = await browser.executeAsync(async (done) => {
+    try {
+      // eslint-disable-next-line no-undef
+      const axe = window.axe;
+      const reasonsOf = (node) => [...node.any, ...node.all, ...node.none].map((c) => c.data?.messageKey ?? c.message);
+      const describe = (el) => el.tagName.toLowerCase() + [...el.classList].map((c) => '.' + c).join('');
+      const first = await axe.run(document, { resultTypes: ['violations', 'incomplete'] });
+      const violations = first.violations.map((v) => ({
+        id: v.id,
+        impact: v.impact,
+        help: v.help,
+        nodes: v.nodes.map((n) => n.target.join(' ')),
+      }));
+      const contrastRechecks = [];
+      const unchecked = first.incomplete.find((v) => v.id === 'color-contrast')?.nodes ?? [];
+      for (const node of unchecked) {
+        const target = node.target.join(' ');
+        const el = document.querySelector(target);
+        const recheck = { target, reasons: reasonsOf(node), scrolled: false, hid: [] };
+        contrastRechecks.push(recheck);
+        if (!el) {
+          recheck.outcome = 'incomplete';
+          recheck.stillIncompleteBecause = ['element not found again'];
+          continue;
+        }
+        const scrolls = [];
+        for (let a = el.parentElement; a; a = a.parentElement) scrolls.push([a, a.scrollTop, a.scrollLeft]);
+        el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        recheck.scrolled = scrolls.some(([a, top, left]) => a.scrollTop !== top || a.scrollLeft !== left);
+        // Elements drawn over the text, at its middle and both ends.
+        const box = el.getBoundingClientRect();
+        const y = box.top + box.height / 2;
+        const covering = new Set();
+        for (const x of [box.left + 1, box.left + box.width / 2, box.right - 1]) {
+          for (const top of document.elementsFromPoint(x, y)) {
+            if (top === el || el.contains(top)) break;
+            if (!top.contains(el)) covering.add(top);
+          }
+        }
+        const visibility = [...covering].map((c) => [c, c.style.getPropertyValue('visibility'), c.style.getPropertyPriority('visibility')]);
+        for (const c of covering) c.style.setProperty('visibility', 'hidden', 'important');
+        recheck.hid = [...covering].map(describe);
+        let again;
+        try {
+          again = await axe.run(el, {
+            runOnly: { type: 'rule', values: ['color-contrast'] },
+            resultTypes: ['violations', 'incomplete', 'passes'],
+          });
+        } finally {
+          for (const [c, value, priority] of visibility) {
+            if (value) c.style.setProperty('visibility', value, priority);
+            else c.style.removeProperty('visibility');
+          }
+          for (const [a, top, left] of scrolls) {
+            a.scrollTop = top;
+            a.scrollLeft = left;
+          }
+        }
+        const nodesOf = (list) => list.flatMap((v) => v.nodes);
+        if (nodesOf(again.violations).length > 0) {
+          recheck.outcome = 'violation';
+          violations.push({
+            id: 'color-contrast',
+            impact: again.violations[0].impact,
+            help: again.violations[0].help,
+            nodes: [target],
+            found: 'on the second check',
+          });
+        } else if (nodesOf(again.incomplete).length > 0 || nodesOf(again.passes).length === 0) {
+          recheck.outcome = 'incomplete';
+          recheck.stillIncompleteBecause = nodesOf(again.incomplete).flatMap(reasonsOf);
+        } else {
+          recheck.outcome = 'passed';
+        }
+      }
+      done({
+        violations,
+        // Checks axe could not finish on the first pass, with its reason
+        // for each element; contrastRechecks says how each contrast one
+        // ended.
+        incomplete: first.incomplete.map((v) => ({
+          id: v.id,
+          nodes: v.nodes.map((n) => ({ target: n.target.join(' '), reasons: reasonsOf(n) })),
+        })),
+        contrastRechecks,
+        passes: first.passes.length,
+      });
+    } catch (error) {
+      done({ error: String(error) });
+    }
   });
   fs.writeFileSync(path.join(a11yDir, `${name}.json`), JSON.stringify(results, null, 2));
-  record({ event: 'axe', name, violations: results.violations?.length, passes: results.passes });
+  const stillIncomplete = (results.contrastRechecks ?? []).filter((r) => r.outcome === 'incomplete');
+  record({
+    event: 'axe',
+    name,
+    violations: results.violations?.length,
+    passes: results.passes,
+    contrastRechecked: results.contrastRechecks?.length,
+    contrastStillIncomplete: stillIncomplete.length,
+  });
   assert.equal(results.error, undefined, `axe failed to run: ${results.error}`);
   assert.deepEqual(results.violations, [], `accessibility violations in ${name}`);
+  assert.deepEqual(
+    stillIncomplete.map((r) => ({ target: r.target, reasons: r.stillIncompleteBecause })),
+    [],
+    `axe could not check the colour contrast of these elements in ${name}`,
+  );
   return results;
 }
 
@@ -228,6 +440,15 @@ export async function selectResult(browser, name) {
     }
   }
   assert.fail(`no search result mentions ${name}`);
+}
+
+/** Waits until the team badge says live updates are connected. */
+export async function waitForLiveUpdates(browser) {
+  await browser.waitUntil(
+    async () =>
+      browser.execute(() => document.querySelector('.team-settings > summary')?.classList.contains('kicad-badge-ready')),
+    { timeout: 20_000, timeoutMsg: 'live updates never connected' },
+  );
 }
 
 export const SYMBOL = 'section[aria-labelledby="symbol-heading"]';

@@ -18,6 +18,7 @@ import {
   startTeamServer,
   teamSignIn,
   textOf,
+  waitForLiveUpdates,
   waitForPreview,
   waitForText,
 } from '../harness.mjs';
@@ -27,6 +28,8 @@ const MPN = 'RC0603FR-0747RL';
 const BADGE = '.team-settings > summary';
 const COLUMN = '.part-fields';
 const NOTICE = '.team-notice';
+/** The server address holds a port that changes from run to run. */
+const SERVER_ADDRESS = '#team-server';
 
 describe('team catalog: history, edits, conflicts and restore', () => {
   let server;
@@ -147,7 +150,7 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     assert.equal(await (await browser.$('aria/Password')).getAttribute('type'), 'password');
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 0);
     await assertAccessible(browser, '40-team-sign-in');
-    await screenshot(browser, '40-team-sign-in');
+    await screenshot(browser, '40-team-sign-in', { hide: [SERVER_ADDRESS] });
   });
 
   it('says plainly when the password is wrong', async () => {
@@ -156,16 +159,13 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     assert.equal(await (await browser.$('aria/Password')).getValue(), '', 'the password is cleared');
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 1);
     await assertAccessible(browser, '41-team-sign-in-failed');
-    await screenshot(browser, '41-team-sign-in-failed');
+    await screenshot(browser, '41-team-sign-in-failed', { hide: [SERVER_ADDRESS] });
   });
 
   it('signs in and shows a part from the team catalog', async () => {
     await signIn(editor);
     await waitForText(browser, BADGE, `Team catalog · ${editor.name}`);
-    await browser.waitUntil(
-      async () => browser.execute((s) => document.querySelector(s)?.classList.contains('kicad-badge-ready'), BADGE),
-      { timeout: 20_000, timeoutMsg: 'live updates never connected' },
-    );
+    await waitForLiveUpdates(browser);
     await searchFor(browser, MPN, '1 matching part');
     await selectResult(browser, MPN);
     await waitForRevision(1);
@@ -337,6 +337,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     );
     await waitForText(browser, '.history li:first-child .history-title', `Revision 6 · Restored by ${editor.name} (current)`);
     assert.match(await textOf(browser, '.revision'), /It copies the details of revision 1\./);
+    // The results list catches up with the restored description by itself.
+    await waitForText(browser, '.results li .result-description', 'RES 47 OHM 1% 1/10W 0603');
     await assertAccessible(browser, '48-team-restored');
     await screenshot(browser, '48-team-restored');
   });
@@ -345,6 +347,7 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     await signOut();
     await signIn(viewer);
     await waitForText(browser, BADGE, `Team catalog · ${viewer.name}`);
+    await waitForLiveUpdates(browser);
     await waitForRevision(6);
     await waitForText(browser, '.read-only', 'You can view this part but not edit it.');
     assert.equal((await browser.$$(NOTICE)).length, 0, "no message left from the editor's session");

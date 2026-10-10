@@ -12,6 +12,8 @@
   "devDependencies": {
     "axe-core": "^4.10.0",
     "edgedriver": "^6.1.0",
+    "pixelmatch": "^8.0.0",
+    "pngjs": "^7.0.0",
     "webdriverio": "^9.0.0"
   }
 }
