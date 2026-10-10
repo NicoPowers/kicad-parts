@@ -1437,8 +1437,12 @@ impl<'a> Reporter<'a> {
                         snapshot_sha256,
                     } => {
                         let id = CadItemRevisionId::new(&CadItemId::from_stored(cad_item), *number);
+                        // The record's content, only if it is the revision
+                        // the part names; otherwise the named hash, which
+                        // then differs from its peers.
                         let content = readback
                             .cad_item_revision(id.as_str())
+                            .filter(|revision| &revision.snapshot_sha256 == snapshot_sha256)
                             .and_then(|revision| {
                                 serde_json::from_str::<CadItemDetails>(&revision.snapshot).ok()
                             })

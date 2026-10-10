@@ -713,6 +713,11 @@ routerAdd(
         if (current.number === target.number && current.snapshotSha256 === target.snapshotSha256) {
           return;
         }
+        // A stored record that is not what its ID says is answered as an ID
+        // collision, below; its bindings cannot be checked against it.
+        if (collisions.length > 0) {
+          return;
+        }
         const now = kept[target.cadItem];
         const keptRecord = now && now.number === target.number && now.snapshotSha256 === target.snapshotSha256
           ? byId("catalog_cad_item_revisions", target.id)
