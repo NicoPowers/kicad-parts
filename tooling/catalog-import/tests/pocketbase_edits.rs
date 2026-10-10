@@ -154,9 +154,10 @@ fn an_editor_publishes_edits_and_restores_with_exact_cad_revisions() {
     assert!(promoted.success().is_err(), "{promoted:?}");
     let account: Value = team.admin.get(&own).unwrap().json().unwrap();
     assert_eq!(account["can_edit_catalog"], false);
-    // ...but can still change their own name.
+    // ...but can still change the rest of their account (not their name;
+    // see only_an_administrator_names_a_member).
     viewer
-        .patch_json(&own, &json!({ "name": "Vic V." }))
+        .patch_json(&own, &json!({ "emailVisibility": true }))
         .unwrap()
         .success()
         .unwrap();
@@ -492,6 +493,29 @@ fn catalog_records_never_change_even_for_superusers() {
             json!({ "detail": "{}" }),
         ),
     ];
+    // Turn PocketBase's batch API on (it is off by default), and show it
+    // works for an ordinary write, so its refusal below comes from the
+    // guards.
+    team.admin
+        .patch_json(
+            "/api/settings",
+            &json!({ "batch": { "enabled": true, "maxRequests": 50, "timeout": 3 } }),
+        )
+        .unwrap()
+        .success()
+        .unwrap();
+    let ordinary = team
+        .admin
+        .post_json(
+            "/api/batch",
+            &json!({ "requests": [{
+                "method": "PATCH",
+                "url": format!("/api/collections/users/records/{}", editor.auth_id().unwrap()),
+                "body": { "verified": true },
+            }]}),
+        )
+        .unwrap();
+    assert_eq!(ordinary.status, 200, "{}", ordinary.body);
     // Superusers bypass collection rules, so only the write guards stop
     // them, always with 403. Members are already stopped by the rules.
     for (client, superuser) in [(&team.admin, true), (&editor, false)] {
@@ -512,7 +536,7 @@ fn catalog_records_never_change_even_for_superusers() {
                 .unwrap();
             assert!(refused(create.status), "{collection} create: {create:?}");
         }
-        // The batch API is refused too.
+        // The batch API is refused too, now that it is on.
         let batch = client
             .post_json(
                 "/api/batch",
@@ -637,4 +661,378 @@ fn a_second_client_converges_through_realtime_and_its_checkpoint() {
     }
     connection.disconnect();
     team.server.stop();
+}
+
+/// The collection's JSON as the API returns it.
+fn collection(admin: &PocketBaseClient, name: &str) -> Value {
+    admin
+        .get(&format!("/api/collections/{name}"))
+        .unwrap()
+        .json()
+        .unwrap()
+}
+
+/// PATCHes collection `name` with `change` applied to its JSON; returns the
+/// status.
+fn change_collection(admin: &PocketBaseClient, name: &str, change: impl Fn(&mut Value)) -> u16 {
+    let mut body = collection(admin, name);
+    change(&mut body);
+    admin
+        .patch_json(&format!("/api/collections/{name}"), &body)
+        .unwrap()
+        .status
+}
+
+#[test]
+fn catalog_collections_cannot_lose_data_through_the_collection_api() {
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    let initial = team.read();
+    applied(&submit_edit(&editor, &edit(&initial, IPN, "Value", "47R")).unwrap());
+    let stored = team.read();
+    let admin = &team.admin;
+    let remove_field = |field: &'static str| {
+        move |body: &mut Value| {
+            body["fields"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|item| item["name"] != field)
+        }
+    };
+
+    // Dropping a field would wipe it on every record.
+    assert_eq!(
+        change_collection(admin, "catalog_part_revisions", remove_field("source")),
+        403
+    );
+    // Renaming or retyping a field, renaming the collection, loosening a
+    // rule and dropping the unique seq index are refused too.
+    assert_eq!(
+        change_collection(admin, "catalog_changes", |body| {
+            for field in body["fields"].as_array_mut().unwrap() {
+                if field["name"] == "reason" {
+                    field["name"] = "why".into();
+                }
+            }
+        }),
+        403
+    );
+    assert_eq!(
+        change_collection(admin, "catalog_audit_entries", |body| body["name"] =
+            "catalog_audit_entries_old".into()),
+        403
+    );
+    assert_eq!(
+        change_collection(admin, "catalog_parts", |body| body["listRule"] = "".into()),
+        403
+    );
+    assert_eq!(
+        change_collection(admin, "catalog_parts", |body| body["updateRule"] =
+            "@request.auth.id != ''".into()),
+        403
+    );
+    assert_eq!(
+        change_collection(admin, "catalog_changes", |body| {
+            body["indexes"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|index| !index.as_str().unwrap().contains("seq"))
+        }),
+        403
+    );
+    // Deleting a collection, the replay ledger included, is refused.
+    for name in ["catalog_commands", "catalog_part_revisions", "users"] {
+        let deleted = admin.delete(&format!("/api/collections/{name}")).unwrap();
+        assert_eq!(deleted.status, 403, "{name}: {}", deleted.body);
+    }
+    // So is an import that deletes a collection or drops a field.
+    let all: Value = admin
+        .get("/api/collections?perPage=500")
+        .unwrap()
+        .json()
+        .unwrap();
+    let every: Vec<Value> = all["items"].as_array().unwrap().clone();
+    let without_ledger: Vec<Value> = every
+        .iter()
+        .filter(|item| item["name"] != "catalog_commands")
+        .cloned()
+        .collect();
+    let import = admin
+        .put_json(
+            "/api/collections/import",
+            &json!({ "collections": without_ledger, "deleteMissing": true }),
+        )
+        .unwrap();
+    assert_eq!(import.status, 403, "{}", import.body);
+    let mut dropped = every.clone();
+    for item in &mut dropped {
+        if item["name"] == "catalog_part_revisions" {
+            remove_field("source")(item);
+        }
+    }
+    let import = admin
+        .put_json(
+            "/api/collections/import",
+            &json!({ "collections": dropped, "deleteMissing": false }),
+        )
+        .unwrap();
+    assert_eq!(import.status, 403, "{}", import.body);
+    // The users fields and rules the edit routes rely on are guarded.
+    assert_eq!(
+        change_collection(admin, "users", remove_field("can_edit_catalog")),
+        403
+    );
+    assert_eq!(
+        change_collection(admin, "users", |body| body["updateRule"] =
+            "id = @request.auth.id".into()),
+        403
+    );
+
+    // Nothing above changed a record.
+    assert_eq!(team.read(), stored);
+    // Harmless changes still work: a new field on a Catalog collection, a
+    // new field on users, and an unchanged import.
+    assert_eq!(
+        change_collection(admin, "catalog_changes", |body| {
+            body["fields"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({ "name": "note", "type": "text" }))
+        }),
+        200
+    );
+    assert_eq!(
+        change_collection(admin, "users", |body| {
+            body["fields"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({ "name": "nickname", "type": "text" }))
+        }),
+        200
+    );
+    let all: Value = admin
+        .get("/api/collections?perPage=500")
+        .unwrap()
+        .json()
+        .unwrap();
+    let import = admin
+        .put_json(
+            "/api/collections/import",
+            &json!({ "collections": all["items"], "deleteMissing": false }),
+        )
+        .unwrap();
+    assert!(
+        matches!(import.status, 200 | 204),
+        "{} {}",
+        import.status,
+        import.body
+    );
+    team.server.stop();
+}
+
+#[test]
+fn only_an_administrator_names_a_member() {
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    let own = format!(
+        "/api/collections/users/records/{}",
+        editor.auth_id().unwrap()
+    );
+    // A member cannot rename themselves, so cannot pose as someone else...
+    for name in ["Grace Editor", "an administrator"] {
+        let renamed = editor.patch_json(&own, &json!({ "name": name })).unwrap();
+        assert!(renamed.success().is_err(), "{renamed:?}");
+    }
+    let account: Value = team.admin.get(&own).unwrap().json().unwrap();
+    assert_eq!(account["name"], "Ada Editor");
+    // ...and an administrator cannot give anyone a name the desktop uses
+    // for authors who are not members.
+    for name in ["an administrator", " Someone "] {
+        let refused = team
+            .admin
+            .patch_json(&own, &json!({ "name": name }))
+            .unwrap();
+        assert_eq!(refused.status, 400, "{name}: {}", refused.body);
+    }
+    let password = native_services::random_token(24);
+    let created = team
+        .admin
+        .post_json(
+            "/api/collections/users/records",
+            &json!({
+                "email": "x@example.test",
+                "name": "An Administrator",
+                "password": password,
+                "passwordConfirm": password,
+            }),
+        )
+        .unwrap();
+    assert_eq!(created.status, 400, "{}", created.body);
+    // The name a Change shows is the one the administrator gave.
+    applied(&submit_edit(&editor, &edit(&team.read(), IPN, "Value", "47R")).unwrap());
+    let change = team.read().changes.pop().unwrap();
+    assert_eq!(change.actor_name, "Ada Editor");
+    team.server.stop();
+}
+
+#[test]
+fn simultaneous_edits_apply_once_and_the_rest_conflict() {
+    let team = Team::start();
+    let editors: Vec<PocketBaseClient> = (0..10)
+        .map(|n| team.member(&format!("Editor {n}"), true))
+        .collect();
+    let readback = team.read();
+    let barrier = std::sync::Barrier::new(editors.len());
+    let replies: Vec<PublishReply> = std::thread::scope(|scope| {
+        let handles: Vec<_> = editors
+            .iter()
+            .enumerate()
+            .map(|(n, client)| {
+                let command = edit(&readback, IPN, "Value", &format!("{}R", 40 + n));
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    submit_edit(client, &command).unwrap()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+    let applied_count = replies
+        .iter()
+        .filter(|reply| matches!(reply.outcome, PublishOutcome::Applied { .. }))
+        .count();
+    let conflicts = replies
+        .iter()
+        .filter(|reply| matches!(reply.outcome, PublishOutcome::Conflict { .. }))
+        .count();
+    assert_eq!((applied_count, conflicts), (1, 9));
+    let after = team.read();
+    assert_eq!(after.changes.len(), 2);
+    assert_eq!(current(&after, IPN).0, 2);
+    team.server.stop();
+}
+
+#[test]
+fn references_are_trimmed_the_way_rust_trims_them() {
+    // Rust's str::trim (used by the CSV import) removes U+0085 but not
+    // U+FEFF; JavaScript's trim() does the opposite. The route follows Rust.
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    let initial = team.read();
+    let (_, first) = current(&initial, IPN);
+    let symbol = first.field("Symbol").unwrap().to_owned();
+    let bound = |details: &PartDetails| {
+        details
+            .cad_references
+            .iter()
+            .find(|reference| reference.role == catalog::CadReferenceRole::Symbol)
+            .map(|reference| (reference.reference.clone(), reference.target.clone()))
+            .unwrap()
+    };
+    let spaced = format!("\u{85}{symbol}\u{85}");
+    applied(&submit_edit(&editor, &edit(&initial, IPN, "Symbol", &spaced)).unwrap());
+    let (_, details) = current(&team.read(), IPN);
+    assert_eq!(details.field("Symbol"), Some(spaced.as_str()));
+    assert_eq!(bound(&details), bound(&first));
+    let marked = format!("\u{feff}{symbol}");
+    applied(&submit_edit(&editor, &edit(&team.read(), IPN, "Symbol", &marked)).unwrap());
+    let (_, details) = current(&team.read(), IPN);
+    assert_eq!(
+        bound(&details),
+        (marked.clone(), CadReferenceTarget::External),
+        "U+FEFF is not trimmed, so the library is not a g- library"
+    );
+    team.server.stop();
+}
+
+/// A hook that saves a part directly, as buggy server code might, for the
+/// test below. It runs in a copy of the repository's hooks.
+const DIRECT_SAVE_HOOK: &str = r#"
+routerAdd("POST", "/api/test/save-part", (e) => {
+  const body = e.requestInfo().body;
+  const part = $app.findFirstRecordByData("catalog_parts", "ipn", body.ipn);
+  let revisionId = body.revision;
+  if (body.createNumber) {
+    const made = new Record($app.findCollectionByNameOrId("catalog_part_revisions"));
+    const current = $app.findRecordById("catalog_part_revisions", part.getString("current_revision"));
+    made.set("part", part.id);
+    made.set("number", body.createNumber);
+    made.set("predecessor", current.id);
+    made.set("change", current.getString("change"));
+    made.set("snapshot", current.getString("snapshot"));
+    made.set("snapshot_sha256", current.getString("snapshot_sha256"));
+    made.set("source", "{}");
+    $app.save(made);
+    revisionId = made.id;
+  }
+  if (body.ipnChange) {
+    part.set("ipn", body.ipnChange);
+  } else {
+    const target = $app.findRecordById("catalog_part_revisions", revisionId);
+    part.set("current_revision", target.id);
+    part.set("current_revision_number", target.getInt("number"));
+  }
+  try {
+    $app.save(part);
+  } catch (error) {
+    return e.json(409, { refused: String(error) });
+  }
+  return e.json(200, { saved: true });
+}, $apis.requireSuperuserAuth());
+"#;
+
+#[test]
+fn server_code_cannot_move_a_part_backwards_or_skip_a_revision() {
+    let root = services::repository_root();
+    let state = tempfile::tempdir().unwrap();
+    let hooks = state.path().join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    for entry in std::fs::read_dir(root.join("infra/pocketbase/pb_hooks")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), hooks.join(entry.file_name())).unwrap();
+    }
+    std::fs::write(hooks.join("test_direct_save.pb.js"), DIRECT_SAVE_HOOK).unwrap();
+    let mut options = services::options(&root, state.path());
+    options.hooks_dir = hooks;
+    let superuser = native_services::Superuser::generate();
+    let binary = native_services::pocketbase_binary(&root).unwrap();
+    let server = PocketBaseServer::start(&binary, &options, &superuser).unwrap();
+    let admin = PocketBaseClient::new(server.url())
+        .authenticate("_superusers", &superuser.email, &superuser.password)
+        .unwrap();
+    let import = services::plan(&root, "g-res").unwrap();
+    submit_import(&admin, &ImportCommand::new(&import, "Import the resistors")).unwrap();
+    let readback = read_back(&admin).unwrap();
+    applied(&submit_edit(&admin, &edit(&readback, IPN, "Value", "47R")).unwrap());
+    let after_edit = read_back(&admin).unwrap();
+    let part = after_edit.part(IPN).unwrap();
+    let second = part.current_revision.clone();
+    let first = after_edit
+        .part_revision(&second)
+        .unwrap()
+        .predecessor
+        .clone();
+
+    let save = |body: Value| admin.post_json("/api/test/save-part", &body).unwrap();
+    // Backwards to revision 1.
+    let back = save(json!({ "ipn": IPN, "revision": first }));
+    assert_eq!(back.status, 409, "{}", back.body);
+    assert!(back.body.contains("right after it"), "{}", back.body);
+    // Skipping to a revision 4 (made directly, after revision 2).
+    let skip = save(json!({ "ipn": IPN, "createNumber": 4 }));
+    assert_eq!(skip.status, 409, "{}", skip.body);
+    // Changing the IPN.
+    let ipn = save(json!({ "ipn": IPN, "ipnChange": "RES-9999-9999" }));
+    assert_eq!(ipn.status, 409, "{}", ipn.body);
+    assert!(ipn.body.contains("never changes"), "{}", ipn.body);
+    let part = read_back(&admin).unwrap().part(IPN).unwrap().clone();
+    assert_eq!(
+        (part.current_revision.as_str(), part.current_revision_number),
+        (second.as_str(), 2)
+    );
+    server.stop();
 }

@@ -300,6 +300,10 @@ impl PocketBaseClient {
         self.send_json("PATCH", path, body)
     }
 
+    pub fn put_json(&self, path: &str, body: &Value) -> CollabResult<HttpReply> {
+        self.send_json("PUT", path, body)
+    }
+
     pub fn delete(&self, path: &str) -> CollabResult<HttpReply> {
         self.send(self.request("DELETE", path), None)
     }

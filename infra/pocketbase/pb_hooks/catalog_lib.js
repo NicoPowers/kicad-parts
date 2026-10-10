@@ -21,6 +21,98 @@ const CSV_CATALOG_SOURCE = "csv-catalog";
 const PART_DETAILS_SCHEMA = "kicad-parts/part-details/1";
 const SOURCE_SCHEMA = "kicad-parts/source/1";
 
+// Trims the characters Rust's str::trim removes (Unicode White_Space), so
+// the server reads Symbol and Footprint references exactly as the CSV import
+// (crates/catalog) and the desktop do. JavaScript's own trim() differs: it
+// also removes U+FEFF (byte order mark) and keeps U+0085 (next line).
+const SPACE = "[\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]";
+const LEADING_SPACE = new RegExp("^" + SPACE + "+");
+const TRAILING_SPACE = new RegExp(SPACE + "+$");
+
+function trimSpace(text) {
+  return text.replace(LEADING_SPACE, "").replace(TRAILING_SPACE, "");
+}
+
+// Words the desktop uses for authors who are not named team members. A
+// member called one of these would look like someone else in the history.
+const RESERVED_NAMES = ["an administrator", "someone"];
+
+function isReservedName(name) {
+  return RESERVED_NAMES.indexOf(trimSpace(String(name)).toLowerCase()) >= 0;
+}
+
+// ---- Collection guards ---------------------------------------------------
+//
+// The parts of a collection the Catalog depends on: its name and type, each
+// field's ID, name and type, its rules, and its indexes. `source` is a
+// Collection or the plain object of a collections import.
+function collectionShape(source) {
+  const plain = typeof source.marshalJSON === "function" ? JSON.parse(toString(source.marshalJSON())) : JSON.parse(JSON.stringify(source));
+  const rule = (value) => (value === null || value === undefined ? null : String(value));
+  return {
+    id: plain.id || "",
+    name: plain.name || "",
+    type: plain.type || "",
+    rules: {
+      listRule: rule(plain.listRule),
+      viewRule: rule(plain.viewRule),
+      createRule: rule(plain.createRule),
+      updateRule: rule(plain.updateRule),
+      deleteRule: rule(plain.deleteRule),
+    },
+    fields: (plain.fields || []).map((field) => ({ id: field.id, name: field.name, type: field.type })),
+    indexes: (plain.indexes || []).map((index) => String(index)),
+  };
+}
+
+// The collections whose shape the Catalog depends on. For `users`, only
+// the fields and rules the edit routes read are protected; the rest of the
+// account settings stay editable in the dashboard.
+function guardedCollection(name) {
+  return name.indexOf("catalog_") === 0 || name === "users";
+}
+
+// Why changing collection `before` into `after` would lose or expose
+// Catalog data, or "" if it would not. Allowed: adding fields and indexes,
+// and making a rule stricter by setting it to superusers only (null).
+// Refused: renaming the collection or changing its type; removing,
+// renaming or retyping a field; dropping an index; any other rule change.
+function collectionChangeProblem(before, after) {
+  const old = collectionShape(before);
+  const next = collectionShape(after);
+  const users = old.name === "users";
+  if (next.name !== old.name || next.type !== old.type) {
+    return `${old.name} cannot be renamed or change type`;
+  }
+  const protectedFields = users ? ["email", "name", "can_edit_catalog"] : null;
+  for (const field of old.fields) {
+    if (protectedFields && protectedFields.indexOf(field.name) < 0) {
+      continue;
+    }
+    const kept = next.fields.find((candidate) => candidate.id === field.id);
+    if (!kept) {
+      return `the field ${field.name} of ${old.name} cannot be removed`;
+    }
+    if (kept.name !== field.name || kept.type !== field.type) {
+      return `the field ${field.name} of ${old.name} cannot be renamed or change type`;
+    }
+  }
+  const rules = users ? ["createRule", "updateRule"] : Object.keys(old.rules);
+  for (const name of rules) {
+    if (next.rules[name] !== old.rules[name] && next.rules[name] !== null) {
+      return `the ${name} of ${old.name} can only stay as it is or become superusers only`;
+    }
+  }
+  if (!users) {
+    for (const index of old.indexes) {
+      if (next.indexes.indexOf(index) < 0) {
+        return `an index of ${old.name} cannot be dropped: ${index}`;
+      }
+    }
+  }
+  return "";
+}
+
 // The Catalog's record ID rule, shared with crates/catalog/src/ids.rs:
 // the first 15 hex digits of SHA-256("kicad-parts:<kind>:v1\n<key>").
 function deriveId(kind, key) {
@@ -176,7 +268,11 @@ function catalogEditor(e) {
   if (collection === "users" && !auth.getBool("can_edit_catalog")) {
     throw new ForbiddenError("you can view the Catalog but not edit it; ask an admin for edit access");
   }
-  const name = collection === "users" ? auth.getString("name") || auth.getString("email") : auth.getString("email");
+  // Only superusers can set a member's name (see 1791600000_catalog_edits.js),
+  // so the name a Change shows is the one an administrator gave them.
+  const given = auth.getString("name");
+  const name =
+    collection === "users" && given && !isReservedName(given) ? given : auth.getString("email");
   return { id: collection + ":" + auth.id, name: name };
 }
 
@@ -200,7 +296,7 @@ function commonRequest(body) {
     fail("correlationId may only contain letters, digits and _ . : -");
   }
   const reason = text("reason", 2000);
-  if (reason.trim().length === 0) {
+  if (trimSpace(reason).length === 0) {
     fail("reason is required");
   }
   const ipn = text("ipn", 13);
@@ -247,7 +343,7 @@ function editedDetails(body, currentDetails) {
   const checkedParts = parts.map((part) => {
     const manufacturer = part && typeof part.manufacturer === "string" ? part.manufacturer : "";
     const mpn = part && typeof part.mpn === "string" ? part.mpn : "";
-    if (manufacturer.trim().length === 0 || mpn.trim().length === 0) {
+    if (trimSpace(manufacturer).length === 0 || trimSpace(mpn).length === 0) {
       fail("every manufacturer part needs a manufacturer and an MPN");
     }
     if (manufacturer.length > 500 || mpn.length > 500) {
@@ -295,7 +391,7 @@ function cadReferences(txApp, fields, currentDetails) {
     }
     const names = text
       .split(";")
-      .map((name) => name.trim())
+      .map((name) => trimSpace(name))
       .filter((name) => name.length > 0);
     names.forEach((reference, ordinal) => {
       const library = reference.indexOf(":") >= 0 ? reference.substring(0, reference.indexOf(":")) : reference;
@@ -362,6 +458,7 @@ function describeRevision(txApp, revision) {
     snapshotSha256: revision.getString("snapshot_sha256"),
     changeKind: change ? change.getString("kind") : "",
     reason: change ? change.getString("reason") : "",
+    actor: change ? change.getString("actor") : "",
     actorName: change ? change.getString("actor_name") : "",
     created: change ? change.getString("created") : "",
   };
@@ -596,6 +693,10 @@ module.exports = {
   PART_DETAILS_SCHEMA: PART_DETAILS_SCHEMA,
   SOURCE_SCHEMA: SOURCE_SCHEMA,
   publishPartRevision: publishPartRevision,
+  trimSpace: trimSpace,
+  isReservedName: isReservedName,
+  guardedCollection: guardedCollection,
+  collectionChangeProblem: collectionChangeProblem,
   deriveId: deriveId,
   sha256Bytes: sha256Bytes,
   base64Decode: base64Decode,

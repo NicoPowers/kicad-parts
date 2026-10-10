@@ -136,3 +136,81 @@ onRecordUpdate((e) => {
   }
   return e.next();
 }, "catalog_parts");
+
+// ---- Collections -----------------------------------------------------------
+//
+// Superusers can also change collections through the API, which could drop
+// a field (wiping it on every record), loosen a rule, drop a unique index or
+// delete a whole collection. These request hooks refuse that for the
+// catalog_* collections and for the parts of `users` the edit routes rely
+// on (see catalog_lib.js collectionChangeProblem). Migrations do not go
+// through the API, so schema changes, including the down migration, still
+// work.
+
+onCollectionUpdateRequest((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  let before = null;
+  try {
+    before = e.app.findCollectionByNameOrId(e.collection.id);
+  } catch (_) {
+    before = null;
+  }
+  if (before && lib.guardedCollection(before.name)) {
+    const problem = lib.collectionChangeProblem(before, e.collection);
+    if (problem) {
+      throw new ForbiddenError(`${problem}; change the Catalog schema with a migration`);
+    }
+  }
+  return e.next();
+});
+
+onCollectionDeleteRequest((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  if (lib.guardedCollection(e.collection.name)) {
+    throw new ForbiddenError(`${e.collection.name} cannot be deleted; the Catalog depends on it`);
+  }
+  return e.next();
+});
+
+onCollectionsImportRequest((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  const imported = e.collectionsData || [];
+  for (const existing of e.app.findAllCollections()) {
+    if (!lib.guardedCollection(existing.name)) {
+      continue;
+    }
+    const data = imported.find((item) => item && item.id === existing.id);
+    if (!data) {
+      if (e.deleteMissing) {
+        throw new ForbiddenError(`the import would delete ${existing.name}; the Catalog depends on it`);
+      }
+      if (imported.some((item) => item && item.name === existing.name)) {
+        throw new ForbiddenError(`the import would replace ${existing.name}; the Catalog depends on it`);
+      }
+      continue;
+    }
+    const problem = lib.collectionChangeProblem(existing, data);
+    if (problem) {
+      throw new ForbiddenError(`${problem}; change the Catalog schema with a migration`);
+    }
+  }
+  return e.next();
+});
+
+// A member's name is shown as the author of their Changes, so it must not
+// look like the words the desktop uses for authors who are not members.
+onRecordCreateRequest((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  if (lib.isReservedName(e.record.getString("name"))) {
+    throw new BadRequestError(`a team member cannot be called "${e.record.getString("name")}"`);
+  }
+  return e.next();
+}, "users");
+
+onRecordUpdateRequest((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  if (lib.isReservedName(e.record.getString("name"))) {
+    throw new BadRequestError(`a team member cannot be called "${e.record.getString("name")}"`);
+  }
+  return e.next();
+}, "users");

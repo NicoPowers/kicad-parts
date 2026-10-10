@@ -1008,7 +1008,7 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
     let (rule, fields) = users_rule(&options.data_dir);
     assert_eq!(
         rule,
-        "(id = @request.auth.id) && @request.body.can_edit_catalog:isset = false"
+        "(id = @request.auth.id) && @request.body.can_edit_catalog:isset = false && @request.body.name:isset = false"
     );
     assert!(fields.contains("can_edit_catalog"));
 
