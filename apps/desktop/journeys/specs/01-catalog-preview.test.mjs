@@ -3,12 +3,18 @@
 // cache, a real export failure, and the other preview problem states.
 
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import {
   FOOTPRINT,
   SYMBOL,
+  VISUAL_LIMITS,
   assertAccessible,
+  capture,
+  comparePngs,
   images,
+  outDir,
+  screenshotsDir,
   launchApp,
   record,
   screenshot,
@@ -42,6 +48,68 @@ describe('catalog search with exact KiCad previews', () => {
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 0);
     await assertAccessible(browser, '01-catalog-loaded');
     await screenshot(browser, '01-catalog-loaded');
+  });
+
+  it('fails a screenshot that differs by one character or one colour', async () => {
+    // Compared with this run's own 01 screenshot, so it also works while
+    // the approved screenshots are being updated.
+    const reference = path.join(screenshotsDir, '01-catalog-loaded.png');
+    const checksDir = path.join(outDir, 'limit-checks');
+    const unchanged = path.join(checksDir, '00-unchanged.png');
+    await capture(browser, unchanged);
+    assert.equal(comparePngs(reference, unchanged).differentPixels, 0, 'the same page gives the same pixels');
+
+    const text = (selector, from, to) => ({ selector, from, to });
+    const token = (name, value) => ({ name, value });
+    const changes = [
+      ['178 to 176 parts', text('.catalog-summary', '178 parts', '176 parts')],
+      ['1.8V to 7.8V', text('.result-description', '1.8V', '7.8V')],
+      ['full stop to comma', text('.empty-state p', '.', ',')],
+      ['rail to rall', text('.result-description', 'rail', 'rall')],
+      ['header colour', token('--brand', '#2a4a75')],
+      ['canvas colour', token('--canvas', '#e9edf2')],
+      ['corner radius', token('--radius', '6px')],
+    ];
+    const counts = {};
+    for (const [n, [label, change]] of changes.entries()) {
+      // Make one change, take a screenshot, then undo the change.
+      const made = await browser.execute((c) => {
+        if (c.name) {
+          const root = document.documentElement.style;
+          const before = root.getPropertyValue(c.name);
+          root.setProperty(c.name, c.value);
+          window.journeyUndo = () => (before ? root.setProperty(c.name, before) : root.removeProperty(c.name));
+          return true;
+        }
+        const walker = document.createTreeWalker(document.querySelector(c.selector), NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          if (node.data.includes(c.from)) {
+            const before = node.data;
+            node.data = before.replace(c.from, c.to);
+            window.journeyUndo = () => (node.data = before);
+            return true;
+          }
+        }
+        return false;
+      }, change);
+      assert.ok(made, `${label}: the page has the text to change`);
+      const file = path.join(checksDir, `${String(n + 1).padStart(2, '0')}-${label.replaceAll(' ', '-')}.png`);
+      await capture(browser, file);
+      await browser.execute(() => {
+        window.journeyUndo();
+        delete window.journeyUndo;
+      });
+      counts[label] = comparePngs(reference, file, file.replace(/\.png$/, '-differences.png')).differentPixels;
+    }
+    record({ event: 'visual-limit-checks', limit: VISUAL_LIMITS.MAX_DIFFERENT_PIXELS, counts });
+    for (const [label, count] of Object.entries(counts)) {
+      assert.ok(
+        count > VISUAL_LIMITS.MAX_DIFFERENT_PIXELS,
+        `${label} changed only ${count} pixels, which the limit of ${VISUAL_LIMITS.MAX_DIFFERENT_PIXELS} would let pass`,
+      );
+    }
+    await capture(browser, unchanged);
+    assert.equal(comparePngs(reference, unchanged).differentPixels, 0, 'every change was undone');
   });
 
   it('searches and previews every symbol unit and the footprint', async () => {

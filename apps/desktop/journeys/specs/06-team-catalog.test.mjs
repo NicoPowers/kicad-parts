@@ -150,7 +150,7 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     assert.equal(await (await browser.$('aria/Password')).getAttribute('type'), 'password');
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 0);
     await assertAccessible(browser, '40-team-sign-in');
-    await screenshot(browser, '40-team-sign-in', { hide: [SERVER_ADDRESS] });
+    await screenshot(browser, '40-team-sign-in', { blankOut: [SERVER_ADDRESS] });
   });
 
   it('says plainly when the password is wrong', async () => {
@@ -159,7 +159,7 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     assert.equal(await (await browser.$('aria/Password')).getValue(), '', 'the password is cleared');
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 1);
     await assertAccessible(browser, '41-team-sign-in-failed');
-    await screenshot(browser, '41-team-sign-in-failed', { hide: [SERVER_ADDRESS] });
+    await screenshot(browser, '41-team-sign-in-failed', { blankOut: [SERVER_ADDRESS] });
   });
 
   it('signs in and shows a part from the team catalog', async () => {

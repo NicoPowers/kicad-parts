@@ -33,20 +33,24 @@ export const VIEWPORT = { width: 1280, height: 800 };
 export const baselinesDir = path.join(here, 'baselines');
 
 /**
- * How different a screenshot may be from its baseline and still pass.
- * A pixel counts as different when its colour moved more than
- * PIXEL_THRESHOLD (pixelmatch's 0-1 colour distance; anti-aliased edges are
- * ignored). The screenshot fails when more than MAX_DIFFERENT_PIXELS differ:
- * repeated runs differ by 0-2 pixels, and one changed character is about
- * 30-80 pixels.
+ * How different a screenshot may be from its approved screenshot and still
+ * pass. A pixel counts as different when its colour moved more than
+ * PIXEL_THRESHOLD (pixelmatch's 0-1 colour distance), anti-aliased edges
+ * included. The screenshot fails when more than MAX_DIFFERENT_PIXELS
+ * differ. Repeated runs differ by 0 pixels (the app draws without the GPU,
+ * which otherwise changes edge smoothing when it sleeps or resets).
+ * Journey 01 checks that small real changes (one character, one colour
+ * token, the corner radius) fail.
  */
-export const VISUAL_LIMITS = { PIXEL_THRESHOLD: 0.1, MAX_DIFFERENT_PIXELS: 20 };
+export const VISUAL_LIMITS = { PIXEL_THRESHOLD: 0.02, MAX_DIFFERENT_PIXELS: 4 };
 
-const screenshotsDir = path.join(outDir, 'screenshots');
-const diffsDir = path.join(outDir, 'diffs');
+export const screenshotsDir = path.join(outDir, 'screenshots');
+const differencesDir = path.join(outDir, 'differences');
+/** Where --update-baselines puts new screenshots until the runner accepts them. */
+export const stagedBaselinesDir = path.join(outDir, 'new-baselines');
 const a11yDir = path.join(outDir, 'accessibility');
 const evidenceFile = path.join(outDir, 'evidence.jsonl');
-/** One line per screenshot: how it compared with its baseline. */
+/** One line per screenshot: how it compared with its approved screenshot. */
 export const visualResultsFile = path.join(outDir, 'visual-results.jsonl');
 const updateBaselines = process.env.JOURNEYS_UPDATE_BASELINES === '1';
 
@@ -137,7 +141,10 @@ export async function launchApp({ args = [], dataDir = tempDir('data') } = {}) {
       'tauri:options': {
         application: appBinary,
         // msedgedriver treats these as browser switches: use --name=value.
-        args: [`--data-dir=${dataDir}`, '--display-scale=1', ...args],
+        // --display-scale=1 and --software-rendering make every screenshot
+        // 1280x800 and drawn the same way, whatever the display scaling or
+        // the GPU's state.
+        args: [`--data-dir=${dataDir}`, '--display-scale=1', '--software-rendering', ...args],
       },
     },
   });
@@ -160,21 +167,37 @@ export async function launchApp({ args = [], dataDir = tempDir('data') } = {}) {
 
 /**
  * Saves a screenshot of the current state after layout settles, then
- * compares it with its baseline (see compareWithBaseline).
+ * compares it with its approved screenshot in baselines/ (see
+ * compareWithBaseline). A screenshot that does not match fails the test
+ * at this point, so the failure shows in the test results.
  *
- * `hide` lists selectors whose text changes from run to run, such as a
- * server port; save times (<time>) are always hidden. Their text is made
- * transparent and hatched for the screenshot only, so the layout stays real.
- * @param {{ hide?: string[] }} options
+ * `blankOut` lists selectors whose text changes from run to run, such as a
+ * server port; save times (<time>) are always blanked out. Their text is
+ * made transparent and hatched for the screenshot only, so the layout
+ * stays real.
+ * @param {{ blankOut?: string[] }} options
  */
-export async function screenshot(browser, name, { hide = [] } = {}) {
-  hide = ['time', ...hide];
-  fs.mkdirSync(screenshotsDir, { recursive: true });
+export async function screenshot(browser, name, { blankOut = [] } = {}) {
+  const file = path.join(screenshotsDir, `${name}.png`);
+  const blankedOut = await capture(browser, file, blankOut);
+  record({ event: 'screenshot', name, file, blankedOut });
+  const result = compareWithBaseline(name, file);
+  assert.ok(result.status === 'same' || result.status === 'staged', visualProblem(result));
+  return file;
+}
+
+/**
+ * Takes a screenshot into `file` with the caret and focus ring removed and
+ * `blankOut` (plus every <time>) blanked out; returns how many elements
+ * were blanked out.
+ */
+export async function capture(browser, file, blankOut = []) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   // Remove the text caret and focus ring so repeated runs match.
   await browser.execute(() => {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   });
-  const hidden = await browser.execute((selectors) => {
+  const blankedOut = await browser.execute((selectors) => {
     const elements = selectors.flatMap((s) => [...document.querySelectorAll(s)]);
     for (const el of elements) {
       // CSSOM, not a style attribute or <style> element, which the CSP blocks.
@@ -185,33 +208,54 @@ export async function screenshot(browser, name, { hide = [] } = {}) {
         'repeating-linear-gradient(135deg, #98a2b3 0 1px, transparent 1px 5px)',
         'important',
       );
-      el.dataset.journeyHidden = '';
+      el.dataset.journeyBlankedOut = '';
     }
     return elements.length;
-  }, hide);
+  }, ['time', ...blankOut]);
   await browser.execute(
     () =>
       new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))),
   );
-  const file = path.join(screenshotsDir, `${name}.png`);
   await browser.saveScreenshot(file);
   await browser.execute(() => {
-    for (const el of document.querySelectorAll('[data-journey-hidden]')) {
+    for (const el of document.querySelectorAll('[data-journey-blanked-out]')) {
       for (const property of ['color', '-webkit-text-fill-color', 'background-image']) el.style.removeProperty(property);
-      delete el.dataset.journeyHidden;
+      delete el.dataset.journeyBlankedOut;
     }
   });
-  record({ event: 'screenshot', name, file, hidden });
-  compareWithBaseline(name, file);
-  return file;
+  return blankedOut;
+}
+
+/**
+ * Counts the pixels that differ between two PNG files and, if any differ,
+ * writes an image of the differences to `differencesFile`.
+ * @returns {{ differentPixels: number, sizeProblem?: string }}
+ */
+export function comparePngs(expectedFile, actualFile, differencesFile) {
+  const expected = PNG.sync.read(fs.readFileSync(expectedFile));
+  const actual = PNG.sync.read(fs.readFileSync(actualFile));
+  if (expected.width !== actual.width || expected.height !== actual.height) {
+    return { differentPixels: 0, sizeProblem: `the approved screenshot is ${expected.width}x${expected.height}` };
+  }
+  const differences = new PNG({ width: actual.width, height: actual.height });
+  const differentPixels = pixelmatch(expected.data, actual.data, differences.data, actual.width, actual.height, {
+    threshold: VISUAL_LIMITS.PIXEL_THRESHOLD,
+    includeAA: true,
+  });
+  if (differentPixels > 0 && differencesFile) {
+    fs.mkdirSync(path.dirname(differencesFile), { recursive: true });
+    fs.writeFileSync(differencesFile, smallPng(differences));
+  }
+  return { differentPixels };
 }
 
 /**
  * Compares a screenshot with baselines/<name>.png and appends the outcome
- * to visual-results.jsonl; the runner reports and fails on it after the
- * journeys. A screenshot that differs keeps an image of the differences in
- * diffs/. With --update-baselines the screenshot becomes the new baseline,
- * which is the only way a baseline changes.
+ * to visual-results.jsonl, which the runner summarises. A screenshot that
+ * differs keeps an image of the differences in differences/. With
+ * --update-baselines the screenshot is staged in new-baselines/ instead;
+ * the runner copies staged screenshots into baselines/ only if every
+ * journey passed, which is the only way an approved screenshot changes.
  */
 function compareWithBaseline(name, file) {
   const actual = PNG.sync.read(fs.readFileSync(file));
@@ -223,30 +267,44 @@ function compareWithBaseline(name, file) {
   const baseline = path.join(baselinesDir, `${name}.png`);
   const result = { name, status: 'same', differentPixels: 0 };
   if (updateBaselines) {
-    fs.mkdirSync(baselinesDir, { recursive: true });
-    fs.writeFileSync(baseline, smallPng(actual));
-    result.status = 'updated';
+    fs.mkdirSync(stagedBaselinesDir, { recursive: true });
+    fs.writeFileSync(path.join(stagedBaselinesDir, `${name}.png`), smallPng(actual));
+    result.status = 'staged';
   } else if (!fs.existsSync(baseline)) {
     result.status = 'missing';
   } else {
-    const expected = PNG.sync.read(fs.readFileSync(baseline));
-    if (expected.width !== actual.width || expected.height !== actual.height) {
+    const differencesFile = path.join(differencesDir, `${name}.png`);
+    const { differentPixels, sizeProblem } = comparePngs(baseline, file, differencesFile);
+    result.differentPixels = differentPixels;
+    if (differentPixels > 0) result.differences = differencesFile;
+    if (sizeProblem) {
       result.status = 'changed';
-      result.reason = `the baseline is ${expected.width}x${expected.height}`;
-    } else {
-      const diff = new PNG({ width: actual.width, height: actual.height });
-      result.differentPixels = pixelmatch(expected.data, actual.data, diff.data, actual.width, actual.height, {
-        threshold: VISUAL_LIMITS.PIXEL_THRESHOLD,
-      });
-      if (result.differentPixels > 0) {
-        fs.mkdirSync(diffsDir, { recursive: true });
-        result.diff = path.join(diffsDir, `${name}.png`);
-        fs.writeFileSync(result.diff, smallPng(diff));
-      }
-      if (result.differentPixels > VISUAL_LIMITS.MAX_DIFFERENT_PIXELS) result.status = 'changed';
+      result.reason = sizeProblem;
+    } else if (differentPixels > VISUAL_LIMITS.MAX_DIFFERENT_PIXELS) {
+      result.status = 'changed';
     }
   }
   fs.appendFileSync(visualResultsFile, `${JSON.stringify(result)}\n`);
+  return result;
+}
+
+/** A plain message for a screenshot that is missing or changed. */
+export function visualProblem(result) {
+  const { name } = result;
+  if (result.status === 'missing') {
+    return (
+      `${name} has no approved screenshot (baselines/${name}.png). Look at screenshots/${name}.png; ` +
+      'if it is right, accept it with `npm run journeys -- --update-baselines`.'
+    );
+  }
+  if (result.reason) return `${name} does not match its approved screenshot: ${result.reason}.`;
+  const percent = ((100 * result.differentPixels) / (VIEWPORT.width * VIEWPORT.height)).toFixed(4);
+  return (
+    `${name} does not match its approved screenshot: ${result.differentPixels} pixels (${percent}%) differ, ` +
+    `more than the ${VISUAL_LIMITS.MAX_DIFFERENT_PIXELS} allowed. The image of the differences is ` +
+    `differences/${name}.png. If the change is intended, look at it, then run ` +
+    '`npm run journeys -- --update-baselines`.'
+  );
 }
 
 /** Re-encodes a PNG with the strongest compression, to keep baselines small. */
@@ -262,8 +320,9 @@ function smallPng(png) {
  * text's background: the text is cut off by a scrolled list
  * (elmPartiallyObscured) or partly under another element, such as an open
  * menu (bgOverlap). Each such element is checked again where axe can
- * measure it, scrolled into view and with the covering elements made
- * invisible, then the page is put back. The journey fails on any contrast
+ * measure it, scrolled into view and with a solid cover made invisible,
+ * then the page is put back. Text under a see-through cover stays
+ * incomplete. The journey fails on any contrast
  * violation and on any contrast check that is still incomplete.
  */
 export async function assertAccessible(browser, name) {
@@ -287,7 +346,7 @@ export async function assertAccessible(browser, name) {
       for (const node of unchecked) {
         const target = node.target.join(' ');
         const el = document.querySelector(target);
-        const recheck = { target, reasons: reasonsOf(node), scrolled: false, hid: [] };
+        const recheck = { target, reasons: reasonsOf(node), scrolled: false, madeInvisible: [] };
         contrastRechecks.push(recheck);
         if (!el) {
           recheck.outcome = 'incomplete';
@@ -298,19 +357,44 @@ export async function assertAccessible(browser, name) {
         for (let a = el.parentElement; a; a = a.parentElement) scrolls.push([a, a.scrollTop, a.scrollLeft]);
         el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
         recheck.scrolled = scrolls.some(([a, top, left]) => a.scrollTop !== top || a.scrollLeft !== left);
-        // Elements drawn over the text, at its middle and both ends.
+        // Elements drawn over the text, at its middle and both ends. A cover
+        // is made invisible only if it is solid: its outermost element (the
+        // one holding the others, such as a menu panel) has a fully opaque
+        // background and is not faded. Text seen through a see-through
+        // cover is never accepted.
+        const solid = (c) => {
+          const background = getComputedStyle(c).backgroundColor;
+          const alpha = background.startsWith('rgba(') ? Number(background.slice(5, -1).split(',')[3]) : 1;
+          if (!background.startsWith('rgb') || alpha < 1) return false;
+          for (let a = c; a; a = a.parentElement) if (Number(getComputedStyle(a).opacity) < 1) return false;
+          return true;
+        };
         const box = el.getBoundingClientRect();
         const y = box.top + box.height / 2;
         const covering = new Set();
+        const seeThrough = new Set();
         for (const x of [box.left + 1, box.left + box.width / 2, box.right - 1]) {
+          const over = [];
           for (const top of document.elementsFromPoint(x, y)) {
             if (top === el || el.contains(top)) break;
-            if (!top.contains(el)) covering.add(top);
+            if (!top.contains(el)) over.push(top);
           }
+          const outermost = over.filter((c) => !over.some((other) => other !== c && other.contains(c)));
+          for (const c of outermost) if (!solid(c)) seeThrough.add(describe(c));
+          for (const c of over) covering.add(c);
+        }
+        if (seeThrough.size > 0) {
+          for (const [a, top, left] of scrolls) {
+            a.scrollTop = top;
+            a.scrollLeft = left;
+          }
+          recheck.outcome = 'incomplete';
+          recheck.stillIncompleteBecause = [`under a see-through cover: ${[...seeThrough].join(', ')}`];
+          continue;
         }
         const visibility = [...covering].map((c) => [c, c.style.getPropertyValue('visibility'), c.style.getPropertyPriority('visibility')]);
         for (const c of covering) c.style.setProperty('visibility', 'hidden', 'important');
-        recheck.hid = [...covering].map(describe);
+        recheck.madeInvisible = [...covering].map(describe);
         let again;
         try {
           again = await axe.run(el, {

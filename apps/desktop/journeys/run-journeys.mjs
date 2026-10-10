@@ -8,19 +8,21 @@
 //                                   # JOURNEYS_VISIBLE=1 does the same
 //   npm run journeys -- --update-baselines
 //                                   # accept every screenshot as its new
-//                                   # baseline, after you have looked at it
+//                                   # approved screenshot, if every journey
+//                                   # passes; look at them before committing
 //
 // By default tauri-driver, msedgedriver, the app and WebView2 run on a
 // hidden, run-scoped Win32 desktop (tooling/journey-desktop), so no window
 // appears or takes focus on the user's desktop.
 //
-// Every screenshot is compared with its reviewed baseline in baselines/.
-// A missing baseline, or one that differs by more than VISUAL_LIMITS, fails
-// the run; a normal run never changes a baseline.
+// Every screenshot is compared with its reviewed, approved screenshot in
+// baselines/. A missing one, or one that differs by more than
+// VISUAL_LIMITS, fails that journey's test (so it shows in junit.xml) and
+// the run; a normal run never changes baselines/.
 //
-// Evidence (JUnit results, screenshots, diff images, visual-summary.json,
-// axe results, evidence.jsonl) goes to target/journeys/latest, or
-// JOURNEY_OUT.
+// Evidence (JUnit results, screenshots, images of the differences,
+// visual-summary.json, axe results, evidence.jsonl) goes to
+// target/journeys/latest, or JOURNEY_OUT.
 
 import { download } from 'edgedriver';
 import { spawn, spawnSync } from 'node:child_process';
@@ -29,7 +31,6 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  VIEWPORT,
   VISUAL_LIMITS,
   appBinary,
   baselinesDir,
@@ -37,6 +38,8 @@ import {
   outDir,
   repoRoot,
   runTempRoot,
+  stagedBaselinesDir,
+  visualProblem,
   visualResultsFile,
 } from './harness.mjs';
 
@@ -116,11 +119,8 @@ if (!fs.existsSync(appBinary)) {
   process.exit(1);
 }
 
-fs.rmSync(outDir, { recursive: true, force: true });
-fs.mkdirSync(outDir, { recursive: true });
-fs.rmSync(runTempRoot, { recursive: true, force: true });
-
-// A driver left over from an earlier run would answer instead of ours.
+// A driver left over from an earlier run would answer instead of ours. A
+// run still going holds the port too, so check before emptying its folders.
 if (await portInUse(driverPort)) {
   console.error(
     `port ${driverPort} is already in use, probably by a tauri-driver from an earlier run. ` +
@@ -128,6 +128,10 @@ if (await portInUse(driverPort)) {
   );
   process.exit(1);
 }
+
+fs.rmSync(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+fs.mkdirSync(outDir, { recursive: true });
+fs.rmSync(runTempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 if (!visible && !fs.existsSync(journeyDesktop)) {
   console.error(
     `missing ${journeyDesktop}, which runs the journeys on a hidden desktop. ` +
@@ -201,7 +205,7 @@ try {
   console.warn(`could not delete ${runTempRoot}: ${error.message}`);
 }
 
-if (!reportVisualResults()) status = status || 1;
+if (!reportVisualResults(status === 0)) status = status || 1;
 
 const shots = fs.existsSync(path.join(outDir, 'screenshots'))
   ? fs.readdirSync(path.join(outDir, 'screenshots')).sort()
@@ -212,12 +216,20 @@ for (const shot of shots) console.log(`    screenshots/${shot}`);
 process.exit(status);
 
 /**
- * Prints how each screenshot compared with its baseline, writes
- * visual-summary.json, and returns false when any screenshot needs
- * attention. In a run of every journey, a baseline that no screenshot used
- * also fails (or, with --update-baselines, is deleted).
+ * Prints how each screenshot compared with its approved screenshot,
+ * writes visual-summary.json, and returns false when any screenshot needs
+ * attention.
+ *
+ * With --update-baselines, the screenshots staged in new-baselines/ are
+ * copied into baselines/ only if every journey passed; in a run of every
+ * journey, approved screenshots no journey took are then deleted. After a
+ * failed run nothing in baselines/ changes.
+ *
+ * Without it, in a run of every journey, an approved screenshot no journey
+ * took also fails: "not used" if every journey passed, "not reached" if
+ * one failed first.
  */
-function reportVisualResults() {
+function reportVisualResults(everyJourneyPassed) {
   const results = fs.existsSync(visualResultsFile)
     ? fs
         .readFileSync(visualResultsFile, 'utf8')
@@ -227,54 +239,73 @@ function reportVisualResults() {
     : [];
   const taken = new Set(results.map((r) => r.name));
   const everyJourney = !process.env.JOURNEYS_ONLY;
-  const unused = !everyJourney || !fs.existsSync(baselinesDir)
-    ? []
-    : fs
-        .readdirSync(baselinesDir)
-        .filter((file) => file.endsWith('.png') && !taken.has(file.slice(0, -4)))
-        .sort();
-  if (updateBaselines) {
-    for (const file of unused) fs.rmSync(path.join(baselinesDir, file));
-  }
+  const notTaken =
+    !everyJourney || !fs.existsSync(baselinesDir)
+      ? []
+      : fs
+          .readdirSync(baselinesDir)
+          .filter((file) => file.endsWith('.png') && !taken.has(file.slice(0, -4)))
+          .sort();
+
   const problems = [];
-  for (const r of results) {
-    const percent = ((100 * r.differentPixels) / (VIEWPORT.width * VIEWPORT.height)).toFixed(3);
-    if (r.status === 'missing') {
+  const accepted = [];
+  const deleted = [];
+  if (updateBaselines) {
+    if (everyJourneyPassed) {
+      fs.mkdirSync(baselinesDir, { recursive: true });
+      for (const r of results) {
+        fs.copyFileSync(path.join(stagedBaselinesDir, `${r.name}.png`), path.join(baselinesDir, `${r.name}.png`));
+        accepted.push(r.name);
+      }
+      for (const file of notTaken) {
+        fs.rmSync(path.join(baselinesDir, file));
+        deleted.push(file);
+      }
+    } else {
       problems.push(
-        `${r.name} has no baseline. Look at screenshots/${r.name}.png; if it is right, ` +
-          'accept it with `npm run journeys -- --update-baselines`.',
-      );
-    } else if (r.status === 'changed') {
-      problems.push(
-        r.reason
-          ? `${r.name} does not match its baseline: ${r.reason}.`
-          : `${r.name} does not match its baseline: ${r.differentPixels} pixels (${percent}%) differ, ` +
-              `more than the ${VISUAL_LIMITS.MAX_DIFFERENT_PIXELS} allowed. See diffs/${r.name}.png. ` +
-              'If the change is intended, look at it, then run `npm run journeys -- --update-baselines`.',
+        'No approved screenshot was changed, because a journey failed. Fix the failure and run ' +
+          '`npm run journeys -- --update-baselines` again. The screenshots this run took are in ' +
+          `${path.relative(repoRoot, stagedBaselinesDir)}, for reference only.`,
       );
     }
-  }
-  if (!updateBaselines) {
-    for (const file of unused) {
-      problems.push(`baselines/${file} was not used by any journey. Delete it, or run with --update-baselines.`);
+  } else {
+    for (const r of results) {
+      if (r.status === 'missing' || r.status === 'changed') problems.push(visualProblem(r));
+    }
+    for (const file of notTaken) {
+      problems.push(
+        everyJourneyPassed
+          ? `baselines/${file} was not used by any journey. Delete it, or run with --update-baselines.`
+          : `baselines/${file} was not compared: no journey reached it, because a journey failed.`,
+      );
     }
   }
   const summary = {
     limits: VISUAL_LIMITS,
-    updated: updateBaselines,
-    unusedBaselines: unused,
+    updateBaselines,
+    everyJourneyPassed,
+    accepted,
+    deleted,
+    notTaken,
     screenshots: results,
     problems,
   };
   fs.writeFileSync(path.join(outDir, 'visual-summary.json'), JSON.stringify(summary, null, 2));
 
-  console.log(`\nScreenshots compared with baselines/ (fail above ${VISUAL_LIMITS.MAX_DIFFERENT_PIXELS} different pixels):`);
+  console.log(
+    `\nScreenshots compared with their approved screenshots in baselines/ ` +
+      `(fail above ${VISUAL_LIMITS.MAX_DIFFERENT_PIXELS} different pixels):`,
+  );
   for (const r of results) {
+    const ok = r.status === 'same' || r.status === 'staged';
     const detail = r.status === 'same' ? `${r.differentPixels} pixels differ` : r.status;
-    console.log(`  ${r.status === 'same' || r.status === 'updated' ? 'ok  ' : 'FAIL'} ${r.name}: ${detail}`);
+    console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${r.name}: ${detail}`);
   }
-  if (updateBaselines) {
-    console.log(`  ${results.length} baselines written${unused.length ? `, ${unused.length} unused ones deleted` : ''}.`);
+  if (accepted.length > 0) {
+    console.log(
+      `  ${accepted.length} approved screenshots written` +
+        `${deleted.length ? `, ${deleted.length} no longer taken deleted (${deleted.join(', ')})` : ''}.`,
+    );
   }
   for (const problem of problems) console.error(`  ${problem}`);
   return problems.length === 0;
