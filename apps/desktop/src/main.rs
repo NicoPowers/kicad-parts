@@ -144,14 +144,10 @@ async fn search_parts(
     request: SearchRequest,
 ) -> Result<SearchResponse, String> {
     let (browser, team) = (browser.inner().clone(), team.inner().clone());
-    blocking(move || {
-        let mut response = browser.search(&request.query, request.limit);
-        // Parts the team catalog has show its current details, as the
-        // part header does.
-        team.overlay(&mut response.hits);
-        response
-    })
-    .await
+    // Parts the team catalog has are found by, and shown with, its current
+    // details, as the part header shows them.
+    blocking(move || browser.search_with(&request.query, request.limit, &team.current_values()))
+        .await
 }
 
 #[tauri::command]

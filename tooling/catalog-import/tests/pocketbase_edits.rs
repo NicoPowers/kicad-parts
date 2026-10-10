@@ -788,6 +788,82 @@ fn catalog_collections_cannot_lose_data_through_the_collection_api() {
         403
     );
 
+    // Changing any option of an existing field is refused, because
+    // PocketBase rewrites stored values in SQL for some of them: fewer
+    // CAD item revision bindings, current_revision turned into a list,
+    // "edit" dropped from the Change kinds, part details hidden from
+    // members.
+    let set_option = |field: &'static str, option: &'static str, value: Value| {
+        move |body: &mut Value| {
+            for item in body["fields"].as_array_mut().unwrap() {
+                if item["name"] == field {
+                    item[option] = value.clone();
+                }
+            }
+        }
+    };
+    assert_eq!(
+        change_collection(
+            admin,
+            "catalog_part_revisions",
+            set_option("cad_item_revisions", "maxSelect", json!(1))
+        ),
+        403
+    );
+    assert_eq!(
+        change_collection(
+            admin,
+            "catalog_changes",
+            set_option("kind", "values", json!(["csv-import", "restore"]))
+        ),
+        403
+    );
+    assert_eq!(
+        change_collection(
+            admin,
+            "catalog_part_revisions",
+            set_option("snapshot", "hidden", json!(true))
+        ),
+        403
+    );
+    assert_eq!(
+        change_collection(admin, "users", set_option("name", "max", json!(5))),
+        403
+    );
+    // A new required field would make every later edit fail.
+    assert_eq!(
+        change_collection(admin, "catalog_parts", |body| {
+            body["fields"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({ "name": "owner", "type": "text", "required": true }))
+        }),
+        403
+    );
+    // The same through an import: current_revision as a list of up to 5.
+    let all: Value = admin
+        .get("/api/collections?perPage=500")
+        .unwrap()
+        .json()
+        .unwrap();
+    let mut widened: Vec<Value> = all["items"].as_array().unwrap().clone();
+    for item in &mut widened {
+        if item["name"] == "catalog_parts" {
+            set_option("current_revision", "maxSelect", json!(5))(item);
+        }
+    }
+    let import = admin
+        .put_json(
+            "/api/collections/import",
+            &json!({ "collections": widened, "deleteMissing": false }),
+        )
+        .unwrap();
+    assert_eq!(import.status, 403, "{}", import.body);
+    assert_eq!(team.read(), stored, "no refused change touched a record");
+    // Edits still work after all of that.
+    applied(&submit_edit(&editor, &edit(&team.read(), IPN, "Value", "47.0")).unwrap());
+    let stored = team.read();
+
     // Nothing above changed a record.
     assert_eq!(team.read(), stored);
     // Harmless changes still work: a new field on a Catalog collection, a
@@ -846,8 +922,16 @@ fn only_an_administrator_names_a_member() {
     let account: Value = team.admin.get(&own).unwrap().json().unwrap();
     assert_eq!(account["name"], "Ada Editor");
     // ...and an administrator cannot give anyone a name the desktop uses
-    // for authors who are not members.
-    for name in ["an administrator", " Someone "] {
+    // for authors who are not members, nor hide characters in a name (a
+    // zero-width space after "someone", a byte order mark, a direction
+    // mark inside an ordinary name).
+    for name in [
+        "an administrator",
+        " Someone ",
+        "someone\u{200B}",
+        "\u{FEFF}an administrator",
+        "Ada\u{200E} Editor",
+    ] {
         let refused = team
             .admin
             .patch_json(&own, &json!({ "name": name }))

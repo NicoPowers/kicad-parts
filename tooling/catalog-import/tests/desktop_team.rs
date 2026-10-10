@@ -209,24 +209,38 @@ fn the_desktop_edits_resolves_a_conflict_and_restores() {
         Some("Thick film resistor 47 ohm")
     );
     assert_eq!(part.current.field("Tolerance"), Some("0.5%"));
-    // The results list shows the team catalog's details for its parts.
+    // Searching finds team parts by the team catalog's details and lists
+    // them with those details: the value is now 47R, which the CSV catalog
+    // does not say.
     wait_until("the saved revision", || checkpoint(&team) == 4);
-    let mut hits = vec![desktop_contract::PartSummary {
-        ipn: IPN.into(),
-        csv_file: "g-res.csv".into(),
-        mpn: "csv mpn".into(),
-        manufacturer: "csv manufacturer".into(),
-        description: "csv description".into(),
-        value: "csv value".into(),
-    }];
-    team.overlay(&mut hits);
+    let cache = tempfile::tempdir().unwrap();
+    let browser = catalog_browser::CatalogBrowser::open(catalog_browser::BrowserConfig {
+        catalog_root: root.clone(),
+        cache_dir: cache.path().join("cache"),
+        settings_file: cache.path().join("settings.json"),
+        kicad_locations: kicad_integration::SearchLocations::Only(Vec::new()),
+    });
+    let current = team.current_values();
+    let found = browser.search_with("47R thick", 10, &current);
+    assert_eq!(found.total, 1, "{:?}", found.hits);
+    let hit = &found.hits[0];
     assert_eq!(
         (
-            hits[0].description.as_str(),
-            hits[0].value.as_str(),
-            hits[0].mpn.as_str()
+            hit.ipn.as_str(),
+            hit.description.as_str(),
+            hit.value.as_str(),
+            hit.mpn.as_str()
         ),
-        ("Thick film resistor 47 ohm", "47R", "RC0603FR-0747RL")
+        (IPN, "Thick film resistor 47 ohm", "47R", "RC0603FR-0747RL")
+    );
+    assert_eq!(browser.search("47R thick", 10).total, 0);
+    // Words only the CSV description has no longer find it.
+    assert!(
+        browser
+            .search_with("1/10W 47", 10, &current)
+            .hits
+            .iter()
+            .all(|hit| hit.ipn != IPN)
     );
 
     // Restoring revision 1 adds revision 5 with its details.

@@ -198,9 +198,13 @@ onCollectionsImportRequest((e) => {
 });
 
 // A member's name is shown as the author of their Changes, so it must not
-// look like the words the desktop uses for authors who are not members.
+// hide characters (see catalog_lib.js hasInvisible), and it must not look
+// like the words the desktop uses for authors who are not members.
 onRecordCreateRequest((e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
+  if (lib.hasInvisible(e.record.getString("name"))) {
+    throw new BadRequestError("a team member's name cannot contain invisible characters");
+  }
   if (lib.isReservedName(e.record.getString("name"))) {
     throw new BadRequestError(`a team member cannot be called "${e.record.getString("name")}"`);
   }
@@ -209,6 +213,9 @@ onRecordCreateRequest((e) => {
 
 onRecordUpdateRequest((e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
+  if (lib.hasInvisible(e.record.getString("name"))) {
+    throw new BadRequestError("a team member's name cannot contain invisible characters");
+  }
   if (lib.isReservedName(e.record.getString("name"))) {
     throw new BadRequestError(`a team member cannot be called "${e.record.getString("name")}"`);
   }

@@ -212,6 +212,15 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     assert.equal(await fieldValue('Description'), 'Thick film resistor, 47 ohm, 1%');
     await assertAccessible(browser, '44-team-live-update');
     await screenshot(browser, '44-team-live-update');
+    // Searching uses the team catalog's details too: 47R and "thick" are
+    // only in the team catalog, and the CSV-only "1/10W" no longer matches.
+    await searchFor(browser, '47R thick', '1 matching part');
+    await searchFor(browser, '1/10W 47', /^(No parts match\.|\d+ matching parts?)$/);
+    assert.equal(
+      await browser.execute(() => [...document.querySelectorAll('.results .result-ipn')].some((e) => e.textContent === 'RES-0000-0470')),
+      false,
+    );
+    await searchFor(browser, MPN, '1 matching part');
   });
 
   it('shows both versions when someone else saved first, and saves on top', async () => {

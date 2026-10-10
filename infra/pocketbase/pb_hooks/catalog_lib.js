@@ -37,15 +37,29 @@ function trimSpace(text) {
 // member called one of these would look like someone else in the history.
 const RESERVED_NAMES = ["an administrator", "someone"];
 
+// Characters that take no visible space (zero-width spaces and joiners,
+// direction marks, word joiners, variation selectors, filler letters, the
+// byte order mark). In a name they would let "someone\u200B" pass as
+// "someone", so names may not contain them.
+const INVISIBLE = /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0]/g;
+
+function hasInvisible(name) {
+  return String(name).search(INVISIBLE) >= 0;
+}
+
 function isReservedName(name) {
-  return RESERVED_NAMES.indexOf(trimSpace(String(name)).toLowerCase()) >= 0;
+  const visible = trimSpace(String(name).replace(INVISIBLE, "")).toLowerCase();
+  return RESERVED_NAMES.indexOf(visible) >= 0;
 }
 
 // ---- Collection guards ---------------------------------------------------
 //
-// The parts of a collection the Catalog depends on: its name and type, each
-// field's ID, name and type, its rules, and its indexes. `source` is a
-// Collection or the plain object of a collections import.
+// The parts of a collection the Catalog depends on: its name and type, the
+// full definition of each field (every option, such as maxSelect, values,
+// required and hidden, because PocketBase rewrites stored data in SQL when
+// some of them change, without running any record hook), its rules, and
+// its indexes. `source` is a Collection or the plain object of a
+// collections import.
 function collectionShape(source) {
   const plain = typeof source.marshalJSON === "function" ? JSON.parse(toString(source.marshalJSON())) : JSON.parse(JSON.stringify(source));
   const rule = (value) => (value === null || value === undefined ? null : String(value));
@@ -60,9 +74,33 @@ function collectionShape(source) {
       updateRule: rule(plain.updateRule),
       deleteRule: rule(plain.deleteRule),
     },
-    fields: (plain.fields || []).map((field) => ({ id: field.id, name: field.name, type: field.type })),
+    fields: (plain.fields || []).map((field) => ({
+      id: field.id,
+      name: field.name,
+      required: field.required === true,
+      definition: canonicalJson(field),
+    })),
     indexes: (plain.indexes || []).map((index) => String(index)),
   };
+}
+
+// JSON with object keys sorted at every level, so two definitions compare
+// equal exactly when every option is equal.
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return "[" + value.map(canonicalJson).join(",") + "]";
+  }
+  if (value !== null && typeof value === "object") {
+    return (
+      "{" +
+      Object.keys(value)
+        .sort()
+        .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key]))
+        .join(",") +
+      "}"
+    );
+  }
+  return JSON.stringify(value === undefined ? null : value);
 }
 
 // The collections whose shape the Catalog depends on. For `users`, only
@@ -72,11 +110,15 @@ function guardedCollection(name) {
   return name.indexOf("catalog_") === 0 || name === "users";
 }
 
-// Why changing collection `before` into `after` would lose or expose
-// Catalog data, or "" if it would not. Allowed: adding fields and indexes,
-// and making a rule stricter by setting it to superusers only (null).
-// Refused: renaming the collection or changing its type; removing,
-// renaming or retyping a field; dropping an index; any other rule change.
+// Why changing collection `before` into `after` would lose, expose or
+// block Catalog data, or "" if it would not. Allowed: adding fields that
+// are not required, adding indexes, and making a rule superusers only
+// (null). Refused: renaming the collection or changing its type; removing
+// a field or changing any option of it (name, type, maxSelect, select
+// values, required, hidden, ...); adding a required field (every edit would
+// then fail); dropping an index; any other rule change. For `users`, only
+// email, name and can_edit_catalog and the create and update rules are
+// checked.
 function collectionChangeProblem(before, after) {
   const old = collectionShape(before);
   const next = collectionShape(after);
@@ -93,8 +135,16 @@ function collectionChangeProblem(before, after) {
     if (!kept) {
       return `the field ${field.name} of ${old.name} cannot be removed`;
     }
-    if (kept.name !== field.name || kept.type !== field.type) {
-      return `the field ${field.name} of ${old.name} cannot be renamed or change type`;
+    if (kept.definition !== field.definition) {
+      return `the field ${field.name} of ${old.name} cannot be changed`;
+    }
+  }
+  if (!users) {
+    for (const field of next.fields) {
+      const isNew = !old.fields.some((existing) => existing.id === field.id);
+      if (isNew && field.required) {
+        return `a required field (${field.name}) cannot be added to ${old.name}; existing routes would stop saving`;
+      }
     }
   }
   const rules = users ? ["createRule", "updateRule"] : Object.keys(old.rules);
@@ -695,6 +745,7 @@ module.exports = {
   publishPartRevision: publishPartRevision,
   trimSpace: trimSpace,
   isReservedName: isReservedName,
+  hasInvisible: hasInvisible,
   guardedCollection: guardedCollection,
   collectionChangeProblem: collectionChangeProblem,
   deriveId: deriveId,

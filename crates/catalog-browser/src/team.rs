@@ -12,6 +12,7 @@
 //! Change `seq` it applied. The UI polls [`TeamCatalog::status`], whose
 //! `checkpoint` grows whenever anyone publishes a Change.
 
+use crate::PartValues;
 use catalog::pocketbase::{
     ConflictingRevision, EditCommand, PublishOutcome, PublishReply, RestoreCommand, StoredChange,
     StoredPart, StoredPartRevision, cad_item_revisions_by_id, changes_by_id, part_by_ipn,
@@ -23,9 +24,9 @@ use catalog::{
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
-    CadItemUse, ConflictRow, DetailChange, Field, LiveUpdates, ManufacturerPart, PartSummary,
-    PublishResult, RevisionDetails, RevisionSummary, SignInRequest, TeamConflict, TeamEditRequest,
-    TeamPart, TeamRestoreRequest, TeamSession, TeamStatus,
+    CadItemUse, ConflictRow, DetailChange, Field, LiveUpdates, ManufacturerPart, PublishResult,
+    RevisionDetails, RevisionSummary, SignInRequest, TeamConflict, TeamEditRequest, TeamPart,
+    TeamRestoreRequest, TeamSession, TeamStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -215,40 +216,42 @@ impl TeamCatalog {
         self.status()
     }
 
-    /// Shows the team catalog's current details in search results for the
-    /// parts it has, as the part header does: main MPN and manufacturer,
-    /// description and value. Uses only what the app already follows, so it
-    /// makes no request.
-    pub fn overlay(&self, hits: &mut [PartSummary]) {
+    /// The team catalog's current values for every part it has, by IPN, as
+    /// the part header shows them (main MPN and manufacturer, description,
+    /// value, symbol and footprint), for searching and listing parts. Uses
+    /// only what the app already follows, so it makes no request; empty
+    /// while signed out.
+    pub fn current_values(&self) -> BTreeMap<String, PartValues> {
         let state = self.lock();
         let Some(session) = &state.session else {
-            return;
+            return BTreeMap::new();
         };
         let live = session
             .follower
             .live
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        for hit in hits {
-            let Some(details) = live
-                .replica
-                .part_by_ipn(&hit.ipn)
-                .and_then(|part| part.details.as_ref())
-            else {
-                continue;
-            };
-            let main = details.manufacturer_parts.first();
-            hit.mpn = main.map(|part| part.mpn.clone()).unwrap_or_default();
-            hit.manufacturer = main
-                .map(|part| part.manufacturer.clone())
-                .unwrap_or_default();
-            if let Some(description) = details.field("Description") {
-                hit.description = description.to_owned();
-            }
-            if let Some(value) = details.field("Value") {
-                hit.value = value.to_owned();
-            }
-        }
+        live.replica
+            .parts()
+            .values()
+            .filter_map(|part| part.details.as_ref())
+            .map(|details| {
+                let main = details.manufacturer_parts.first();
+                let field = |name: &str| details.field(name).map(str::to_owned);
+                let values = PartValues {
+                    mpn: Some(main.map(|part| part.mpn.clone()).unwrap_or_default()),
+                    manufacturer: Some(
+                        main.map(|part| part.manufacturer.clone())
+                            .unwrap_or_default(),
+                    ),
+                    description: field("Description"),
+                    value: field("Value"),
+                    symbol: field("Symbol"),
+                    footprint: field("Footprint"),
+                };
+                (details.ipn.clone(), values)
+            })
+            .collect()
     }
 
     /// The team catalog's view of `ipn`, or `None` if the team catalog does

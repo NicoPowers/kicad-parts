@@ -158,10 +158,24 @@ impl LegacyCatalog {
     /// IPN or MPN prefix matches, then catalog order. An empty query matches
     /// every row.
     pub fn search(&self, query: &str, limit: usize) -> SearchResults {
+        self.search_replacing(query, limit, |_| None)
+    }
+
+    /// Like [`Self::search`], but a part for which `replace` returns a part
+    /// is matched on that part's values instead (for example the team
+    /// catalog's current details), so a search finds what the app shows.
+    pub fn search_replacing(
+        &self,
+        query: &str,
+        limit: usize,
+        replace: impl Fn(&CatalogPart) -> Option<CatalogPart>,
+    ) -> SearchResults {
         let query = query.trim().to_lowercase();
         let terms: Vec<&str> = query.split_whitespace().collect();
         let mut ranked: Vec<(u8, usize)> = Vec::new();
-        for (position, key) in self.index.iter().enumerate() {
+        for (position, indexed) in self.index.iter().enumerate() {
+            let replaced = replace(&self.parts[position]).map(|part| SearchKey::new(&part));
+            let key = replaced.as_ref().unwrap_or(indexed);
             if !terms.iter().all(|term| key.text.contains(term)) {
                 continue;
             }
@@ -318,6 +332,29 @@ mod tests {
         assert_eq!(results.total, 2);
         assert_eq!(results.hits, vec![0]);
         assert_eq!(catalog.search("  ", 10).total, 3);
+    }
+
+    #[test]
+    fn replaced_parts_match_on_their_replacement_values() {
+        let catalog = LegacyCatalog::from_parts(
+            vec![part("R-1", "", "res 47"), part("R-2", "", "res 10k")],
+            Vec::new(),
+        );
+        let replace = |found: &CatalogPart| {
+            (found.ipn == "R-1").then(|| CatalogPart {
+                description: "thick film 47R".into(),
+                ..found.clone()
+            })
+        };
+        assert_eq!(catalog.search_replacing("47r", 10, replace).hits, vec![0]);
+        assert_eq!(catalog.search("47r", 10).total, 0);
+        // The old value no longer finds the replaced part.
+        assert_eq!(catalog.search_replacing("res", 10, replace).hits, vec![1]);
+        assert_eq!(
+            catalog.search_replacing("10k", 10, replace).hits,
+            vec![1],
+            "other parts match as before"
+        );
     }
 
     #[test]

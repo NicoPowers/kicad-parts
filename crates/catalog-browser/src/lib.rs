@@ -18,6 +18,7 @@ use kicad_integration::{
 };
 use legacy_catalog::{CatalogPart, LegacyCatalog};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -150,14 +151,34 @@ impl CatalogBrowser {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> SearchResponse {
+        self.search_with(query, limit, &BTreeMap::new())
+    }
+
+    /// Like [`Self::search`], but the parts in `current` (by IPN, such as
+    /// the team catalog's current details) are matched on and shown with
+    /// those values, so a search finds what the app shows.
+    pub fn search_with(
+        &self,
+        query: &str,
+        limit: usize,
+        current: &BTreeMap<String, PartValues>,
+    ) -> SearchResponse {
         let started = Instant::now();
+        let replace = |part: &CatalogPart| current.get(&part.ipn).map(|values| values.apply(part));
         let (total, hits) = match &self.catalog {
             Ok(catalog) => {
-                let results = catalog.search(query, limit.min(MAX_SEARCH_LIMIT));
+                let results = if current.is_empty() {
+                    catalog.search(query, limit.min(MAX_SEARCH_LIMIT))
+                } else {
+                    catalog.search_replacing(query, limit.min(MAX_SEARCH_LIMIT), replace)
+                };
                 let hits = results
                     .hits
                     .iter()
-                    .map(|&position| summary(&catalog.parts()[position]))
+                    .map(|&position| {
+                        let part = &catalog.parts()[position];
+                        summary(&replace(part).unwrap_or_else(|| part.clone()))
+                    })
                     .collect();
                 (results.total, hits)
             }
@@ -444,4 +465,36 @@ fn capitalize(text: &str) -> String {
 
 fn display(path: &Path) -> String {
     path.display().to_string()
+}
+
+/// A part's current values from somewhere other than the CSV catalog, such
+/// as the team catalog. `None` keeps the CSV catalog's value.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PartValues {
+    pub mpn: Option<String>,
+    pub manufacturer: Option<String>,
+    pub description: Option<String>,
+    pub value: Option<String>,
+    pub symbol: Option<String>,
+    pub footprint: Option<String>,
+}
+
+impl PartValues {
+    fn apply(&self, part: &CatalogPart) -> CatalogPart {
+        let pick = |new: &Option<String>, old: &String| new.clone().unwrap_or_else(|| old.clone());
+        let pick_reference = |new: &Option<String>, old: &Option<String>| match new {
+            Some(reference) if reference.trim().is_empty() => None,
+            Some(reference) => Some(reference.clone()),
+            None => old.clone(),
+        };
+        CatalogPart {
+            mpn: pick(&self.mpn, &part.mpn),
+            manufacturer: pick(&self.manufacturer, &part.manufacturer),
+            description: pick(&self.description, &part.description),
+            value: pick(&self.value, &part.value),
+            symbol: pick_reference(&self.symbol, &part.symbol),
+            footprint: pick_reference(&self.footprint, &part.footprint),
+            ..part.clone()
+        }
+    }
 }
