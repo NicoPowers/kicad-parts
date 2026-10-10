@@ -19,8 +19,10 @@
 //!
 //! Excluded from BOM is set in the part details only from explicit
 //! evidence in the CAD libraries: a local symbol the part uses says
-//! `(in_bom no)`, or a local footprint it uses has `exclude_from_bom` in its
-//! `(attr ...)`.
+//! `(in_bom no)`, or every footprint choice is a local footprint with
+//! `exclude_from_bom` in its `(attr ...)`. If only some footprint choices
+//! say so, a `footprint-choices-disagree-on-bom` import problem keeps them
+//! and the setting stays unset.
 //!
 //! The CSV file name (`g-res`) is only part of the source. It is neither a
 //! category nor the IPN prefix.
@@ -90,6 +92,11 @@ pub enum ColumnRoute {
     /// parts. A value here becomes an `mpn-to-be-confirmed` import problem
     /// for someone to confirm.
     MpnToBeConfirmed,
+    /// Any other column whose name mentions an MPN, in any case, such as
+    /// `MPN 2`, `Alt MPN` or `mpn2`. The import does not know what it
+    /// means, so a value here becomes an `unknown-mpn-column` import
+    /// problem rather than a guessed part-details field.
+    UnknownMpn,
     /// Supplier data: kept in the source, never in the part details.
     SupplierData,
 }
@@ -116,6 +123,7 @@ pub fn route_column(name: &str) -> ColumnRoute {
         "MPN TBC" => ColumnRoute::MpnToBeConfirmed,
         name if is_extra_mpn_column(name) => ColumnRoute::ExtraMpn,
         name if SUPPLIER_DATA_COLUMNS.contains(&name) => ColumnRoute::SupplierData,
+        name if name.to_ascii_lowercase().contains("mpn") => ColumnRoute::UnknownMpn,
         _ => ColumnRoute::PartDetails,
     }
 }
@@ -686,7 +694,9 @@ impl<'a> Planner<'a> {
                 }),
                 ColumnRoute::MainMpn => mpn = Some(value(index)),
                 ColumnRoute::MainManufacturer => manufacturer = Some(value(index)),
-                route @ (ColumnRoute::ExtraMpn | ColumnRoute::MpnToBeConfirmed) => {
+                route @ (ColumnRoute::ExtraMpn
+                | ColumnRoute::MpnToBeConfirmed
+                | ColumnRoute::UnknownMpn) => {
                     if !value(index).is_empty() {
                         unplaced_mpns.push((route, header.clone(), value(index)));
                     }
@@ -699,8 +709,8 @@ impl<'a> Planner<'a> {
         }
         for (route, column, value) in unplaced_mpns {
             let location = format!("rows[IPN={ipn}].{column}");
-            let problem = if route == ColumnRoute::ExtraMpn {
-                ImportProblem::new(
+            let problem = match route {
+                ColumnRoute::ExtraMpn => ImportProblem::new(
                     "mpn-without-manufacturer",
                     ipn.as_str(),
                     catalog_path,
@@ -713,9 +723,8 @@ impl<'a> Planner<'a> {
                         "mpn": value,
                         "row_manufacturer": manufacturer.clone().unwrap_or_default(),
                     }),
-                )
-            } else {
-                ImportProblem::new(
+                ),
+                ColumnRoute::MpnToBeConfirmed => ImportProblem::new(
                     "mpn-to-be-confirmed",
                     ipn.as_str(),
                     catalog_path,
@@ -724,7 +733,17 @@ impl<'a> Planner<'a> {
                         "{ipn} lists MPNs still to be confirmed in {column} (`{value}`); they are not approved manufacturer parts, so they are kept here"
                     ),
                     json!({ "column": column, "value": value }),
-                )
+                ),
+                _ => ImportProblem::new(
+                    "unknown-mpn-column",
+                    ipn.as_str(),
+                    catalog_path,
+                    &location,
+                    format!(
+                        "{ipn} has `{value}` in {column}, a column this import does not know; it is kept here instead of going into the part details"
+                    ),
+                    json!({ "column": column, "value": value }),
+                ),
             };
             self.record_problem(problem);
         }
@@ -862,10 +881,11 @@ impl<'a> Planner<'a> {
 
         let mut cad_references = Vec::new();
         // Excluded from BOM is set only from explicit evidence: a local
-        // symbol the part uses says `(in_bom no)`, or a local footprint it
-        // uses has `exclude_from_bom` in its `(attr ...)`. Descriptions and
-        // notes are never read for it.
-        let mut excluded_from_bom = false;
+        // symbol the part uses says `(in_bom no)`, or every footprint choice
+        // is a local footprint with `exclude_from_bom` in its `(attr ...)`.
+        // Descriptions and notes are never read for it.
+        let mut symbol_marked = false;
+        let mut footprint_marks: Vec<(String, bool)> = Vec::new();
         for (role, column) in [
             (CadReferenceRole::Symbol, "Symbol"),
             (CadReferenceRole::Footprint, "Footprint"),
@@ -880,8 +900,13 @@ impl<'a> Planner<'a> {
                 .filter(|reference| !reference.is_empty())
                 .collect();
             for (ordinal, reference) in references.into_iter().enumerate() {
-                let (target, marked_excluded) = self.bind(role, reference, ipn)?;
-                excluded_from_bom |= marked_excluded;
+                let (target, marked) = self.bind(role, reference, ipn)?;
+                match role {
+                    CadReferenceRole::Symbol => symbol_marked |= marked,
+                    CadReferenceRole::Footprint => {
+                        footprint_marks.push((reference.to_owned(), marked));
+                    }
+                }
                 cad_references.push(CadReference {
                     role,
                     ordinal: ordinal as u32,
@@ -890,6 +915,28 @@ impl<'a> Planner<'a> {
                 });
             }
         }
+        let marked_choices = footprint_marks.iter().filter(|(_, marked)| *marked).count();
+        let all_choices_marked = marked_choices > 0 && marked_choices == footprint_marks.len();
+        if !symbol_marked && marked_choices > 0 && !all_choices_marked {
+            // Some footprint choices say the part is not in the BOM and
+            // others do not: that is unclear, so the setting stays unset.
+            self.record_problem(ImportProblem::new(
+                "footprint-choices-disagree-on-bom",
+                ipn.as_str(),
+                catalog_path,
+                &format!("rows[IPN={ipn}].Footprint"),
+                format!(
+                    "only some footprint choices of {ipn} are excluded from the BOM, so Excluded from BOM is left unset"
+                ),
+                json!({
+                    "footprints": footprint_marks
+                        .iter()
+                        .map(|(reference, marked)| json!({ "reference": reference, "exclude_from_bom": marked }))
+                        .collect::<Vec<_>>(),
+                }),
+            ));
+        }
+        let excluded_from_bom = symbol_marked || all_choices_marked;
 
         let snapshot = PartDetails {
             schema: PART_DETAILS_SCHEMA.to_owned(),

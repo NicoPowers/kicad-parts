@@ -36,6 +36,9 @@
 //!   manufacturer. A blank cell adds nothing.
 //! - `MPN TBC`: `import-problem` (`mpn-to-be-confirmed`). These MPNs are
 //!   still to be confirmed, so they are not approved manufacturer parts.
+//! - Any other column whose name mentions MPN in any case (`MPN 2`,
+//!   `Alt MPN`, `mpn2`): `import-problem` (`unknown-mpn-column`), never a
+//!   guessed part-details field. No CSV file has one today.
 //! - `LCSC`, `DigiKey_PN`, `Mouser_PN`, `DigiKey_Price`, `Mouser_Price`,
 //!   `Price_Range`, `Price_LastSynced_UTC`: `supplier-data`.
 //!
@@ -66,9 +69,10 @@
 //! All 21 files also have the 7 supplier data columns.
 //!
 //! Excluded from BOM is part details but no column: the report checks that
-//! a part has it exactly when a symbol or footprint revision it binds is
-//! marked so in its stored bytes (`(in_bom no)`, or `exclude_from_bom` in a
-//! footprint's `(attr ...)`).
+//! a part has it exactly when a symbol revision it binds says `(in_bom no)`
+//! in its stored bytes, or every footprint choice has `exclude_from_bom` in
+//! its `(attr ...)`; footprint choices that disagree need a
+//! `footprint-choices-disagree-on-bom` import problem.
 
 use catalog::csv_import::{
     CadItemSource, ColumnRoute, CsvRecord, EMPTY_3D_MODEL, SubstitutesCsvColumn, parse_csv,
@@ -78,8 +82,8 @@ use catalog::pocketbase::{
     CatalogReadback, ImportRun, StoredAuditEntry, StoredImportProblem, StoredPartRevision,
 };
 use catalog::{
-    CadItemDetails, CadItemId, CadItemRevisionId, CadReferenceRole, CadReferenceTarget, License,
-    ModelTarget, PartDetails, sha256_hex,
+    CadItemDetails, CadItemId, CadItemRevisionId, CadReference, CadReferenceRole,
+    CadReferenceTarget, License, ModelTarget, PartDetails, sha256_hex,
 };
 use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
 use legacy_import_fixture::Manifest;
@@ -599,14 +603,20 @@ impl<'a> Reporter<'a> {
                     // An extra MPN without a known manufacturer, or MPNs
                     // still to be confirmed: an import problem keeps the
                     // value. A blank cell needs no problem.
-                    ColumnRoute::ExtraMpn | ColumnRoute::MpnToBeConfirmed if value.is_empty() => {
+                    ColumnRoute::ExtraMpn
+                    | ColumnRoute::MpnToBeConfirmed
+                    | ColumnRoute::UnknownMpn
+                        if value.is_empty() =>
+                    {
                         (IMPORT_PROBLEM, Some(String::new()))
                     }
-                    ColumnRoute::ExtraMpn | ColumnRoute::MpnToBeConfirmed => {
-                        let (code, key) = if route == ColumnRoute::ExtraMpn {
-                            ("mpn-without-manufacturer", "mpn")
-                        } else {
-                            ("mpn-to-be-confirmed", "value")
+                    ColumnRoute::ExtraMpn
+                    | ColumnRoute::MpnToBeConfirmed
+                    | ColumnRoute::UnknownMpn => {
+                        let (code, key) = match route {
+                            ColumnRoute::ExtraMpn => ("mpn-without-manufacturer", "mpn"),
+                            ColumnRoute::MpnToBeConfirmed => ("mpn-to-be-confirmed", "value"),
+                            _ => ("unknown-mpn-column", "value"),
                         };
                         let kept = self.find_problem(|problem, detail| {
                             problem.code == code
@@ -660,7 +670,7 @@ impl<'a> Reporter<'a> {
                     ));
                 }
             }
-            self.check_excluded_from_bom(row_number, &ipn, details);
+            self.check_excluded_from_bom(row_number, &ipn, details, &mut explained);
             scope.insert(ipn.clone(), revision);
         }
 
@@ -837,12 +847,21 @@ impl<'a> Reporter<'a> {
         changes
     }
 
-    /// A part is Excluded from BOM exactly when a symbol or footprint
-    /// revision it binds is marked so in its stored bytes: the symbol says
-    /// `(in_bom no)`, or the footprint's `(attr ...)` has `exclude_from_bom`.
-    fn check_excluded_from_bom(&mut self, row_number: usize, ipn: &str, details: &PartDetails) {
+    /// A part is Excluded from BOM exactly when a symbol revision it binds
+    /// says `(in_bom no)` in its stored bytes, or every footprint choice is a
+    /// footprint revision whose `(attr ...)` has `exclude_from_bom`. If only
+    /// some footprint choices say so, the setting must be unset and the
+    /// latest run must have found a `footprint-choices-disagree-on-bom`
+    /// import problem.
+    fn check_excluded_from_bom(
+        &mut self,
+        row_number: usize,
+        ipn: &str,
+        details: &PartDetails,
+        explained: &mut BTreeSet<String>,
+    ) {
         let readback = self.readback;
-        let marked = details.cad_references.iter().any(|reference| {
+        let marked = |reference: &CadReference| {
             let CadReferenceTarget::CadItemRevision {
                 cad_item,
                 snapshot_sha256,
@@ -872,12 +891,36 @@ impl<'a> Reporter<'a> {
                 CadReferenceRole::Footprint => FootprintFile::parse(&blob.bytes)
                     .is_ok_and(|footprint| footprint.exclude_from_bom),
             }
-        });
-        if marked != details.excluded_from_bom {
+        };
+        let of_role = |role: CadReferenceRole| -> Vec<bool> {
+            details
+                .cad_references
+                .iter()
+                .filter(|reference| reference.role == role)
+                .map(marked)
+                .collect()
+        };
+        let symbol_marked = of_role(CadReferenceRole::Symbol).contains(&true);
+        let footprints = of_role(CadReferenceRole::Footprint);
+        let all_footprints = !footprints.is_empty() && !footprints.contains(&false);
+        let expected = symbol_marked || all_footprints;
+        if expected != details.excluded_from_bom {
             self.problem(format!(
-                "row {row_number} ({ipn}): Excluded from BOM is {}, but its symbols and footprints say {marked}",
+                "row {row_number} ({ipn}): Excluded from BOM is {}, but its symbols and footprints say {expected}",
                 details.excluded_from_bom
             ));
+        }
+        if !symbol_marked && footprints.contains(&true) && !all_footprints {
+            match self.find_problem(|problem, _| {
+                problem.code == "footprint-choices-disagree-on-bom" && problem.subject == ipn
+            }) {
+                Some((problem, _)) => {
+                    explained.insert(problem.id.clone());
+                }
+                None => self.problem(format!(
+                    "row {row_number} ({ipn}): only some footprint choices are excluded from the BOM, and no import problem says so"
+                )),
+            }
         }
     }
 

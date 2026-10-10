@@ -293,7 +293,9 @@ fn every_column_of_every_csv_file_has_one_destination() {
                 let destination = match route_column(header) {
                     ColumnRoute::Ipn | ColumnRoute::PartDetails => "part-details",
                     ColumnRoute::MainMpn | ColumnRoute::MainManufacturer => "manufacturer-parts",
-                    ColumnRoute::ExtraMpn | ColumnRoute::MpnToBeConfirmed => "import-problem",
+                    ColumnRoute::ExtraMpn
+                    | ColumnRoute::MpnToBeConfirmed
+                    | ColumnRoute::UnknownMpn => "import-problem",
                     ColumnRoute::SupplierData => "supplier-data",
                 };
                 (header.as_str(), destination)
@@ -379,7 +381,10 @@ fn extra_mpn_columns_are_kept_as_import_problems_end_to_end() {
 fn excluded_from_bom_comes_from_the_symbol_and_survives_an_edit() {
     // ART-0000-0001's symbol g-art:TestPoint says `(in_bom no)`, which
     // matches its row's note "Artwork part only, does not appear in BOM".
-    // ART-0001-0006's symbol is in the BOM, so it is left unset.
+    // ART-0001-0006 has no evidence either way: its symbol
+    // g-con:Conn_PIC_TagConnect_TC2030 is missing from the library
+    // (missing-member) and its footprint is in KiCad's own library, which
+    // is not read. So it is left unset.
     use catalog::pocketbase::{EditCommand, submit_edit};
     let root = repository();
     let state = tempfile::tempdir().unwrap();
@@ -426,4 +431,215 @@ fn excluded_from_bom_comes_from_the_symbol_and_survives_an_edit() {
     assert_eq!(number, 2);
     assert!(details.excluded_from_bom);
     assert_eq!(details.canonical_json(), snapshot);
+}
+
+/// Rewrites the current revision of `ipn` in a read-back copy, keeping its
+/// hash consistent, so that only the report's own checks can notice.
+fn rewrite_current(
+    stored: &mut catalog::pocketbase::CatalogReadback,
+    ipn: &str,
+    change: impl FnOnce(&mut catalog::PartDetails),
+) {
+    let current = stored.part(ipn).unwrap().current_revision.clone();
+    let revision = stored
+        .part_revisions
+        .iter_mut()
+        .find(|revision| revision.id == current)
+        .unwrap();
+    let mut details: catalog::PartDetails = serde_json::from_str(&revision.snapshot).unwrap();
+    change(&mut details);
+    revision.snapshot = details.canonical_json();
+    revision.snapshot_sha256 = sha256_hex(&revision.snapshot);
+}
+
+/// Changes the detail of every stored import problem with `code`, or drops
+/// those problems when `change` is `None`.
+fn retouch_problems(
+    stored: &mut catalog::pocketbase::CatalogReadback,
+    code: &str,
+    change: Option<(&str, &str)>,
+) {
+    match change {
+        Some((from, to)) => {
+            for problem in stored
+                .problems
+                .iter_mut()
+                .filter(|problem| problem.code == code)
+            {
+                assert!(problem.detail.contains(from), "{}", problem.detail);
+                problem.detail = problem.detail.replace(from, to);
+            }
+        }
+        None => stored.problems.retain(|problem| problem.code != code),
+    }
+}
+
+#[test]
+fn the_zero_loss_report_fails_when_its_new_checks_find_a_loss() {
+    // A temp copy adds the cases the real catalog lacks: g-swi's Form column
+    // renamed to `Alt MPN` (an MPN column with no route), ART-0001-0006 given
+    // two footprint choices that disagree on the BOM, and g-cpd's diode
+    // model emptied. database/ and 3d-models/ themselves are never edited.
+    let copy = tempfile::tempdir().unwrap();
+    copy_catalog(copy.path());
+    let edit = |path: &str, from: &str, to: &str| {
+        let path = copy.path().join(path);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(from), "{from}");
+        fs::write(&path, text.replacen(from, to, 1)).unwrap();
+    };
+    edit(
+        "database/g-swi.csv",
+        "Description,Form,",
+        "Description,Alt MPN,",
+    );
+    edit(
+        "database/g-art.csv",
+        ",Connector:Tag-Connect",
+        ",g-no_bom:Fiducial_1mm_Mask2mm;Connector:Tag-Connect",
+    );
+    fs::write(copy.path().join("3d-models/D_SOD-923.step"), "").unwrap();
+    let oracle = legacy_import_fixture::build_manifest(copy.path()).unwrap();
+
+    let csv_files = ["g-art", "g-cpd", "g-rfm", "g-rvr", "g-swi"];
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
+    for csv_file in csv_files {
+        let import = CsvCatalog::new(copy.path()).import(csv_file, None).unwrap();
+        let state = catalog::pocketbase::read_import_state(&admin).unwrap();
+        let command = ImportCommand::new(&import, &format!("Import {csv_file}")).expecting(&state);
+        let reply = submit_import(&admin, &command).unwrap();
+        assert!(
+            matches!(reply.outcome, ImportOutcome::Applied { .. }),
+            "{csv_file}: {}",
+            reply.body
+        );
+    }
+    let stored = read_back(&admin).unwrap();
+    server.stop();
+    let report = |stored: &catalog::pocketbase::CatalogReadback, csv_file: &str| {
+        catalog_import::report(&oracle, csv_file, stored, copy.path())
+    };
+    for csv_file in csv_files {
+        let untouched = report(&stored, csv_file);
+        assert!(
+            untouched.is_lossless(),
+            "{csv_file}: {}",
+            serde_json::to_string_pretty(&untouched.summary()).unwrap()
+        );
+    }
+    let swi = report(&stored, "g-swi");
+    assert!(
+        swi.column_routes
+            .contains(&("Alt MPN".to_owned(), "import-problem".to_owned()))
+    );
+    // Footprint choices that disagree leave the setting unset.
+    let part = stored.part("ART-0001-0006").unwrap();
+    let snapshot = &stored
+        .part_revision(&part.current_revision)
+        .unwrap()
+        .snapshot;
+    assert!(!snapshot.contains("excluded_from_bom"), "{snapshot}");
+    assert!(stored.problems.iter().any(|problem| problem.code
+        == "footprint-choices-disagree-on-bom"
+        && problem.subject == "ART-0001-0006"));
+
+    // Each broken copy must fail, saying why.
+    type Break = Box<dyn Fn(&mut catalog::pocketbase::CatalogReadback)>;
+    let cases: Vec<(&str, &str, Break, &str)> = vec![
+        (
+            "Excluded from BOM unset",
+            "g-art",
+            Box::new(|stored| {
+                rewrite_current(stored, "ART-0000-0001", |d| d.excluded_from_bom = false)
+            }),
+            "Excluded from BOM is false",
+        ),
+        (
+            "Excluded from BOM set on mixed footprint choices",
+            "g-art",
+            Box::new(|stored| {
+                rewrite_current(stored, "ART-0001-0006", |d| d.excluded_from_bom = true)
+            }),
+            "Excluded from BOM is true",
+        ),
+        (
+            "mixed footprint choices without their import problem",
+            "g-art",
+            Box::new(|stored| retouch_problems(stored, "footprint-choices-disagree-on-bom", None)),
+            "no import problem says so",
+        ),
+        (
+            "MPN2 problem missing",
+            "g-rfm",
+            Box::new(|stored| retouch_problems(stored, "mpn-without-manufacturer", None)),
+            "field MPN2",
+        ),
+        (
+            "MPN2 problem with another value",
+            "g-rfm",
+            Box::new(|stored| {
+                retouch_problems(
+                    stored,
+                    "mpn-without-manufacturer",
+                    Some(("MS128-10F", "MS128-10X")),
+                )
+            }),
+            "field MPN2",
+        ),
+        (
+            "MPN TBC problem missing",
+            "g-rvr",
+            Box::new(|stored| retouch_problems(stored, "mpn-to-be-confirmed", None)),
+            "field MPN TBC",
+        ),
+        (
+            "MPN TBC problem with another value",
+            "g-rvr",
+            Box::new(|stored| {
+                retouch_problems(
+                    stored,
+                    "mpn-to-be-confirmed",
+                    Some(("ST-4ETA102", "ST-4ETA103")),
+                )
+            }),
+            "field MPN TBC",
+        ),
+        (
+            "unrouted MPN column problem missing",
+            "g-swi",
+            Box::new(|stored| retouch_problems(stored, "unknown-mpn-column", None)),
+            "field Alt MPN",
+        ),
+        (
+            "empty 3D model problem missing",
+            "g-cpd",
+            Box::new(|stored| retouch_problems(stored, "empty-3d-model-reference", None)),
+            "no import problem empty-3d-model-reference",
+        ),
+        (
+            "supplier number leaked into the part details",
+            "g-rfm",
+            Box::new(|stored| {
+                rewrite_current(stored, "RFM-0000-0001", |d| {
+                    d.fields.push(catalog::DetailField {
+                        name: "Order code".into(),
+                        value: "C4365834".into(),
+                    })
+                })
+            }),
+            "supplier data LCSC=C4365834 also appears in the part details",
+        ),
+    ];
+    for (name, csv_file, break_it, says) in cases {
+        let mut broken = stored.clone();
+        break_it(&mut broken);
+        let report = report(&broken, csv_file);
+        assert!(!report.is_lossless(), "{name}: the report passed");
+        assert!(
+            report.problems.iter().any(|problem| problem.contains(says)),
+            "{name}: {:?}",
+            report.problems
+        );
+    }
 }

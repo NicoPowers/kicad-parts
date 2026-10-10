@@ -452,8 +452,9 @@ fn extra_mpns_and_mpns_to_be_confirmed_are_import_problems() {
         ("MPN2", ColumnRoute::ExtraMpn),
         ("MPN12", ColumnRoute::ExtraMpn),
         ("MPN TBC", ColumnRoute::MpnToBeConfirmed),
-        ("MPN2x", ColumnRoute::PartDetails),
-        ("MPN_", ColumnRoute::PartDetails),
+        ("MPN2x", ColumnRoute::UnknownMpn),
+        ("MPN_", ColumnRoute::UnknownMpn),
+        ("Value", ColumnRoute::PartDetails),
         ("Mouser_PN", ColumnRoute::SupplierData),
     ] {
         assert_eq!(route_column(column), route, "{column}");
@@ -537,4 +538,84 @@ fn excluded_from_bom_is_set_only_by_a_marked_symbol_or_footprint() {
             .ends_with(r#","excluded_from_bom":true}"#)
     );
     assert!(!import.parts[2].snapshot_json.contains("excluded_from_bom"));
+}
+
+#[test]
+fn footprint_choices_that_disagree_on_the_bom_are_an_import_problem() {
+    let csv = format!(
+        "{HEADER}RES-0000-0001,M1,Yageo,1,g-pas:R_US,g-res:NoBom;g-res:R_0603,,\nRES-0000-0002,M2,Yageo,2,g-pas:R_US,g-res:NoBom;Resistor_SMD:R_0402,,\nRES-0000-0003,M3,Yageo,3,g-pas:R_US,g-res:NoBom;g-res:NoBom2,,\n"
+    );
+    let root = fixture(&csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
+    for name in ["NoBom", "NoBom2"] {
+        fs::write(
+            root.path()
+                .join(format!("footprints/g-res.pretty/{name}.kicad_mod")),
+            format!("(footprint \"{name}\"\n\t(attr smd exclude_from_bom)\n)\n"),
+        )
+        .unwrap();
+    }
+    let import = CsvCatalog::new(root.path()).import("g-res", None).unwrap();
+    let excluded: Vec<(&str, bool)> = import
+        .parts
+        .iter()
+        .map(|part| (part.ipn.as_str(), part.snapshot.excluded_from_bom))
+        .collect();
+    // A choice that is not marked, or that cannot be read (KiCad's own
+    // library), leaves the setting unset; all choices marked sets it.
+    assert_eq!(
+        excluded,
+        [
+            ("RES-0000-0001", false),
+            ("RES-0000-0002", false),
+            ("RES-0000-0003", true),
+        ]
+    );
+    let disagree: Vec<(&str, &str)> = import
+        .problems
+        .iter()
+        .filter(|problem| problem.code == "footprint-choices-disagree-on-bom")
+        .map(|problem| (problem.subject.as_str(), problem.detail_json.as_str()))
+        .collect();
+    assert_eq!(disagree.len(), 2, "{disagree:?}");
+    assert!(disagree.contains(&(
+        "RES-0000-0001",
+        r#"{"footprints":[{"exclude_from_bom":true,"reference":"g-res:NoBom"},{"exclude_from_bom":false,"reference":"g-res:R_0603"}]}"#
+    )));
+}
+
+#[test]
+fn unknown_mpn_columns_are_import_problems() {
+    for column in ["MPN 2", "Alt MPN", "mpn2", "Mpn", "Supplier MPN"] {
+        assert_eq!(route_column(column), ColumnRoute::UnknownMpn, "{column}");
+    }
+    let csv = "IPN,MPN,Manufacturer,Alt MPN,mpn2,Value\nRES-0000-0470,MPN47,Yageo,ALT47,,47\n";
+    let root = fixture(csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
+    let import = CsvCatalog::new(root.path()).import("g-res", None).unwrap();
+    let problems: Vec<(&str, &str, &str)> = import
+        .problems
+        .iter()
+        .map(|problem| {
+            (
+                problem.code.as_str(),
+                problem.location.as_str(),
+                problem.detail_json.as_str(),
+            )
+        })
+        .collect();
+    // The blank mpn2 cell adds nothing.
+    assert_eq!(
+        problems,
+        [(
+            "unknown-mpn-column",
+            "rows[IPN=RES-0000-0470].Alt MPN",
+            r#"{"column":"Alt MPN","value":"ALT47"}"#
+        )]
+    );
+    let names: Vec<&str> = import.parts[0]
+        .snapshot
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert_eq!(names, ["Value"]);
 }
