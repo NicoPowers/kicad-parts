@@ -456,6 +456,17 @@ a {
   margin: -0.3rem 0 0.6rem;
 }
 
+/* Where a drawing came from when it is not what the team catalog stores. */
+.preview-note {
+  margin: -0.2rem 0 0.6rem;
+  padding: 0.4rem 0.7rem;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-line);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  font-size: 0.88rem;
+}
+
 .preview-grid {
   flex: 1;
   min-height: 0;

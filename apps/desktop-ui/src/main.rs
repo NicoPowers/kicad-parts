@@ -8,8 +8,8 @@ mod team;
 
 use desktop_contract::{
     AppStatus, KicadStatus, PartDetail, PreviewKind, PreviewOutcome, PreviewProblem,
-    PreviewProblemReason, PreviewSet, SearchResponse, TeamPart, TeamSession, TeamStatus,
-    unit_label,
+    PreviewProblemReason, PreviewRequest, PreviewSet, SearchResponse, TeamPart, TeamSession,
+    TeamStatus, unit_label,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -514,6 +514,10 @@ fn PartPanel(
     let footprint = RwSignal::new(Load::<PreviewOutcome>::Loading);
     let seq = StoredValue::new(0u64);
     let preview_seq = StoredValue::new(0u64);
+    // Tells the backend which previews are for the newest selection, so it
+    // can drop waiting exports for older ones. Based on the clock, so it
+    // keeps growing if the page reloads.
+    let selection = StoredValue::new(0u64);
     // The team catalog's view of the selected part: None while signed out
     // or when the team catalog does not have it.
     let team_part = RwSignal::new(None::<TeamPart>);
@@ -553,27 +557,15 @@ fn PartPanel(
             )
         })
     });
-    // The team catalog's Symbol and Footprint, where they differ from the
-    // CSV catalog's, so the previews show what the team catalog uses.
-    let preview_fields = Memo::new(move |_| {
-        let csv = detail.with(|detail| match detail {
-            Some(Load::Ready(Some(part))) => (part.symbol.clone(), part.footprint.clone()),
-            _ => (None, None),
-        });
+    // For a part the team catalog has: the revision shown, whose exact CAD
+    // item revisions the previews are drawn from, and its Symbol and
+    // Footprint in case those cannot be fetched. Otherwise the CSV catalog's.
+    let preview_source = Memo::new(move |_| {
         team_part.with(|part| {
-            let Some(part) = part else {
-                return (None, None);
-            };
-            let differs = |name: &str, csv: &Option<String>| {
-                let team = part
-                    .current
-                    .field(name)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_owned();
-                (team != csv.clone().unwrap_or_default().trim()).then_some(team)
-            };
-            (differs("Symbol", &csv.0), differs("Footprint", &csv.1))
+            part.as_ref().map(|part| {
+                let field = |name: &str| part.current.field(name).unwrap_or_default().to_owned();
+                (part.current.number, field("Symbol"), field("Footprint"))
+            })
         })
     });
 
@@ -631,22 +623,42 @@ fn PartPanel(
 
     Effect::new(move |_| {
         kicad_epoch.track();
-        let (symbol_field, footprint_field) = preview_fields.get();
+        let source = preview_source.get();
         let Some(ipn) = selected.get() else {
             return;
         };
         let current = preview_seq.get_value() + 1;
         preview_seq.set_value(current);
+        let now = js_sys::Date::now() as u64;
+        let this_selection = now.max(selection.get_value() + 1);
+        selection.set_value(this_selection);
         symbol.set(Load::Loading);
         footprint.set(Load::Loading);
+        let (team_revision, symbol_field, footprint_field) = match source {
+            Some((revision, symbol, footprint)) => (Some(revision), Some(symbol), Some(footprint)),
+            None => (None, None, None),
+        };
         for (kind, target, field) in [
             (PreviewKind::Symbol, symbol, symbol_field),
             (PreviewKind::Footprint, footprint, footprint_field),
         ] {
-            let ipn = ipn.clone();
+            let request = PreviewRequest {
+                ipn: ipn.clone(),
+                kind,
+                field,
+                team_revision,
+                selection: Some(this_selection),
+            };
             spawn_local(async move {
-                let result = backend::preview(ipn, kind, field).await;
-                if preview_seq.get_value() == current {
+                let result = backend::preview(request).await;
+                // Only the newest selection's answer is shown, even if an
+                // older export finishes later.
+                let superseded = matches!(
+                    &result,
+                    Ok(PreviewOutcome::Problem(problem))
+                        if problem.reason == PreviewProblemReason::Superseded
+                );
+                if preview_seq.get_value() == current && !superseded {
                     target.set(into_load(result));
                 }
             });
@@ -870,11 +882,18 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
         units.dedup();
         units.len()
     };
-    let source = if set.from_kicad_bundle {
-        "KiCad library"
-    } else {
-        "project library"
+    let source = match set.cad_item_revision {
+        Some(number) => format!("team catalog, revision {number}"),
+        None if set.from_kicad_bundle => "KiCad library".to_owned(),
+        None => "project library".to_owned(),
     };
+    // Hovering shows the library file, or the stored bytes' SHA-256.
+    let drawn_from = if set.library_path.is_empty() {
+        format!("Stored bytes with SHA-256 {}", set.library_sha256)
+    } else {
+        set.library_path.clone()
+    };
+    let note = set.note.clone();
     let provenance = format!(
         "{} · kicad-cli {} · {}",
         source,
@@ -903,8 +922,9 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
     view! {
         <p class="preview-meta">
             <code class="reference">{set.reference.clone()}</code>
-            <span class="provenance" title=set.library_path.clone()>{provenance}</span>
+            <span class="provenance" title=drawn_from>{provenance}</span>
         </p>
+        {note.map(|note| view! { <p class="preview-note">{note}</p> })}
         {(!alternates.is_empty())
             .then(|| view! {
                 <p class="alternates">{format!("Also listed: {}", alternates.join(", "))}</p>
@@ -979,6 +999,12 @@ fn PreviewProblemView(problem: PreviewProblem) -> impl IntoView {
                  project's {noun}s folder."
             ),
         ),
+        PreviewProblemReason::TeamSignInNeeded => {
+            (format!("Sign in to see this {noun}"), String::new())
+        }
+        PreviewProblemReason::Superseded => {
+            (format!("The {noun} preview was replaced"), String::new())
+        }
         PreviewProblemReason::KicadUnavailable => (
             "Previews need KiCad 10".to_owned(),
             "Fix the KiCad problem shown above; previews load automatically.".to_owned(),
@@ -1002,7 +1028,10 @@ fn PreviewProblemView(problem: PreviewProblem) -> impl IntoView {
     // announced by the panel at the top; neither needs another alert.
     let quiet = matches!(
         problem.reason,
-        PreviewProblemReason::Unassigned | PreviewProblemReason::KicadUnavailable
+        PreviewProblemReason::Unassigned
+            | PreviewProblemReason::KicadUnavailable
+            | PreviewProblemReason::TeamSignInNeeded
+            | PreviewProblemReason::Superseded
     );
     // The headline and reference already say what failed to export.
     let message = (problem.reason != PreviewProblemReason::ExportFailed).then_some(problem.message);

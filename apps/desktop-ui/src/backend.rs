@@ -1,9 +1,9 @@
 //! Calls into the Tauri shell. Payload shapes come from `desktop-contract`.
 
 use desktop_contract::{
-    AppStatus, PartDetail, PreviewKind, PreviewOutcome, PreviewRequest, PublishResult,
-    SearchRequest, SearchResponse, SignInRequest, TeamEditRequest, TeamPart, TeamRestoreRequest,
-    TeamStatus, command,
+    AppStatus, PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
+    SearchResponse, SignInRequest, TeamEditRequest, TeamPart, TeamRestoreRequest, TeamStatus,
+    command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -77,20 +77,9 @@ pub async fn part_detail(ipn: &str) -> Result<Option<PartDetail>, String> {
     call(command::PART_DETAIL, &DetailArgs { ipn }).await
 }
 
-/// `field` previews that Symbol or Footprint value instead of the CSV
-/// catalog's.
-pub async fn preview(
-    ipn: String,
-    kind: PreviewKind,
-    field: Option<String>,
-) -> Result<PreviewOutcome, String> {
-    call(
-        command::PART_PREVIEW,
-        &PreviewArgs {
-            request: PreviewRequest { ipn, kind, field },
-        },
-    )
-    .await
+/// Asks for a part's symbol or footprint preview; see [`PreviewRequest`].
+pub async fn preview(request: PreviewRequest) -> Result<PreviewOutcome, String> {
+    call(command::PART_PREVIEW, &PreviewArgs { request }).await
 }
 
 #[derive(Serialize)]
