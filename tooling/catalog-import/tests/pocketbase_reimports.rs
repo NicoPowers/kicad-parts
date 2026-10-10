@@ -119,7 +119,7 @@ fn outcome(reply: &ImportReply) -> &'static str {
 /// The zero-loss report of `root`'s CSV catalog against what is stored. It
 /// must be lossless.
 fn lossless_report(root: &Path, stored: &CatalogReadback, step: &str) -> ZeroLossReport {
-    let oracle = legacy_import_fixture::build_manifest(root).unwrap();
+    let oracle = csv_catalog_fixture::build_manifest(root).unwrap();
     let report = catalog_import::report(&oracle, "g-res", stored, root);
     assert!(
         report.is_lossless(),
@@ -353,7 +353,7 @@ fn re_imports_stay_lossless() {
     let mut copy = stored.clone();
     copy.problems
         .retain(|problem| problem.code != "part-not-in-csv-file");
-    let oracle = legacy_import_fixture::build_manifest(root).unwrap();
+    let oracle = csv_catalog_fixture::build_manifest(root).unwrap();
     let report = catalog_import::report(&oracle, "g-res", &copy, root);
     assert!(
         report

@@ -1,4 +1,4 @@
-use legacy_import_fixture::{build_manifest, compare, load_manifest};
+use csv_catalog_fixture::{build_manifest, compare, load_manifest};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ fn root() -> PathBuf {
         .unwrap()
 }
 fn expected_path(root: &Path) -> PathBuf {
-    root.join("fixtures/import/legacy-catalog/manifest.json")
+    root.join("fixtures/import/csv-catalog/manifest.json")
 }
 
 #[test]

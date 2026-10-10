@@ -2,7 +2,7 @@
 # system-wide core.autocrlf setting.
 * text=auto eol=lf
 
-# The legacy import oracle hashes these catalog inputs byte for byte, and some
+# The CSV catalog fixture hashes these catalog inputs byte for byte, and some
 # were committed with CRLF. Never convert their line endings.
 /database/** -text
 /symbols/** -text

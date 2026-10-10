@@ -59,8 +59,8 @@ fn pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(services::repository_root);
     let csv_file = args.get(1).map(String::as_str).unwrap_or("g-res");
-    let oracle = legacy_import_fixture::load_manifest(
-        &root.join("fixtures/import/legacy-catalog/manifest.json"),
+    let oracle = csv_catalog_fixture::load_manifest(
+        &root.join("fixtures/import/csv-catalog/manifest.json"),
     )?;
 
     let import = services::plan(&root, csv_file)?;

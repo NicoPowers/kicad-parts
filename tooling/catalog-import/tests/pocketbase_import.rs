@@ -1,5 +1,5 @@
 //! The resistor CSV file (g-res) imported into a real, disposable PocketBase and
-//! proved lossless against the legacy import oracle.
+//! proved lossless against the CSV catalog fixture.
 //!
 //! Each test starts its own PocketBase on a random 127.0.0.1 port with a
 //! temp data directory and stops it at the end. The repository is only
@@ -37,9 +37,9 @@ fn input_hashes(root: &Path) -> Vec<String> {
         .collect()
 }
 
-fn oracle() -> legacy_import_fixture::Manifest {
-    legacy_import_fixture::load_manifest(
-        &repository().join("fixtures/import/legacy-catalog/manifest.json"),
+fn oracle() -> csv_catalog_fixture::Manifest {
+    csv_catalog_fixture::load_manifest(
+        &repository().join("fixtures/import/csv-catalog/manifest.json"),
     )
     .unwrap()
 }
@@ -918,8 +918,8 @@ fn the_oracle_still_matches_the_checked_in_catalog() {
     // The import must leave every CSV catalog input byte-for-byte as
     // the oracle recorded it.
     let root = repository();
-    let actual = legacy_import_fixture::build_manifest(&root).unwrap();
-    assert!(legacy_import_fixture::compare(&oracle(), &actual).is_empty());
+    let actual = csv_catalog_fixture::build_manifest(&root).unwrap();
+    assert!(csv_catalog_fixture::compare(&oracle(), &actual).is_empty());
 }
 
 /// Copies the CSV catalog trees the oracle reads into `target`.
@@ -963,7 +963,7 @@ fn substitutes_csv_rows_become_manufacturer_parts_end_to_end() {
         "RES-9999-0001,X,Y,,,\n",
     ));
     fs::write(&substitutes_csv_rows, text).unwrap();
-    let oracle = legacy_import_fixture::build_manifest(copy.path()).unwrap();
+    let oracle = csv_catalog_fixture::build_manifest(copy.path()).unwrap();
 
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();

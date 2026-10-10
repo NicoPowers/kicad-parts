@@ -1,7 +1,7 @@
 .~lock*.csv#
 *.bak
-# database/parts.sqlite is a committed, frozen legacy projection read by the
-# import oracle; ignore any other generated copies.
+# database/parts.sqlite is a committed, frozen SQLite copy of the CSV catalog,
+# read by the CSV catalog fixture; ignore any other generated copies.
 parts.sqlite
 !/database/parts.sqlite
 secrets.env

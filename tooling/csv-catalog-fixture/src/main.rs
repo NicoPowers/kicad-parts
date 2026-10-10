@@ -1,4 +1,4 @@
-use legacy_import_fixture::{build_manifest, compare, load_manifest, manifest_json};
+use csv_catalog_fixture::{build_manifest, compare, load_manifest, manifest_json};
 use std::path::PathBuf;
 
 fn main() {
@@ -15,7 +15,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_path = args
         .get(2)
         .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("fixtures/import/legacy-catalog/manifest.json"));
+        .unwrap_or_else(|| root.join("fixtures/import/csv-catalog/manifest.json"));
     let actual = build_manifest(&root)?;
     match command {
         "write" => {
@@ -26,7 +26,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let expected = load_manifest(&manifest_path)?;
             let differences = compare(&expected, &actual);
             if differences.is_empty() {
-                println!("legacy import fixture matches {}", manifest_path.display());
+                println!("CSV catalog fixture matches {}", manifest_path.display());
             } else {
                 for difference in &differences {
                     eprintln!("{difference}");
@@ -36,8 +36,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: legacy-import-fixture [check|write] [REPOSITORY_ROOT] [MANIFEST_PATH]"
-                    .into(),
+                "usage: csv-catalog-fixture [check|write] [REPOSITORY_ROOT] [MANIFEST_PATH]".into(),
             );
         }
     }

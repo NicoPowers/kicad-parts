@@ -1263,7 +1263,7 @@ struct ClassifiedModel {
 }
 
 /// The oracle's lexical, host-independent classification of a 3D model
-/// reference (`tooling/import-fixture`).
+/// reference (`tooling/csv-catalog-fixture`).
 fn classify_model_reference(reference: &str) -> ClassifiedModel {
     let strip = |variable: &str| {
         reference

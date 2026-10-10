@@ -85,8 +85,8 @@ use catalog::{
     CadItemDetails, CadItemId, CadItemRevisionId, CadReference, CadReferenceRole,
     CadReferenceTarget, License, ModelTarget, PartDetails, sha256_hex,
 };
+use csv_catalog_fixture::Manifest;
 use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
-use legacy_import_fixture::Manifest;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1696,7 +1696,7 @@ impl<'a> Reporter<'a> {
     fn expect_model_problem(
         &mut self,
         status: &str,
-        model: &legacy_import_fixture::ModelReference,
+        model: &csv_catalog_fixture::ModelReference,
         explained: &mut BTreeSet<String>,
     ) {
         let readback = self.readback;

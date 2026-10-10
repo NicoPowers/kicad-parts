@@ -1,7 +1,7 @@
 //! Proves a CSV catalog import lossless.
 //!
 //! - [`zero_loss`] compares the Catalog records read back from PocketBase
-//!   with the legacy import oracle (`fixtures/import/legacy-catalog/
+//!   with the CSV catalog fixture (`fixtures/import/csv-catalog/
 //!   manifest.json`), field by field, CAD item by CAD item and diagnostic by
 //!   problem.
 //! - [`services`] starts a disposable PocketBase with the repository's

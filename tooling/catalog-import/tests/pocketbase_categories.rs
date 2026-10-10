@@ -17,9 +17,9 @@ fn repository() -> PathBuf {
     services::repository_root()
 }
 
-fn oracle() -> legacy_import_fixture::Manifest {
-    legacy_import_fixture::load_manifest(
-        &repository().join("fixtures/import/legacy-catalog/manifest.json"),
+fn oracle() -> csv_catalog_fixture::Manifest {
+    csv_catalog_fixture::load_manifest(
+        &repository().join("fixtures/import/csv-catalog/manifest.json"),
     )
     .unwrap()
 }
@@ -180,7 +180,7 @@ fn an_empty_3d_model_file_becomes_an_import_problem() {
     copy_catalog(copy.path());
     let model = "3d-models/D_SOD-923.step";
     fs::write(copy.path().join(model), "").unwrap();
-    let oracle = legacy_import_fixture::build_manifest(copy.path()).unwrap();
+    let oracle = csv_catalog_fixture::build_manifest(copy.path()).unwrap();
 
     let stored = import_one(copy.path(), "g-cpd");
     let report = catalog_import::report(&oracle, "g-cpd", &stored, copy.path());
@@ -313,7 +313,7 @@ fn extra_mpn_columns_are_kept_as_import_problems_end_to_end() {
     // Neither becomes a manufacturer part or a part-details field.
     let copy = tempfile::tempdir().unwrap();
     copy_catalog(copy.path());
-    let oracle = legacy_import_fixture::build_manifest(copy.path()).unwrap();
+    let oracle = csv_catalog_fixture::build_manifest(copy.path()).unwrap();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
     for csv_file in ["g-rfm", "g-rvr"] {
@@ -499,7 +499,7 @@ fn the_zero_loss_report_fails_when_its_new_checks_find_a_loss() {
         ",g-no_bom:Fiducial_1mm_Mask2mm;Connector:Tag-Connect",
     );
     fs::write(copy.path().join("3d-models/D_SOD-923.step"), "").unwrap();
-    let oracle = legacy_import_fixture::build_manifest(copy.path()).unwrap();
+    let oracle = csv_catalog_fixture::build_manifest(copy.path()).unwrap();
 
     let csv_files = ["g-art", "g-cpd", "g-rfm", "g-rvr", "g-swi"];
     let state = tempfile::tempdir().unwrap();
