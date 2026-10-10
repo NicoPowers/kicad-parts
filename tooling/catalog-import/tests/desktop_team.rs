@@ -96,6 +96,7 @@ fn the_desktop_edits_resolves_a_conflict_and_restores() {
 
     // An edit saves revision 2, and the history says what changed.
     let mut request = TeamEditRequest {
+        correlation_id: None,
         ipn: IPN.into(),
         expected_revision: 1,
         reason: "Exact value".into(),
@@ -108,10 +109,25 @@ fn the_desktop_edits_resolves_a_conflict_and_restores() {
         .find(|field| field.name == "Value")
         .unwrap()
         .value = "47R".into();
+    // A save sent twice with the same correlation ID (as after a lost
+    // answer) is replayed, not a conflict with yourself.
+    request.correlation_id = Some("desktop-retry-1".into());
+    let PublishResult::Saved {
+        revision: again, ..
+    } = team.edit(request.clone()).unwrap()
+    else {
+        panic!("not saved");
+    };
     let PublishResult::Saved { revision, part } = team.edit(request.clone()).unwrap() else {
         panic!("not saved");
     };
-    assert_eq!(revision, 2);
+    assert_eq!((again, revision), (2, 2));
+    assert_eq!(
+        part.history.len(),
+        2,
+        "the repeated save made no new revision"
+    );
+    request.correlation_id = None;
     let latest = &part.history[0];
     assert_eq!(
         (latest.action.as_str(), latest.actor_name.as_str()),
@@ -178,6 +194,9 @@ fn the_desktop_edits_resolves_a_conflict_and_restores() {
     let labels: Vec<&str> = conflict.rows.iter().map(|row| row.label.as_str()).collect();
     assert_eq!(labels, ["Description", "Tolerance"]);
     assert!(conflict.rows.iter().all(|row| !row.both_changed));
+    // Only the field you changed counts as yours.
+    let changed: Vec<bool> = conflict.rows.iter().map(|row| row.you_changed).collect();
+    assert_eq!(changed, [false, true]);
     // Saving on top keeps both changes.
     assert_eq!(conflict.merged.expected_revision, 3);
     let PublishResult::Saved { revision, part } = team.edit(conflict.merged.clone()).unwrap()
@@ -190,6 +209,25 @@ fn the_desktop_edits_resolves_a_conflict_and_restores() {
         Some("Thick film resistor 47 ohm")
     );
     assert_eq!(part.current.field("Tolerance"), Some("0.5%"));
+    // The results list shows the team catalog's details for its parts.
+    wait_until("the saved revision", || checkpoint(&team) == 4);
+    let mut hits = vec![desktop_contract::PartSummary {
+        ipn: IPN.into(),
+        csv_file: "g-res.csv".into(),
+        mpn: "csv mpn".into(),
+        manufacturer: "csv manufacturer".into(),
+        description: "csv description".into(),
+        value: "csv value".into(),
+    }];
+    team.overlay(&mut hits);
+    assert_eq!(
+        (
+            hits[0].description.as_str(),
+            hits[0].value.as_str(),
+            hits[0].mpn.as_str()
+        ),
+        ("Thick film resistor 47 ohm", "47R", "RC0603FR-0747RL")
+    );
 
     // Restoring revision 1 adds revision 5 with its details.
     let first = part.history.iter().find(|r| r.number == 1).unwrap();
@@ -201,6 +239,7 @@ fn the_desktop_edits_resolves_a_conflict_and_restores() {
     );
     let restored = team
         .restore(TeamRestoreRequest {
+            correlation_id: None,
             ipn: IPN.into(),
             expected_revision: 4,
             restore_revision: 1,
@@ -217,6 +256,7 @@ fn the_desktop_edits_resolves_a_conflict_and_restores() {
     // A stale restore is a conflict that names the restore.
     let PublishResult::Conflict(conflict) = team
         .restore(TeamRestoreRequest {
+            correlation_id: None,
             ipn: IPN.into(),
             expected_revision: 4,
             restore_revision: 2,

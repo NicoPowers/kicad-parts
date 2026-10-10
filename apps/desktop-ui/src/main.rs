@@ -57,6 +57,14 @@ fn App() -> impl IntoView {
     });
 
     let team = RwSignal::new(None::<TeamStatus>);
+    let team_changes = Memo::new(move |_| {
+        team.with(
+            |status| match status.as_ref().map(|status| &status.session) {
+                Some(TeamSession::SignedIn { checkpoint, .. }) => Some(*checkpoint),
+                _ => None,
+            },
+        )
+    });
     let refresh_team = move || {
         spawn_local(async move {
             if let Ok(latest) = backend::team_status().await {
@@ -81,6 +89,11 @@ fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         let text = query.get();
+        // Search again when anyone saves a Change, or on sign-in and
+        // sign-out, so team parts show their current details.
+        // (Reading the value, not just tracking it, makes the memo follow
+        // the team status.)
+        let _ = team_changes.get();
         let seq = search_seq.get_value() + 1;
         search_seq.set_value(seq);
         set_timeout(

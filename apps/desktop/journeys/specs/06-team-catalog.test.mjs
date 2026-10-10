@@ -202,6 +202,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     await editAsSomeoneElse(server.url, otherToken, IPN, { Description: 'Thick film resistor, 47 ohm, 1%' }, 'Clearer description');
     await waitForRevision(3);
     await waitForText(browser, '.part-description', 'Thick film resistor, 47 ohm, 1%');
+    // The results list shows the team catalog's description too.
+    await waitForText(browser, '.results li .result-description', 'Thick film resistor, 47 ohm, 1%');
     // The earlier "saved" message would now be out of date.
     await browser.waitUntil(async () => (await browser.$$(NOTICE)).length === 0, {
       timeout: 5_000,
@@ -244,7 +246,9 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     assert.match(conflict.summary, new RegExp(`^${other.name} saved revision 4 on .* after you started editing revision 3\\. Your changes are not saved yet\\.$`));
     assert.deepEqual(conflict.headers, ['Field', 'Revision 3 (you started here)', 'Theirs (revision 4)', 'Yours']);
     assert.deepEqual(conflict.rows, [
-      ['Value', '47R', '47.0', '47R'],
+      // You did not change the value, so yours says so; saving on top keeps
+      // their 47.0.
+      ['Value', '47R', '47.0', 'not changed'],
       ['Tolerance', '1%', '1%', '0.5%'],
     ]);
     assert.equal(conflict.tabsHidden, true);

@@ -9,6 +9,7 @@
 //! `collaboration::Replica`, which does the same for the provisional
 //! `collab_*` records.
 
+use crate::part::PartDetails;
 use crate::pocketbase::{StoredChange, StoredPartRevision, changes_since, revisions_in_change};
 use collaboration::{ApplyResult, CollabError, CollabResult, PocketBaseClient};
 use std::collections::BTreeMap;
@@ -19,6 +20,8 @@ pub struct ReplicaPart {
     pub revision_id: String,
     pub number: u32,
     pub snapshot_sha256: String,
+    /// Its part details, when the snapshot parses.
+    pub details: Option<PartDetails>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -26,6 +29,8 @@ pub struct CatalogReplica {
     checkpoint: u64,
     /// By part ID.
     parts: BTreeMap<String, ReplicaPart>,
+    /// Part IDs by IPN.
+    ipns: BTreeMap<String, String>,
     applied: Vec<u64>,
 }
 
@@ -42,6 +47,11 @@ impl CatalogReplica {
     /// Current revisions by part ID.
     pub fn parts(&self) -> &BTreeMap<String, ReplicaPart> {
         &self.parts
+    }
+
+    /// The current revision of the part with `ipn`, if known.
+    pub fn part_by_ipn(&self, ipn: &str) -> Option<&ReplicaPart> {
+        self.parts.get(self.ipns.get(ipn)?)
     }
 
     /// Every applied `seq`, in the order applied.
@@ -74,12 +84,17 @@ impl CatalogReplica {
                 .get(&revision.part)
                 .is_none_or(|known| known.number < revision.number);
             if newer {
+                let details: Option<PartDetails> = serde_json::from_str(&revision.snapshot).ok();
+                if let Some(details) = &details {
+                    self.ipns.insert(details.ipn.clone(), revision.part.clone());
+                }
                 self.parts.insert(
                     revision.part.clone(),
                     ReplicaPart {
                         revision_id: revision.id.clone(),
                         number: revision.number,
                         snapshot_sha256: revision.snapshot_sha256.clone(),
+                        details: details.clone(),
                     },
                 );
             }

@@ -140,10 +140,18 @@ async fn set_kicad_override(
 #[tauri::command]
 async fn search_parts(
     browser: State<'_, Browser>,
+    team: State<'_, Team>,
     request: SearchRequest,
 ) -> Result<SearchResponse, String> {
-    let browser = browser.inner().clone();
-    blocking(move || browser.search(&request.query, request.limit)).await
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    blocking(move || {
+        let mut response = browser.search(&request.query, request.limit);
+        // Parts the team catalog has show its current details, as the
+        // part header does.
+        team.overlay(&mut response.hits);
+        response
+    })
+    .await
 }
 
 #[tauri::command]

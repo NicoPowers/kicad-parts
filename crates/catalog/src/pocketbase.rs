@@ -361,6 +361,9 @@ pub struct ConflictingRevision {
     pub snapshot_sha256: String,
     pub change_kind: String,
     pub reason: String,
+    /// `<auth collection>:<record id>` of whoever published it.
+    #[serde(default)]
+    pub actor: String,
     pub actor_name: String,
     pub created: String,
 }

@@ -52,12 +52,14 @@ The accounts are:
 
 ## Stop it
 
-Close the desktop app. The command then stops the team server and deletes its data. If you stop the command with Ctrl+C instead, the team server still stops, because it runs in a job that Windows ends with the command.
+Close the desktop app. The command then stops the team server and deletes its data. Ctrl+C or closing the console window does the same.
 
-Without `--desktop`, the command prints the address and accounts and waits for you to press Enter, so you can open the app yourself.
+The team server keeps its data in `target/local-team-server/run-<number>` while it runs, never in your system temp folder. The data includes the accounts' password hashes. If the command is killed outright (for example from Task Manager), the team server still stops, because it runs in a job that Windows ends with the command, but the folder stays behind until the next time you start the command, which deletes it.
+
+Without `--desktop`, the command prints the address and accounts and waits for you to press Enter or Ctrl+C, so you can open the app yourself.
 
 ## How signing in works
 
 - The app saves only the server address and your email (in `team.json` in its settings folder). It never saves your password or the sign-in session; after a restart you sign in again.
 - For now the app only connects to a team server on this computer (`http://127.0.0.1`, `localhost` or `[::1]`). Live updates use plain HTTP, and a password must not cross a network unencrypted. Connecting to a shared server needs HTTPS first.
-- Members marked "can edit catalog" in PocketBase can edit and restore. Everyone else who signs in can only view. Only an administrator can change that mark.
+- Members marked "can edit catalog" in PocketBase can edit and restore. Everyone else who signs in can only view. Only an administrator can change that mark, or a member's name, which the history shows as the author of each change.

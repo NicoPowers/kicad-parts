@@ -23,9 +23,9 @@ use catalog::{
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
-    CadItemUse, ConflictRow, DetailChange, Field, LiveUpdates, ManufacturerPart, PublishResult,
-    RevisionDetails, RevisionSummary, SignInRequest, TeamConflict, TeamEditRequest, TeamPart,
-    TeamRestoreRequest, TeamSession, TeamStatus,
+    CadItemUse, ConflictRow, DetailChange, Field, LiveUpdates, ManufacturerPart, PartSummary,
+    PublishResult, RevisionDetails, RevisionSummary, SignInRequest, TeamConflict, TeamEditRequest,
+    TeamPart, TeamRestoreRequest, TeamSession, TeamStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -43,6 +43,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// should stop.
 const POLL: Duration = Duration::from_millis(250);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
 /// What the app remembers between runs. No password, no token.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,11 +99,12 @@ impl Follower {
 }
 
 impl Drop for Follower {
+    /// Asks the thread to stop without waiting for it: it may be in the
+    /// middle of a request to a server that does not answer, and it ends
+    /// by itself once that request returns or times out.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        drop(self.thread.take());
     }
 }
 
@@ -181,10 +183,9 @@ impl TeamCatalog {
     /// returned status, not as an error.
     pub fn sign_in(&self, request: SignInRequest) -> TeamStatus {
         let outcome = sign_in(&request);
-        {
+        let earlier = {
             let mut state = self.lock();
-            // Stop any earlier session first.
-            state.session = None;
+            let earlier = state.session.take();
             match outcome {
                 Ok((session, server_url)) => {
                     state.problem = None;
@@ -197,17 +198,57 @@ impl TeamCatalog {
                 }
                 Err(problem) => state.problem = Some(problem),
             }
-        }
+            earlier
+        };
+        // Ended outside the lock, so status polling never waits for it.
+        drop(earlier);
         self.status()
     }
 
     pub fn sign_out(&self) -> TeamStatus {
-        {
+        let earlier = {
             let mut state = self.lock();
-            state.session = None;
             state.problem = None;
-        }
+            state.session.take()
+        };
+        drop(earlier);
         self.status()
+    }
+
+    /// Shows the team catalog's current details in search results for the
+    /// parts it has, as the part header does: main MPN and manufacturer,
+    /// description and value. Uses only what the app already follows, so it
+    /// makes no request.
+    pub fn overlay(&self, hits: &mut [PartSummary]) {
+        let state = self.lock();
+        let Some(session) = &state.session else {
+            return;
+        };
+        let live = session
+            .follower
+            .live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for hit in hits {
+            let Some(details) = live
+                .replica
+                .part_by_ipn(&hit.ipn)
+                .and_then(|part| part.details.as_ref())
+            else {
+                continue;
+            };
+            let main = details.manufacturer_parts.first();
+            hit.mpn = main.map(|part| part.mpn.clone()).unwrap_or_default();
+            hit.manufacturer = main
+                .map(|part| part.manufacturer.clone())
+                .unwrap_or_default();
+            if let Some(description) = details.field("Description") {
+                hit.description = description.to_owned();
+            }
+            if let Some(value) = details.field("Value") {
+                hit.value = value.to_owned();
+            }
+        }
     }
 
     /// The team catalog's view of `ipn`, or `None` if the team catalog does
@@ -223,7 +264,7 @@ impl TeamCatalog {
     pub fn edit(&self, request: TeamEditRequest) -> Result<PublishResult, String> {
         let client = self.client()?;
         let command = EditCommand {
-            correlation_id: CorrelationId::generate(),
+            correlation_id: attempt_id(request.correlation_id.as_deref())?,
             reason: request.reason.clone(),
             ipn: request.ipn.clone(),
             expected_revision: request.expected_revision,
@@ -258,6 +299,10 @@ impl TeamCatalog {
             request.restore_revision,
             &request.reason,
         );
+        let command = RestoreCommand {
+            correlation_id: attempt_id(request.correlation_id.as_deref())?,
+            ..command
+        };
         let reply = submit_restore(&client, &command);
         self.published(&client, &request.ipn, reply, |current, part| {
             restore_conflict(&request, current, part)
@@ -321,6 +366,15 @@ impl TeamCatalog {
     }
 }
 
+/// The correlation ID the UI made for this save attempt, so that retrying
+/// the same save replays its answer; a new one if the UI sent none.
+fn attempt_id(sent: Option<&str>) -> Result<CorrelationId, String> {
+    match sent {
+        Some(id) => CorrelationId::new(id).map_err(|error| error.to_string()),
+        None => Ok(CorrelationId::generate()),
+    }
+}
+
 /// Checks the address, signs in, reads the account, and starts following.
 fn sign_in(request: &SignInRequest) -> Result<(Session, String), String> {
     let server_url = loopback_url(&request.server_url)?;
@@ -380,8 +434,11 @@ fn loopback_url(text: &str) -> Result<String, String> {
 
 /// Follows new Changes until `stop` is set: subscribe, catch up from the
 /// checkpoint, apply each notification; on any break, wait and do it all
-/// again. Catching up after subscribing means a Change published in
-/// between arrives twice at most, and the replica ignores the copy.
+/// again, waiting twice as long after each failed try (up to
+/// [`MAX_RECONNECT_DELAY`]). Catching up after subscribing means a Change
+/// published in between arrives twice at most, and the replica ignores the
+/// copy. If the server rejects the sign-in, it stops and asks the person to
+/// sign in again instead of retrying.
 fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBool) {
     let set = |updates: LiveUpdates| {
         live.lock().unwrap_or_else(|e| e.into_inner()).updates = updates;
@@ -397,12 +454,15 @@ fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBo
         live.lock().unwrap_or_else(|e| e.into_inner()).replica = replica;
         Ok::<(), CollabError>(())
     };
+    let mut delay = RECONNECT_DELAY;
     while !stop.load(Ordering::SeqCst) {
+        let went_live = std::cell::Cell::new(false);
         let result = (|| -> Result<(), CollabError> {
             let mut connection = RealtimeConnection::connect(client.base_url(), CONNECT_TIMEOUT)?;
             connection.subscribe(client, &[CHANGES_TOPIC])?;
             update_replica(&|replica| replica.catch_up(client).map(|_| ()))?;
             set(LiveUpdates::Live);
+            went_live.set(true);
             while !stop.load(Ordering::SeqCst) {
                 let Some(event) = connection.next_event(POLL)? else {
                     continue;
@@ -416,17 +476,47 @@ fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBo
             }
             Ok(())
         })();
+        if went_live.get() {
+            delay = RECONNECT_DELAY;
+        }
         if let Err(error) = result {
-            set(LiveUpdates::Reconnecting {
-                message: error.to_string(),
-            });
+            match after_break(&error) {
+                AfterBreak::SignInAgain => {
+                    set(LiveUpdates::SignInAgain {
+                        message: error.to_string(),
+                    });
+                    return;
+                }
+                AfterBreak::Retry => set(LiveUpdates::Reconnecting {
+                    message: error.to_string(),
+                }),
+            }
         }
         let mut waited = Duration::ZERO;
-        while waited < RECONNECT_DELAY && !stop.load(Ordering::SeqCst) {
+        while waited < delay && !stop.load(Ordering::SeqCst) {
             std::thread::sleep(POLL);
             waited += POLL;
         }
+        delay = next_delay(delay);
     }
+}
+
+#[derive(Debug, PartialEq)]
+enum AfterBreak {
+    Retry,
+    /// The token was rejected; retrying cannot help.
+    SignInAgain,
+}
+
+fn after_break(error: &CollabError) -> AfterBreak {
+    match error {
+        CollabError::Unauthorized(_) | CollabError::Forbidden(_) => AfterBreak::SignInAgain,
+        _ => AfterBreak::Retry,
+    }
+}
+
+fn next_delay(delay: Duration) -> Duration {
+    (delay * 2).min(MAX_RECONNECT_DELAY)
 }
 
 /// A part's revisions as the app shows them, with what it needs to build a
@@ -704,6 +794,7 @@ fn edit_conflict(
                 theirs: field.value.clone(),
                 yours: mine.clone(),
                 both_changed: you_changed && field.value != started && field.value != mine,
+                you_changed,
             });
         }
         merged_fields.push(Field {
@@ -733,9 +824,11 @@ fn edit_conflict(
             both_changed: you_changed_parts
                 && their_parts != started_parts
                 && their_parts != your_parts,
+            you_changed: you_changed_parts,
         });
     }
     let merged = TeamEditRequest {
+        correlation_id: None,
         ipn: request.ipn.clone(),
         expected_revision: current.number,
         reason: request.reason.clone(),
@@ -784,10 +877,12 @@ fn restore_conflict(
                 theirs: field.value.clone(),
                 yours: mine.to_owned(),
                 both_changed: mine != started && field.value != started && field.value != mine,
+                you_changed: mine != started,
             });
         }
     }
     let merged = TeamEditRequest {
+        correlation_id: None,
         ipn: request.ipn.clone(),
         expected_revision: current.number,
         reason: request.reason.clone(),
@@ -815,7 +910,11 @@ fn their_summary(current: &ConflictingRevision, part: &LoadedPart) -> RevisionSu
         .unwrap_or_else(|| RevisionSummary {
             number: current.number,
             action: action(&current.change_kind).to_owned(),
-            actor_name: current.actor_name.clone(),
+            actor_name: if current.actor.starts_with("_superusers:") {
+                "an administrator".to_owned()
+            } else {
+                current.actor_name.clone()
+            },
             saved_at: saved_at(&current.created),
             reason: current.reason.clone(),
             restored_from: None,
@@ -858,6 +957,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_rejected_sign_in_stops_retrying_and_other_breaks_back_off() {
+        for rejected in [
+            CollabError::Unauthorized("token".into()),
+            CollabError::Forbidden("rules".into()),
+        ] {
+            assert_eq!(after_break(&rejected), AfterBreak::SignInAgain);
+        }
+        assert_eq!(
+            after_break(&CollabError::Transport("refused".into())),
+            AfterBreak::Retry
+        );
+        let mut delay = RECONNECT_DELAY;
+        let mut delays = Vec::new();
+        for _ in 0..7 {
+            delays.push(delay.as_secs());
+            delay = next_delay(delay);
+        }
+        assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30]);
+    }
+    #[test]
+    fn a_sent_correlation_id_is_kept_and_checked() {
+        assert_eq!(
+            attempt_id(Some("desktop-abc")).unwrap().as_str(),
+            "desktop-abc"
+        );
+        assert!(attempt_id(Some("has space")).is_err());
+        assert!(attempt_id(None).unwrap().as_str().starts_with("cmd-"));
+    }
     #[test]
     fn dates_are_shown_to_the_minute() {
         assert_eq!(saved_at("2026-10-09 23:39:58.997Z"), "2026-10-09 23:39 UTC");

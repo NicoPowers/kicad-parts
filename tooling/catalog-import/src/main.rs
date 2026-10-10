@@ -21,13 +21,18 @@
 //! - otherwise, stops when you press Enter.
 //!
 //! The server runs without a window in a kill-on-close job, so it also
-//! stops if this command is killed. Nothing is written to the repository.
+//! stops if this command is killed. Its data lives in
+//! `target/local-team-server/run-<process id>` and is deleted when it stops,
+//! including on Ctrl+C; a run killed outright is deleted by the next run.
+//! Nothing else is written.
 
 use catalog::pocketbase::{ImportCommand, ImportOutcome, read_back, submit_import};
+use catalog_import::run_folder::RunFolder;
 use catalog_import::services::{self, Member};
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Mutex, mpsc};
 
 fn main() {
     if let Err(error) = run() {
@@ -110,8 +115,12 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
     let root = services::repository_root();
     let import = services::plan(&root, "g-res")?;
-    let state = tempfile::tempdir()?;
-    let (server, admin, _superuser) = services::start(&root, state.path())?;
+    // A known folder under target/, not the system temp folder, so a run
+    // that is killed outright is cleaned up by the next one.
+    let folder = RunFolder::create(&root.join("target").join("local-team-server"))?;
+    let (stop_sender, stop) = mpsc::channel::<Stop>();
+    stop_on_ctrl_c(stop_sender.clone());
+    let (server, admin, _superuser) = services::start(&root, folder.path())?;
     let reply = submit_import(
         &admin,
         &ImportCommand::new(&import, "Import the resistors from database/g-res.csv"),
@@ -147,8 +156,12 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             out.flush()?;
             drop(out);
             // Stop when whoever started us closes our input.
-            let mut sink = Vec::new();
-            let _ = std::io::stdin().lock().read_to_end(&mut sink);
+            let sender = stop_sender.clone();
+            std::thread::spawn(move || {
+                let mut sink = Vec::new();
+                let _ = std::io::stdin().lock().read_to_end(&mut sink);
+                let _ = sender.send(Stop::Finished);
+            });
         }
         Then::WaitForEnter | Then::OpenDesktop => {
             writeln!(out, "Team server: {}", server.url())?;
@@ -166,26 +179,87 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             )?;
             out.flush()?;
             drop(out);
+            let sender = stop_sender.clone();
             if then == Then::OpenDesktop {
                 println!("Opening the desktop app. Close it to stop the team server.");
-                let status = Command::new(&desktop)
+                let mut child = Command::new(&desktop)
                     .arg(format!("--team-server={}", server.url()))
                     .arg(format!("--team-email={}", members[0].email))
                     .arg(format!(
                         "--data-dir={}",
-                        state.path().join("desktop").display()
+                        folder.path().join("desktop").display()
                     ))
-                    .status()?;
-                println!("The desktop app closed ({status}).");
+                    .spawn()?;
+                std::thread::spawn(move || {
+                    let status = child.wait();
+                    println!("The desktop app closed ({status:?}).");
+                    let _ = sender.send(Stop::Finished);
+                });
             } else {
-                println!("Press Enter to stop the team server.");
-                let mut line = String::new();
-                let _ = std::io::stdin().lock().read_line(&mut line);
+                println!("Press Enter (or Ctrl+C) to stop the team server.");
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let _ = std::io::stdin().lock().read_line(&mut line);
+                    let _ = sender.send(Stop::Finished);
+                });
             }
         }
     }
+    let reason = stop.recv().unwrap_or(Stop::Finished);
     server.stop();
+    // The server has let go of its files, so they can be deleted.
+    let removed = folder.remove();
+    if reason == Stop::Interrupted {
+        eprintln!("Stopped the team server and deleted its data.");
+        std::process::exit(130);
+    }
+    removed?;
     Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+enum Stop {
+    /// Enter, the desktop closing, or the input closing.
+    Finished,
+    /// Ctrl+C, Ctrl+Break or the console window closing.
+    Interrupted,
+}
+
+/// Where the Ctrl+C handler sends its request to stop.
+static INTERRUPTS: Mutex<Option<mpsc::Sender<Stop>>> = Mutex::new(None);
+
+/// Turns Ctrl+C, Ctrl+Break and closing the console into an orderly stop,
+/// so the server is stopped and its data deleted rather than left behind.
+#[cfg(windows)]
+fn stop_on_ctrl_c(sender: mpsc::Sender<Stop>) {
+    use windows_sys::Win32::System::Console::{CTRL_CLOSE_EVENT, SetConsoleCtrlHandler};
+    use windows_sys::core::BOOL;
+
+    unsafe extern "system" fn handler(event: u32) -> BOOL {
+        if let Some(sender) = INTERRUPTS.lock().ok().and_then(|guard| guard.clone()) {
+            let _ = sender.send(Stop::Interrupted);
+        }
+        if event == CTRL_CLOSE_EVENT {
+            // Windows ends the process when this returns; give the main
+            // thread time to stop the server and delete its data.
+            std::thread::sleep(std::time::Duration::from_secs(4));
+        }
+        1
+    }
+
+    *INTERRUPTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender);
+    // SAFETY: `handler` is a plain function that lives for the whole
+    // process and only touches the mutex above.
+    unsafe {
+        SetConsoleCtrlHandler(Some(handler), 1);
+    }
+}
+
+#[cfg(not(windows))]
+fn stop_on_ctrl_c(sender: mpsc::Sender<Stop>) {
+    // Without a handler, Ctrl+C ends the process; the next run sweeps the
+    // folder.
+    *INTERRUPTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender);
 }
 
 fn describe(member: &Member) -> String {

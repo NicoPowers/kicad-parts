@@ -7,6 +7,7 @@
 //! - [`services`] starts a disposable PocketBase with the repository's
 //!   migrations and hooks.
 
+pub mod run_folder;
 pub mod services;
 pub mod zero_loss;
 

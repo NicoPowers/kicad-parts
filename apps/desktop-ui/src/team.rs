@@ -146,6 +146,15 @@ pub fn TeamBadge(
                             "Reconnecting so that changes others make appear here. Last problem: {message}"
                         ),
                     ),
+                    LiveUpdates::SignInAgain { .. } => (
+                        "kicad-badge kicad-badge-problem",
+                        "The team server no longer accepts this sign-in, so changes others make no longer appear. Sign out, then sign in again.".to_owned(),
+                    ),
+                };
+                let summary = if matches!(live, LiveUpdates::SignInAgain { .. }) {
+                    "Team catalog: sign in again".to_owned()
+                } else {
+                    format!("Team catalog · {name}")
                 };
                 let access = if *can_edit {
                     "You can edit parts."
@@ -154,7 +163,7 @@ pub fn TeamBadge(
                 };
                 view! {
                     <details class="team-settings" open=open.get_untracked() on:toggle=toggled>
-                        <summary class=badge>{format!("Team catalog · {name}")}</summary>
+                        <summary class=badge>{summary}</summary>
                         <div class="kicad-settings-body team-settings-body">
                             <p>
                                 {format!("Signed in to {} as {name} ({signed_in_email}). {access}", status.server_url)}
@@ -225,6 +234,12 @@ pub struct TeamUi {
     pub restoring: RwSignal<Option<u32>>,
     pub restore_reason: RwSignal<String>,
     pub busy: RwSignal<bool>,
+    /// The last save sent and its correlation ID: sending the same save
+    /// again (after a lost answer) reuses the ID, so the server replays its
+    /// answer instead of reporting a conflict with yourself.
+    pub attempt: StoredValue<Option<(Attempt, String)>>,
+    /// The ID made when the edit form opened, for its first save.
+    pub opened_id: StoredValue<String>,
 }
 
 impl Default for TeamUi {
@@ -246,10 +261,14 @@ impl TeamUi {
             restoring: RwSignal::new(None),
             restore_reason: RwSignal::new(String::new()),
             busy: RwSignal::new(false),
+            attempt: StoredValue::new(None),
+            opened_id: StoredValue::new(new_correlation_id()),
         }
     }
 
     pub fn reset(&self) {
+        self.attempt.set_value(None);
+        self.opened_id.set_value(new_correlation_id());
         self.tab.set(Tab::Details);
         self.editing.set(None);
         self.conflict.set(None);
@@ -261,6 +280,8 @@ impl TeamUi {
     }
 
     fn start_editing(&self, draft: Draft) {
+        self.attempt.set_value(None);
+        self.opened_id.set_value(new_correlation_id());
         self.draft.set_value(draft);
         self.conflict.set(None);
         self.notice.set(None);
@@ -334,6 +355,39 @@ fn published(
     }
 }
 
+/// One save as sent, without its correlation ID.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Attempt {
+    Edit(TeamEditRequest),
+    Restore(TeamRestoreRequest),
+}
+
+/// A new correlation ID: letters, digits and dashes, as the server needs.
+fn new_correlation_id() -> String {
+    let now = js_sys::Date::now() as u64;
+    let random = (js_sys::Math::random() * 1e15) as u64;
+    format!("desktop-{now:x}-{random:x}")
+}
+
+/// The correlation ID for `attempt`: the previous one if this is the same
+/// save sent again, the form's own ID for its first save, otherwise new.
+fn attempt_id(ui: TeamUi, attempt: Attempt) -> String {
+    let repeated = ui.attempt.with_value(|last| match last {
+        Some((previous, id)) if *previous == attempt => Some(id.clone()),
+        _ => None,
+    });
+    if let Some(id) = repeated {
+        return id;
+    }
+    let id = if ui.attempt.with_value(Option::is_none) {
+        ui.opened_id.get_value()
+    } else {
+        new_correlation_id()
+    };
+    ui.attempt.set_value(Some((attempt, id.clone())));
+    id
+}
+
 fn save_edit(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamEditRequest) {
     if request.reason.trim().is_empty() {
         ui.notice.set(Some(Notice::Problem(
@@ -341,6 +395,9 @@ fn save_edit(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamEditRequ
         )));
         return;
     }
+    let mut request = request;
+    request.correlation_id = None;
+    request.correlation_id = Some(attempt_id(ui, Attempt::Edit(request.clone())));
     ui.busy.set(true);
     spawn_local(async move {
         let result = backend::team_edit(request).await;
@@ -357,6 +414,9 @@ fn restore(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamRestoreReq
         )));
         return;
     }
+    let mut request = request;
+    request.correlation_id = None;
+    request.correlation_id = Some(attempt_id(ui, Attempt::Restore(request.clone())));
     ui.busy.set(true);
     let restored = request.restore_revision;
     spawn_local(async move {
@@ -604,6 +664,7 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
             ui,
             part,
             TeamEditRequest {
+                correlation_id: None,
                 ipn: draft.ipn,
                 expected_revision: draft.base,
                 reason: draft.reason,
@@ -902,6 +963,7 @@ fn RevisionView(
                             ui,
                             part,
                             TeamRestoreRequest {
+                                correlation_id: None,
                                 ipn: ipn.clone(),
                                 expected_revision: current,
                                 restore_revision: number,
@@ -1031,6 +1093,7 @@ fn ConflictView(
                                 ui,
                                 part,
                                 TeamRestoreRequest {
+                                    correlation_id: None,
                                     ipn: ipn.clone(),
                                     expected_revision: expected,
                                     restore_revision,
@@ -1068,7 +1131,11 @@ fn ConflictView(
                                 <th scope="row">{row.label}</th>
                                 <td class:blank=row.started_from.is_empty()>{shown(&row.started_from)}</td>
                                 <td class:blank=row.theirs.is_empty()>{shown(&row.theirs)}</td>
-                                <td class:blank=row.yours.is_empty()>{shown(&row.yours)}</td>
+                                {if row.you_changed {
+                                    view! { <td class:blank=row.yours.is_empty()>{shown(&row.yours)}</td> }.into_any()
+                                } else {
+                                    view! { <td class="blank">"not changed"</td> }.into_any()
+                                }}
                             </tr>
                         })
                         .collect_view()}

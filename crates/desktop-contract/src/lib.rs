@@ -249,13 +249,29 @@ pub enum LiveUpdates {
     Reconnecting {
         message: String,
     },
+    /// The server no longer accepts this sign-in (for example the password
+    /// changed). The app stops retrying; sign out and sign in again.
+    SignInAgain {
+        message: String,
+    },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SignInRequest {
     pub server_url: String,
     pub email: String,
     pub password: String,
+}
+
+/// Never prints the password.
+impl std::fmt::Debug for SignInRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SignInRequest")
+            .field("server_url", &self.server_url)
+            .field("email", &self.email)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One part in the team catalog: its current details and its history.
@@ -333,6 +349,11 @@ pub struct DetailChange {
 /// list of manufacturer parts.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamEditRequest {
+    /// Names this save attempt. Retrying the same save with the same ID
+    /// replays the answer instead of conflicting with yourself; `None`
+    /// makes a new one.
+    #[serde(default)]
+    pub correlation_id: Option<String>,
     pub ipn: String,
     /// The revision the edit starts from.
     pub expected_revision: u32,
@@ -343,6 +364,9 @@ pub struct TeamEditRequest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamRestoreRequest {
+    /// As in [`TeamEditRequest`].
+    #[serde(default)]
+    pub correlation_id: Option<String>,
     pub ipn: String,
     pub expected_revision: u32,
     pub restore_revision: u32,
@@ -397,6 +421,8 @@ pub struct ConflictRow {
     pub yours: String,
     /// Both sides changed it differently; yours wins if you save on top.
     pub both_changed: bool,
+    /// You changed it; otherwise "yours" is just where you started.
+    pub you_changed: bool,
 }
 
 /// KiCad's letter for a symbol unit: 1 is A, 26 is Z, 27 is AA.
@@ -415,6 +441,17 @@ pub fn unit_label(unit: u32) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sign_in_requests_never_print_the_password() {
+        let request = SignInRequest {
+            server_url: "http://127.0.0.1:8090".into(),
+            email: "a@example.test".into(),
+            password: "secret-password".into(),
+        };
+        let printed = format!("{request:?}");
+        assert!(printed.contains("a@example.test"), "{printed}");
+        assert!(!printed.contains("secret-password"), "{printed}");
+    }
     #[test]
     fn unit_labels_follow_kicad_lettering() {
         assert_eq!(unit_label(1), "A");

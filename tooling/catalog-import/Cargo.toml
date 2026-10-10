@@ -21,3 +21,7 @@ catalog-browser = { path = "../../crates/catalog-browser" }
 desktop-contract = { path = "../../crates/desktop-contract" }
 # Inspects a rolled-back data.db while PocketBase is stopped.
 rusqlite = { version = "0.37", features = ["bundled"] }
+
+[target.'cfg(windows)'.dependencies]
+# Ctrl+C handling for `local-team-server`.
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
