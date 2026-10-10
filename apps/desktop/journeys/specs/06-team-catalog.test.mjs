@@ -146,8 +146,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     assert.equal(await (await browser.$('aria/Email')).getValue(), editor.email);
     assert.equal(await (await browser.$('aria/Password')).getAttribute('type'), 'password');
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 0);
-    await assertAccessible(browser, '10-team-sign-in');
-    await screenshot(browser, '10-team-sign-in');
+    await assertAccessible(browser, '40-team-sign-in');
+    await screenshot(browser, '40-team-sign-in');
   });
 
   it('says plainly when the password is wrong', async () => {
@@ -155,8 +155,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     await waitForText(browser, '.team-sign-in [role="alert"]', 'The email or password is not right.');
     assert.equal(await (await browser.$('aria/Password')).getValue(), '', 'the password is cleared');
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 1);
-    await assertAccessible(browser, '11-team-sign-in-failed');
-    await screenshot(browser, '11-team-sign-in-failed');
+    await assertAccessible(browser, '41-team-sign-in-failed');
+    await screenshot(browser, '41-team-sign-in-failed');
   });
 
   it('signs in and shows a part from the team catalog', async () => {
@@ -180,8 +180,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     const layout = await windowFits();
     record({ event: 'layout', state: 'team-details', ...layout });
     assert.deepEqual(layout, { windowFits: true, fieldsOnTheRight: true });
-    await assertAccessible(browser, '12-team-part-details');
-    await screenshot(browser, '12-team-part-details');
+    await assertAccessible(browser, '42-team-part-details');
+    await screenshot(browser, '42-team-part-details');
   });
 
   it('edits the part and saves a new revision', async () => {
@@ -189,8 +189,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     await waitForText(browser, '#edit-heading', 'Edit details (starting from revision 1)');
     await (await fieldInput('Value')).setValue('47R');
     await (await browser.$('#edit-reason')).setValue('Write the value the way the BOM does');
-    await assertAccessible(browser, '13-team-edit');
-    await screenshot(browser, '13-team-edit');
+    await assertAccessible(browser, '43-team-edit');
+    await screenshot(browser, '43-team-edit');
     await clickButton('.edit-form', 'Save');
     await waitForText(browser, NOTICE, 'Saved as revision 2.');
     await waitForRevision(2);
@@ -208,8 +208,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
       timeoutMsg: 'the out-of-date saved message stayed',
     });
     assert.equal(await fieldValue('Description'), 'Thick film resistor, 47 ohm, 1%');
-    await assertAccessible(browser, '14-team-live-update');
-    await screenshot(browser, '14-team-live-update');
+    await assertAccessible(browser, '44-team-live-update');
+    await screenshot(browser, '44-team-live-update');
   });
 
   it('shows both versions when someone else saved first, and saves on top', async () => {
@@ -247,8 +247,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
       ['Tolerance', '1%', '1%', '0.5%'],
     ]);
     assert.equal(conflict.tabsHidden, true);
-    await assertAccessible(browser, '15-team-conflict');
-    await screenshot(browser, '15-team-conflict');
+    await assertAccessible(browser, '45-team-conflict');
+    await screenshot(browser, '45-team-conflict');
     await clickButton('.conflict', 'Save my changes on top of theirs');
     await waitForText(browser, NOTICE, 'Saved as revision 5.');
     await waitForRevision(5);
@@ -286,8 +286,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
       ),
     );
     assert.deepEqual(rows, [['Value', '47', '47R']]);
-    await assertAccessible(browser, '16-team-history');
-    await screenshot(browser, '16-team-history');
+    await assertAccessible(browser, '46-team-history');
+    await screenshot(browser, '46-team-history');
   });
 
   it('restores revision 1 as a new revision', async () => {
@@ -311,8 +311,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
       ['Tolerance', '0.5%', '1%'],
     ]);
     await (await browser.$('#restore-reason')).setValue('Go back to the imported details');
-    await assertAccessible(browser, '17-team-restore');
-    await screenshot(browser, '17-team-restore');
+    await assertAccessible(browser, '47-team-restore');
+    await screenshot(browser, '47-team-restore');
     await clickButton('.restore-form', 'Restore revision 1');
     await waitForText(browser, NOTICE, 'Restored revision 1 as revision 6.');
     await waitForRevision(6);
@@ -323,8 +323,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     );
     await waitForText(browser, '.history li:first-child .history-title', `Revision 6 · Restored by ${editor.name} (current)`);
     assert.match(await textOf(browser, '.revision'), /It copies the details of revision 1\./);
-    await assertAccessible(browser, '18-team-restored');
-    await screenshot(browser, '18-team-restored');
+    await assertAccessible(browser, '48-team-restored');
+    await screenshot(browser, '48-team-restored');
   });
 
   it('lets a read-only member see everything but not edit', async () => {
@@ -345,8 +345,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     await waitForText(browser, '#revision-heading', 'What changed in revision 5');
     assert.equal(await browser.execute(() => document.querySelectorAll('.restore-open').length), 0);
     await clickButton(COLUMN, 'Details');
-    await assertAccessible(browser, '19-team-read-only');
-    await screenshot(browser, '19-team-read-only');
+    await assertAccessible(browser, '49-team-read-only');
+    await screenshot(browser, '49-team-read-only');
   });
 
   it('says when a part is not in the team catalog', async () => {
