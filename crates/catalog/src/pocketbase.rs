@@ -5,7 +5,8 @@
 //! and `1791600000_catalog_edits.js`).
 
 use crate::cad_item::Blob;
-use crate::csv_import::{CsvImport, CurrentCadItemRevision, SourceFile};
+use crate::cad_item::{CadItemDetails, ModelTarget};
+use crate::csv_import::{Binding, CsvImport, CurrentCad, CurrentCadItemRevision, SourceFile};
 use crate::part::{DetailField, ManufacturerPart, PartDetails};
 use crate::sha256_hex;
 use collaboration::{CollabError, CollabResult, CorrelationId, PocketBaseClient};
@@ -84,13 +85,11 @@ impl<'a> ImportCommand<'a> {
     /// Expects each part's current revision, each CAD item's current
     /// revision, and the latest import run of this CSV file, to be the ones
     /// in `state`. Numbers the CAD item revisions against `state` (see
-    /// [`CsvImport::numbered_against`]), so the parts bind each CAD item's
-    /// current revision. Derives the correlation ID again.
+    /// [`CsvImport::numbered_against`]): a binding keeps its number while its
+    /// content is the same, and otherwise names the CAD item's current
+    /// revision. Derives the correlation ID again.
     pub fn expecting(mut self, state: &ImportState) -> Self {
-        self.import = Cow::Owned(
-            self.import
-                .numbered_against(&state.current_cad_item_revisions),
-        );
+        self.import = Cow::Owned(self.import.numbered_against(&state.current_cad));
         self.expected_revisions = self
             .import
             .parts
@@ -230,8 +229,9 @@ fn blob_body(blob: &Blob) -> Value {
 pub struct ImportState {
     /// Each part's current revision number, by IPN.
     pub current_revisions: BTreeMap<String, u32>,
-    /// Each CAD item's current revision (its newest), by CAD item ID.
-    pub current_cad_item_revisions: BTreeMap<String, CurrentCadItemRevision>,
+    /// Each CAD item's current revision (its newest), and the CAD item
+    /// revisions each part's current revision binds.
+    pub current_cad: CurrentCad,
     /// The latest import run of each CSV file, oldest first.
     pub latest_imports: Vec<LatestImport>,
 }
@@ -272,17 +272,29 @@ struct LatestImportFields {
 }
 
 /// The few fields of a CAD item revision that [`read_import_state`]
-/// downloads.
+/// downloads (its snapshot is small: it names the blob, not its bytes).
 #[derive(Deserialize)]
-struct CadItemRevisionNumber {
+struct CadItemRevisionFields {
+    id: String,
     cad_item: String,
     number: u32,
     snapshot_sha256: String,
+    snapshot: String,
 }
 
-/// Reads each part's current revision number, each CAD item's current
-/// revision, and the latest import run of each CSV file. Downloads only the
-/// fields it needs, never the recorded rows or snapshots.
+/// The few fields of a part revision that [`read_import_state`] downloads.
+#[derive(Deserialize)]
+struct PartRevisionBindings {
+    part: String,
+    number: u32,
+    #[serde(default)]
+    cad_item_revisions: Vec<String>,
+}
+
+/// Reads each part's current revision number and the CAD item revisions it
+/// binds, each CAD item's current revision, and the latest import run of
+/// each CSV file. Downloads only the fields it needs, never the recorded
+/// rows or the stored bytes.
 pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState> {
     let parts: Vec<StoredPart> = client.list_record_fields(
         "catalog_parts",
@@ -296,23 +308,7 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
         "csv_import_number",
         "id,csv_file,csv_import_number,source_commit,file_hashes",
     )?;
-    let cad_item_revisions: Vec<CadItemRevisionNumber> = client.list_record_fields(
-        "catalog_cad_item_revisions",
-        "",
-        "cad_item,number",
-        "cad_item,number,snapshot_sha256",
-    )?;
-    // Sorted by number, so the newest revision of each CAD item comes last.
-    let mut current_cad_item_revisions = BTreeMap::new();
-    for revision in cad_item_revisions {
-        current_cad_item_revisions.insert(
-            revision.cad_item,
-            CurrentCadItemRevision {
-                number: revision.number,
-                snapshot_sha256: revision.snapshot_sha256,
-            },
-        );
-    }
+    let current_cad = read_current_cad(client, &parts)?;
     let mut latest: BTreeMap<String, LatestImport> = BTreeMap::new();
     for entry in entries {
         let file_hashes = serde_json::from_str(&entry.file_hashes).map_err(|error| {
@@ -339,9 +335,97 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
             .into_iter()
             .map(|part| (part.ipn, part.current_revision_number))
             .collect(),
-        current_cad_item_revisions,
+        current_cad,
         latest_imports,
     })
+}
+
+/// Each CAD item's current revision, with a footprint's 3D model bindings,
+/// and the CAD item revisions each part's current revision binds.
+fn read_current_cad(client: &PocketBaseClient, parts: &[StoredPart]) -> CollabResult<CurrentCad> {
+    let revisions: Vec<CadItemRevisionFields> = client.list_record_fields(
+        "catalog_cad_item_revisions",
+        "",
+        "cad_item,number",
+        "id,cad_item,number,snapshot_sha256,snapshot",
+    )?;
+    let mut current = CurrentCad::default();
+    let mut by_id: BTreeMap<String, (String, Binding)> = BTreeMap::new();
+    // Sorted by number, so the newest revision of each CAD item comes last.
+    for revision in revisions {
+        let details: CadItemDetails =
+            serde_json::from_str(&revision.snapshot).map_err(|error| {
+                CollabError::Protocol(format!(
+                    "CAD item revision {} cannot be read: {error}",
+                    revision.id
+                ))
+            })?;
+        let binding = Binding {
+            number: revision.number,
+            snapshot_sha256: revision.snapshot_sha256,
+            content_sha256: details.content_sha256(),
+        };
+        let models = details
+            .model_references
+            .into_iter()
+            .filter_map(|model| match model.target {
+                ModelTarget::CadItemRevision {
+                    cad_item,
+                    number,
+                    snapshot_sha256,
+                } => Some((
+                    cad_item,
+                    Binding {
+                        number,
+                        // A 3D model names no other CAD item, so its
+                        // content is its whole snapshot.
+                        content_sha256: snapshot_sha256.clone(),
+                        snapshot_sha256,
+                    },
+                )),
+                ModelTarget::Unresolved { .. } => None,
+            })
+            .collect();
+        current.cad_items.insert(
+            revision.cad_item.clone(),
+            CurrentCadItemRevision {
+                number: binding.number,
+                snapshot_sha256: binding.snapshot_sha256.clone(),
+                models,
+            },
+        );
+        by_id.insert(revision.id, (revision.cad_item, binding));
+    }
+    let part_revisions: Vec<PartRevisionBindings> = client.list_record_fields(
+        "catalog_part_revisions",
+        "",
+        "part,number",
+        "part,number,cad_item_revisions",
+    )?;
+    let current_numbers: BTreeMap<&str, (&str, u32)> = parts
+        .iter()
+        .map(|part| {
+            (
+                part.id.as_str(),
+                (part.ipn.as_str(), part.current_revision_number),
+            )
+        })
+        .collect();
+    for revision in part_revisions {
+        let Some(&(ipn, number)) = current_numbers.get(revision.part.as_str()) else {
+            continue;
+        };
+        if number != revision.number {
+            continue;
+        }
+        let bindings = revision
+            .cad_item_revisions
+            .iter()
+            .filter_map(|id| by_id.get(id).cloned())
+            .collect();
+        current.parts.insert(ipn.to_owned(), bindings);
+    }
+    Ok(current)
 }
 
 /// What the import route answered.
@@ -559,11 +643,9 @@ impl EditCommand {
     }
 }
 
-/// A new revision of one part whose details are a copy of revision
-/// `restore_revision`. Each CAD binding names the CAD item's current
-/// revision if that revision has the same content, and otherwise keeps the
-/// exact older revision, so the part gets back exactly the CAD it had. A
-/// restore never adds a CAD item revision.
+/// A new revision of one part whose details are an exact copy of revision
+/// `restore_revision`, CAD item revisions included. A restore never adds a
+/// CAD item revision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoreCommand {
     pub correlation_id: CorrelationId,

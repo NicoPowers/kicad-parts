@@ -19,7 +19,8 @@
 //!   current revision is the newest: content that differs from the current
 //!   revision adds a revision, even if an older revision had exactly that
 //!   content. A part's details name each CAD item revision by number and
-//!   snapshot hash. The revision's [`csv_import::CadItemSource`] is stored
+//!   snapshot hash, and a binding keeps its number while its content is the
+//!   same: the same content under a newer number is not a change. The revision's [`csv_import::CadItemSource`] is stored
 //!   with it but is not hashed, so reading identical content from a moved
 //!   or edited library file adds no revision.
 //! - A [`Blob`] is exact bytes, addressed by their SHA-256, so revisions
@@ -58,8 +59,8 @@ pub use cad_item::{
 pub use change::ChangeKind;
 pub use compare::{DetailDifference, DifferenceKind, compare_details, describe_binding};
 pub use csv_import::{
-    CadItemRevisionDraft, CsvCatalog, CsvImport, CurrentCadItemRevision, ImportProblem, PartDraft,
-    Source, SourceFile,
+    Binding, CadItemRevisionDraft, CsvCatalog, CsvImport, CurrentCad, CurrentCadItemRevision,
+    ImportProblem, PartDraft, Source, SourceFile,
 };
 pub use hash::sha256_hex;
 pub use ids::{

@@ -636,20 +636,76 @@ fn numbers(import: &CsvImport) -> Vec<(&str, u32, u32)> {
 }
 
 /// What `import` would leave as each CAD item's current revision.
-fn current_after(import: &CsvImport) -> BTreeMap<String, CurrentCadItemRevision> {
-    import
+fn current_after(import: &CsvImport) -> CurrentCad {
+    // The content hash of each revision this import names, by snapshot hash.
+    let contents: BTreeMap<String, String> = import
         .cad_item_revisions
         .iter()
         .map(|draft| {
+            (
+                draft.snapshot_sha256.clone(),
+                draft.snapshot.content_sha256(),
+            )
+        })
+        .collect();
+    let binding = |cad_item: &str, number: u32, sha: &str| {
+        (
+            cad_item.to_owned(),
+            Binding {
+                number,
+                snapshot_sha256: sha.to_owned(),
+                content_sha256: contents.get(sha).cloned().unwrap_or_else(|| sha.to_owned()),
+            },
+        )
+    };
+    let cad_items = import
+        .cad_item_revisions
+        .iter()
+        .map(|draft| {
+            let models = draft
+                .snapshot
+                .model_references
+                .iter()
+                .filter_map(|model| match &model.target {
+                    ModelTarget::CadItemRevision {
+                        cad_item,
+                        number,
+                        snapshot_sha256,
+                    } => Some(binding(cad_item, *number, snapshot_sha256)),
+                    ModelTarget::Unresolved { .. } => None,
+                })
+                .collect();
             (
                 draft.cad_item.id.as_str().to_owned(),
                 CurrentCadItemRevision {
                     number: draft.number,
                     snapshot_sha256: draft.snapshot_sha256.clone(),
+                    models,
                 },
             )
         })
-        .collect()
+        .collect();
+    let parts = import
+        .parts
+        .iter()
+        .map(|part| {
+            let bindings = part
+                .snapshot
+                .cad_references
+                .iter()
+                .filter_map(|reference| match &reference.target {
+                    CadReferenceTarget::CadItemRevision {
+                        cad_item,
+                        number,
+                        snapshot_sha256,
+                    } => Some(binding(cad_item, *number, snapshot_sha256)),
+                    _ => None,
+                })
+                .collect();
+            (part.ipn.as_str().to_owned(), bindings)
+        })
+        .collect();
+    CurrentCad { cad_items, parts }
 }
 
 #[test]
@@ -670,7 +726,7 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
 
     // A fresh import is numbered as if the catalog were empty.
     let first = plan();
-    assert_eq!(first, first.numbered_against(&BTreeMap::new()));
+    assert_eq!(first, first.numbered_against(&CurrentCad::default()));
     assert_eq!(
         numbers(&first),
         [
@@ -706,8 +762,8 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
     fs::write(&path, FOOTPRINT).unwrap();
     let third = plan().numbered_against(&after_b);
     assert_eq!(numbers(&third)[2], ("g-res:R_0603", 2, 3));
-    // Same content as revision 1, so the same blob, but a new revision that
-    // the part binds.
+    // Same content as revision 1, so the same blob, but a new revision. The
+    // part bound revision 2 (other content), so it now binds revision 3.
     assert_eq!(
         third.cad_item_revisions[2].snapshot_sha256,
         first.cad_item_revisions[2].snapshot_sha256
@@ -729,6 +785,19 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
         third.parts[0].snapshot_json
     );
 
+    // A part that still binds revision 1 (it missed revision 2, say because
+    // an edit kept it) keeps binding 1: the same content under a newer
+    // number is not a change, so its details are exactly as they were.
+    let mut missed = after_b.clone();
+    missed.parts = after_a.parts.clone();
+    let kept = plan().numbered_against(&missed);
+    assert_eq!(numbers(&kept)[2], ("g-res:R_0603", 2, 3));
+    let CadReferenceTarget::CadItemRevision { number, .. } = footprint_target(&kept) else {
+        panic!("the footprint is bound");
+    };
+    assert_eq!(number, 1);
+    assert_eq!(kept.parts[0].snapshot_json, first.parts[0].snapshot_json);
+
     // A new 3D model revision makes a new footprint revision that names it.
     let after_third = current_after(&third);
     fs::write(
@@ -741,10 +810,52 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
         numbers(&fourth)[1..],
         [("3d-models/local.step", 1, 2), ("g-res:R_0603", 3, 4)]
     );
-    let names_model_2 = fourth.cad_item_revisions[2]
-        .snapshot
-        .model_references
-        .iter()
-        .any(|model| matches!(model.target, ModelTarget::CadItemRevision { number: 2, .. }));
-    assert!(names_model_2);
+    let model_number = |import: &CsvImport| {
+        import.cad_item_revisions[2]
+            .snapshot
+            .model_references
+            .iter()
+            .find_map(|model| match model.target {
+                ModelTarget::CadItemRevision { number, .. } => Some(number),
+                ModelTarget::Unresolved { .. } => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(model_number(&fourth), 2);
+    // The model goes back to A: revision 3. The footprint bound model
+    // revision 2 (other content), so it is new content, revision 5, naming
+    // model revision 3.
+    let after_fourth = current_after(&fourth);
+    fs::write(root.path().join("3d-models/local.step"), "ISO-10303-21;\n").unwrap();
+    let fifth = plan().numbered_against(&after_fourth);
+    assert_eq!(
+        numbers(&fifth)[1..],
+        [("3d-models/local.step", 2, 3), ("g-res:R_0603", 4, 5)]
+    );
+    assert_eq!(model_number(&fifth), 3);
+    // A footprint that still binds model revision 1 keeps it, so it is
+    // unchanged and keeps its number.
+    let mut model_missed = after_fourth.clone();
+    let footprint_id = fifth.cad_item_revisions[2].cad_item.id.as_str().to_owned();
+    model_missed.cad_items.insert(
+        footprint_id.clone(),
+        after_third.cad_items[&footprint_id].clone(),
+    );
+    let unchanged = plan().numbered_against(&model_missed);
+    assert_eq!(
+        numbers(&unchanged)[1..],
+        [("3d-models/local.step", 2, 3), ("g-res:R_0603", 3, 3)]
+    );
+    assert_eq!(model_number(&unchanged), 1);
+    // A part that still binds footprint revision 3 (model revision 1) keeps
+    // it: revision 5 differs only in naming model revision 3, which has the
+    // same content, so the CAD the part uses is the same.
+    let mut part_missed = after_fourth.clone();
+    part_missed.parts = after_third.parts.clone();
+    let kept = plan().numbered_against(&part_missed);
+    let CadReferenceTarget::CadItemRevision { number, .. } = footprint_target(&kept) else {
+        panic!("the footprint is bound");
+    };
+    assert_eq!(number, 3);
+    assert_eq!(kept.parts[0].snapshot_json, third.parts[0].snapshot_json);
 }

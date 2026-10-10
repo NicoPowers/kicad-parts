@@ -135,6 +135,21 @@ impl CadItemDetails {
     pub fn sha256(&self) -> String {
         sha256_hex(self.canonical_json())
     }
+
+    /// The SHA-256 of this snapshot with the numbers of its 3D model
+    /// bindings left out. Two revisions with the same content hash have the
+    /// same CAD content and differ at most in which revision numbers they
+    /// name, which is not a change. For a symbol or 3D model it is a hash of
+    /// the whole snapshot.
+    pub fn content_sha256(&self) -> String {
+        let mut content = self.clone();
+        for model in &mut content.model_references {
+            if let ModelTarget::CadItemRevision { number, .. } = &mut model.target {
+                *number = 0;
+            }
+        }
+        content.sha256()
+    }
 }
 
 /// Exact bytes, addressed by their SHA-256.

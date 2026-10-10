@@ -819,14 +819,14 @@ fn bound_number(details: &PartDetails, role: CadReferenceRole) -> u32 {
 /// Checks that `kind` `key` has revisions 1..=`count`, each the successor
 /// of the one before, with the ID derived from its number, and that every
 /// part whose current revision uses it binds the newest one, except the
-/// parts in `kept_on_older_content` (kept by an edit while the content
-/// changed). Returns the revisions.
+/// parts in `kept_older` (which still bind an older revision). Returns the
+/// revisions.
 fn numbered_and_current<'a>(
     stored: &'a CatalogReadback,
     kind: CadItemKind,
     key: &str,
     count: u32,
-    kept_on_older_content: &[&str],
+    kept_older: &[&str],
 ) -> Vec<&'a StoredCadItemRevision> {
     let revisions = revisions_of(stored, kind, key);
     let cad_item = CadItemId::new(kind, key);
@@ -856,7 +856,7 @@ fn numbered_and_current<'a>(
                 reference.role == role
                     && matches!(&reference.target, CadReferenceTarget::CadItemRevision { cad_item: id, .. } if id == cad_item.as_str())
             });
-            if uses && !kept_on_older_content.contains(&part.ipn.as_str()) {
+            if uses && !kept_older.contains(&part.ipn.as_str()) {
                 users += 1;
                 assert_eq!(bound_number(&details, role), count, "{}", part.ipn);
                 assert!(
@@ -866,11 +866,7 @@ fn numbered_and_current<'a>(
                 );
             }
         }
-        assert_eq!(
-            users,
-            29 - kept_on_older_content.len(),
-            "every resistor uses {key}"
-        );
+        assert_eq!(users, 29 - kept_older.len(), "every resistor uses {key}");
     }
     revisions
 }
@@ -888,16 +884,12 @@ fn edit_field(admin: &PocketBaseClient, ipn: &str, field: &str, value: &str) {
     assert_eq!(reply.status, 200, "{}", reply.body);
 }
 
-/// The current revision of `ipn`: its number, what its source says it came
-/// from, and its footprint and symbol numbers.
-fn edited_state(stored: &CatalogReadback, ipn: &str) -> (u32, String, u32, u32) {
-    let part = stored.part(ipn).unwrap();
-    let revision = stored.part_revision(&part.current_revision).unwrap();
-    let details: PartDetails = serde_json::from_str(&revision.snapshot).unwrap();
-    let source: serde_json::Value = serde_json::from_str(&revision.source).unwrap();
+/// The current revision of `ipn`: its number, and its footprint and symbol
+/// numbers.
+fn bound_state(stored: &CatalogReadback, ipn: &str) -> (u32, u32, u32) {
+    let (number, details) = current_revision(stored, ipn);
     (
-        revision.number,
-        source["source"].as_str().unwrap_or_default().to_owned(),
+        number,
         bound_number(&details, CadReferenceRole::Footprint),
         bound_number(&details, CadReferenceRole::Symbol),
     )
@@ -965,12 +957,14 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
 
     import_step(&admin, root, "content A", "applied");
     // A person edits one resistor and changes it back, so its details equal
-    // its row again but an edit, not the CSV, now keeps it.
+    // its row again, but an edit, not the CSV, now keeps it: it misses the
+    // CAD changes below.
     edit_field(&admin, EDITED, "Value", "100 Ohm");
     edit_field(&admin, EDITED, "Value", "100");
     let cad_changed =
         format!("the symbols, footprints or 3D models that the row of {EDITED} uses changed");
-    // Footprint A, B, A: revisions 1, 2 and 3, with 3 current.
+    // Footprint A, B, A: revisions 1, 2 and 3, with 3 current. Parts the
+    // imports keep get real revisions binding 1, 2 and 3.
     replace_once(
         root,
         FOOTPRINT,
@@ -978,9 +972,10 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
         "(tags \"resistor B\")",
     );
     let stored = import_step(&admin, root, "footprint B", "applied");
+    assert_eq!(bound_state(&stored, "RES-0000-0470"), (2, 2, 1));
     // Edits win: the edited part keeps footprint revision 1, and the import
     // problem says plainly that only the CAD it uses changed.
-    assert_eq!(edited_state(&stored, EDITED), (3, "edit".into(), 1, 1));
+    assert_eq!(bound_state(&stored, EDITED), (3, 1, 1));
     let found = conflicts_found(&stored, EDITED);
     assert!(
         found.len() == 1 && found[0].starts_with(&cad_changed),
@@ -988,15 +983,13 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
     );
     fs::write(root.join(FOOTPRINT), &footprint_a).unwrap();
     let stored = import_step(&admin, root, "footprint A again", "applied");
-    // Footprint revision 3 has the content the edited part binds, so the
-    // import moves it there with a revision that only moves that binding.
-    // Nothing else conflicts, so there is no conflict problem.
-    assert_eq!(
-        edited_state(&stored, EDITED),
-        (4, "cad-binding-update".into(), 3, 1)
-    );
+    assert_eq!(bound_state(&stored, "RES-0000-0470"), (3, 3, 1));
+    // Footprint revision 3 has the content of revision 1, which the edited
+    // part binds: the same content under a newer number is not a change, so
+    // the part keeps revision 1, gets no revision and no conflict problem.
+    assert_eq!(bound_state(&stored, EDITED), (3, 1, 1));
     assert!(conflicts_found(&stored, EDITED).is_empty());
-    let revisions = numbered_and_current(&stored, CadItemKind::Footprint, footprint, 3, &[]);
+    let revisions = numbered_and_current(&stored, CadItemKind::Footprint, footprint, 3, &[EDITED]);
     assert_eq!(revisions[2].snapshot_sha256, revisions[0].snapshot_sha256);
     assert_ne!(revisions[1].snapshot_sha256, revisions[0].snapshot_sha256);
     // The bytes are stored once, shared by revisions 1 and 3.
@@ -1017,17 +1010,51 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
     let replay = import_reading_first(&admin, &plan(root), "");
     assert_eq!((replay.status, replay.replayed), (422, true));
     assert_eq!(read_back(&admin).unwrap(), stored);
+    // A part may keep the older number it binds, but not switch to one it
+    // does not bind, even with the same content: RES-0000-0470 binds
+    // footprint revision 3, so naming revision 1 is refused.
+    let mut body = ImportCommand::new(&plan(root), REASON)
+        .expecting(&read_import_state(&admin).unwrap())
+        .body();
+    body["correlationId"] = "switch-to-an-older-number".into();
+    let index = body["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|part| part["ipn"] == "RES-0000-0470")
+        .unwrap();
+    let mut snapshot: serde_json::Value =
+        serde_json::from_str(body["parts"][index]["snapshot"].as_str().unwrap()).unwrap();
+    for reference in snapshot["cad_references"].as_array_mut().unwrap() {
+        if reference["role"] == "footprint" {
+            assert_eq!(reference["target"]["number"], 3);
+            reference["target"]["number"] = 1.into();
+            reference["target"]["snapshot_sha256"] = revisions[0].snapshot_sha256.clone().into();
+        }
+    }
+    let snapshot = snapshot.to_string();
+    body["parts"][index]["snapshotSha256"] = sha256_hex(&snapshot).into();
+    body["parts"][index]["snapshot"] = snapshot.into();
+    let reply = admin
+        .post_json(catalog::pocketbase::CSV_IMPORT_ROUTE, &body)
+        .unwrap();
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert!(
+        reply
+            .body
+            .contains("keep the revision with the same content it binds now"),
+        "{}",
+        reply.body
+    );
+    assert_eq!(read_back(&admin).unwrap(), stored);
 
-    // Moving the binding did not hand the part back to the CSV: a later
-    // change to its row is still an import problem, not a revision.
+    // The edited part is still kept by its edit: a change to its row is an
+    // import problem, not a revision.
     let value = "\"RES 100 OHM 1% 1/10W 0603\",\"100\"";
     let changed_value = "\"RES 100 OHM 1% 1/10W 0603\",\"100R\"";
     replace_once(root, CSV, value, changed_value);
     let stored = import_step(&admin, root, "edited part's row changed", "nothing_changed");
-    assert_eq!(
-        edited_state(&stored, EDITED),
-        (4, "cad-binding-update".into(), 3, 1)
-    );
+    assert_eq!(bound_state(&stored, EDITED), (3, 1, 1));
     let found = conflicts_found(&stored, EDITED);
     assert!(
         found.len() == 1 && found[0].starts_with(&format!("the source row of {EDITED} changed")),
@@ -1043,14 +1070,18 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
         "\t(symbol \"R_US\"\n",
         "\t(symbol \"R_US\"\n\t\t(property \"Note\" \"content B\"\n\t\t\t(at 0 0 0)\n\t\t)\n",
     );
-    import_step(&admin, root, "symbol B", "applied");
+    let stored = import_step(&admin, root, "symbol B", "applied");
+    assert_eq!(bound_state(&stored, EDITED), (3, 1, 1));
+    let found = conflicts_found(&stored, EDITED);
+    assert!(
+        found.len() == 1 && found[0].starts_with(&cad_changed),
+        "{found:?}"
+    );
     fs::write(root.join(SYMBOLS), &symbols_a).unwrap();
     let stored = import_step(&admin, root, "symbol A again", "applied");
-    assert_eq!(
-        edited_state(&stored, EDITED),
-        (5, "cad-binding-update".into(), 3, 3)
-    );
-    let symbols = numbered_and_current(&stored, CadItemKind::Symbol, symbol, 3, &[]);
+    assert_eq!(bound_state(&stored, EDITED), (3, 1, 1));
+    assert!(conflicts_found(&stored, EDITED).is_empty());
+    let symbols = numbered_and_current(&stored, CadItemKind::Symbol, symbol, 3, &[EDITED]);
     assert_eq!(symbols[2].snapshot_sha256, symbols[0].snapshot_sha256);
     assert_eq!(symbols[2].blob, symbols[0].blob);
     let noop = import_reading_first(&admin, &plan(root), "");
@@ -1062,9 +1093,21 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
     let mut model_b = model_a.clone();
     model_b.extend_from_slice(b"/* content B */\n");
     fs::write(root.join(MODEL), &model_b).unwrap();
-    import_step(&admin, root, "3D model B", "applied");
+    let stored = import_step(&admin, root, "3D model B", "applied");
+    // Footprint revision 4 names model revision 2, other content.
+    assert_eq!(bound_state(&stored, EDITED), (3, 1, 1));
+    let found = conflicts_found(&stored, EDITED);
+    assert!(
+        found.len() == 1 && found[0].starts_with(&cad_changed),
+        "{found:?}"
+    );
     fs::write(root.join(MODEL), &model_a).unwrap();
     let stored = import_step(&admin, root, "3D model A again", "applied");
+    // Footprint revision 5 differs from revision 1 only in naming model
+    // revision 3 instead of 1, which have the same content. So the edited
+    // part's CAD is unchanged: it keeps footprint revision 1, quietly.
+    assert_eq!(bound_state(&stored, EDITED), (3, 1, 1));
+    assert!(conflicts_found(&stored, EDITED).is_empty());
     let models = numbered_and_current(&stored, CadItemKind::Model3d, MODEL, 3, &[]);
     assert_eq!(models[2].snapshot_sha256, models[0].snapshot_sha256);
     assert_eq!(models[2].blob, models[0].blob);
@@ -1079,23 +1122,18 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
         })
         .collect();
     assert_eq!(model_numbers, [3]);
-    // The edited part keeps footprint revision 3: revision 5 names 3D model
-    // revision 3, so it is not the content the part binds (which names
-    // model revision 1), and edits win. The problem says the CAD changed.
-    assert_eq!(
-        edited_state(&stored, EDITED),
-        (5, "cad-binding-update".into(), 3, 3)
-    );
-    let found = conflicts_found(&stored, EDITED);
-    assert!(
-        found.len() == 1 && found[0].starts_with(&cad_changed),
-        "{found:?}"
-    );
     // Footprint revisions 3 and 5 have the same bytes, so one blob.
     assert_eq!(footprints[4].blob, footprints[2].blob);
     let noop = import_reading_first(&admin, &plan(root), "");
     assert_eq!(outcome(&noop), "noop", "{}", noop.body);
     let cad_item_revisions = stored.cad_item_revisions.len();
+
+    // An edit of the part that kept the older numbers keeps them too: the
+    // binding moves only when the CAD content or the reference changes.
+    edit_field(&admin, EDITED, "Value", "100 Ohm");
+    let stored = read_back(&admin).unwrap();
+    assert_eq!(bound_state(&stored, EDITED), (4, 1, 1));
+    assert_eq!(stored.cad_item_revisions.len(), cad_item_revisions);
 
     // An edit after that binds the current revisions, and adds none.
     let ipn = "RES-0000-0470";
@@ -1112,20 +1150,29 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
     assert_eq!(edited.cad_item_revisions.len(), cad_item_revisions);
     lossless_report(root, &edited, "edit after the imports");
 
-    // Restoring revision 1: the symbol's revision 1 has the same content as
-    // its current revision 3, so the restore binds 3. The footprint's
-    // revision 1 names 3D model revision 1, so its content is no longer
-    // current (revision 5 names model revision 3), and the restore keeps
-    // revision 1: the part gets back exactly the CAD it had. A restore adds
-    // no CAD item revision.
+    // Restoring revision 1 copies it exactly, CAD bindings included: symbol
+    // revision 1 and footprint revision 1. A restore never moves a binding
+    // and adds no CAD item revision.
     let restore = RestoreCommand::new(ipn, 8, 1, "Go back to the first import");
     let reply = submit_restore(&admin, &restore).unwrap();
     assert_eq!(reply.status, 200, "{}", reply.body);
     let restored = read_back(&admin).unwrap();
     let (number, details) = current_revision(&restored, ipn);
     assert_eq!(number, 9);
-    assert_eq!(bound_number(&details, CadReferenceRole::Symbol), 3);
+    assert_eq!(bound_number(&details, CadReferenceRole::Symbol), 1);
     assert_eq!(bound_number(&details, CadReferenceRole::Footprint), 1);
+    assert_eq!(
+        restored
+            .part_revision(&restored.part(ipn).unwrap().current_revision)
+            .unwrap()
+            .snapshot,
+        restored
+            .part_revisions
+            .iter()
+            .find(|revision| revision.part == restored.part(ipn).unwrap().id && revision.number == 1)
+            .unwrap()
+            .snapshot
+    );
     let first = restored
         .part_revisions
         .iter()
@@ -1141,7 +1188,7 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
     let mut bound = current.cad_item_revisions.clone();
     bound.sort();
     let mut expected = vec![
-        CadItemRevisionId::new(&CadItemId::new(CadItemKind::Symbol, symbol), 3).to_string(),
+        CadItemRevisionId::new(&CadItemId::new(CadItemKind::Symbol, symbol), 1).to_string(),
         CadItemRevisionId::new(&CadItemId::new(CadItemKind::Footprint, footprint), 1).to_string(),
     ];
     expected.sort();

@@ -366,17 +366,23 @@ impl CsvImport {
         sha256_hex(text)
     }
 
-    /// This import, with its CAD item revisions numbered against `current`
-    /// (each CAD item's current revision in the team catalog, by CAD item
-    /// ID). Content equal to the current revision's keeps its number;
-    /// anything else is the next number, even if an older revision had
-    /// exactly that content. Footprint snapshots and part details then name
-    /// those numbers, so they bind each CAD item's current revision.
+    /// This import, with its CAD item revisions numbered against `current`,
+    /// what the team catalog holds now.
+    ///
+    /// A CAD item revision whose content equals the CAD item's current
+    /// revision keeps its number; any other content is the next number,
+    /// even if an older revision had exactly that content.
+    ///
+    /// A binding (a part's symbol or footprint, or a footprint's 3D model)
+    /// keeps the revision it names now while its content is the same (see
+    /// [`CadItemDetails::content_sha256`]): the same content under a newer
+    /// number is not a change. A binding whose content changed, or that is
+    /// new, names the CAD item's current revision.
     ///
     /// A [`CsvImport`] fresh from [`CsvCatalog::import`] is numbered as if
     /// the team catalog were empty, which is the same as
-    /// `numbered_against(&BTreeMap::new())`.
-    pub fn numbered_against(&self, current: &BTreeMap<String, CurrentCadItemRevision>) -> Self {
+    /// `numbered_against(&CurrentCad::default())`.
+    pub fn numbered_against(&self, current: &CurrentCad) -> Self {
         let mut numbered = self.clone();
         // A footprint's snapshot names its 3D models' numbers, so 3D models
         // are numbered first.
@@ -384,9 +390,13 @@ impl CsvImport {
         order.sort_by_key(|&index| {
             numbered.cad_item_revisions[index].cad_item.kind != CadItemKind::Model3d
         });
-        let mut assigned: BTreeMap<String, (u32, String)> = BTreeMap::new();
+        // Each CAD item's current revision once this import is published.
+        let mut after: BTreeMap<String, Binding> = BTreeMap::new();
         for index in order {
             let draft = &mut numbered.cad_item_revisions[index];
+            let stored = current.cad_items.get(draft.cad_item.id.as_str());
+            let no_models = BTreeMap::new();
+            let kept = stored.map_or(&no_models, |stored| &stored.models);
             for model in &mut draft.snapshot.model_references {
                 if let ModelTarget::CadItemRevision {
                     cad_item,
@@ -394,27 +404,32 @@ impl CsvImport {
                     snapshot_sha256,
                 } = &mut model.target
                 {
-                    if let Some((assigned_number, assigned_sha)) = assigned.get(cad_item.as_str()) {
-                        *number = *assigned_number;
-                        snapshot_sha256.clone_from(assigned_sha);
+                    if let Some(bound) = binding_for(kept, &after, cad_item) {
+                        *number = bound.number;
+                        snapshot_sha256.clone_from(&bound.snapshot_sha256);
                     }
                 }
             }
             draft.snapshot_json = draft.snapshot.canonical_json();
             draft.snapshot_sha256 = sha256_hex(&draft.snapshot_json);
-            let stored = current.get(draft.cad_item.id.as_str());
             draft.expected_revision = stored.map_or(0, |stored| stored.number);
             draft.number = match stored {
                 Some(stored) if stored.snapshot_sha256 == draft.snapshot_sha256 => stored.number,
                 _ => draft.expected_revision + 1,
             };
             draft.id = CadItemRevisionId::new(&draft.cad_item.id, draft.number);
-            assigned.insert(
+            after.insert(
                 draft.cad_item.id.as_str().to_owned(),
-                (draft.number, draft.snapshot_sha256.clone()),
+                Binding {
+                    number: draft.number,
+                    snapshot_sha256: draft.snapshot_sha256.clone(),
+                    content_sha256: draft.snapshot.content_sha256(),
+                },
             );
         }
+        let no_bindings = BTreeMap::new();
         for part in &mut numbered.parts {
+            let kept = current.parts.get(part.ipn.as_str()).unwrap_or(&no_bindings);
             for reference in &mut part.snapshot.cad_references {
                 if let CadReferenceTarget::CadItemRevision {
                     cad_item,
@@ -422,9 +437,9 @@ impl CsvImport {
                     snapshot_sha256,
                 } = &mut reference.target
                 {
-                    if let Some((assigned_number, assigned_sha)) = assigned.get(cad_item.as_str()) {
-                        *number = *assigned_number;
-                        snapshot_sha256.clone_from(assigned_sha);
+                    if let Some(bound) = binding_for(kept, &after, cad_item) {
+                        *number = bound.number;
+                        snapshot_sha256.clone_from(&bound.snapshot_sha256);
                     }
                 }
             }
@@ -435,12 +450,49 @@ impl CsvImport {
     }
 }
 
-/// A CAD item's current revision in the team catalog: its number and the
-/// SHA-256 of its snapshot.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// The revision a binding to `cad_item` names: the one in `kept` (what it
+/// binds now) if that has the same content as the CAD item's current
+/// revision after the import, otherwise that current revision. `None` if
+/// the import has no revision of `cad_item`.
+fn binding_for<'a>(
+    kept: &'a BTreeMap<String, Binding>,
+    after: &'a BTreeMap<String, Binding>,
+    cad_item: &str,
+) -> Option<&'a Binding> {
+    let current = after.get(cad_item)?;
+    match kept.get(cad_item) {
+        Some(kept) if kept.content_sha256 == current.content_sha256 => Some(kept),
+        _ => Some(current),
+    }
+}
+
+/// What the team catalog holds now, for numbering an import.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CurrentCad {
+    /// Each CAD item's current revision, by CAD item ID.
+    pub cad_items: BTreeMap<String, CurrentCadItemRevision>,
+    /// The CAD item revisions each part's current revision binds, by IPN,
+    /// then by CAD item ID.
+    pub parts: BTreeMap<String, BTreeMap<String, Binding>>,
+}
+
+/// A CAD item's current revision in the team catalog.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CurrentCadItemRevision {
     pub number: u32,
     pub snapshot_sha256: String,
+    /// For a footprint, the 3D model revisions it binds, by CAD item ID.
+    pub models: BTreeMap<String, Binding>,
+}
+
+/// One bound CAD item revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Binding {
+    pub number: u32,
+    /// The SHA-256 of its snapshot.
+    pub snapshot_sha256: String,
+    /// See [`CadItemDetails::content_sha256`].
+    pub content_sha256: String,
 }
 
 /// The CSV catalog under a repository root, opened read-only.

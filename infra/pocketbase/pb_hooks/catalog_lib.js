@@ -301,11 +301,8 @@ function base64Decode(text) {
 //   2. answer 409 conflict, with the part's current revision, if the
 //      caller expected another current revision;
 //   3. build the new part details: for an edit, from the caller's fields
-//      and manufacturer parts; for a restore, a copy of the older
-//      revision's details. Either way each CAD binding names the CAD item's
-//      current revision when that revision has the same content as the
-//      binding (see reboundTarget), so a part never names an older number
-//      for content that is current;
+//      and manufacturer parts; for a restore, an exact copy of the older
+//      revision's details, CAD item revisions included;
 //   4. answer 422 noop if they equal the current revision's details;
 //   5. otherwise save one Change, the new revision, the part's move to it,
 //      and one audit entry.
@@ -487,33 +484,13 @@ function bindingTo(cadItemId, revision) {
   };
 }
 
-// A stored binding, kept as it is unless the CAD item's current revision
-// has the same content (the same snapshot hash) under a newer number; then
-// it names the current revision instead. So a binding never names an older
-// number for content that is current, and never changes which bytes a part
-// uses. A binding whose content is no longer current keeps naming its exact
-// older revision.
-function reboundTarget(txApp, target) {
-  const current = currentCadItemRevision(txApp, target.cad_item);
-  if (current && current.getString("snapshot_sha256") === target.snapshot_sha256) {
-    return bindingTo(target.cad_item, current);
-  }
-  return {
-    kind: "cad-item-revision",
-    cad_item: target.cad_item,
-    number: target.number,
-    snapshot_sha256: target.snapshot_sha256,
-  };
-}
-
 // The CAD references of new part details, read from their Symbol and
 // Footprint fields the way the CSV import reads them (`;` separates
 // footprint choices). Each reference to the CSV catalog's own libraries
 // (`g-*`) is bound to one exact CAD item revision:
-// - a reference the current revision already binds keeps the content it
-//   binds, so editing another field never changes the CAD a part uses; it
-//   moves to the CAD item's current revision only when that revision has
-//   the same content (see reboundTarget);
+// - a reference the current revision already binds keeps its exact
+//   revision, so editing another field never moves a CAD binding (the same
+//   content under a newer number is not a change);
 // - any other reference binds the current revision of the CAD item with
 //   exactly that library reference;
 // - a reference that the current revision kept as unresolved stays so;
@@ -554,7 +531,12 @@ function cadReferences(txApp, fields, currentDetails) {
         }
         const same = previous.find((item) => item.role === role && item.reference === reference);
         if (cadItem && same && same.target.kind === "cad-item-revision" && same.target.cad_item === cadItemId) {
-          target = reboundTarget(txApp, same.target);
+          target = {
+            kind: "cad-item-revision",
+            cad_item: cadItemId,
+            number: same.target.number,
+            snapshot_sha256: same.target.snapshot_sha256,
+          };
         } else if (cadItem) {
           const current = currentCadItemRevision(txApp, cadItemId);
           if (!current) {
@@ -708,27 +690,9 @@ function publishPartRevision(e, kind) {
       if (!restored) {
         throw new NotFoundError(`${request.ipn} has no revision ${restoreRevision}`);
       }
-      // The older revision's details. Each CAD binding moves to the CAD
-      // item's current revision if that revision has the same content, and
-      // otherwise keeps its exact older revision, so the part gets back
-      // exactly the CAD it had. A restore never adds a CAD item revision.
-      // When no binding moves, the stored bytes are copied exactly.
+      // The exact stored bytes, so the restored revision has the same
+      // details and the same CAD item revisions.
       snapshot = restored.getString("snapshot");
-      const details = JSON.parse(snapshot);
-      let moved = false;
-      for (const reference of details.cad_references || []) {
-        if (reference.target && reference.target.kind === "cad-item-revision") {
-          const target = reboundTarget(txApp, reference.target);
-          if (target.number !== reference.target.number) {
-            reference.target = target;
-            moved = true;
-          }
-        }
-      }
-      if (moved) {
-        // Parsed from canonical JSON, so the keys keep Rust's order.
-        snapshot = JSON.stringify(details);
-      }
       source = {
         schema: SOURCE_SCHEMA,
         source: CHANGE_KINDS.restore,

@@ -1417,17 +1417,50 @@ impl<'a> Reporter<'a> {
                     )),
                 }
             }
-            if targets.len() != 1 {
+            // Parts may bind different numbers of one CAD item while the
+            // content is the same (the same content under a newer number is
+            // not a change), so targets are compared by content.
+            let mut targets: Vec<CadReferenceTarget> = targets
+                .iter()
+                .map(|target| serde_json::from_str(target).expect("parses"))
+                .collect();
+            targets.sort_by_key(|target| match target {
+                CadReferenceTarget::CadItemRevision { number, .. } => *number,
+                _ => 0,
+            });
+            let contents: BTreeSet<String> = targets
+                .iter()
+                .map(|target| match target {
+                    CadReferenceTarget::CadItemRevision {
+                        cad_item,
+                        number,
+                        snapshot_sha256,
+                    } => {
+                        let id = CadItemRevisionId::new(&CadItemId::from_stored(cad_item), *number);
+                        let content = readback
+                            .cad_item_revision(id.as_str())
+                            .and_then(|revision| {
+                                serde_json::from_str::<CadItemDetails>(&revision.snapshot).ok()
+                            })
+                            .map_or_else(
+                                || snapshot_sha256.clone(),
+                                |details| details.content_sha256(),
+                            );
+                        format!("{cad_item} {content}")
+                    }
+                    other => serde_json::to_string(other).unwrap_or_default(),
+                })
+                .collect();
+            if contents.len() != 1 {
                 self.problem(format!(
                     "{} binds {} different targets across its parts",
                     reference.reference,
-                    targets.len()
+                    contents.len()
                 ));
                 accounts.push(account);
                 continue;
             }
-            let target: CadReferenceTarget =
-                serde_json::from_str(targets.iter().next().expect("one target")).expect("parses");
+            let target = targets.last().expect("one target").clone();
             match (&target, reference.local, reference.status.as_str()) {
                 (CadReferenceTarget::External, false, _) => {}
                 (
@@ -1439,6 +1472,24 @@ impl<'a> Reporter<'a> {
                     true,
                     "resolved",
                 ) => {
+                    // Every other bound revision must be a revision with
+                    // this content too; the account shows the highest.
+                    for other in &targets[..targets.len() - 1] {
+                        if let CadReferenceTarget::CadItemRevision {
+                            number: other_number,
+                            snapshot_sha256: other_sha256,
+                            ..
+                        } = other
+                        {
+                            self.check_cad_item_revision(
+                                &mut account,
+                                cad_item,
+                                *other_number,
+                                other_sha256,
+                                oracle_file.map(|file| file.byte_sha256.as_str()),
+                            );
+                        }
+                    }
                     self.check_cad_item_revision(
                         &mut account,
                         cad_item,
