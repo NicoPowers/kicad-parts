@@ -218,3 +218,159 @@ fn an_empty_3d_model_file_becomes_an_import_problem() {
             .any(|account| account.stored == "empty file + import problem")
     );
 }
+
+/// A CSV file, its part-details columns besides `IPN`, its manufacturer
+/// part columns and its import-problem columns. Every other column is
+/// supplier data.
+type ColumnRow = (
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [&'static str],
+);
+
+/// The table in `zero_loss.rs`.
+#[rustfmt::skip]
+const COLUMN_TABLE: [ColumnRow; 21] = [
+    ("g-ana", &["Description", "Symbol", "Footprint", "Datasheet", "Sim_Library", "Sim_Name", "Sim_Device", "Sim_Pins"], &["MPN", "Manufacturer"], &[]),
+    ("g-art", &["Description", "Symbol", "Footprint", "Comments"], &[], &[]),
+    ("g-cap", &["Description", "Symbol", "Footprint", "Value", "Voltage", "Material", "Tolerance", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-con", &["Value", "Description", "Symbol", "Footprint", "Pins", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-cpd", &["Description", "Symbol", "Footprint", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-dio", &["Value", "Description", "Symbol", "Footprint", "Current", "Voltage", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-ics", &["Description", "Symbol", "Footprint", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-ind", &["Description", "Symbol", "Footprint", "Value", "Current", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-mcu", &["Description", "Symbol", "Footprint", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-mec", &["Description", "Symbol", "Footprint", "Type", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-mpu", &["Description", "Symbol", "Footprint", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-opt", &["Description", "Symbol", "Footprint", "Color", "I-forward-max", "V-forward", "Wavelength", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-osc", &["Description", "Symbol", "Footprint", "Frequency", "Stability", "Load", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-pcb", &["Description", "Project link"], &[], &[]),
+    ("g-pwr", &["Description", "Symbol", "Footprint", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-reg", &["Description", "Voltage", "Current", "Symbol", "Footprint", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-res", &["Description", "Value", "Symbol", "Footprint", "Tolerance", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-rfm", &["Value", "Description", "Symbol", "Footprint", "Datasheet"], &["MPN", "Manufacturer"], &["MPN2"]),
+    ("g-rvr", &["Description", "Resistance", "Symbol", "Footprint", "Tolerance", "Turns", "Datasheet"], &["MPN", "Manufacturer"], &["MPN TBC"]),
+    ("g-swi", &["Description", "Form", "Symbol", "Footprint", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+    ("g-trs", &["Value", "Type", "max(Vce)", "max(Ic)", "Description", "Symbol", "Footprint", "Datasheet"], &["MPN", "Manufacturer"], &[]),
+];
+
+#[test]
+fn every_column_of_every_csv_file_has_one_destination() {
+    use catalog::csv_import::{ColumnRoute, SUPPLIER_DATA_COLUMNS, route_column};
+    let oracle = oracle();
+    assert_eq!(oracle.catalog.categories.len(), COLUMN_TABLE.len());
+    for (csv_file, part_details, manufacturer_parts, import_problems) in COLUMN_TABLE {
+        let category = oracle
+            .catalog
+            .categories
+            .iter()
+            .find(|category| format!("g-{}", category.table) == csv_file)
+            .unwrap_or_else(|| panic!("the oracle has no {csv_file}"));
+        let mut expected: Vec<(&str, &str)> = vec![("IPN", "part-details")];
+        expected.extend(part_details.iter().map(|column| (*column, "part-details")));
+        expected.extend(
+            manufacturer_parts
+                .iter()
+                .map(|column| (*column, "manufacturer-parts")),
+        );
+        expected.extend(
+            import_problems
+                .iter()
+                .map(|column| (*column, "import-problem")),
+        );
+        expected.extend(
+            SUPPLIER_DATA_COLUMNS
+                .iter()
+                .map(|column| (*column, "supplier-data")),
+        );
+        expected.sort();
+        let mut actual: Vec<(&str, &str)> = category
+            .document
+            .headers
+            .iter()
+            .map(|header| {
+                let destination = match route_column(header) {
+                    ColumnRoute::Ipn | ColumnRoute::PartDetails => "part-details",
+                    ColumnRoute::MainMpn | ColumnRoute::MainManufacturer => "manufacturer-parts",
+                    ColumnRoute::ExtraMpn | ColumnRoute::MpnToBeConfirmed => "import-problem",
+                    ColumnRoute::SupplierData => "supplier-data",
+                };
+                (header.as_str(), destination)
+            })
+            .collect();
+        actual.sort();
+        assert_eq!(actual, expected, "{csv_file}");
+    }
+}
+
+#[test]
+fn extra_mpn_columns_are_kept_as_import_problems_end_to_end() {
+    // g-rfm's MPN2 is another approved MPN whose manufacturer the CSV file
+    // does not name; g-rvr's MPN TBC lists MPNs still to be confirmed.
+    // Neither becomes a manufacturer part or a part-details field.
+    let copy = tempfile::tempdir().unwrap();
+    copy_catalog(copy.path());
+    let oracle = legacy_import_fixture::build_manifest(copy.path()).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
+    for csv_file in ["g-rfm", "g-rvr"] {
+        let import = CsvCatalog::new(copy.path()).import(csv_file, None).unwrap();
+        let state = catalog::pocketbase::read_import_state(&admin).unwrap();
+        let command = ImportCommand::new(&import, &format!("Import {csv_file}")).expecting(&state);
+        let reply = submit_import(&admin, &command).unwrap();
+        assert!(
+            matches!(reply.outcome, ImportOutcome::Applied { .. }),
+            "{}",
+            reply.body
+        );
+    }
+    let stored = read_back(&admin).unwrap();
+    server.stop();
+
+    for (csv_file, ipn, column, code, kept) in [
+        (
+            "g-rfm",
+            "RFM-0000-0001",
+            "MPN2",
+            "mpn-without-manufacturer",
+            "MS128-10F",
+        ),
+        (
+            "g-rvr",
+            "RVR-0000-1001",
+            "MPN TBC",
+            "mpn-to-be-confirmed",
+            "ST-4ETA102, 23AR1KLFTR, TS53YJ102MR10",
+        ),
+    ] {
+        let report = catalog_import::report(&oracle, csv_file, &stored, copy.path());
+        assert!(
+            report.is_lossless(),
+            "{csv_file}: {}",
+            serde_json::to_string_pretty(&report.summary()).unwrap()
+        );
+        assert!(
+            report
+                .column_routes
+                .contains(&(column.to_owned(), "import-problem".to_owned())),
+            "{:?}",
+            report.column_routes
+        );
+        let problem = stored
+            .problems
+            .iter()
+            .find(|problem| problem.code == code && problem.subject == ipn)
+            .unwrap_or_else(|| panic!("no {code} for {ipn}"));
+        let detail: serde_json::Value = serde_json::from_str(&problem.detail).unwrap();
+        assert_eq!(detail["column"], column);
+        assert!(problem.detail.contains(kept), "{}", problem.detail);
+        // Only the row's own MPN and Manufacturer make a manufacturer part.
+        let part = stored.part(ipn).unwrap();
+        let revision = stored.part_revision(&part.current_revision).unwrap();
+        let details: catalog::PartDetails = serde_json::from_str(&revision.snapshot).unwrap();
+        assert_eq!(details.manufacturer_parts.len(), 1, "{ipn}");
+        assert!(details.field(column).is_none(), "{ipn}");
+        assert!(!revision.snapshot.contains(kept), "{ipn}");
+    }
+}

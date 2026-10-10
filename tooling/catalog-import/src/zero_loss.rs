@@ -21,6 +21,49 @@
 //! separately only to show where each `MPN` and `Manufacturer` went. A part
 //! that an earlier import run of the file made, but that the file no longer
 //! has, must have a `part-not-in-csv-file` import problem.
+//!
+//! Where every column of the 21 CSV files goes (`route_column` in
+//! `crates/catalog`; the test `every_column_of_every_csv_file_has_one_destination`
+//! checks this table against the oracle's headers):
+//!
+//! - `IPN` and every column not named below: `part-details`.
+//! - `MPN` and `Manufacturer`: `part-details.manufacturer-parts`, the main
+//!   manufacturer part. If either is blank, an
+//!   `incomplete-main-manufacturer-part` import problem keeps both.
+//! - `MPN2` (any `MPN` followed by a number): `import-problem`
+//!   (`mpn-without-manufacturer`). It is another approved MPN, but the CSV
+//!   file does not say who makes it, and a manufacturer part needs a
+//!   manufacturer. A blank cell adds nothing.
+//! - `MPN TBC`: `import-problem` (`mpn-to-be-confirmed`). These MPNs are
+//!   still to be confirmed, so they are not approved manufacturer parts.
+//! - `LCSC`, `DigiKey_PN`, `Mouser_PN`, `DigiKey_Price`, `Mouser_Price`,
+//!   `Price_Range`, `Price_LastSynced_UTC`: `supplier-data`.
+//!
+//! | CSV file | `part-details` besides `IPN` | manufacturer parts | `import-problem` |
+//! |----------|------------------------------|--------------------|------------------|
+//! | g-ana | Description, Symbol, Footprint, Datasheet, Sim_Library, Sim_Name, Sim_Device, Sim_Pins | MPN, Manufacturer | |
+//! | g-art | Description, Symbol, Footprint, Comments | | |
+//! | g-cap | Description, Symbol, Footprint, Value, Voltage, Material, Tolerance, Datasheet | MPN, Manufacturer | |
+//! | g-con | Value, Description, Symbol, Footprint, Pins, Datasheet | MPN, Manufacturer | |
+//! | g-cpd | Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
+//! | g-dio | Value, Description, Symbol, Footprint, Current, Voltage, Datasheet | MPN, Manufacturer | |
+//! | g-ics | Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
+//! | g-ind | Description, Symbol, Footprint, Value, Current, Datasheet | MPN, Manufacturer | |
+//! | g-mcu | Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
+//! | g-mec | Description, Symbol, Footprint, Type, Datasheet | MPN, Manufacturer | |
+//! | g-mpu | Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
+//! | g-opt | Description, Symbol, Footprint, Color, I-forward-max, V-forward, Wavelength, Datasheet | MPN, Manufacturer | |
+//! | g-osc | Description, Symbol, Footprint, Frequency, Stability, Load, Datasheet | MPN, Manufacturer | |
+//! | g-pcb | Description, Project link | | |
+//! | g-pwr | Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
+//! | g-reg | Description, Voltage, Current, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
+//! | g-res | Description, Value, Symbol, Footprint, Tolerance, Datasheet | MPN, Manufacturer | |
+//! | g-rfm | Value, Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | MPN2 |
+//! | g-rvr | Description, Resistance, Symbol, Footprint, Tolerance, Turns, Datasheet | MPN, Manufacturer | MPN TBC |
+//! | g-swi | Description, Form, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
+//! | g-trs | Value, Type, max(Vce), max(Ic), Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
+//!
+//! All 21 files also have the 7 supplier data columns.
 
 use catalog::csv_import::{
     CadItemSource, ColumnRoute, CsvRecord, EMPTY_3D_MODEL, SubstitutesCsvColumn, parse_csv,
@@ -545,6 +588,30 @@ impl<'a> Reporter<'a> {
                             (None, None) => (MANUFACTURER_PARTS, None),
                         }
                     }
+                    // An extra MPN without a known manufacturer, or MPNs
+                    // still to be confirmed: an import problem keeps the
+                    // value. A blank cell needs no problem.
+                    ColumnRoute::ExtraMpn | ColumnRoute::MpnToBeConfirmed if value.is_empty() => {
+                        (IMPORT_PROBLEM, Some(String::new()))
+                    }
+                    ColumnRoute::ExtraMpn | ColumnRoute::MpnToBeConfirmed => {
+                        let (code, key) = if route == ColumnRoute::ExtraMpn {
+                            ("mpn-without-manufacturer", "mpn")
+                        } else {
+                            ("mpn-to-be-confirmed", "value")
+                        };
+                        let kept = self.find_problem(|problem, detail| {
+                            problem.code == code
+                                && problem.subject == ipn
+                                && problem.path == source_path
+                                && detail["column"].as_str() == Some(column.as_str())
+                        });
+                        let stored = kept.and_then(|(problem, detail)| {
+                            explained.insert(problem.id.clone());
+                            detail[key].as_str().map(str::to_owned)
+                        });
+                        (IMPORT_PROBLEM, stored)
+                    }
                     // Supplier data never makes a revision; the latest run's
                     // row keeps it.
                     ColumnRoute::SupplierData => (SUPPLIER_DATA, Some(csv.field(index, position))),
@@ -565,9 +632,19 @@ impl<'a> Reporter<'a> {
                     "row {row_number} ({ipn}): part-details fields {stored_fields:?} are not the part-details columns {part_detail_columns:?}"
                 ));
             }
+            // A supplier part number may equal a value another column puts
+            // in the part details (a Mouser number can be the MPN itself);
+            // only a value no such column has would have leaked.
+            let detail_values: BTreeSet<&String> = headers
+                .iter()
+                .zip(row)
+                .filter(|(column, _)| route_column(column) != ColumnRoute::SupplierData)
+                .map(|(_, value)| value)
+                .collect();
             for (column, value) in headers.iter().zip(row) {
                 if route_column(column) == ColumnRoute::SupplierData
                     && !value.is_empty()
+                    && !detail_values.contains(value)
                     && revision.revision.snapshot.contains(&format!("\"{value}\""))
                 {
                     self.problem(format!(

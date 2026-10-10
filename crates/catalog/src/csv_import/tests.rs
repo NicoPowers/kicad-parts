@@ -444,3 +444,60 @@ fn a_part_has_one_datasheet() {
     let kept = &import.parts[0].source.substitutes_csv_rows[2];
     assert_eq!(kept.record[3], "https://other");
 }
+
+#[test]
+fn extra_mpns_and_mpns_to_be_confirmed_are_import_problems() {
+    for (column, route) in [
+        ("MPN", ColumnRoute::MainMpn),
+        ("MPN2", ColumnRoute::ExtraMpn),
+        ("MPN12", ColumnRoute::ExtraMpn),
+        ("MPN TBC", ColumnRoute::MpnToBeConfirmed),
+        ("MPN2x", ColumnRoute::PartDetails),
+        ("MPN_", ColumnRoute::PartDetails),
+        ("Mouser_PN", ColumnRoute::SupplierData),
+    ] {
+        assert_eq!(route_column(column), route, "{column}");
+    }
+    let csv = "IPN,MPN,Manufacturer,MPN2,MPN TBC,Value\nRES-0000-0470,MPN47,Yageo,ALT47,\"X1, X2\",47\nRES-0000-1000,MPN100,Yageo,,,100\n";
+    let root = fixture(csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
+    let import = CsvCatalog::new(root.path()).import("g-res", None).unwrap();
+    // Import problems are ordered by their ID.
+    let problems: Vec<(&str, &str, &str)> = import
+        .problems
+        .iter()
+        .map(|problem| {
+            (
+                problem.code.as_str(),
+                problem.location.as_str(),
+                problem.detail_json.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        problems,
+        [
+            (
+                "mpn-without-manufacturer",
+                "rows[IPN=RES-0000-0470].MPN2",
+                r#"{"column":"MPN2","mpn":"ALT47","row_manufacturer":"Yageo"}"#
+            ),
+            (
+                "mpn-to-be-confirmed",
+                "rows[IPN=RES-0000-0470].MPN TBC",
+                r#"{"column":"MPN TBC","value":"X1, X2"}"#
+            ),
+        ]
+    );
+    // Neither is a part-details field or a manufacturer part; blank cells
+    // add nothing.
+    for part in &import.parts {
+        let names: Vec<&str> = part
+            .snapshot
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(names, ["Value"]);
+        assert_eq!(part.snapshot.manufacturer_parts.len(), 1);
+    }
+}

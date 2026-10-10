@@ -13,8 +13,9 @@
 //! - supplier data, kept in the revision's [`Source`] and never in its
 //!   part details (supplier part numbers and prices);
 //! - an import problem, for anything the import cannot place, such as a
-//!   row that cannot become a part or a substitutes.csv row with another
-//!   datasheet.
+//!   row that cannot become a part, a substitutes.csv row with another
+//!   datasheet, an extra MPN (`MPN2`) whose manufacturer the CSV file does
+//!   not name, or MPNs still to be confirmed (`MPN TBC`).
 //!
 //! The CSV file name (`g-res`) is only part of the source. It is neither a
 //! category nor the IPN prefix.
@@ -74,6 +75,16 @@ pub enum ColumnRoute {
     MainMpn,
     /// The main manufacturer part's manufacturer, in the part details.
     MainManufacturer,
+    /// Another approved MPN, such as `MPN2`. A manufacturer part needs a
+    /// manufacturer, and the CSV catalog never says that the row's
+    /// Manufacturer makes this MPN too, so a value here becomes an
+    /// `mpn-without-manufacturer` import problem rather than a guessed
+    /// manufacturer part.
+    ExtraMpn,
+    /// `MPN TBC`: MPNs still to be confirmed, so not approved manufacturer
+    /// parts. A value here becomes an `mpn-to-be-confirmed` import problem
+    /// for someone to confirm.
+    MpnToBeConfirmed,
     /// Supplier data: kept in the source, never in the part details.
     SupplierData,
 }
@@ -97,9 +108,18 @@ pub fn route_column(name: &str) -> ColumnRoute {
         "IPN" => ColumnRoute::Ipn,
         "MPN" => ColumnRoute::MainMpn,
         "Manufacturer" => ColumnRoute::MainManufacturer,
+        "MPN TBC" => ColumnRoute::MpnToBeConfirmed,
+        name if is_extra_mpn_column(name) => ColumnRoute::ExtraMpn,
         name if SUPPLIER_DATA_COLUMNS.contains(&name) => ColumnRoute::SupplierData,
         _ => ColumnRoute::PartDetails,
     }
+}
+
+/// `MPN` followed by a number, such as `MPN2`.
+fn is_extra_mpn_column(name: &str) -> bool {
+    name.strip_prefix("MPN").is_some_and(|number| {
+        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 /// Where a substitutes.csv column's value goes.
@@ -648,6 +668,7 @@ impl<'a> Planner<'a> {
         let mut supplier_data = Vec::new();
         let mut mpn = None;
         let mut manufacturer = None;
+        let mut unplaced_mpns = Vec::new();
         for (index, header) in headers.iter().enumerate() {
             match route_column(header) {
                 ColumnRoute::Ipn => {}
@@ -657,11 +678,47 @@ impl<'a> Planner<'a> {
                 }),
                 ColumnRoute::MainMpn => mpn = Some(value(index)),
                 ColumnRoute::MainManufacturer => manufacturer = Some(value(index)),
+                route @ (ColumnRoute::ExtraMpn | ColumnRoute::MpnToBeConfirmed) => {
+                    if !value(index).is_empty() {
+                        unplaced_mpns.push((route, header.clone(), value(index)));
+                    }
+                }
                 ColumnRoute::SupplierData => supplier_data.push(SupplierData {
                     column: header.clone(),
                     value: value(index),
                 }),
             }
+        }
+        for (route, column, value) in unplaced_mpns {
+            let location = format!("rows[IPN={ipn}].{column}");
+            let problem = if route == ColumnRoute::ExtraMpn {
+                ImportProblem::new(
+                    "mpn-without-manufacturer",
+                    ipn.as_str(),
+                    catalog_path,
+                    &location,
+                    format!(
+                        "{ipn} has {column} `{value}`, but the CSV file does not say who makes it, so it is kept here instead of becoming a manufacturer part"
+                    ),
+                    json!({
+                        "column": column,
+                        "mpn": value,
+                        "row_manufacturer": manufacturer.clone().unwrap_or_default(),
+                    }),
+                )
+            } else {
+                ImportProblem::new(
+                    "mpn-to-be-confirmed",
+                    ipn.as_str(),
+                    catalog_path,
+                    &location,
+                    format!(
+                        "{ipn} lists MPNs still to be confirmed in {column} (`{value}`); they are not approved manufacturer parts, so they are kept here"
+                    ),
+                    json!({ "column": column, "value": value }),
+                )
+            };
+            self.record_problem(problem);
         }
 
         let mut manufacturer_parts = Vec::new();
