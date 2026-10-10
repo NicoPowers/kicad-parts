@@ -356,7 +356,7 @@ fn stored_bytes_that_do_not_match_or_cannot_be_drawn_are_refused() {
     let cache = &fixture.cache;
     assert!(matches!(
         cache.stored_symbol(&fixture.kicad, &item, || Ok(b"other".to_vec()), None),
-        Err(PreviewError::StoredBytes(message)) if message.contains("do not match")
+        Err(PreviewError::StoredBytes(message)) if message.contains("do not match their SHA-256")
     ));
     assert_eq!(
         cache.stored_symbol(&fixture.kicad, &item, || Err("server down".into()), None),

@@ -894,16 +894,24 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
         set.library_path.clone()
     };
     let note = set.note.clone();
-    let provenance = format!(
-        "{} · kicad-cli {} · {}",
+    // Each part stays on one line; the line breaks only between parts.
+    let provenance = [
         source,
-        set.kicad_version,
+        format!("kicad-cli {}", set.kicad_version),
         if set.from_cache {
             "from cache"
         } else {
             "exported now"
-        },
-    );
+        }
+        .to_owned(),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, part)| {
+        let separator = if index == 0 { "" } else { " · " };
+        view! { {separator}<span class="provenance-part">{part}</span> }
+    })
+    .collect_view();
     let reference = set.reference.clone();
     let alternates = set.alternates.clone();
     let canvas = match set.kind {

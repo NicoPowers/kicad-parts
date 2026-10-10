@@ -93,7 +93,8 @@ pub enum PreviewError {
     /// The item cannot be passed to kicad-cli safely or completely.
     Unexportable(String),
     /// A CAD item revision's stored bytes could not be fetched, or were not
-    /// the bytes their SHA-256 names.
+    /// the bytes their SHA-256 names. The message finishes the sentence
+    /// "... because ...".
     StoredBytes(String),
     /// A newer selection replaced the one this request was for before its
     /// export started, so the export did not run.
@@ -599,10 +600,9 @@ fn checked_bytes(
 ) -> Result<Vec<u8>, PreviewError> {
     let bytes = load_bytes().map_err(PreviewError::StoredBytes)?;
     if sha256_hex(&bytes) != item.blob_sha256 {
-        return Err(PreviewError::StoredBytes(format!(
-            "The stored bytes of {} do not match their SHA-256.",
-            item.lib_ref
-        )));
+        return Err(PreviewError::StoredBytes(
+            "the bytes the team server sent do not match their SHA-256".into(),
+        ));
     }
     Ok(bytes)
 }

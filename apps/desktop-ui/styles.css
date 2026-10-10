@@ -456,6 +456,10 @@ a {
   margin: -0.3rem 0 0.6rem;
 }
 
+.provenance-part {
+  white-space: nowrap;
+}
+
 /* Where a drawing came from when it is not what the team catalog stores. */
 .preview-note {
   margin: -0.2rem 0 0.6rem;
@@ -465,6 +469,7 @@ a {
   border-left-width: 4px;
   border-radius: var(--radius);
   font-size: 0.88rem;
+  overflow-wrap: anywhere;
 }
 
 .preview-grid {

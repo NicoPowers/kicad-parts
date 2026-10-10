@@ -187,10 +187,10 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
         ready(fresh.preview_request(&request(PreviewKind::Symbol, Some(revision)), Some(&team)));
     assert_eq!(fallback.cad_item_revision, None);
     let note = fallback.note.unwrap();
-    assert!(
-        note.starts_with("Revision 1 of g-pas:R_US could not be fetched from the team catalog")
-            && note.ends_with("so this is drawn from your local library, which differs from it."),
-        "{note}"
+    assert_eq!(
+        note,
+        "Revision 1 of g-pas:R_US could not be fetched because the team server could not be \
+         reached. This drawing is from your local library, which differs from that revision."
     );
     // With an unchanged local library, the note says the bytes match.
     let same = open_browser(&root, &data.path().join("same"));
@@ -212,7 +212,9 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     ));
     let note = unknown.note.unwrap();
     assert!(
-        note.starts_with("The team catalog could not be reached"),
+        note.starts_with(
+            "The team catalog could not be checked because the team server could not be reached."
+        ),
         "{note}"
     );
     team.sign_out();

@@ -317,10 +317,10 @@ impl CatalogBrowser {
                     capitalize(&message),
                 );
             }
-            Err(TeamCadError::Unreachable(message)) => {
+            Err(TeamCadError::Unreachable(why)) => {
                 let note = format!(
-                    "The team catalog could not be reached ({message}), so this is drawn from \
-                     your local library, which may differ from the revision this part uses."
+                    "The team catalog could not be checked because {why}. This drawing is \
+                     from your local library, which may differ from the revision this part uses."
                 );
                 return self.local_preview(request, install, Some(note));
             }
@@ -400,14 +400,13 @@ impl CatalogBrowser {
             Some(bytes) if sha256_hex(&bytes) == stored.item.blob_sha256 => {
                 "which has the same bytes"
             }
-            Some(_) => "which differs from it",
-            None => "which may differ from it",
+            Some(_) => "which differs from that revision",
+            None => "which may differ from that revision",
         };
         format!(
-            "Revision {} of {reference} could not be fetched from the team catalog ({}), so \
-             this is drawn from your local library, {comparison}.",
-            stored.number,
-            why.trim_end_matches('.')
+            "Revision {} of {reference} could not be fetched because {why}. This drawing is \
+             from your local library, {comparison}.",
+            stored.number
         )
     }
 

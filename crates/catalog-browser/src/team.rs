@@ -480,7 +480,7 @@ impl TeamCatalog {
     /// checks them against their SHA-256.
     pub fn stored_bytes(&self, cad: &StoredCad) -> Result<Vec<u8>, String> {
         let client = self.client()?;
-        let fail = |error: CollabError| format!("the team server did not send them: {error}");
+        let fail = |error: CollabError| plain_reason(&error);
         let blob: StoredBlob = client
             .get(&format!(
                 "/api/collections/catalog_blobs/records/{}",
@@ -598,7 +598,19 @@ fn fetch_part_details(
 }
 
 fn unreachable(error: CollabError) -> TeamCadError {
-    TeamCadError::Unreachable(error.to_string())
+    TeamCadError::Unreachable(plain_reason(&error))
+}
+
+/// Why a request to the team server failed, in words that finish the
+/// sentence "... because ...".
+fn plain_reason(error: &CollabError) -> String {
+    match error {
+        CollabError::Transport(_) => "the team server could not be reached".into(),
+        CollabError::Unauthorized(_) | CollabError::Forbidden(_) => {
+            "the team server no longer accepts your sign-in".into()
+        }
+        other => format!("the team server answered: {other}"),
+    }
 }
 
 /// The correlation ID the UI made for this save attempt, so that retrying
