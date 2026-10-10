@@ -1,19 +1,27 @@
 //! KiCad Parts desktop UI: search the catalog, select a part, and see the
 //! exact KiCad symbol (every unit) and footprint exported by kicad-cli.
+//! Signed in to the team catalog, a part it has also shows its history and
+//! can be edited and restored there.
 
 mod backend;
+mod team;
 
 use desktop_contract::{
     AppStatus, KicadStatus, PartDetail, PreviewKind, PreviewOutcome, PreviewProblem,
-    PreviewProblemReason, PreviewSet, SearchResponse, unit_label,
+    PreviewProblemReason, PreviewSet, SearchResponse, TeamPart, TeamSession, TeamStatus,
+    unit_label,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::time::Duration;
+use team::{TeamBadge, TeamColumn, TeamUi};
 
 /// Results shown per search. The catalog search itself covers every row.
 const RESULT_LIMIT: usize = 200;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(120);
+/// How often the UI asks whether the team catalog has new Changes. The app
+/// itself hears about them through PocketBase realtime.
+const TEAM_POLL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug)]
 enum Load<T> {
@@ -48,6 +56,29 @@ fn App() -> impl IntoView {
         status.set(loaded);
     });
 
+    let team = RwSignal::new(None::<TeamStatus>);
+    let refresh_team = move || {
+        spawn_local(async move {
+            if let Ok(latest) = backend::team_status().await {
+                if team.with_untracked(|known| known.as_ref() != Some(&latest)) {
+                    team.set(Some(latest));
+                }
+            }
+        });
+    };
+    refresh_team();
+    set_interval(refresh_team, TEAM_POLL);
+    // The header does not need the checkpoint; leaving it out keeps the
+    // menu from re-rendering whenever someone saves a Change.
+    let team_badge = Memo::new(move |_| {
+        team.get().map(|mut status| {
+            if let TeamSession::SignedIn { checkpoint, .. } = &mut status.session {
+                *checkpoint = 0;
+            }
+            status
+        })
+    });
+
     Effect::new(move |_| {
         let text = query.get();
         let seq = search_seq.get_value() + 1;
@@ -74,6 +105,7 @@ fn App() -> impl IntoView {
             <header class="topbar">
                 <h1 class="brand">"KiCad Parts"</h1>
                 <CatalogBadge status=status />
+                <TeamBadge team=team_badge set_team=team />
                 <KicadBadge status=status kicad_epoch=kicad_epoch override_input=override_input />
             </header>
             <KicadProblem status=status kicad_epoch=kicad_epoch override_input=override_input />
@@ -96,7 +128,7 @@ fn App() -> impl IntoView {
                     />
                     <ResultList results=results selected=selected />
                 </section>
-                <PartPanel selected=selected kicad_epoch=kicad_epoch />
+                <PartPanel selected=selected kicad_epoch=kicad_epoch team=team />
             </main>
         </div>
     }
@@ -459,41 +491,149 @@ fn ResultList(
 }
 
 #[component]
-fn PartPanel(selected: RwSignal<Option<String>>, kicad_epoch: RwSignal<u32>) -> impl IntoView {
+fn PartPanel(
+    selected: RwSignal<Option<String>>,
+    kicad_epoch: RwSignal<u32>,
+    team: RwSignal<Option<TeamStatus>>,
+) -> impl IntoView {
     let detail = RwSignal::new(None::<Load<Option<PartDetail>>>);
     let symbol = RwSignal::new(Load::<PreviewOutcome>::Loading);
     let footprint = RwSignal::new(Load::<PreviewOutcome>::Loading);
     let seq = StoredValue::new(0u64);
+    let preview_seq = StoredValue::new(0u64);
+    // The team catalog's view of the selected part: None while signed out
+    // or when the team catalog does not have it.
+    let team_part = RwSignal::new(None::<TeamPart>);
+    let team_checked = RwSignal::new(false);
+    let team_seq = StoredValue::new(0u64);
+    let ui = TeamUi::new();
+    // Changes whenever someone saves a Change, or on sign-in and sign-out.
+    let team_checkpoint = Memo::new(move |_| {
+        team.with(
+            |status| match status.as_ref().map(|status| &status.session) {
+                Some(TeamSession::SignedIn { checkpoint, .. }) => Some(*checkpoint),
+                _ => None,
+            },
+        )
+    });
+    // Who is signed in; a different person starts from a clean column.
+    let signed_in_as = Memo::new(move |_| {
+        team.with(
+            |status| match status.as_ref().map(|status| &status.session) {
+                Some(TeamSession::SignedIn { email, .. }) => Some(email.clone()),
+                _ => None,
+            },
+        )
+    });
+    Effect::new(move |previous: Option<Option<String>>| {
+        let now = signed_in_as.get();
+        if previous.is_some_and(|previous| previous != now) {
+            ui.reset();
+        }
+        now
+    });
+    let can_edit = Memo::new(move |_| {
+        team.with(|status| {
+            matches!(
+                status.as_ref().map(|status| &status.session),
+                Some(TeamSession::SignedIn { can_edit: true, .. })
+            )
+        })
+    });
+    // The team catalog's Symbol and Footprint, where they differ from the
+    // CSV catalog's, so the previews show what the team catalog uses.
+    let preview_fields = Memo::new(move |_| {
+        let csv = detail.with(|detail| match detail {
+            Some(Load::Ready(Some(part))) => (part.symbol.clone(), part.footprint.clone()),
+            _ => (None, None),
+        });
+        team_part.with(|part| {
+            let Some(part) = part else {
+                return (None, None);
+            };
+            let differs = |name: &str, csv: &Option<String>| {
+                let team = part
+                    .current
+                    .field(name)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                (team != csv.clone().unwrap_or_default().trim()).then_some(team)
+            };
+            (differs("Symbol", &csv.0), differs("Footprint", &csv.1))
+        })
+    });
 
     Effect::new(move |_| {
-        kicad_epoch.track();
         let Some(ipn) = selected.get() else {
             detail.set(None);
             return;
         };
         let current = seq.get_value() + 1;
         seq.set_value(current);
-        let fresh = move || seq.get_value() == current;
         detail.set(Some(Load::Loading));
+        team_part.set(None);
+        team_checked.set(false);
+        ui.reset();
+        spawn_local(async move {
+            let result = backend::part_detail(&ipn).await;
+            if seq.get_value() == current {
+                detail.set(Some(into_load(result)));
+            }
+        });
+    });
+
+    Effect::new(move |_| {
+        let signed_in = team_checkpoint.get().is_some();
+        let Some(ipn) = selected.get() else {
+            return;
+        };
+        if !signed_in {
+            team_part.set(None);
+            team_checked.set(false);
+            return;
+        }
+        let current = team_seq.get_value() + 1;
+        team_seq.set_value(current);
+        spawn_local(async move {
+            let result = backend::team_part(&ipn).await;
+            if team_seq.get_value() == current && selected.get_untracked().as_deref() == Some(&ipn)
+            {
+                // Keep showing the last good view if a refresh fails.
+                if let Ok(part) = result {
+                    // A revision someone else saved makes an earlier
+                    // "saved" message out of date.
+                    let shown =
+                        team_part.with_untracked(|shown| shown.as_ref().map(|p| p.current.number));
+                    let fetched = part.as_ref().map(|p| p.current.number);
+                    if shown.is_some() && shown != fetched {
+                        ui.notice.set(None);
+                    }
+                    team_part.set(part);
+                }
+                team_checked.set(true);
+            }
+        });
+    });
+
+    Effect::new(move |_| {
+        kicad_epoch.track();
+        let (symbol_field, footprint_field) = preview_fields.get();
+        let Some(ipn) = selected.get() else {
+            return;
+        };
+        let current = preview_seq.get_value() + 1;
+        preview_seq.set_value(current);
         symbol.set(Load::Loading);
         footprint.set(Load::Loading);
-        {
-            let ipn = ipn.clone();
-            spawn_local(async move {
-                let result = backend::part_detail(&ipn).await;
-                if fresh() {
-                    detail.set(Some(into_load(result)));
-                }
-            });
-        }
-        for (kind, target) in [
-            (PreviewKind::Symbol, symbol),
-            (PreviewKind::Footprint, footprint),
+        for (kind, target, field) in [
+            (PreviewKind::Symbol, symbol, symbol_field),
+            (PreviewKind::Footprint, footprint, footprint_field),
         ] {
             let ipn = ipn.clone();
             spawn_local(async move {
-                let result = backend::preview(ipn, kind).await;
-                if fresh() {
+                let result = backend::preview(ipn, kind, field).await;
+                if preview_seq.get_value() == current {
                     target.set(into_load(result));
                 }
             });
@@ -523,7 +663,16 @@ fn PartPanel(selected: RwSignal<Option<String>>, kicad_epoch: RwSignal<u32>) -> 
                 }
                 .into_any(),
                 Some(Load::Ready(Some(part))) => view! {
-                    <PartView part=part symbol=symbol footprint=footprint />
+                    <PartView
+                        part=part
+                        symbol=symbol
+                        footprint=footprint
+                        team_part=team_part
+                        team_checked=team_checked
+                        signed_in=Signal::derive(move || team_checkpoint.get().is_some())
+                        can_edit=can_edit
+                        ui=ui
+                    />
                 }
                 .into_any(),
             }}
@@ -532,54 +681,86 @@ fn PartPanel(selected: RwSignal<Option<String>>, kicad_epoch: RwSignal<u32>) -> 
 }
 
 #[component]
+#[allow(clippy::too_many_arguments)]
 fn PartView(
     part: PartDetail,
     symbol: RwSignal<Load<PreviewOutcome>>,
     footprint: RwSignal<Load<PreviewOutcome>>,
+    team_part: RwSignal<Option<TeamPart>>,
+    team_checked: RwSignal<bool>,
+    signed_in: Signal<bool>,
+    can_edit: Memo<bool>,
+    ui: TeamUi,
 ) -> impl IntoView {
+    let in_team = Memo::new(move |_| team_part.with(Option::is_some));
     let summary = part.summary.clone();
-    let heading = if summary.mpn.is_empty() {
-        summary.ipn.clone()
-    } else {
-        summary.mpn.clone()
+    // The header: from the team catalog's current revision when it has the
+    // part, otherwise from the CSV catalog.
+    let header = move || {
+        let team = team_part.get();
+        let field = |name: &str| {
+            team.as_ref()
+                .and_then(|part| part.current.field(name).map(str::to_owned))
+        };
+        let main = team
+            .as_ref()
+            .and_then(|part| part.current.manufacturer_parts.first().cloned());
+        let (mpn, manufacturer) = match (&team, main) {
+            (Some(_), Some(main)) => (main.mpn, main.manufacturer),
+            (Some(_), None) => (String::new(), String::new()),
+            (None, _) => (summary.mpn.clone(), summary.manufacturer.clone()),
+        };
+        let heading = if mpn.is_empty() {
+            summary.ipn.clone()
+        } else {
+            mpn
+        };
+        let description = field("Description").unwrap_or_else(|| summary.description.clone());
+        let value = field("Value").unwrap_or_else(|| summary.value.clone());
+        // The IPN prefix is the letters before the first dash, such as `RES`.
+        let ipn_prefix = summary
+            .ipn
+            .split_once('-')
+            .map(|(prefix, _)| prefix.to_owned())
+            .unwrap_or_default();
+        let source = match &team {
+            Some(part) => format!("Team catalog, revision {}", part.current.number),
+            None => summary.csv_file.clone(),
+        };
+        let facts: Vec<(&str, String)> = [
+            ("IPN", summary.ipn.clone()),
+            ("Manufacturer", manufacturer),
+            ("Value", value),
+            ("IPN prefix", ipn_prefix),
+            ("Source", source),
+        ]
+        .into_iter()
+        .filter(|(_, value)| !value.is_empty())
+        .collect();
+        view! {
+            <h2 id="part-title">{heading}</h2>
+            <p class="part-description">{description}</p>
+            <dl class="facts">
+                {facts
+                    .into_iter()
+                    .map(|(name, value)| view! {
+                        <div class="fact">
+                            <dt>{name}</dt>
+                            <dd>{value}</dd>
+                        </div>
+                    })
+                    .collect_view()}
+            </dl>
+        }
     };
-    // The IPN prefix is the letters before the first dash, such as `RES`.
-    let ipn_prefix = summary
-        .ipn
-        .split_once('-')
-        .map(|(prefix, _)| prefix.to_owned())
-        .unwrap_or_default();
-    let facts: Vec<(&str, String)> = [
-        ("IPN", summary.ipn.clone()),
-        ("Manufacturer", summary.manufacturer.clone()),
-        ("Value", summary.value.clone()),
-        ("IPN prefix", ipn_prefix),
-        ("Source", summary.csv_file.clone()),
-    ]
-    .into_iter()
-    .filter(|(_, value)| !value.is_empty())
-    .collect();
-    let field_count = part.fields.len();
+    let fields = part.fields.clone();
+    let field_count = fields.len();
     // Previews stack on the left and every catalog field stays visible on
     // the right, so a typical part needs no scrolling.
     view! {
         <div class="part-view">
-            <header class="part-header">
-                <h2 id="part-title">{heading}</h2>
-                <p class="part-description">{summary.description.clone()}</p>
-                <dl class="facts">
-                    {facts
-                        .into_iter()
-                        .map(|(name, value)| view! {
-                            <div class="fact">
-                                <dt>{name}</dt>
-                                <dd>{value}</dd>
-                            </div>
-                        })
-                        .collect_view()}
-                </dl>
-            </header>
-            <div class="part-body">
+            <header class="part-header">{header}</header>
+            <div class="part-body" class:team=move || in_team.get()>
                 // Each column scrolls on its own when a part needs more room,
                 // so both are focusable for keyboard scrolling.
                 <div class="part-previews" role="region" aria-label="Symbol and footprint" tabindex="0">
@@ -587,30 +768,45 @@ fn PartView(
                     <PreviewSection kind=PreviewKind::Footprint state=footprint />
                 </div>
                 <section class="part-fields" aria-labelledby="fields-heading" tabindex="0">
-                    <h3 id="fields-heading">{format!("Catalog fields ({field_count})")}</h3>
-                    <table aria-labelledby="fields-heading">
-                        <thead>
-                            <tr><th scope="col">"Field"</th><th scope="col">"Value"</th></tr>
-                        </thead>
-                        <tbody>
-                            {part
-                                .fields
-                                .into_iter()
-                                .map(|field| {
-                                    // Long URLs stay on one line; hovering shows all of it.
-                                    let is_url = field.value.starts_with("http://")
-                                        || field.value.starts_with("https://");
-                                    let title = is_url.then(|| field.value.clone());
-                                    view! {
-                                        <tr>
-                                            <th scope="row">{field.name}</th>
-                                            <td class:field-url=is_url title=title>{field.value}</td>
-                                        </tr>
-                                    }
-                                })
-                                .collect_view()}
-                        </tbody>
-                    </table>
+                    {move || {
+                        if in_team.get() {
+                            return view! {
+                                <TeamColumn part=team_part can_edit=can_edit.get_untracked() ui=ui />
+                            }
+                            .into_any();
+                        }
+                        let fields = fields.clone();
+                        let not_in_team = signed_in.get() && team_checked.get();
+                        view! {
+                            <h3 id="fields-heading">{format!("Catalog fields ({field_count})")}</h3>
+                            {not_in_team.then(|| view! {
+                                <p class="hint">"This part is not in the team catalog yet, so it has no history."</p>
+                            })}
+                            <table aria-labelledby="fields-heading">
+                                <thead>
+                                    <tr><th scope="col">"Field"</th><th scope="col">"Value"</th></tr>
+                                </thead>
+                                <tbody>
+                                    {fields
+                                        .into_iter()
+                                        .map(|field| {
+                                            // Long URLs stay on one line; hovering shows all of it.
+                                            let is_url = field.value.starts_with("http://")
+                                                || field.value.starts_with("https://");
+                                            let title = is_url.then(|| field.value.clone());
+                                            view! {
+                                                <tr>
+                                                    <th scope="row">{field.name}</th>
+                                                    <td class:field-url=is_url title=title>{field.value}</td>
+                                                </tr>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </tbody>
+                            </table>
+                        }
+                        .into_any()
+                    }}
                 </section>
             </div>
         </div>

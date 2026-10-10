@@ -1,8 +1,9 @@
 //! Calls into the Tauri shell. Payload shapes come from `desktop-contract`.
 
 use desktop_contract::{
-    AppStatus, PartDetail, PreviewKind, PreviewOutcome, PreviewRequest, SearchRequest,
-    SearchResponse, command,
+    AppStatus, PartDetail, PreviewKind, PreviewOutcome, PreviewRequest, PublishResult,
+    SearchRequest, SearchResponse, SignInRequest, TeamEditRequest, TeamPart, TeamRestoreRequest,
+    TeamStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -76,12 +77,57 @@ pub async fn part_detail(ipn: &str) -> Result<Option<PartDetail>, String> {
     call(command::PART_DETAIL, &DetailArgs { ipn }).await
 }
 
-pub async fn preview(ipn: String, kind: PreviewKind) -> Result<PreviewOutcome, String> {
+/// `field` previews that Symbol or Footprint value instead of the CSV
+/// catalog's.
+pub async fn preview(
+    ipn: String,
+    kind: PreviewKind,
+    field: Option<String>,
+) -> Result<PreviewOutcome, String> {
     call(
         command::PART_PREVIEW,
         &PreviewArgs {
-            request: PreviewRequest { ipn, kind },
+            request: PreviewRequest { ipn, kind, field },
         },
     )
     .await
+}
+
+#[derive(Serialize)]
+struct SignInArgs {
+    request: SignInRequest,
+}
+
+#[derive(Serialize)]
+struct EditArgs {
+    request: TeamEditRequest,
+}
+
+#[derive(Serialize)]
+struct RestoreArgs {
+    request: TeamRestoreRequest,
+}
+
+pub async fn team_status() -> Result<TeamStatus, String> {
+    call(command::TEAM_STATUS, &NoArgs {}).await
+}
+
+pub async fn team_sign_in(request: SignInRequest) -> Result<TeamStatus, String> {
+    call(command::TEAM_SIGN_IN, &SignInArgs { request }).await
+}
+
+pub async fn team_sign_out() -> Result<TeamStatus, String> {
+    call(command::TEAM_SIGN_OUT, &NoArgs {}).await
+}
+
+pub async fn team_part(ipn: &str) -> Result<Option<TeamPart>, String> {
+    call(command::TEAM_PART, &DetailArgs { ipn }).await
+}
+
+pub async fn team_edit(request: TeamEditRequest) -> Result<PublishResult, String> {
+    call(command::TEAM_EDIT, &EditArgs { request }).await
+}
+
+pub async fn team_restore(request: TeamRestoreRequest) -> Result<PublishResult, String> {
+    call(command::TEAM_RESTORE, &RestoreArgs { request }).await
 }

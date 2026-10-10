@@ -588,10 +588,7 @@ fn summary(
     RevisionSummary {
         number: revision.number,
         action: action(kind).to_owned(),
-        actor_name: change
-            .map(|change| change.actor_name.clone())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "someone".to_owned()),
+        actor_name: change.map_or_else(|| "someone".to_owned(), actor_name),
         saved_at: change
             .map(|change| saved_at(&change.created))
             .unwrap_or_default(),
@@ -601,6 +598,19 @@ fn summary(
         restored_from,
         changes,
         restore_changes,
+    }
+}
+
+/// Who made a Change, in words a team member understands. Administrator
+/// accounts (such as the one that runs imports) are not team members, so
+/// their email is not shown.
+fn actor_name(change: &StoredChange) -> String {
+    if change.actor.starts_with("_superusers:") {
+        "an administrator".to_owned()
+    } else if change.actor_name.is_empty() {
+        "someone".to_owned()
+    } else {
+        change.actor_name.clone()
     }
 }
 

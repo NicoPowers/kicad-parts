@@ -634,3 +634,352 @@ a {
 .override-form .override-rejected {
   margin: 0.6rem 0 0;
 }
+
+/* Team catalog: the header menu sits beside the KiCad one. */
+.team-settings {
+  margin-left: auto;
+  position: relative;
+}
+
+.team-settings + .kicad-settings,
+.team-settings + .kicad-badge {
+  margin-left: 0;
+}
+
+.team-settings > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.team-settings > summary::-webkit-details-marker {
+  display: none;
+}
+
+.team-badge-off {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px #c9d4e2;
+  color: var(--brand-ink);
+}
+
+.team-settings-body {
+  width: 26rem;
+}
+
+.team-sign-in label {
+  display: block;
+  font-weight: 600;
+  margin: 0.5rem 0 0.2rem;
+}
+
+.team-sign-in input,
+.edit-form input,
+.edit-form textarea,
+.restore-form textarea {
+  width: 100%;
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+}
+
+.team-sign-in .problem {
+  margin: 0.5rem 0;
+}
+
+.team-sign-in button[type="submit"] {
+  margin-top: 0.5rem;
+}
+
+/* With the team column, the right side gets more room for history and
+   comparisons; the previews stay on the left. */
+.part-body.team {
+  grid-template-columns: minmax(0, 2fr) minmax(24rem, 3fr);
+}
+
+.team-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.team-tab {
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  padding: 0.35rem 0.8rem;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.team-tab[aria-selected="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.team-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.35rem;
+}
+
+.team-toolbar h3 {
+  margin: 0;
+}
+
+.part-fields h4 {
+  margin: 0.2rem 0 0.35rem;
+  font-size: 1rem;
+}
+
+.part-fields h3 + table,
+.part-fields .changes {
+  margin-bottom: 0.9rem;
+}
+
+.part-fields td.blank {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.read-only {
+  margin: 0;
+}
+
+.team-notice {
+  margin: 0 0 0.6rem;
+  padding: 0.45rem 0.75rem;
+  background: var(--ok-soft);
+  color: var(--ok);
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
+.team-problem {
+  margin: 0 0 0.6rem;
+}
+
+.manufacturer-parts {
+  margin: 0 0 0.9rem;
+  padding-left: 1.4rem;
+  font-size: 0.88rem;
+}
+
+/* Edit form */
+.edit-form fieldset {
+  margin: 0 0 0.8rem;
+  padding: 0.5rem 0.75rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.edit-form legend {
+  padding: 0 0.3rem;
+  font-weight: 600;
+}
+
+.edit-row {
+  display: grid;
+  grid-template-columns: 40% minmax(0, 1fr);
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+  font-size: 0.88rem;
+}
+
+.edit-row label {
+  color: var(--muted);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.edit-row input {
+  padding: 0.25rem 0.5rem;
+}
+
+.edit-part {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 0.4rem;
+  margin: 0.35rem 0 0.5rem;
+}
+
+.edit-part input {
+  padding: 0.25rem 0.5rem;
+}
+
+.reason-label {
+  display: block;
+  font-weight: 600;
+  margin: 0.2rem 0 0.25rem;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+/* History */
+.history {
+  list-style: none;
+  margin: 0 0 0.9rem;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.history li + li {
+  border-top: 1px solid #edf0f4;
+}
+
+.history-entry {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.1rem 0.75rem;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-left: 4px solid transparent;
+  border-radius: 0;
+  padding: 0.45rem 0.75rem 0.45rem calc(0.75rem - 4px);
+  background: transparent;
+  font-size: 0.88rem;
+}
+
+.history-entry:hover {
+  background: #f5f8fb;
+}
+
+.history-entry[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+}
+
+.history-title {
+  font-weight: 600;
+}
+
+.history-when {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.history-reason {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-reason:empty {
+  display: none;
+}
+
+.revision {
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
+}
+
+.revision > p {
+  margin: 0 0 0.5rem;
+}
+
+.restore-open {
+  margin-top: 0.2rem;
+}
+
+.restore-form {
+  margin-top: 0.6rem;
+  padding: 0.75rem;
+  background: #f5f7fa;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.restore-form p {
+  margin: 0 0 0.5rem;
+}
+
+/* A comparison of two or three versions. Each value keeps its line
+   breaks, so lists of manufacturer parts stay readable. */
+.part-fields .changes td {
+  white-space: pre-line;
+}
+
+.part-fields .changes thead th {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.part-fields .changes td.after {
+  background: var(--ok-soft);
+}
+
+.part-fields .changes td.before {
+  background: var(--danger-soft);
+}
+
+/* Conflict: one alert with both versions and the ways forward. */
+.conflict {
+  margin-bottom: 0.9rem;
+  padding: 0.75rem 1rem;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-line);
+  border-left-width: 6px;
+  border-radius: var(--radius);
+}
+
+.conflict h3 {
+  margin: 0 0 0.35rem;
+}
+
+.conflict p {
+  margin: 0 0 0.6rem;
+}
+
+.conflict .changes {
+  background: var(--panel);
+}
+
+.conflict tr.both-changed th {
+  color: #6b4a00;
+}
+
+/* `hidden` must win over any display rule above. */
+[hidden] {
+  display: none !important;
+}
+
+.team-column table {
+  margin-bottom: 0.9rem;
+}
+
+/* Comparison tables split the width evenly and never break inside words. */
+.part-fields .changes {
+  table-layout: fixed;
+}
+
+.part-fields .changes th,
+.part-fields .changes td {
+  overflow-wrap: break-word;
+}
+
+.part-fields .changes tbody th {
+  width: auto;
+}
+
+/* Save and Cancel stay in reach while the form scrolls. */
+.edit-form .form-actions {
+  position: sticky;
+  bottom: 0;
+  margin-bottom: 0;
+  padding: 0.5rem 0;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}

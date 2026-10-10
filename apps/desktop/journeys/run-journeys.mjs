@@ -3,6 +3,7 @@
 //
 //   npm run journeys                # build, then run on a hidden desktop
 //   npm run journeys -- --skip-build
+//   JOURNEYS_ONLY=06 npm run journeys  # only specs whose names contain 06
 //   npm run journeys -- --visible   # show the app windows (debugging);
 //                                   # JOURNEYS_VISIBLE=1 does the same
 //
@@ -88,6 +89,7 @@ if (!skipBuild) {
   run('trunk', ['build'], path.join(repoRoot, 'apps', 'desktop-ui'));
   run('cargo', ['build', '--locked', '-p', 'kicad-parts-desktop', '--features', 'custom-protocol'], repoRoot);
   run('cargo', ['build', '--locked', '-p', 'fake-kicad-cli'], repoRoot);
+  run('cargo', ['build', '--locked', '-p', 'catalog-import'], repoRoot);
   if (!visible) run('cargo', ['build', '--locked', '-p', 'journey-desktop'], repoRoot);
 }
 if (!fs.existsSync(appBinary)) {
@@ -142,6 +144,8 @@ try {
   const specs = fs
     .readdirSync(path.join(here, 'specs'))
     .filter((name) => name.endsWith('.test.mjs'))
+    // JOURNEYS_ONLY=06 runs only the specs whose names contain it.
+    .filter((name) => !process.env.JOURNEYS_ONLY || name.includes(process.env.JOURNEYS_ONLY))
     .sort()
     .map((name) => path.join(here, 'specs', name));
   const result = spawnSync(

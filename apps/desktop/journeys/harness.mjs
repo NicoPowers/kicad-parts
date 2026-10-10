@@ -3,6 +3,7 @@
 // the preview cache are all real.
 
 import { remote } from 'webdriverio';
+import { spawn } from 'node:child_process';
 import axe from 'axe-core';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -246,4 +247,102 @@ export async function waitForPreview(browser, section, timeout = 60_000) {
       ),
     { timeout, interval: 100, timeoutMsg: `${section} did not finish loading` },
   );
+}
+
+/**
+ * Starts `catalog-import local-team-server --json`: a disposable PocketBase
+ * on 127.0.0.1 with the resistors imported and three accounts. It runs
+ * windowless in a kill-on-close job and stops when its input closes, so it
+ * cannot outlive this process.
+ * @returns {Promise<{ url: string, accounts: { name: string, email: string, password: string, canEditCatalog: boolean }[], stop: () => Promise<void> }>}
+ */
+export async function startTeamServer() {
+  const exe = path.join(
+    repoRoot,
+    'target',
+    'debug',
+    process.platform === 'win32' ? 'catalog-import.exe' : 'catalog-import',
+  );
+  assert.ok(fs.existsSync(exe), `build it first: ${exe}`);
+  const child = spawn(exe, ['local-team-server', '--json'], {
+    cwd: repoRoot,
+    stdio: ['pipe', 'pipe', 'inherit'],
+    windowsHide: true,
+  });
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  const line = await new Promise((resolve, reject) => {
+    let buffered = '';
+    const timer = setTimeout(() => reject(new Error('the team server did not start in time')), 180_000);
+    child.stdout.on('data', (chunk) => {
+      buffered += chunk.toString('utf8');
+      const end = buffered.indexOf('\n');
+      if (end >= 0) {
+        clearTimeout(timer);
+        resolve(buffered.slice(0, end));
+      }
+    });
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`the team server exited with ${code}`));
+    });
+  });
+  const info = JSON.parse(line);
+  record({ event: 'team-server', url: info.url, accounts: info.accounts.map((a) => a.email) });
+  return {
+    ...info,
+    async stop() {
+      child.stdin.end();
+      const timeout = new Promise((resolve) => setTimeout(() => resolve('timeout'), 15_000));
+      if ((await Promise.race([exited, timeout])) === 'timeout') child.kill();
+    },
+  };
+}
+
+/** Signs in to the team server as `account`; returns the auth token. */
+export async function teamSignIn(url, account) {
+  const reply = await fetch(`${url}/api/collections/users/auth-with-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identity: account.email, password: account.password }),
+  });
+  assert.equal(reply.status, 200, 'the second person signs in');
+  return (await reply.json()).token;
+}
+
+/**
+ * Publishes an edit of `ipn` as someone else, the way another desktop
+ * would: read the current revision, change fields, POST /api/catalog/edits.
+ * @param {Record<string, string>} values field name to new value
+ */
+export async function editAsSomeoneElse(url, token, ipn, values, reason) {
+  const headers = { Authorization: token, 'Content-Type': 'application/json' };
+  const parts = await fetch(
+    `${url}/api/collections/catalog_parts/records?filter=${encodeURIComponent(`ipn = "${ipn}"`)}`,
+    { headers },
+  ).then((r) => r.json());
+  const part = parts.items[0];
+  const revision = await fetch(
+    `${url}/api/collections/catalog_part_revisions/records/${part.current_revision}`,
+    { headers },
+  ).then((r) => r.json());
+  const details = JSON.parse(revision.snapshot);
+  const fields = details.fields.map((field) =>
+    field.name in values ? { name: field.name, value: values[field.name] } : field,
+  );
+  const reply = await fetch(`${url}/api/catalog/edits`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      correlationId: `journey-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+      reason,
+      ipn,
+      expectedRevision: revision.number,
+      fields,
+      manufacturerParts: details.manufacturer_parts,
+    }),
+  });
+  const body = await reply.json();
+  assert.equal(reply.status, 200, `someone else's edit: ${JSON.stringify(body)}`);
+  record({ event: 'edit-by-someone-else', ipn, revision: body.revision.number, values });
+  return body.revision.number;
 }
