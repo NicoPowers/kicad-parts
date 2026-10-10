@@ -1,4 +1,4 @@
-//! End-to-end use cases over the real legacy catalog and the installed
+//! End-to-end use cases over the real CSV catalog and the installed
 //! KiCad 10, without the desktop window.
 
 use catalog_browser::{BrowserConfig, CatalogBrowser};

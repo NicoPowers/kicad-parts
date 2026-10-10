@@ -7,6 +7,7 @@
 pub mod team;
 
 use base64::Engine;
+use csv_catalog::{CatalogPart, CsvCatalog};
 use desktop_contract::{
     AppStatus, CatalogStatus, Field, KicadStatus, PartDetail, PartSummary, PreviewImage,
     PreviewKind, PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet,
@@ -18,7 +19,6 @@ use kicad_integration::{
     LibraryResolver, Preview, PreviewCache, PreviewError, ResolveError, SUPPORTED_MAJOR,
     SearchLocations, discover, footprint_choices, sha256_hex,
 };
-use legacy_catalog::{CatalogPart, LegacyCatalog};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -59,7 +59,7 @@ struct KicadState {
 
 pub struct CatalogBrowser {
     config: BrowserConfig,
-    catalog: Result<LegacyCatalog, String>,
+    catalog: Result<CsvCatalog, String>,
     previews: PreviewCache,
     kicad: RwLock<KicadState>,
 }
@@ -68,7 +68,7 @@ impl CatalogBrowser {
     /// Loads the catalog and settings and looks for KiCad. Problems become
     /// part of [`AppStatus`] rather than errors, so the UI can explain them.
     pub fn open(config: BrowserConfig) -> Self {
-        let catalog = LegacyCatalog::load(&config.catalog_root).map_err(|e| e.to_string());
+        let catalog = CsvCatalog::load(&config.catalog_root).map_err(|e| e.to_string());
         let (settings, settings_error) = match load_settings(&config.settings_file) {
             Ok(settings) => (settings, None),
             Err(error) => (Settings::default(), Some(error)),

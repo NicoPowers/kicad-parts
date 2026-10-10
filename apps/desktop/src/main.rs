@@ -175,7 +175,7 @@ fn default_catalog_root() -> PathBuf {
         return PathBuf::from(root);
     }
     // Until the canonical catalog exists, development builds browse the
-    // legacy catalog in this repository.
+    // CSV catalog in this repository.
     normalize(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
 }
 

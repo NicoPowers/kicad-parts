@@ -1,4 +1,4 @@
-use legacy_catalog::{CatalogPart, CategorySummary, LegacyCatalog};
+use csv_catalog::{CatalogPart, CategorySummary, CsvCatalog};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -13,8 +13,8 @@ fn repo_root() -> &'static Path {
 }
 
 #[test]
-fn loads_every_legacy_category_and_row() {
-    let catalog = LegacyCatalog::load(repo_root()).expect("legacy catalog loads");
+fn loads_every_csv_catalog_category_and_row() {
+    let catalog = CsvCatalog::load(repo_root()).expect("CSV catalog loads");
     assert_eq!(catalog.categories().len(), 21);
     assert_eq!(catalog.parts().len(), 178);
     let rows: usize = catalog.categories().iter().map(|c| c.rows).sum();
@@ -32,14 +32,14 @@ fn loads_every_legacy_category_and_row() {
 
 #[test]
 fn real_catalog_search_finds_parts_by_mpn_and_description() {
-    let catalog = LegacyCatalog::load(repo_root()).expect("legacy catalog loads");
+    let catalog = CsvCatalog::load(repo_root()).expect("CSV catalog loads");
     let results = catalog.search("RC0603FR-0747RL", 10);
     assert_eq!(results.total, 1);
     assert_eq!(catalog.parts()[results.hits[0]].ipn, "RES-0000-0470");
     assert!(catalog.search("0603", 500).total > 10);
 }
 
-fn synthetic_catalog(rows: usize) -> LegacyCatalog {
+fn synthetic_catalog(rows: usize) -> CsvCatalog {
     let packages = ["0402", "0603", "0805", "1206", "SOT-23", "SOIC-8", "QFN-32"];
     let makers = ["Yageo", "Murata", "TI", "ST", "Vishay", "Nexperia"];
     let parts = (0..rows)
@@ -60,7 +60,7 @@ fn synthetic_catalog(rows: usize) -> LegacyCatalog {
             }
         })
         .collect();
-    LegacyCatalog::from_parts(
+    CsvCatalog::from_parts(
         parts,
         vec![CategorySummary {
             name: "g-syn".into(),

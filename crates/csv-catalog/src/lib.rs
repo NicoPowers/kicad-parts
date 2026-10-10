@@ -1,4 +1,4 @@
-//! Read-only view of the legacy CSV part catalog (`database/g-*.csv`).
+//! Read-only view of the CSV catalog (`database/g-*.csv`).
 //!
 //! The canonical, revisioned catalog belongs to a later bounded context. This
 //! crate only reads the migration input so the desktop shell can browse real
@@ -60,7 +60,7 @@ pub struct CategorySummary {
 
 /// The loaded catalog plus a search index over it.
 #[derive(Debug)]
-pub struct LegacyCatalog {
+pub struct CsvCatalog {
     parts: Vec<CatalogPart>,
     categories: Vec<CategorySummary>,
     index: Vec<SearchKey>,
@@ -77,11 +77,11 @@ struct SearchKey {
 pub struct SearchResults {
     /// Number of rows matching the query, before `limit` is applied.
     pub total: usize,
-    /// Indices into [`LegacyCatalog::parts`], best match first.
+    /// Indices into [`CsvCatalog::parts`], best match first.
     pub hits: Vec<usize>,
 }
 
-impl LegacyCatalog {
+impl CsvCatalog {
     /// Reads every `database/g-*.csv` table under `root`, in file-name order.
     pub fn load(root: &Path) -> Result<Self, CatalogError> {
         let database = root.join("database");
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn exact_and_prefix_matches_rank_before_text_matches() {
-        let catalog = LegacyCatalog::from_parts(
+        let catalog = CsvCatalog::from_parts(
             vec![
                 part("A-1", "X", "mentions abc"),
                 part("A-2", "ABCD", "prefix"),
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn all_terms_must_match_and_limit_keeps_total() {
-        let catalog = LegacyCatalog::from_parts(
+        let catalog = CsvCatalog::from_parts(
             vec![
                 part("R-1", "", "res 10k 0603"),
                 part("R-2", "", "res 10k 0402"),
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn replaced_parts_match_on_their_replacement_values() {
-        let catalog = LegacyCatalog::from_parts(
+        let catalog = CsvCatalog::from_parts(
             vec![part("R-1", "", "res 47"), part("R-2", "", "res 10k")],
             Vec::new(),
         );
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn terms_do_not_match_across_field_boundaries() {
-        let catalog = LegacyCatalog::from_parts(vec![part("AB", "CD", "")], Vec::new());
+        let catalog = CsvCatalog::from_parts(vec![part("AB", "CD", "")], Vec::new());
         assert_eq!(catalog.search("bc", 10).total, 0);
     }
 }

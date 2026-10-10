@@ -10,9 +10,9 @@ description = "Browse the catalog with kicad-cli previews; the use cases behind 
 base64 = "0.22"
 catalog = { path = "../catalog" }
 collaboration = { path = "../collaboration" }
+csv-catalog = { path = "../csv-catalog" }
 desktop-contract = { path = "../desktop-contract" }
 kicad-integration = { path = "../kicad-integration" }
-legacy-catalog = { path = "../legacy-catalog" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
