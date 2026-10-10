@@ -247,6 +247,70 @@ fn routes_every_field_and_binds_exact_cad_items() {
 }
 
 #[test]
+fn an_empty_3d_model_file_is_an_import_problem_and_stays_a_source() {
+    let csv = format!("{HEADER}RES-0000-0470,MPN47,Yageo,47,g-pas:R_US,g-res:R_0603,,\n");
+    let root = fixture(&csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
+    fs::write(root.path().join("3d-models/local.step"), "").unwrap();
+    let import = CsvCatalog::new(root.path()).import("g-res", None).unwrap();
+
+    // The file is a source of the import, with its size and hash...
+    let source = import
+        .sources
+        .iter()
+        .find(|source| source.path == "3d-models/local.step")
+        .unwrap();
+    assert_eq!(
+        (
+            source.role.as_str(),
+            source.size,
+            source.byte_sha256.as_str()
+        ),
+        ("3d-model", 0, sha256_hex(b"").as_str())
+    );
+    // ...but no CAD item revision or blob, which PocketBase could not store.
+    assert!(import.blobs.iter().all(|blob| !blob.bytes.is_empty()));
+    assert!(
+        import
+            .cad_item_revisions
+            .iter()
+            .all(|revision| revision.cad_item.kind != CadItemKind::Model3d)
+    );
+    let footprint = import
+        .cad_item_revisions
+        .iter()
+        .find(|revision| revision.cad_item.kind == CadItemKind::Footprint)
+        .unwrap();
+    assert_eq!(
+        footprint.snapshot.model_references[1].target,
+        ModelTarget::Unresolved {
+            status: "empty".into()
+        }
+    );
+    let problem = import
+        .problems
+        .iter()
+        .find(|problem| problem.code == "empty-3d-model-reference")
+        .unwrap();
+    assert_eq!(
+        (
+            problem.path.as_str(),
+            problem.location.as_str(),
+            problem.subject.as_str()
+        ),
+        (
+            "footprints/g-res.pretty/R_0603.kicad_mod",
+            "model=${GITPLM_PARTS}/3d-models/local.step",
+            "g-res:R_0603"
+        )
+    );
+    assert!(
+        problem.message.contains("empty file"),
+        "{}",
+        problem.message
+    );
+}
+
+#[test]
 fn rows_that_cannot_become_parts_are_kept_as_import_problems() {
     let csv = format!(
         "{HEADER}res-0000-0001,M,Y,1,,,,\nRES-0000-0002,M,Y,2,,,,\nRES-0000-0002,M2,Y,2,,,,\n,,,,,,,\nRES-0000-0003,M,Y,3,,,,,extra\nRES-0000-0004,,Y,4,,,,\n"

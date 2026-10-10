@@ -23,8 +23,8 @@
 //! has, must have a `part-not-in-csv-file` import problem.
 
 use catalog::csv_import::{
-    CadItemSource, ColumnRoute, CsvRecord, SubstitutesCsvColumn, parse_csv, route_column,
-    route_substitutes_csv_column,
+    CadItemSource, ColumnRoute, CsvRecord, EMPTY_3D_MODEL, SubstitutesCsvColumn, parse_csv,
+    route_column, route_substitutes_csv_column,
 };
 use catalog::pocketbase::{
     CatalogReadback, ImportRun, StoredAuditEntry, StoredImportProblem, StoredPartRevision,
@@ -44,6 +44,9 @@ pub const PART_DETAILS: &str = "part-details";
 pub const MANUFACTURER_PARTS: &str = "part-details.manufacturer-parts";
 pub const SUPPLIER_DATA: &str = "supplier-data";
 pub const IMPORT_PROBLEM: &str = "import-problem";
+
+/// The SHA-256 of an empty file.
+const EMPTY_FILE_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /// The audit entry action of a CSV import run.
 pub const CSV_IMPORT_ACTION: &str = "catalog.csv-import";
@@ -1435,6 +1438,14 @@ impl<'a> Reporter<'a> {
                             model.reference, stored.scope, model.scope
                         ));
                     }
+                    let oracle_sha = model.asset_path.as_ref().and_then(|path| {
+                        oracle
+                            .assets
+                            .models_3d
+                            .iter()
+                            .find(|file| &file.path == path)
+                            .map(|file| file.byte_sha256.clone())
+                    });
                     match (&stored.target, model.status.as_str()) {
                         (
                             ModelTarget::CadItemRevision {
@@ -1443,14 +1454,6 @@ impl<'a> Reporter<'a> {
                             },
                             "resolved",
                         ) => {
-                            let oracle_sha = model.asset_path.as_ref().and_then(|path| {
-                                oracle
-                                    .assets
-                                    .models_3d
-                                    .iter()
-                                    .find(|file| &file.path == path)
-                                    .map(|file| file.byte_sha256.clone())
-                            });
                             let mut account = CadItemAccount {
                                 kind: "model-3d".into(),
                                 reference: model.asset_path.clone().unwrap_or_default(),
@@ -1473,25 +1476,19 @@ impl<'a> Reporter<'a> {
                             );
                             format!("cad-item-revision {snapshot_sha256}")
                         }
+                        // The oracle finds the file, but it is empty: the
+                        // Catalog keeps it as an import problem, not a blob.
+                        (ModelTarget::Unresolved { status }, "resolved")
+                            if status == EMPTY_3D_MODEL
+                                && oracle_sha.as_deref() == Some(EMPTY_FILE_SHA256) =>
+                        {
+                            self.expect_model_problem(status, model, explained);
+                            "empty file + import problem".to_owned()
+                        }
                         (ModelTarget::Unresolved { status }, oracle_status)
                             if status == oracle_status =>
                         {
-                            let code = format!("{status}-3d-model-reference");
-                            let location = format!("model={}", model.reference);
-                            match readback.problems.iter().find(|problem| {
-                                self.in_run(problem)
-                                    && problem.code == code
-                                    && problem.path == model.source_footprint
-                                    && problem.location == location
-                            }) {
-                                Some(problem) => {
-                                    explained.insert(problem.id.clone());
-                                }
-                                None => self.problem(format!(
-                                    "no import problem {code} for {location} in {}",
-                                    model.source_footprint
-                                )),
-                            }
+                            self.expect_model_problem(status, model, explained);
                             format!("unresolved ({status}) + import problem")
                         }
                         (target, status) => {
@@ -1513,6 +1510,33 @@ impl<'a> Reporter<'a> {
             });
         }
         accounts
+    }
+
+    /// The latest import run must have found a `<status>-3d-model-reference`
+    /// import problem for `model`.
+    fn expect_model_problem(
+        &mut self,
+        status: &str,
+        model: &legacy_import_fixture::ModelReference,
+        explained: &mut BTreeSet<String>,
+    ) {
+        let readback = self.readback;
+        let code = format!("{status}-3d-model-reference");
+        let location = format!("model={}", model.reference);
+        match readback.problems.iter().find(|problem| {
+            self.in_run(problem)
+                && problem.code == code
+                && problem.path == model.source_footprint
+                && problem.location == location
+        }) {
+            Some(problem) => {
+                explained.insert(problem.id.clone());
+            }
+            None => self.problem(format!(
+                "no import problem {code} for {location} in {}",
+                model.source_footprint
+            )),
+        }
     }
 
     /// Every oracle diagnostic about this CSV file's CAD must be stored as an

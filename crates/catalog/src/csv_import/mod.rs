@@ -48,6 +48,9 @@ pub const SOURCE_SCHEMA: &str = "kicad-parts/source/1";
 pub const SUBSTITUTES_PATH: &str = "database/substitutes.csv";
 /// The `source` of everything this module produces.
 pub const CSV_CATALOG_SOURCE: &str = "csv-catalog";
+/// The status of a 3D model reference whose file is empty. Its import
+/// problem is `empty-3d-model-reference`.
+pub const EMPTY_3D_MODEL: &str = "empty";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportError(pub String);
@@ -998,15 +1001,23 @@ impl<'a> Planner<'a> {
                 },
             };
             if let ModelTarget::Unresolved { status } = &target {
+                let message = if status == EMPTY_3D_MODEL {
+                    format!(
+                        "3D model reference `{model}` names an empty file ({}); the file is kept as a source of this import",
+                        classified.scope
+                    )
+                } else {
+                    format!(
+                        "3D model reference `{model}` is {status} ({})",
+                        classified.scope
+                    )
+                };
                 self.record_problem(ImportProblem::new(
                     &format!("{status}-3d-model-reference"),
                     reference,
                     &path,
                     &format!("model={model}"),
-                    format!(
-                        "3D model reference `{model}` is {status} ({})",
-                        classified.scope
-                    ),
+                    message,
                     json!({ "footprint": reference, "reference": model, "scope": classified.scope }),
                 ));
             }
@@ -1034,6 +1045,15 @@ impl<'a> Planner<'a> {
             return Ok(outcome.clone());
         }
         let (bytes, file_sha) = self.read_source("3d-model", path)?;
+        if bytes.is_empty() {
+            // An empty file is no 3D model, and PocketBase cannot store an
+            // empty blob. The file stays a source of the import, and the
+            // footprint's reference to it becomes an import problem.
+            let outcome = CadItemOutcome::Unresolved(EMPTY_3D_MODEL.into());
+            self.cad_items
+                .insert((CadItemKind::Model3d, path.to_owned()), outcome.clone());
+            return Ok(outcome);
+        }
         let outcome = self.cad_item_revision(
             CadItemKind::Model3d,
             path,

@@ -116,3 +116,105 @@ fn every_real_3d_model_imports_in_one_request_per_csv_file() {
         "the slowest import request took {slowest:?}"
     );
 }
+
+/// Copies the CSV catalog trees the oracle reads into `target`.
+fn copy_catalog(target: &Path) {
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let destination = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &destination);
+            } else {
+                fs::copy(entry.path(), destination).unwrap();
+            }
+        }
+    }
+    for tree in ["database", "symbols", "footprints", "3d-models"] {
+        copy_tree(&repository().join(tree), &target.join(tree));
+    }
+}
+
+/// Imports `csv_file` from `root` into a new PocketBase and reads every
+/// Catalog record back.
+fn import_one(root: &Path, csv_file: &str) -> catalog::pocketbase::CatalogReadback {
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
+    let import = CsvCatalog::new(root).import(csv_file, None).unwrap();
+    let reply = submit_import(
+        &admin,
+        &ImportCommand::new(&import, &format!("Import {csv_file}")),
+    )
+    .unwrap();
+    assert!(
+        matches!(reply.outcome, ImportOutcome::Applied { .. }),
+        "{csv_file}: {}",
+        reply.body
+    );
+    let stored = read_back(&admin).unwrap();
+    server.stop();
+    stored
+}
+
+/// The import run of `csv_file` that `stored` records last.
+fn latest_run(
+    stored: &catalog::pocketbase::CatalogReadback,
+    csv_file: &str,
+) -> catalog::pocketbase::ImportRun {
+    stored
+        .audit_entries
+        .iter()
+        .filter(|entry| entry.csv_file == csv_file && entry.csv_import_number > 0)
+        .max_by_key(|entry| entry.csv_import_number)
+        .and_then(|entry| entry.import_run())
+        .unwrap()
+}
+
+#[test]
+fn an_empty_3d_model_file_becomes_an_import_problem() {
+    // An empty file used to fail the whole import with 400, because
+    // PocketBase cannot store an empty blob. A temp copy empties the model
+    // that g-cpd's diode footprint uses; 3d-models/ itself is never edited.
+    let copy = tempfile::tempdir().unwrap();
+    copy_catalog(copy.path());
+    let model = "3d-models/D_SOD-923.step";
+    fs::write(copy.path().join(model), "").unwrap();
+    let oracle = legacy_import_fixture::build_manifest(copy.path()).unwrap();
+
+    let stored = import_one(copy.path(), "g-cpd");
+    let report = catalog_import::report(&oracle, "g-cpd", &stored, copy.path());
+    assert!(
+        report.is_lossless(),
+        "{}",
+        serde_json::to_string_pretty(&report.summary()).unwrap()
+    );
+    // The import run keeps the empty file as a source...
+    let file = latest_run(&stored, "g-cpd").file(model).cloned().unwrap();
+    assert_eq!((file.role.as_str(), file.size), ("3d-model", 0));
+    assert_eq!(file.byte_sha256, sha256_hex(b""));
+    // ...and the footprint's reference to it is an import problem, not a
+    // CAD item.
+    let problem = stored
+        .problems
+        .iter()
+        .find(|problem| problem.code == "empty-3d-model-reference")
+        .unwrap();
+    assert!(
+        problem.location.ends_with("/D_SOD-923.step"),
+        "{}",
+        problem.location
+    );
+    assert!(
+        stored
+            .cad_items
+            .iter()
+            .all(|cad_item| cad_item.key != model)
+    );
+    assert!(
+        report
+            .model_references
+            .iter()
+            .any(|account| account.stored == "empty file + import problem")
+    );
+}
