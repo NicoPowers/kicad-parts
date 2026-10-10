@@ -207,7 +207,7 @@ pub enum PreviewProblemReason {
     /// The team catalog's stored revision needs a sign-in to read.
     TeamSignInNeeded,
     /// A newer selection replaced the request before its export started.
-    Superseded,
+    Replaced,
     /// KiCad is missing or unsupported; see [`AppStatus::kicad`].
     KicadUnavailable,
     /// kicad-cli ran and failed.

@@ -650,15 +650,32 @@ fn PartPanel(
                 selection: Some(this_selection),
             };
             spawn_local(async move {
-                let result = backend::preview(request).await;
+                let replaced = |result: &Result<PreviewOutcome, String>| {
+                    matches!(
+                        result,
+                        Ok(PreviewOutcome::Problem(problem))
+                            if problem.reason == PreviewProblemReason::Replaced
+                    )
+                };
+                let mut result = backend::preview(request.clone()).await;
                 // Only the newest selection's answer is shown, even if an
                 // older export finishes later.
-                let superseded = matches!(
-                    &result,
-                    Ok(PreviewOutcome::Problem(problem))
-                        if problem.reason == PreviewProblemReason::Superseded
-                );
-                if preview_seq.get_value() == current && !superseded {
+                if preview_seq.get_value() != current {
+                    return;
+                }
+                // The backend knows a newer selection number than this one
+                // (for example after the clock moved back), yet this is
+                // still what the person selected: ask again without a
+                // selection, which is never replaced, rather than loading
+                // forever.
+                if replaced(&result) {
+                    result = backend::preview(PreviewRequest {
+                        selection: None,
+                        ..request
+                    })
+                    .await;
+                }
+                if preview_seq.get_value() == current {
                     target.set(into_load(result));
                 }
             });
@@ -1010,7 +1027,7 @@ fn PreviewProblemView(problem: PreviewProblem) -> impl IntoView {
         PreviewProblemReason::TeamSignInNeeded => {
             (format!("Sign in to see this {noun}"), String::new())
         }
-        PreviewProblemReason::Superseded => {
+        PreviewProblemReason::Replaced => {
             (format!("The {noun} preview was replaced"), String::new())
         }
         PreviewProblemReason::KicadUnavailable => (
@@ -1039,7 +1056,7 @@ fn PreviewProblemView(problem: PreviewProblem) -> impl IntoView {
         PreviewProblemReason::Unassigned
             | PreviewProblemReason::KicadUnavailable
             | PreviewProblemReason::TeamSignInNeeded
-            | PreviewProblemReason::Superseded
+            | PreviewProblemReason::Replaced
     );
     // The headline and reference already say what failed to export.
     let message = (problem.reason != PreviewProblemReason::ExportFailed).then_some(problem.message);

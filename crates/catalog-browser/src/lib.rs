@@ -255,9 +255,6 @@ impl CatalogBrowser {
         request: &PreviewRequest,
         team: Option<&TeamCatalog>,
     ) -> PreviewOutcome {
-        // First, so exports still waiting for older selections are dropped
-        // while this request does slower work.
-        self.previews.note_selection(request.selection);
         let kind = request.kind;
         let install = {
             let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
@@ -316,6 +313,18 @@ impl CatalogBrowser {
                     None,
                     capitalize(&message),
                 );
+            }
+            Err(TeamCadError::Mismatch { reference, why }) => {
+                let note = format!(
+                    "The team catalog's revision of {reference} could not be used because \
+                     {why}. This drawing is from your local library, which may differ from the \
+                     revision this part uses."
+                );
+                let request = PreviewRequest {
+                    field: Some(reference),
+                    ..request.clone()
+                };
+                return self.local_preview(&request, install, Some(note));
             }
             Err(TeamCadError::Unreachable(why)) => {
                 let note = format!(
@@ -586,9 +595,9 @@ fn export_problem(kind: PreviewKind, reference: &str, error: PreviewError) -> Pr
             Some(reference),
             message,
         ),
-        PreviewError::Superseded => problem(
+        PreviewError::Replaced => problem(
             kind,
-            PreviewProblemReason::Superseded,
+            PreviewProblemReason::Replaced,
             Some(reference),
             "A newer selection replaced this preview.".into(),
         ),

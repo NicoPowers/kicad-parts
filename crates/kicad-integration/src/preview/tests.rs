@@ -163,6 +163,18 @@ impl Fixture {
         }
     }
 
+    fn wait_until_joined(&self, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.cache.queue.joins() < count {
+            assert!(
+                Instant::now() < deadline,
+                "only {} joined",
+                self.cache.queue.joins()
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     /// Requests `name` for `selection` on its own thread.
     fn request(
         &self,
@@ -179,8 +191,8 @@ fn requests_for_the_same_item_share_one_export() {
     let fixture = fixture(false);
     let requests: Vec<_> = (0..6).map(|_| fixture.request("R", None)).collect();
     fixture.fake.wait_until_started(1);
-    // Give the other five time to arrive and wait on the first.
-    thread::sleep(Duration::from_millis(100));
+    // All six have joined: one runs the export, five wait on it.
+    fixture.wait_until_joined(6);
     fixture.fake.open_gate();
     let previews: Vec<Preview> = requests
         .into_iter()
@@ -224,14 +236,14 @@ fn waiting_exports_for_an_older_selection_are_dropped() {
         .collect();
     fixture.fake.wait_until_started(MAX_RUNNING);
     let stale = fixture.request("Stale", Some(1));
-    // A request without a selection is never superseded.
+    // A request without a selection is never replaced.
     let unselected = fixture.request("Unselected", None);
-    thread::sleep(Duration::from_millis(50));
+    fixture.wait_until_joined(MAX_RUNNING + 2);
 
     // The person selects another part. The waiting export is dropped at
     // once, before any turn frees up.
     let newer = fixture.request("Newer", Some(2));
-    assert_eq!(stale.join().unwrap(), Err(PreviewError::Superseded));
+    assert_eq!(stale.join().unwrap(), Err(PreviewError::Replaced));
 
     fixture.fake.open_gate();
     // Exports that had started finish and are cached.
@@ -262,9 +274,12 @@ fn a_newer_selection_waiting_for_the_same_item_keeps_its_export() {
     // Two parts share the symbol `Shared`: selection 1 queues it, then the
     // person selects the other part, which joins the same export.
     let older = fixture.request("Shared", Some(1));
-    thread::sleep(Duration::from_millis(50));
+    fixture.wait_until_joined(MAX_RUNNING + 1);
     let newer = fixture.request("Shared", Some(2));
-    thread::sleep(Duration::from_millis(50));
+    // The newer request has joined while the export still waits for a
+    // turn, and selection 2 is now the newest; the export must survive.
+    fixture.wait_until_joined(MAX_RUNNING + 2);
+    assert_eq!(fixture.cache.queue.exports_in_progress(), MAX_RUNNING + 1);
     fixture.fake.open_gate();
     for request in running {
         request.join().unwrap().unwrap();
@@ -354,6 +369,23 @@ fn stored_bytes_that_do_not_match_or_cannot_be_drawn_are_refused() {
     let fixture = fixture(true);
     let item = stored("R_US", ENTRY.as_bytes());
     let cache = &fixture.cache;
+    // A SHA-256 that is not 64 lowercase hex digits never reaches a cache
+    // path, and the bytes are not even fetched.
+    for bad in ["../../evil", "ABCDEF", &"A".repeat(64), &"0".repeat(63)] {
+        let named_badly = StoredItem {
+            blob_sha256: bad.to_owned(),
+            ..item.clone()
+        };
+        let fetch = || -> Result<Vec<u8>, String> { panic!("fetched bytes for {bad}") };
+        assert!(matches!(
+            cache.stored_symbol(&fixture.kicad, &named_badly, fetch, None),
+            Err(PreviewError::StoredBytes(message)) if message.contains("64 lowercase hex digits")
+        ));
+        assert!(matches!(
+            cache.stored_footprint(&fixture.kicad, &named_badly, fetch, None),
+            Err(PreviewError::StoredBytes(_))
+        ));
+    }
     assert!(matches!(
         cache.stored_symbol(&fixture.kicad, &item, || Ok(b"other".to_vec()), None),
         Err(PreviewError::StoredBytes(message)) if message.contains("do not match their SHA-256")

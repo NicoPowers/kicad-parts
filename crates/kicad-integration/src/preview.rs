@@ -9,7 +9,7 @@
 //!
 //! `<kind>` is `sym` or `fp` for a library on disk, keyed by the library's
 //! content SHA-256, and `sym-blob` or `fp-blob` for a CAD item revision's
-//! stored bytes, keyed by the blob's SHA-256. The hash and KiCad version are
+//! stored bytes, keyed by their SHA-256. The hash and KiCad version are
 //! part of every path, so an edited library or a different KiCad never
 //! serves a stale image, and a repeat view never re-runs kicad-cli.
 //!
@@ -17,7 +17,7 @@
 //! crash cannot leave a partial entry; staging folders a crash leaves behind
 //! are swept the next time a cache opens ([`staging`]). Requests for the same
 //! entry share one export, at most [`MAX_RUNNING`] exports run at once, and
-//! waiting exports for a superseded selection are dropped ([`queue`]).
+//! waiting exports for a replaced selection are dropped ([`queue`]).
 //! [`PreviewCache::evict_unused`] removes entries nothing uses any more
 //! ([`eviction`]).
 
@@ -32,7 +32,7 @@ use crate::discovery::{KicadInstall, KicadVersion};
 use crate::library_file::SymbolLibrary;
 use crate::process::{CliOutput, run_kicad_cli};
 use crate::resolver::{LibRef, ResolvedFootprint, ResolvedSymbol};
-use queue::{Queue, Role};
+use queue::{Exporter, Joined, Queue};
 use sha2::{Digest, Sha256};
 use staging::RunFolder;
 use std::collections::{HashMap, HashSet};
@@ -78,7 +78,7 @@ pub struct Preview {
     /// symbol has one), in unit order, or a single footprint image.
     pub images: Vec<PreviewImage>,
     /// The SHA-256 the entry is keyed by: the library's content, or the
-    /// stored blob's bytes.
+    /// stored bytes.
     pub library_sha256: String,
     pub cache: CacheOutcome,
 }
@@ -98,7 +98,7 @@ pub enum PreviewError {
     StoredBytes(String),
     /// A newer selection replaced the one this request was for before its
     /// export started, so the export did not run.
-    Superseded,
+    Replaced,
     Io(String),
 }
 
@@ -109,7 +109,7 @@ impl fmt::Display for PreviewError {
                 command,
                 cli_message,
             } => write!(f, "`{command}` failed: {cli_message}"),
-            Self::Superseded => f.write_str("a newer selection replaced this preview request"),
+            Self::Replaced => f.write_str("a newer selection replaced this preview request"),
             Self::Unexportable(message) | Self::StoredBytes(message) | Self::Io(message) => {
                 f.write_str(message)
             }
@@ -152,7 +152,8 @@ pub struct PreviewCache {
 
 impl PreviewCache {
     /// Opens the cache in `root`, first removing staging folders that
-    /// crashed or killed apps left behind.
+    /// crashed or killed apps left behind, and anything an earlier removal
+    /// left in the trash.
     pub fn new(root: PathBuf) -> Self {
         Self::with_runner(
             root,
@@ -162,6 +163,7 @@ impl PreviewCache {
 
     fn with_runner(root: PathBuf, runner: Runner) -> Self {
         staging::sweep(&root.join("staging"));
+        eviction::empty_trash(&root);
         Self {
             root,
             hashes: Mutex::new(HashMap::new()),
@@ -186,14 +188,6 @@ impl PreviewCache {
     /// more than [`MAX_RUNNING`].
     pub fn peak_running(&self) -> usize {
         self.queue.peak_running()
-    }
-
-    /// Records that a newer selection exists, such as a new click in the
-    /// results list. Exports still waiting for a turn, and wanted only by
-    /// older selections, are dropped. Call it as soon as a request arrives,
-    /// before slower work such as fetching stored bytes.
-    pub fn note_selection(&self, selection: Selection) {
-        self.queue.note_selection(selection);
     }
 
     /// Removes entries for other KiCad versions, themes and cache layouts,
@@ -292,6 +286,7 @@ impl PreviewCache {
     ) -> Result<Preview, PreviewError> {
         let name = &item.lib_ref.item;
         reject_option_like(name)?;
+        check_sha256(item)?;
         let Some(version) = item.format_version.as_deref() else {
             return Err(PreviewError::Unexportable(format!(
                 "The stored revision of {} does not say which KiCad file version it came from, so it cannot be put in a library.",
@@ -330,6 +325,7 @@ impl PreviewCache {
     ) -> Result<Preview, PreviewError> {
         let lib_ref = &item.lib_ref;
         reject_option_like(&lib_ref.item)?;
+        check_sha256(item)?;
         let entry = self.entry_dir(kicad, "fp-blob", &item.blob_sha256, &lib_ref.item);
         let export = Export {
             prepare: |staging: &Path| {
@@ -370,23 +366,24 @@ impl PreviewCache {
         >,
     ) -> Result<Preview, PreviewError> {
         if entry.is_dir() {
+            // A newer selection still drops older selections' waiting work.
+            self.queue.note_selection(selection);
             return self.served(&entry, library_sha256, CacheOutcome::Hit);
         }
-        self.queue.note_selection(selection);
-        let mut leader = match self.queue.join(&entry, selection) {
-            Role::Follower(flight) => {
-                flight.wait()?;
+        let mut exporter = match self.queue.join(&entry, selection) {
+            Joined::Wait(shared) => {
+                shared.wait()?;
                 return self.served(&entry, library_sha256, CacheOutcome::Exported);
             }
-            Role::Leader(leader) => leader,
+            Joined::Export(exporter) => exporter,
         };
         // Another export may have finished between the check and joining.
         if entry.is_dir() {
-            leader.finish(Ok(()));
+            exporter.finish(Ok(()));
             return self.served(&entry, library_sha256, CacheOutcome::Hit);
         }
-        let outcome = self.export_entry(&entry, &mut leader, export);
-        leader.finish(outcome.clone());
+        let outcome = self.export_entry(&entry, &mut exporter, export);
+        exporter.finish(outcome.clone());
         outcome?;
         self.served(&entry, library_sha256, CacheOutcome::Exported)
     }
@@ -396,7 +393,7 @@ impl PreviewCache {
     fn export_entry(
         &self,
         entry: &Path,
-        leader: &mut queue::Leader<'_>,
+        exporter: &mut Exporter<'_>,
         export: Export<
             impl FnOnce(&Path) -> Result<(), PreviewError>,
             impl FnOnce(&Path) -> Result<(), PreviewError>,
@@ -404,8 +401,8 @@ impl PreviewCache {
     ) -> Result<(), PreviewError> {
         let staging = self.staging_folder()?;
         let result = (export.prepare)(&staging).and_then(|()| {
-            let Some(turn) = leader.wait_for_turn() else {
-                return Err(PreviewError::Superseded);
+            let Some(turn) = exporter.wait_for_turn() else {
+                return Err(PreviewError::Replaced);
             };
             let ran = (export.run)(&staging);
             drop(turn);
@@ -591,6 +588,23 @@ struct Export<P, R> {
 /// The SHA-256 of `bytes`, as lowercase hex.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
+}
+
+/// The stored bytes' SHA-256 becomes part of a cache path, so it must be
+/// exactly 64 lowercase hex digits.
+fn check_sha256(item: &StoredItem) -> Result<(), PreviewError> {
+    let sha256 = &item.blob_sha256;
+    if sha256.len() == 64
+        && sha256
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Ok(());
+    }
+    Err(PreviewError::StoredBytes(format!(
+        "the stored revision of {} names its bytes with a SHA-256 that is not 64 lowercase hex digits",
+        item.lib_ref
+    )))
 }
 
 /// Loads a stored item's bytes and checks them against its SHA-256.

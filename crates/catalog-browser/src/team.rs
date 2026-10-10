@@ -20,8 +20,8 @@ use catalog::pocketbase::{
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
-    CadItemDetails, CadReference, CadReferenceRole, CadReferenceTarget, DetailField, PartDetails,
-    compare_details,
+    CadItemDetails, CadItemKind, CadReference, CadReferenceRole, CadReferenceTarget, DetailField,
+    PartDetails, compare_details,
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
@@ -172,6 +172,12 @@ pub enum TeamCadError {
     NotFound(String),
     /// The team server could not be reached or refused the request.
     Unreachable(String),
+    /// The CAD item revision record the server sent is not the one the
+    /// part's details name. `why` finishes the sentence "... because ...".
+    Mismatch {
+        reference: String,
+        why: String,
+    },
 }
 
 impl TeamCatalog {
@@ -456,11 +462,10 @@ impl TeamCatalog {
             });
         };
         let revision = self.cad_item_revision(&client, cad_item, snapshot_sha256)?;
-        let snapshot: CadItemDetails =
-            serde_json::from_str(&revision.snapshot).map_err(|error| {
-                TeamCadError::Unreachable(format!(
-                    "the stored revision of {reference} is unreadable: {error}"
-                ))
+        let snapshot = checked_snapshot(&revision, cad_item, snapshot_sha256, reference, kind)
+            .map_err(|why| TeamCadError::Mismatch {
+                reference: reference.to_owned(),
+                why,
             })?;
         let lib_ref =
             LibRef::parse(reference).map_err(|error| TeamCadError::NotFound(error.to_string()))?;
@@ -571,6 +576,44 @@ impl TeamCatalog {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// The details of a CAD item revision record, once it is shown to be the
+/// revision a part's details name: its snapshot hashes to
+/// `snapshot_sha256`, it belongs to `cad_item`, and it is the right kind
+/// of item, in the format the preview reads, for `reference`. Otherwise
+/// says why not, finishing the sentence "... because ...".
+fn checked_snapshot(
+    revision: &StoredCadItemRevision,
+    cad_item: &str,
+    snapshot_sha256: &str,
+    reference: &str,
+    kind: PreviewKind,
+) -> Result<CadItemDetails, String> {
+    if catalog::sha256_hex(revision.snapshot.as_bytes()) != snapshot_sha256 {
+        return Err("its record does not match its SHA-256".into());
+    }
+    if revision.cad_item != cad_item {
+        return Err("its record belongs to another CAD item".into());
+    }
+    let snapshot: CadItemDetails = serde_json::from_str(&revision.snapshot)
+        .map_err(|_| "its record cannot be read".to_owned())?;
+    let (expected_kind, expected_format) = match kind {
+        PreviewKind::Symbol => (CadItemKind::Symbol, "kicad-symbol-entry"),
+        PreviewKind::Footprint => (CadItemKind::Footprint, "kicad-footprint"),
+    };
+    if snapshot.kind != expected_kind || snapshot.format != expected_format {
+        return Err(format!(
+            "its record is a {} in the {} format, not a {}",
+            snapshot.kind.as_str(),
+            snapshot.format,
+            expected_kind.as_str()
+        ));
+    }
+    if snapshot.key != reference {
+        return Err("its record is for another reference".into());
+    }
+    Ok(snapshot)
 }
 
 /// Revision `number` of `ipn`'s details, from the team server.
@@ -1224,6 +1267,74 @@ mod tests {
         }
         assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30]);
     }
+    #[test]
+    fn stored_revision_records_are_checked_against_the_part_details() {
+        let details = |kind: CadItemKind, format: &str, key: &str| CadItemDetails {
+            schema: "kicad-parts/cad-item-details/1".into(),
+            kind,
+            key: key.into(),
+            format: format.into(),
+            format_version: Some("20241209".into()),
+            blob_sha256: "0".repeat(64),
+            blob_size: 1,
+            model_references: Vec::new(),
+            license: catalog::License::UnknownNeedsReview,
+        };
+        let record = |details: &CadItemDetails| StoredCadItemRevision {
+            id: "r1".into(),
+            cad_item: "item1".into(),
+            number: 1,
+            predecessor: String::new(),
+            change: "c1".into(),
+            blob: "b1".into(),
+            snapshot_sha256: details.sha256(),
+            snapshot: details.canonical_json(),
+            license: "unknown-needs-review".into(),
+            source: String::new(),
+        };
+        let symbol = details(CadItemKind::Symbol, "kicad-symbol-entry", "g-pas:R_US");
+        let good = record(&symbol);
+        let check = |revision: &StoredCadItemRevision, cad_item: &str, kind: PreviewKind| {
+            checked_snapshot(revision, cad_item, &symbol.sha256(), "g-pas:R_US", kind)
+        };
+        assert_eq!(
+            check(&good, "item1", PreviewKind::Symbol),
+            Ok(symbol.clone())
+        );
+
+        // A snapshot changed after it was hashed.
+        let mut tampered = good.clone();
+        tampered.snapshot = tampered.snapshot.replace("R_US", "R_EU");
+        assert_eq!(
+            check(&tampered, "item1", PreviewKind::Symbol),
+            Err("its record does not match its SHA-256".into())
+        );
+        // The right snapshot under another CAD item.
+        assert_eq!(
+            check(&good, "item2", PreviewKind::Symbol),
+            Err("its record belongs to another CAD item".into())
+        );
+        // A symbol asked for as a footprint.
+        assert!(
+            check(&good, "item1", PreviewKind::Footprint)
+                .unwrap_err()
+                .starts_with("its record is a symbol")
+        );
+        // A footprint record whose hash the part's details name for a symbol.
+        let footprint = details(CadItemKind::Footprint, "kicad-footprint", "g-pas:R_US");
+        let wrong_kind = record(&footprint);
+        assert!(
+            checked_snapshot(
+                &wrong_kind,
+                "item1",
+                &footprint.sha256(),
+                "g-pas:R_US",
+                PreviewKind::Symbol
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn a_sent_correlation_id_is_kept_and_checked() {
         assert_eq!(

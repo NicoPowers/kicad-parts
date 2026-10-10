@@ -4,7 +4,7 @@
 //! PocketBase, then change a temporary copy of the catalog's libraries, and
 //! check which drawing each request gets.
 
-use catalog::pocketbase::{ImportCommand, submit_import};
+use catalog::pocketbase::{ImportCommand, read_back, submit_import};
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use catalog_import::services;
@@ -106,6 +106,90 @@ fn request(kind: PreviewKind, team_revision: Option<u32>) -> PreviewRequest {
     }
 }
 
+/// Signs `team` in and waits until it follows changes live.
+fn sign_in_live(team: &TeamCatalog, url: &str, member: &services::Member) {
+    team.sign_in(SignInRequest {
+        server_url: url.to_owned(),
+        email: member.email.clone(),
+        password: member.password.clone(),
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !matches!(
+        team.status().session,
+        TeamSession::SignedIn {
+            live: LiveUpdates::Live,
+            ..
+        }
+    ) {
+        assert!(Instant::now() < deadline, "live updates never connected");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_stored_revision_record_that_does_not_match_its_hash_is_not_drawn() {
+    let root = services::repository_root();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let import = services::plan(&root, "g-res").unwrap();
+    submit_import(&admin, &ImportCommand::new(&import, "Import the resistors")).unwrap();
+    let member = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
+    // Find the stored revision of the R_US symbol, then change its snapshot
+    // in the stopped server's database, keeping the hash the part names.
+    let readback = read_back(&admin).unwrap();
+    let cad_item = readback
+        .cad_items
+        .iter()
+        .find(|item| item.kind == "symbol" && item.key == "g-pas:R_US")
+        .unwrap();
+    let revision = readback
+        .cad_item_revisions
+        .iter()
+        .find(|revision| revision.cad_item == cad_item.id)
+        .unwrap();
+    server.stop();
+    let connection =
+        rusqlite::Connection::open(state.path().join("pb_data").join("data.db")).unwrap();
+    let changed = connection
+        .execute(
+            "UPDATE catalog_cad_item_revisions SET snapshot = ?1 WHERE id = ?2",
+            rusqlite::params![revision.snapshot.replace("R_US", "R_EU"), revision.id],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    drop(connection);
+    let (server, _admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let url = server.url().to_owned();
+
+    let data = tempfile::tempdir().unwrap();
+    let browser = open_browser(&root, data.path());
+    let team = TeamCatalog::open(data.path().join("team.json"), Some(url.clone()), None);
+    sign_in_live(&team, &url, &member);
+    let revision = team.part(IPN).unwrap().unwrap().current.number;
+    let symbol =
+        ready(browser.preview_request(&request(PreviewKind::Symbol, Some(revision)), Some(&team)));
+    assert_eq!(
+        symbol.cad_item_revision, None,
+        "not drawn as the stored revision"
+    );
+    assert_eq!(
+        symbol.note.as_deref(),
+        Some(
+            "The team catalog's revision of g-pas:R_US could not be used because its record \
+             does not match its SHA-256. This drawing is from your local library, which may \
+             differ from the revision this part uses."
+        )
+    );
+    // The footprint's record is untouched and is drawn from its stored bytes.
+    let footprint = ready(browser.preview_request(
+        &request(PreviewKind::Footprint, Some(revision)),
+        Some(&team),
+    ));
+    assert_eq!(footprint.cad_item_revision, Some(1));
+    team.sign_out();
+    server.stop();
+}
+
 #[test]
 fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     let root = services::repository_root();
@@ -133,22 +217,7 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
             other => panic!("expected a sign-in message, got {other:?}"),
         }
     }
-    team.sign_in(SignInRequest {
-        server_url: url.clone(),
-        email: member.email.clone(),
-        password: member.password.clone(),
-    });
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !matches!(
-        team.status().session,
-        TeamSession::SignedIn {
-            live: LiveUpdates::Live,
-            ..
-        }
-    ) {
-        assert!(Instant::now() < deadline, "live updates never connected");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    sign_in_live(&team, &url, &member);
     let revision = team.part(IPN).unwrap().unwrap().current.number;
 
     for (kind, reference) in [
@@ -167,7 +236,7 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
         // the team catalog stored, which are the original library's.
         assert_ne!(drawing(&stored), drawing(&local), "{reference}");
         assert_eq!(drawing(&stored), drawing(&original), "{reference}");
-        // A repeat view comes from the cache, keyed by the blob's SHA-256.
+        // A repeat view comes from the cache, keyed by the stored bytes' SHA-256.
         let again = ready(browser.preview_request(&request(kind, Some(revision)), Some(&team)));
         assert!(again.from_cache);
         assert_eq!(again.library_sha256, stored.library_sha256);

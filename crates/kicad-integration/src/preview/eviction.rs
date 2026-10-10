@@ -11,11 +11,23 @@
 //!
 //! Every removed entry can be exported again, so removing one too early
 //! only costs one export.
+//!
+//! A folder is first renamed into `<root>/trash/`, which is a single step,
+//! and only then deleted. So a delete that stops halfway (a crash, or a file
+//! another program holds open) never leaves a partial entry where the cache
+//! would serve it. Whatever is left in the trash is deleted the next time a
+//! cache opens ([`empty_trash`]).
 
 use super::staging;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+const TRASH: &str = "trash";
+
+/// Keeps trash names distinct within one process.
+static NEXT_TRASH: AtomicU64 = AtomicU64::new(0);
 
 /// How long a library folder may go unused before it is removed.
 pub const UNUSED_FOR: Duration = Duration::from_secs(14 * 24 * 60 * 60);
@@ -35,22 +47,35 @@ pub(super) struct InUse<'a> {
 /// Removes what [`InUse`] does not name and library folders unused for
 /// [`UNUSED_FOR`]. Returns the folders it removed.
 pub(super) fn evict(root: &Path, keep: &InUse<'_>) -> Vec<PathBuf> {
+    let trash = root.join(TRASH);
     let mut removed = Vec::new();
-    remove_children(root, &mut removed, |name, _| {
+    remove_children(root, &trash, &mut removed, |name, _| {
         is_layout_name(name) && name != keep.layout
     });
     let layout = root.join(keep.layout);
-    remove_children(&layout, &mut removed, |name, _| {
+    remove_children(&layout, &trash, &mut removed, |name, _| {
         name.starts_with("kicad-") && name != keep.kicad
     });
     let kicad = layout.join(keep.kicad);
-    remove_children(&kicad, &mut removed, |name, _| {
+    remove_children(&kicad, &trash, &mut removed, |name, _| {
         name.starts_with("theme") && name != keep.theme
     });
-    remove_children(&kicad.join(keep.theme), &mut removed, |_, path| {
+    remove_children(&kicad.join(keep.theme), &trash, &mut removed, |_, path| {
         !used_within(path, UNUSED_FOR)
     });
     removed
+}
+
+/// Deletes whatever an earlier removal left in `<root>/trash/`.
+pub(super) fn empty_trash(root: &Path) {
+    let trash = root.join(TRASH);
+    let Ok(entries) = fs::read_dir(&trash) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let _ = fs::remove_dir_all(entry.path());
+    }
+    let _ = fs::remove_dir(&trash);
 }
 
 /// Removes a preview cache from where an older version of the app kept it:
@@ -58,7 +83,10 @@ pub(super) fn evict(root: &Path, keep: &InUse<'_>) -> Vec<PathBuf> {
 /// if nothing else is in it. Returns the folders it removed.
 pub fn remove_old_cache(old_root: &Path) -> Vec<PathBuf> {
     let mut removed = Vec::new();
-    remove_children(old_root, &mut removed, |name, _| is_layout_name(name));
+    remove_children(old_root, &old_root.join(TRASH), &mut removed, |name, _| {
+        is_layout_name(name)
+    });
+    empty_trash(old_root);
     let staging_root = old_root.join("staging");
     removed.extend(staging::sweep(&staging_root));
     for empty in [&staging_root, old_root] {
@@ -87,8 +115,11 @@ fn used_within(folder: &Path, age: Duration) -> bool {
     !staging::older_than(&checked, age)
 }
 
+/// Moves each folder in `parent` that `should_remove` picks into `trash`,
+/// then deletes it there. A folder that cannot be moved is left whole.
 fn remove_children(
     parent: &Path,
+    trash: &Path,
     removed: &mut Vec<PathBuf>,
     should_remove: impl Fn(&str, &Path) -> bool,
 ) {
@@ -98,10 +129,27 @@ fn remove_children(
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if path.is_dir() && should_remove(&name, &path) && fs::remove_dir_all(&path).is_ok() {
-            removed.push(path);
+        if !path.is_dir() || name == TRASH || !should_remove(&name, &path) {
+            continue;
         }
+        let Some(moved) = move_to_trash(&path, &name, trash) else {
+            continue;
+        };
+        // If this stops halfway, the rest goes when a cache next opens.
+        let _ = fs::remove_dir_all(&moved);
+        removed.push(path);
     }
+}
+
+fn move_to_trash(path: &Path, name: &str, trash: &Path) -> Option<PathBuf> {
+    fs::create_dir_all(trash).ok()?;
+    let target = trash.join(format!(
+        "{}-{}-{name}",
+        std::process::id(),
+        NEXT_TRASH.fetch_add(1, Ordering::SeqCst)
+    ));
+    fs::rename(path, &target).ok()?;
+    Some(target)
 }
 
 #[cfg(test)]
@@ -162,6 +210,52 @@ mod tests {
         assert!(used.exists() && unused_but_marked.exists());
         // Staging folders belong to the startup sweep, not to eviction.
         assert!(staging.exists());
+    }
+
+    #[test]
+    fn left_over_trash_is_emptied() {
+        let root = tempfile::tempdir().unwrap();
+        // A removal that stopped halfway left part of a folder in the trash.
+        let partial = root.path().join("trash/1-0-sym-aaaa/R-0123");
+        fs::create_dir_all(&partial).unwrap();
+        fs::write(partial.join("R_unit1.svg"), "<svg/>").unwrap();
+        empty_trash(root.path());
+        assert!(!root.path().join("trash").exists());
+    }
+
+    /// A folder whose files another program holds open cannot be moved, so
+    /// it stays whole instead of being half deleted.
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_that_cannot_be_moved_is_left_whole() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let unused = root
+            .path()
+            .join("v1/kicad-10.0.4/theme_builtin_default/sym-aaaa");
+        let entry = unused.join("R-0123");
+        fs::create_dir_all(&entry).unwrap();
+        for file in ["R_unit1.svg", "R_unit2.svg"] {
+            fs::write(entry.join(file), "<svg/>").unwrap();
+        }
+        make_older(&unused, UNUSED_FOR * 2);
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(entry.join("R_unit2.svg"))
+            .unwrap();
+        let keep = InUse {
+            layout: "v1",
+            kicad: "kicad-10.0.4",
+            theme: "theme_builtin_default",
+        };
+        let removed = evict(root.path(), &keep);
+        assert!(removed.is_empty(), "{removed:?}");
+        assert!(entry.join("R_unit1.svg").exists() && entry.join("R_unit2.svg").exists());
+        // Once the file is closed, the folder goes as a whole.
+        drop(held);
+        assert_eq!(evict(root.path(), &keep), [unused.clone()]);
+        assert!(!unused.exists());
     }
 
     #[test]
