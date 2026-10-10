@@ -34,10 +34,15 @@ struct LaunchOptions {
     team_server: Option<String>,
     /// `--team-email EMAIL`: the email to suggest at sign-in.
     team_email: Option<String>,
-    /// `--display-scale N` (Windows only): draw N screen pixels per CSS
+    /// `--display-scale N` (Windows only, N from 0.5 to 4): draw N screen pixels per CSS
     /// pixel, whatever the Windows display scaling is. The journeys use 1, so
     /// their screenshots are 1280x800 on every machine.
     display_scale: Option<f64>,
+    /// `--software-rendering` (Windows only, no value): WebView2 draws
+    /// without the GPU. The journeys use it so screenshots are drawn the
+    /// same way even when the GPU sleeps or resets, which changes how text
+    /// and curves are smoothed.
+    software_rendering: bool,
 }
 
 impl LaunchOptions {
@@ -53,6 +58,10 @@ impl LaunchOptions {
                 Some((name, value)) => (name.to_owned(), Some(OsString::from(value))),
                 None => (text.clone(), None),
             };
+            if name == "--software-rendering" && inline.is_none() {
+                options.software_rendering = true;
+                continue;
+            }
             let target = match name.as_str() {
                 "--catalog-root" => Target::CatalogRoot,
                 "--data-dir" => Target::DataDir,
@@ -90,32 +99,54 @@ enum Target {
     DisplayScale,
 }
 
+/// The display scales `--display-scale` accepts: 50% to 400%.
+const DISPLAY_SCALES: std::ops::RangeInclusive<f64> = 0.5..=4.0;
+
 fn parse_scale(text: &str) -> Result<f64, String> {
     text.parse::<f64>()
         .ok()
-        .filter(|scale| scale.is_finite() && *scale > 0.0)
-        .ok_or_else(|| format!("--display-scale needs a number above 0, not {text}"))
+        .filter(|scale| DISPLAY_SCALES.contains(scale))
+        .ok_or_else(|| {
+            format!(
+                "--display-scale needs a number from {} to {}, not {text}",
+                DISPLAY_SCALES.start(),
+                DISPLAY_SCALES.end()
+            )
+        })
 }
 
-/// The browser switch that fixes WebView2's scale. WebView2 reads extra
-/// switches from `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, and the WebDriver
-/// that runs the journeys fills that variable with its own switches, so the
-/// app adds this one to the end instead of replacing them.
-fn with_scale_switch(switches: &str, scale: f64) -> String {
-    let switch = format!("--force-device-scale-factor={scale}");
-    if switches.trim().is_empty() {
-        switch
-    } else {
-        format!("{} {switch}", switches.trim_end())
+/// The browser switches the launch options need: a fixed scale and drawing
+/// without the GPU.
+fn webview_switches(display_scale: Option<f64>, software_rendering: bool) -> Vec<String> {
+    let mut switches = Vec::new();
+    if let Some(scale) = display_scale {
+        switches.push(format!("--force-device-scale-factor={scale}"));
     }
+    if software_rendering {
+        switches.push("--disable-gpu".to_owned());
+    }
+    switches
+}
+
+/// `existing` with `added` at the end. WebView2 reads extra switches from
+/// `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, and the WebDriver that runs the
+/// journeys fills that variable with its own switches, so the app adds to
+/// them instead of replacing them.
+fn with_switches(existing: &str, added: &[String]) -> String {
+    let mut all = existing
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    all.extend(added.iter().cloned());
+    all.join(" ")
 }
 
 const WEBVIEW2_SWITCHES: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
 
-fn fix_webview_scale(scale: f64) {
-    let switches = std::env::var(WEBVIEW2_SWITCHES).unwrap_or_default();
+fn add_webview_switches(added: &[String]) {
+    let existing = std::env::var(WEBVIEW2_SWITCHES).unwrap_or_default();
     // SAFETY: main calls this before Tauri starts, while it is the only thread.
-    unsafe { std::env::set_var(WEBVIEW2_SWITCHES, with_scale_switch(&switches, scale)) };
+    unsafe { std::env::set_var(WEBVIEW2_SWITCHES, with_switches(&existing, added)) };
 }
 
 /// With a fixed WebView scale, Windows display scaling would still enlarge
@@ -291,10 +322,11 @@ fn main() {
             std::process::exit(2);
         }
     };
-    // The fixed scale needs a WebView2 switch, so it is Windows only.
+    // Both options need WebView2 switches, so they are Windows only.
     let display_scale = options.display_scale.filter(|_| cfg!(windows));
-    if let Some(scale) = display_scale {
-        fix_webview_scale(scale);
+    let switches = webview_switches(display_scale, options.software_rendering && cfg!(windows));
+    if !switches.is_empty() {
+        add_webview_switches(&switches);
     }
 
     tauri::Builder::default()
@@ -378,6 +410,7 @@ mod tests {
             "--team-email",
             "a@example.test",
             "--display-scale=1",
+            "--software-rendering",
         ]
         .map(OsString::from);
         let options = LaunchOptions::parse(args).unwrap();
@@ -393,29 +426,42 @@ mod tests {
         );
         assert_eq!(options.team_email.as_deref(), Some("a@example.test"));
         assert_eq!(options.display_scale, Some(1.0));
+        assert!(options.software_rendering);
         assert!(LaunchOptions::parse([OsString::from("--data-dir")]).is_err());
     }
 
     #[test]
-    fn rejects_a_display_scale_that_is_not_above_zero() {
-        for scale in ["0", "-1", "big", "NaN", "inf"] {
+    fn rejects_a_display_scale_outside_half_to_four() {
+        for scale in ["0", "-1", "0.49", "4.01", "100", "big", "NaN", "inf"] {
             let arg = OsString::from(format!("--display-scale={scale}"));
             assert!(LaunchOptions::parse([arg]).is_err(), "{scale}");
         }
         assert_eq!(parse_scale("1.5"), Ok(1.5));
+        assert_eq!(parse_scale("0.5"), Ok(0.5));
+        assert_eq!(parse_scale("4"), Ok(4.0));
+        assert_eq!(
+            parse_scale("9"),
+            Err("--display-scale needs a number from 0.5 to 4, not 9".to_owned())
+        );
     }
 
     #[test]
-    fn the_scale_switch_is_added_after_the_drivers_switches() {
-        assert_eq!(with_scale_switch("", 1.0), "--force-device-scale-factor=1");
+    fn the_switches_are_added_after_the_drivers_switches() {
+        let both = webview_switches(Some(1.0), true);
+        assert_eq!(both, ["--force-device-scale-factor=1", "--disable-gpu"]);
         assert_eq!(
-            with_scale_switch("--remote-debugging-port=0 ", 1.0),
-            "--remote-debugging-port=0 --force-device-scale-factor=1"
+            with_switches("", &both),
+            "--force-device-scale-factor=1 --disable-gpu"
         );
         assert_eq!(
-            with_scale_switch("--a", 1.25),
-            "--a --force-device-scale-factor=1.25"
+            with_switches("--remote-debugging-port=0 ", &both),
+            "--remote-debugging-port=0 --force-device-scale-factor=1 --disable-gpu"
         );
+        assert_eq!(
+            webview_switches(Some(1.25), false),
+            ["--force-device-scale-factor=1.25"]
+        );
+        assert!(webview_switches(None, false).is_empty());
     }
 
     #[test]
