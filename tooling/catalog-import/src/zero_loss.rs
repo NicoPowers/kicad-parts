@@ -1,5 +1,5 @@
 //! The zero-loss report: every source field, substitutes.csv row, CAD reference and
-//! oracle diagnostic of one CSV catalog file, found again in the Catalog
+//! oracle import problem of one CSV catalog file, found again in the Catalog
 //! records read back from PocketBase.
 //!
 //! The expected side is always the oracle manifest, never this crate's own
@@ -145,8 +145,8 @@ pub struct ZeroLossReport {
     pub substitutes_csv_rows: SubstitutesCsvAccount,
     pub cad_items: Vec<CadItemAccount>,
     pub model_references: Vec<ModelAccount>,
-    pub oracle_diagnostics: Vec<ProblemAccount>,
-    /// Stored import problems that no oracle diagnostic or row explains.
+    pub oracle_import_problems: Vec<ProblemAccount>,
+    /// Stored import problems that no oracle import problem or row explains.
     pub other_problems: Vec<String>,
     pub changes: Vec<ChangeAccount>,
     /// Every field, with its oracle and stored values.
@@ -703,8 +703,8 @@ impl<'a> Reporter<'a> {
         );
         let (cad_items, footprint_paths) = self.cad_items(&in_scope, &mut explained);
         let model_references = self.models(&footprint_paths, &mut explained);
-        let oracle_diagnostics =
-            self.oracle_diagnostics(&footprint_paths, &cad_items, &mut explained);
+        let oracle_import_problems =
+            self.oracle_import_problems(&footprint_paths, &cad_items, &mut explained);
         // Every import problem belongs to the audit entry of the run that
         // first found it.
         for problem in &readback.problems {
@@ -767,7 +767,7 @@ impl<'a> Reporter<'a> {
             substitutes_csv_rows,
             cad_items,
             model_references,
-            oracle_diagnostics,
+            oracle_import_problems,
             other_problems,
             changes,
             field_accounts: fields.accounts,
@@ -794,7 +794,7 @@ impl<'a> Reporter<'a> {
             substitutes_csv_rows: SubstitutesCsvAccount::default(),
             cad_items: vec![],
             model_references: vec![],
-            oracle_diagnostics: vec![],
+            oracle_import_problems: vec![],
             other_problems: vec![],
             changes,
             field_accounts: vec![],
@@ -1718,10 +1718,10 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    /// Every oracle diagnostic about this CSV file's CAD must be stored as an
+    /// Every oracle import problem about this CSV file's CAD must be stored as an
     /// import problem with the same code and location (and, for 3D
     /// models, the same footprint path and message).
-    fn oracle_diagnostics(
+    fn oracle_import_problems(
         &mut self,
         footprint_paths: &BTreeMap<String, String>,
         cad_items: &[CadItemAccount],
@@ -1741,7 +1741,7 @@ impl<'a> Reporter<'a> {
         let oracle = self.oracle;
         let readback = self.readback;
         let mut accounts = Vec::new();
-        for problem in &oracle.diagnostics {
+        for problem in &oracle.import_problems {
             let model = footprint_paths.contains_key(&problem.path);
             let reference =
                 problem.code.ends_with("-reference") && references.contains(&problem.location);
@@ -1760,7 +1760,7 @@ impl<'a> Reporter<'a> {
                     explained.insert(stored.id.clone());
                 }
                 None => self.problem(format!(
-                    "oracle diagnostic {} {} {} has no import problem",
+                    "oracle import problem {} {} {} is not stored",
                     problem.code, problem.path, problem.location
                 )),
             }

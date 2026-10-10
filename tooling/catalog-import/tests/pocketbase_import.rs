@@ -283,7 +283,7 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     assert!(!report.destinations.contains_key("import-problem"));
     assert_eq!(report.rebuilt_byte_sha256, report.oracle_byte_sha256);
     assert_eq!(report.cad_items.len(), 2);
-    assert_eq!(report.oracle_diagnostics.len(), 1);
+    assert_eq!(report.oracle_import_problems.len(), 1);
     assert!(report.other_problems.is_empty());
     assert_eq!(
         (

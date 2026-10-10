@@ -10686,7 +10686,7 @@
       }
     ]
   },
-  "diagnostics": [
+  "import_problems": [
     {
       "code": "missing-3d-model-reference",
       "path": "footprints/g-cpd.pretty/WQFN20_RUK_TEX-L.kicad_mod",

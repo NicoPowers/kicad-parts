@@ -52,7 +52,7 @@ pub struct Manifest {
     pub sqlite_projection: SqliteManifest,
     pub descriptor: DescriptorManifest,
     pub assets: AssetManifest,
-    pub diagnostics: Vec<Diagnostic>,
+    pub import_problems: Vec<ImportProblem>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -154,7 +154,7 @@ pub struct ModelReference {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
-pub struct Diagnostic {
+pub struct ImportProblem {
     pub code: String,
     pub path: String,
     pub location: String,
@@ -210,13 +210,13 @@ pub fn build_manifest(root: &Path) -> Result<Manifest, FixtureError> {
     )?);
     let descriptor = read_descriptor(root, &generated_sqlite_tables)?;
 
-    let mut diagnostics = Vec::new();
-    compare_projection(&categories, &sqlite_projection, &mut diagnostics);
+    let mut import_problems = Vec::new();
+    compare_projection(&categories, &sqlite_projection, &mut import_problems);
     if generated_sqlite_tables != update_script_tables {
         let generated: BTreeSet<_> = generated_sqlite_tables.iter().cloned().collect();
         let scripted: BTreeSet<_> = update_script_tables.iter().cloned().collect();
         for table in generated.difference(&scripted) {
-            diagnostics.push(Diagnostic {
+            import_problems.push(ImportProblem {
                 code: "update-script-omits-csv-table".into(),
                 path: "database/update_db.sh".into(),
                 location: format!("table[{table}]"),
@@ -224,8 +224,8 @@ pub fn build_manifest(root: &Path) -> Result<Manifest, FixtureError> {
             });
         }
     }
-    let assets = read_assets(root, &categories, &mut diagnostics)?;
-    diagnostics.sort();
+    let assets = read_assets(root, &categories, &mut import_problems)?;
+    import_problems.sort();
 
     Ok(Manifest {
         schema_version: SCHEMA_VERSION,
@@ -239,7 +239,7 @@ pub fn build_manifest(root: &Path) -> Result<Manifest, FixtureError> {
         sqlite_projection,
         descriptor,
         assets,
-        diagnostics,
+        import_problems,
     })
 }
 
@@ -488,7 +488,7 @@ fn quote_sqlite_identifier(value: &str) -> String {
 fn compare_projection(
     categories: &[Category],
     sqlite: &SqliteManifest,
-    diagnostics: &mut Vec<Diagnostic>,
+    import_problems: &mut Vec<ImportProblem>,
 ) {
     let csv_by_table: BTreeMap<_, _> = categories
         .iter()
@@ -503,7 +503,7 @@ fn compare_projection(
         .keys()
         .filter(|table| !sqlite_by_table.contains_key(**table))
     {
-        diagnostics.push(Diagnostic {
+        import_problems.push(ImportProblem {
             code: "sqlite-missing-csv-table".into(),
             path: sqlite.path.clone(),
             location: format!("table[{table}]"),
@@ -514,7 +514,7 @@ fn compare_projection(
         .keys()
         .filter(|table| !csv_by_table.contains_key(**table))
     {
-        diagnostics.push(Diagnostic {
+        import_problems.push(ImportProblem {
             code: "sqlite-table-without-csv".into(),
             path: sqlite.path.clone(),
             location: format!("table[{table}]"),
@@ -528,7 +528,7 @@ fn compare_projection(
             continue;
         };
         if category.document.headers != table.headers {
-            diagnostics.push(Diagnostic {
+            import_problems.push(ImportProblem {
                 code: "sqlite-table-schema-differs-from-csv".into(),
                 path: sqlite.path.clone(),
                 location: format!("table[{name}]"),
@@ -537,7 +537,7 @@ fn compare_projection(
             continue;
         }
         if category.document.rows.len() != table.rows.len() {
-            diagnostics.push(Diagnostic {
+            import_problems.push(ImportProblem {
                 code: "sqlite-table-row-count-differs-from-csv".into(),
                 path: sqlite.path.clone(),
                 location: format!("table[{name}]"),
@@ -577,7 +577,7 @@ fn compare_projection(
                             format!("SQLite value `{value}` does not match CSV value `{csv_value}`")
                         }
                     };
-                    diagnostics.push(Diagnostic {
+                    import_problems.push(ImportProblem {
                         code: "sqlite-cell-differs-from-csv".into(),
                         path: sqlite.path.clone(),
                         location: format!("table[{name}].rows[{row_key}].fields[{header}]"),
@@ -699,15 +699,16 @@ fn canonical_json(value: &Value) -> String {
 fn read_assets(
     root: &Path,
     categories: &[Category],
-    diagnostics: &mut Vec<Diagnostic>,
+    import_problems: &mut Vec<ImportProblem>,
 ) -> Result<AssetManifest, FixtureError> {
     let symbols = asset_files(root, &root.join("symbols"), "kicad_sym")?;
     let footprints = asset_files(root, &root.join("footprints"), "kicad_mod")?;
     let models_3d = asset_files(root, &root.join("3d-models"), "*")?;
-    let symbol_references = catalog_references(root, categories, "Symbol", "symbol", diagnostics)?;
+    let symbol_references =
+        catalog_references(root, categories, "Symbol", "symbol", import_problems)?;
     let footprint_references =
-        catalog_references(root, categories, "Footprint", "footprint", diagnostics)?;
-    let model_references = model_references(root, &footprints, diagnostics)?;
+        catalog_references(root, categories, "Footprint", "footprint", import_problems)?;
+    let model_references = model_references(root, &footprints, import_problems)?;
     Ok(AssetManifest {
         symbols,
         footprints,
@@ -753,7 +754,7 @@ fn catalog_references(
     categories: &[Category],
     column: &str,
     kind: &str,
-    diagnostics: &mut Vec<Diagnostic>,
+    import_problems: &mut Vec<ImportProblem>,
 ) -> Result<Vec<CadReference>, FixtureError> {
     let mut uses: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for category in categories {
@@ -795,7 +796,7 @@ fn catalog_references(
             resolve_footprint(root, namespace, member)?
         };
         if local && status != "resolved" {
-            diagnostics.push(Diagnostic {
+            import_problems.push(ImportProblem {
                 code: format!("{status}-local-{kind}-reference"),
                 path: "database/g-*.csv".into(),
                 location: format!("{column}={reference}"),
@@ -860,7 +861,7 @@ fn resolve_footprint(
 fn model_references(
     root: &Path,
     footprints: &[Asset],
-    diagnostics: &mut Vec<Diagnostic>,
+    import_problems: &mut Vec<ImportProblem>,
 ) -> Result<Vec<ModelReference>, FixtureError> {
     let mut refs = Vec::new();
     for asset in footprints {
@@ -878,7 +879,7 @@ fn model_references(
                 None => (classified.status, None),
             };
             if status != "resolved" {
-                diagnostics.push(Diagnostic {
+                import_problems.push(ImportProblem {
                     code: format!("{status}-3d-model-reference"),
                     path: asset.path.clone(),
                     location: format!("model={reference}"),

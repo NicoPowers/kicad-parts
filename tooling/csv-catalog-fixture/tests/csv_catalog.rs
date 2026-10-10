@@ -80,7 +80,7 @@ fn inventories_substitutes_assets_and_references() {
     );
     assert!(
         manifest
-            .diagnostics
+            .import_problems
             .iter()
             .any(|d| d.code == "update-script-omits-csv-table" && d.location == "table[pcb]")
     );
@@ -161,7 +161,7 @@ fn implementation_has_no_python_or_pyqt_runtime_bridge() {
 }
 
 #[test]
-fn ambiguous_local_symbol_is_retained_as_a_diagnostic() {
+fn ambiguous_local_symbol_is_kept_as_an_import_problem() {
     let source_root = root();
     let temporary = tempfile::tempdir().unwrap();
     copy_inputs(&source_root, temporary.path());
@@ -170,15 +170,15 @@ fn ambiguous_local_symbol_is_retained_as_a_diagnostic() {
     content.push_str("\n(symbol \"OPA990\")\n");
     fs::write(path, content).unwrap();
     let manifest = build_manifest(temporary.path()).unwrap();
-    assert!(manifest.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "ambiguous-local-symbol-reference"
-            && diagnostic.location == "Symbol=g-ana:OPA990"
-            && diagnostic.message.contains("ANA-0002-0002")
+    assert!(manifest.import_problems.iter().any(|problem| {
+        problem.code == "ambiguous-local-symbol-reference"
+            && problem.location == "Symbol=g-ana:OPA990"
+            && problem.message.contains("ANA-0002-0002")
     }));
 }
 
 #[test]
-fn escaped_catalog_and_model_references_are_diagnosed_without_reading_external_sentinel() {
+fn escaped_catalog_and_model_references_are_import_problems_without_reading_external_sentinel() {
     let sandbox = tempfile::tempdir().unwrap();
     let repository = sandbox.path().join("repository");
     fs::create_dir(&repository).unwrap();
@@ -202,25 +202,25 @@ fn escaped_catalog_and_model_references_are_diagnosed_without_reading_external_s
     fs::write(footprint_path, footprint).unwrap();
 
     let manifest = build_manifest(&repository).unwrap();
-    assert!(manifest.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "unsafe-path-local-symbol-reference"
-            && diagnostic.location == "Symbol=g-escape/../../../sentinel:OPA990S"
+    assert!(manifest.import_problems.iter().any(|problem| {
+        problem.code == "unsafe-path-local-symbol-reference"
+            && problem.location == "Symbol=g-escape/../../../sentinel:OPA990S"
     }));
-    assert!(manifest.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "unsafe-path-3d-model-reference"
-            && diagnostic.location == "model=${GITPLM_PARTS}/../sentinel.step"
+    assert!(manifest.import_problems.iter().any(|problem| {
+        problem.code == "unsafe-path-3d-model-reference"
+            && problem.location == "model=${GITPLM_PARTS}/../sentinel.step"
     }));
     assert!(
         manifest
-            .diagnostics
+            .import_problems
             .iter()
-            .all(|diagnostic| !Path::new(&diagnostic.path).is_absolute())
+            .all(|problem| !Path::new(&problem.path).is_absolute())
     );
     assert_eq!(fs::read(&sentinel).unwrap(), [0xff, 0xfe, 0xfd]);
 }
 
 #[test]
-fn sqlite_null_is_distinct_from_csv_blank_and_has_field_diagnostic() {
+fn sqlite_null_is_distinct_from_csv_blank_and_has_field_import_problem() {
     let source_root = root();
     let temporary = tempfile::tempdir().unwrap();
     copy_inputs(&source_root, temporary.path());
@@ -237,10 +237,10 @@ fn sqlite_null_is_distinct_from_csv_blank_and_has_field_diagnostic() {
         before.sqlite_projection.semantic_sha256,
         after.sqlite_projection.semantic_sha256
     );
-    assert!(after.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "sqlite-cell-differs-from-csv"
-            && diagnostic.location == "table[ana].rows[IPN=ANA-0001-0001].fields[DigiKey_Price]"
-            && diagnostic.message == "SQLite NULL does not match CSV empty string"
+    assert!(after.import_problems.iter().any(|problem| {
+        problem.code == "sqlite-cell-differs-from-csv"
+            && problem.location == "table[ana].rows[IPN=ANA-0001-0001].fields[DigiKey_Price]"
+            && problem.message == "SQLite NULL does not match CSV empty string"
     }));
     let ana = after
         .sqlite_projection
