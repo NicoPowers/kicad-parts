@@ -179,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_changed_fields_manufacturer_parts_bom_setting_and_cad_bindings() {
+    fn lists_changed_fields_manufacturer_parts_excluded_from_bom_and_cad_bindings() {
         let before = details("47", &"a".repeat(64), &[("Yageo", "RC0603FR-0747RL")]);
         assert!(compare_details(&before, &before, describe_binding).is_empty());
         let mut after = details(

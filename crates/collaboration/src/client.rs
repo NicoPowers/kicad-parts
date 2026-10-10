@@ -312,6 +312,15 @@ impl PocketBaseClient {
         self.send_json("POST", path, body)
     }
 
+    /// Posts a body that is already JSON text, for a caller that needed the
+    /// text anyway (for example to check its size).
+    pub fn post_json_text(&self, path: &str, body: &str) -> CollabResult<HttpReply> {
+        let request = self
+            .request("POST", path)
+            .set("Content-Type", "application/json");
+        self.send(request, Some(body.as_bytes()))
+    }
+
     pub fn patch_json(&self, path: &str, body: &Value) -> CollabResult<HttpReply> {
         self.send_json("PATCH", path, body)
     }

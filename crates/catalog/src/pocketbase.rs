@@ -19,7 +19,7 @@ pub const CSV_IMPORT_ROUTE: &str = "/api/catalog/csv-imports";
 /// The largest import request the route accepts, in bytes (32 MiB, set by
 /// `IMPORT_BODY_LIMIT` in `catalog_csv_imports.pb.js`). An import is one
 /// request so that it is one transaction; the largest import of the CSV
-/// catalog today (g-con, with a 1.5 MiB 3D model) is about 2.3 MiB.
+/// catalog today (g-con, with a 1.5 MiB 3D model) is 1.8 MiB (1,900,969 bytes).
 pub const IMPORT_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Every Catalog collection, in dependency order.
@@ -406,15 +406,15 @@ pub fn submit_import(
     client: &PocketBaseClient,
     command: &ImportCommand<'_>,
 ) -> CollabResult<ImportReply> {
-    let body = command.body();
-    let size = serde_json::to_vec(&body).map_or(0, |bytes| bytes.len());
+    let body = command.body().to_string();
+    let size = body.len();
     if size > IMPORT_BODY_LIMIT {
         return Err(CollabError::Protocol(format!(
             "the import of {} is {size} bytes, more than the {IMPORT_BODY_LIMIT} bytes the import route accepts in one request; nothing was sent",
             command.import.csv_file
         )));
     }
-    let reply = client.post_json(CSV_IMPORT_ROUTE, &body)?;
+    let reply = client.post_json_text(CSV_IMPORT_ROUTE, &body)?;
     match reply.status {
         200 | 409 | 422 => {
             let outcome: ImportOutcome = serde_json::from_str(&reply.body)

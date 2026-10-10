@@ -92,7 +92,7 @@
 // A request may be at most 32 MiB (IMPORT_BODY_LIMIT in
 // crates/catalog/src/pocketbase.rs, which refuses a bigger one before
 // sending it); PocketBase answers 413 to anything larger. The largest
-// import of the CSV catalog today (g-con) is about 2 MiB.
+// import of the CSV catalog today (g-con) is 1.8 MiB (1,900,969 bytes).
 const IMPORT_BODY_LIMIT = 32 * 1024 * 1024;
 routerAdd(
   "POST",
