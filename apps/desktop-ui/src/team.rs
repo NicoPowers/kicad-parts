@@ -827,6 +827,19 @@ fn changes_table(
     }
 }
 
+/// A save time such as `2026-10-09 18:02 UTC`, marked up as a `<time>`.
+fn saved_at_view(shown: String) -> impl IntoView {
+    let datetime = machine_time(&shown);
+    view! { <time datetime=datetime>{shown}</time> }
+}
+
+/// `2026-10-09 18:02 UTC` as `2026-10-09T18:02Z`, the form `<time
+/// datetime>` needs; `None` for any other text.
+fn machine_time(shown: &str) -> Option<String> {
+    let (date, time) = shown.strip_suffix(" UTC")?.split_once(' ')?;
+    Some(format!("{date}T{time}Z"))
+}
+
 fn revision_title(revision: &RevisionSummary) -> String {
     format!(
         "Revision {} · {} by {}",
@@ -877,7 +890,7 @@ fn HistoryView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                                         {revision_title(revision)}
                                         {(number == current).then_some(" (current)")}
                                     </span>
-                                    <span class="history-when">{revision.saved_at.clone()}</span>
+                                    <span class="history-when">{saved_at_view(revision.saved_at.clone())}</span>
                                     <span class="history-reason">{reason}</span>
                                 </button>
                             </li>
@@ -1007,7 +1020,8 @@ fn RevisionView(
         <section class="revision" aria-labelledby="revision-heading">
             <h4 id="revision-heading">{format!("What changed in revision {number}")}</h4>
             <p class="history-when">
-                {format!("{} by {} on {}", revision.action, revision.actor_name, revision.saved_at)}
+                {format!("{} by {} on ", revision.action, revision.actor_name)}
+                {saved_at_view(revision.saved_at.clone())}
             </p>
             {copies}
             {what_changed}
@@ -1028,15 +1042,16 @@ fn ConflictView(
     } else {
         format!(" (“{}”)", theirs.reason)
     };
-    let summary = match conflict.restore_revision {
+    // The sentence is split around the save time, which is a <time>.
+    let summary_start = format!("{} saved revision {} on ", theirs.actor_name, theirs.number);
+    let summary_end = match conflict.restore_revision {
         None => format!(
-            "{} saved revision {} on {}{reason} after you started editing revision {}. Your changes are not saved yet.",
-            theirs.actor_name, theirs.number, theirs.saved_at, conflict.started_from,
+            "{reason} after you started editing revision {}. Your changes are not saved yet.",
+            conflict.started_from,
         ),
-        Some(restore) => format!(
-            "{} saved revision {} on {}{reason} before your restore of revision {restore}. Nothing was restored.",
-            theirs.actor_name, theirs.number, theirs.saved_at,
-        ),
+        Some(restore) => {
+            format!("{reason} before your restore of revision {restore}. Nothing was restored.")
+        }
     };
     let yours_heading = if conflict.restore_revision.is_some() {
         "Restore would give"
@@ -1113,7 +1128,7 @@ fn ConflictView(
     view! {
         <section class="conflict" role="alert" aria-labelledby="conflict-heading">
             <h3 id="conflict-heading">"Someone else changed this part first"</h3>
-            <p>{summary}</p>
+            <p>{summary_start}{saved_at_view(theirs.saved_at.clone())}{summary_end}</p>
             <table class="changes" aria-label="Your version and theirs">
                 <thead>
                     <tr>
@@ -1148,5 +1163,19 @@ fn ConflictView(
             })}
             {actions}
         </section>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::machine_time;
+
+    #[test]
+    fn save_times_get_a_machine_readable_form() {
+        assert_eq!(
+            machine_time("2026-10-09 18:02 UTC").as_deref(),
+            Some("2026-10-09T18:02Z")
+        );
+        assert_eq!(machine_time("yesterday"), None);
     }
 }

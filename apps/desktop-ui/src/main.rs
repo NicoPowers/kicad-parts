@@ -809,7 +809,18 @@ fn PartView(
                     <PreviewSection kind=PreviewKind::Symbol state=symbol />
                     <PreviewSection kind=PreviewKind::Footprint state=footprint />
                 </div>
-                <section class="part-fields" aria-labelledby="fields-heading" tabindex="0">
+                // The open edit form replaces the details and their heading.
+                <section
+                    class="part-fields"
+                    aria-labelledby=move || {
+                        if in_team.get() && ui.editing.with(Option::is_some) {
+                            "edit-heading"
+                        } else {
+                            "fields-heading"
+                        }
+                    }
+                    tabindex="0"
+                >
                     {move || {
                         if in_team.get() {
                             return view! {
