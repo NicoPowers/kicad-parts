@@ -14,7 +14,7 @@ use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use tauri::{Manager, State};
+use tauri::{Manager, PhysicalSize, State};
 
 type Browser = Arc<CatalogBrowser>;
 type Team = Arc<TeamCatalog>;
@@ -34,6 +34,10 @@ struct LaunchOptions {
     team_server: Option<String>,
     /// `--team-email EMAIL`: the email to suggest at sign-in.
     team_email: Option<String>,
+    /// `--display-scale N` (Windows only): draw N screen pixels per CSS
+    /// pixel, whatever the Windows display scaling is. The journeys use 1, so
+    /// their screenshots are 1280x800 on every machine.
+    display_scale: Option<f64>,
 }
 
 impl LaunchOptions {
@@ -55,6 +59,7 @@ impl LaunchOptions {
                 "--kicad-search-root" => Target::KicadSearchRoot,
                 "--team-server" => Target::TeamServer,
                 "--team-email" => Target::TeamEmail,
+                "--display-scale" => Target::DisplayScale,
                 // WebView and test drivers may add their own arguments.
                 _ => continue,
             };
@@ -69,6 +74,7 @@ impl LaunchOptions {
                 Target::KicadSearchRoot => options.kicad_search_roots.push(PathBuf::from(&value)),
                 Target::TeamServer => options.team_server = Some(text()),
                 Target::TeamEmail => options.team_email = Some(text()),
+                Target::DisplayScale => options.display_scale = Some(parse_scale(&text())?),
             }
         }
         Ok(options)
@@ -81,6 +87,54 @@ enum Target {
     KicadSearchRoot,
     TeamServer,
     TeamEmail,
+    DisplayScale,
+}
+
+fn parse_scale(text: &str) -> Result<f64, String> {
+    text.parse::<f64>()
+        .ok()
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
+        .ok_or_else(|| format!("--display-scale needs a number above 0, not {text}"))
+}
+
+/// The browser switch that fixes WebView2's scale. WebView2 reads extra
+/// switches from `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, and the WebDriver
+/// that runs the journeys fills that variable with its own switches, so the
+/// app adds this one to the end instead of replacing them.
+fn with_scale_switch(switches: &str, scale: f64) -> String {
+    let switch = format!("--force-device-scale-factor={scale}");
+    if switches.trim().is_empty() {
+        switch
+    } else {
+        format!("{} {switch}", switches.trim_end())
+    }
+}
+
+const WEBVIEW2_SWITCHES: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+
+fn fix_webview_scale(scale: f64) {
+    let switches = std::env::var(WEBVIEW2_SWITCHES).unwrap_or_default();
+    // SAFETY: main calls this before Tauri starts, while it is the only thread.
+    unsafe { std::env::set_var(WEBVIEW2_SWITCHES, with_scale_switch(&switches, scale)) };
+}
+
+/// With a fixed WebView scale, Windows display scaling would still enlarge
+/// the window, so give the configured window size in screen pixels.
+fn size_window_in_screen_pixels(app: &tauri::App, scale: f64) -> tauri::Result<()> {
+    let Some(config) = app.config().app.windows.first() else {
+        return Ok(());
+    };
+    let Some(window) = app.get_webview_window(&config.label) else {
+        return Ok(());
+    };
+    let pixels = |css: f64| (css * scale).round() as u32;
+    if let (Some(width), Some(height)) = (config.min_width, config.min_height) {
+        window.set_min_size(Some(PhysicalSize::new(pixels(width), pixels(height))))?;
+    }
+    window.set_size(PhysicalSize::new(
+        pixels(config.width),
+        pixels(config.height),
+    ))
 }
 
 fn default_catalog_root() -> PathBuf {
@@ -237,9 +291,17 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // The fixed scale needs a WebView2 switch, so it is Windows only.
+    let display_scale = options.display_scale.filter(|_| cfg!(windows));
+    if let Some(scale) = display_scale {
+        fix_webview_scale(scale);
+    }
 
     tauri::Builder::default()
         .setup(move |app| {
+            if let Some(scale) = display_scale {
+                size_window_in_screen_pixels(app, scale)?;
+            }
             let (config_dir, cache_dir) = match &options.data_dir {
                 Some(dir) => (dir.join("config"), dir.join("cache")),
                 None => {
@@ -315,6 +377,7 @@ mod tests {
             "--team-server=http://127.0.0.1:8090",
             "--team-email",
             "a@example.test",
+            "--display-scale=1",
         ]
         .map(OsString::from);
         let options = LaunchOptions::parse(args).unwrap();
@@ -329,7 +392,30 @@ mod tests {
             Some("http://127.0.0.1:8090")
         );
         assert_eq!(options.team_email.as_deref(), Some("a@example.test"));
+        assert_eq!(options.display_scale, Some(1.0));
         assert!(LaunchOptions::parse([OsString::from("--data-dir")]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_display_scale_that_is_not_above_zero() {
+        for scale in ["0", "-1", "big", "NaN", "inf"] {
+            let arg = OsString::from(format!("--display-scale={scale}"));
+            assert!(LaunchOptions::parse([arg]).is_err(), "{scale}");
+        }
+        assert_eq!(parse_scale("1.5"), Ok(1.5));
+    }
+
+    #[test]
+    fn the_scale_switch_is_added_after_the_drivers_switches() {
+        assert_eq!(with_scale_switch("", 1.0), "--force-device-scale-factor=1");
+        assert_eq!(
+            with_scale_switch("--remote-debugging-port=0 ", 1.0),
+            "--remote-debugging-port=0 --force-device-scale-factor=1"
+        );
+        assert_eq!(
+            with_scale_switch("--a", 1.25),
+            "--a --force-device-scale-factor=1.25"
+        );
     }
 
     #[test]
