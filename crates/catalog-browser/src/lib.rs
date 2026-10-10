@@ -9,12 +9,14 @@ pub mod team;
 use base64::Engine;
 use desktop_contract::{
     AppStatus, CatalogStatus, Field, KicadStatus, PartDetail, PartSummary, PreviewImage,
-    PreviewKind, PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewSet, SearchResponse,
+    PreviewKind, PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet,
+    SearchResponse,
 };
+use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use kicad_integration::{
-    CacheOutcome, Discovery, DiscoveryOptions, InstallSource, LibraryOrigin, LibraryResolver,
-    PreviewCache, PreviewError, ResolveError, SUPPORTED_MAJOR, SearchLocations, discover,
-    footprint_choices,
+    CacheOutcome, Discovery, DiscoveryOptions, InstallSource, KicadInstall, LibRef, LibraryOrigin,
+    LibraryResolver, Preview, PreviewCache, PreviewError, ResolveError, SUPPORTED_MAJOR,
+    SearchLocations, discover, footprint_choices, sha256_hex,
 };
 use legacy_catalog::{CatalogPart, LegacyCatalog};
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::Instant;
+use team::{StoredCad, TeamCad, TeamCadError, TeamCatalog};
 
 /// Largest page of search results the UI may request.
 pub const MAX_SEARCH_LIMIT: usize = 500;
@@ -31,7 +34,8 @@ pub const MAX_SEARCH_LIMIT: usize = 500;
 pub struct BrowserConfig {
     /// Directory holding `database/`, `symbols/` and `footprints/`.
     pub catalog_root: PathBuf,
-    /// Application cache directory; previews go under `previews/`.
+    /// The app's cache folder, kept apart from WebView2's data; previews go
+    /// under `previews/`.
     pub cache_dir: PathBuf,
     /// JSON file holding user settings such as the kicad-cli override.
     pub settings_file: PathBuf,
@@ -70,8 +74,13 @@ impl CatalogBrowser {
             Err(error) => (Settings::default(), Some(error)),
         };
         let discovery = discover(&discovery_options(&config, &settings));
+        // Opening the cache sweeps staging folders that crashed apps left.
+        let previews = PreviewCache::new(config.cache_dir.join("previews"));
+        if let Discovery::Ready(install) = &discovery {
+            previews.evict_unused(&install.version);
+        }
         Self {
-            previews: PreviewCache::new(config.cache_dir.join("previews")),
+            previews,
             catalog,
             kicad: RwLock::new(KicadState {
                 settings,
@@ -225,75 +234,242 @@ impl CatalogBrowser {
         kind: PreviewKind,
         field: Option<&str>,
     ) -> PreviewOutcome {
-        let problem = |reason, reference: Option<&str>, message: String| {
-            PreviewOutcome::Problem(PreviewProblem {
+        self.preview_request(
+            &PreviewRequest {
+                ipn: ipn.to_owned(),
                 kind,
-                reason,
-                reference: reference.map(str::to_owned),
-                message,
-                command: None,
-                cli_message: None,
-            })
-        };
-        let Some(part) = self.catalog.as_ref().ok().and_then(|c| c.find(ipn)) else {
-            return problem(
-                PreviewProblemReason::UnknownPart,
-                None,
-                format!("Part {ipn} is not in the catalog."),
-            );
-        };
-        let field = match (field, kind) {
-            (Some(field), _) => Some(field.trim()).filter(|field| !field.is_empty()),
-            (None, PreviewKind::Symbol) => part.symbol.as_deref(),
-            (None, PreviewKind::Footprint) => part.footprint.as_deref(),
-        };
-        // Footprint fields may list `;`-separated alternatives; symbol
-        // fields hold exactly one reference.
-        let choices = match (kind, field) {
-            (_, None) => Vec::new(),
-            (PreviewKind::Symbol, Some(field)) => vec![field],
-            (PreviewKind::Footprint, Some(field)) => footprint_choices(field),
-        };
-        let Some((&reference, alternates)) = choices.split_first() else {
-            return problem(
-                PreviewProblemReason::Unassigned,
-                None,
-                format!("{ipn} has no {} assigned in the catalog.", noun(kind)),
-            );
-        };
+                field: field.map(str::to_owned),
+                team_revision: None,
+                selection: None,
+            },
+            None,
+        )
+    }
 
+    /// The preview the UI asked for. With `team_revision`, it is drawn from
+    /// the stored bytes of the exact CAD item revision that revision of the
+    /// part uses, read through `team`; otherwise from the library on this
+    /// computer.
+    pub fn preview_request(
+        &self,
+        request: &PreviewRequest,
+        team: Option<&TeamCatalog>,
+    ) -> PreviewOutcome {
+        // First, so exports still waiting for older selections are dropped
+        // while this request does slower work.
+        self.previews.note_selection(request.selection);
+        let kind = request.kind;
         let install = {
             let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
             match &kicad.discovery {
                 Discovery::Ready(install) => install.clone(),
                 _ => {
                     return problem(
+                        kind,
                         PreviewProblemReason::KicadUnavailable,
-                        Some(reference),
+                        None,
                         "Previews are drawn by KiCad 10's kicad-cli, which is not available."
                             .into(),
                     );
                 }
             }
         };
-        let resolver = LibraryResolver::new(
-            Some(self.config.catalog_root.clone()),
-            install.share_dir.clone(),
-        );
+        match (request.team_revision, team) {
+            (Some(revision), Some(team)) => self.team_preview(request, revision, team, &install),
+            _ => self.local_preview(request, &install, None),
+        }
+    }
+
+    /// How many times kicad-cli has exported a preview in this session.
+    pub fn export_count(&self) -> usize {
+        self.previews.export_count()
+    }
+
+    /// Draws what revision `revision` of the part uses, from the team
+    /// catalog's stored bytes. If they cannot be fetched, draws the local
+    /// library instead and says so.
+    fn team_preview(
+        &self,
+        request: &PreviewRequest,
+        revision: u32,
+        team: &TeamCatalog,
+        install: &KicadInstall,
+    ) -> PreviewOutcome {
+        let kind = request.kind;
+        let cad = match team.cad_for_preview(&request.ipn, revision, kind) {
+            Ok(cad) => cad,
+            Err(TeamCadError::SignedOut) => {
+                return problem(
+                    kind,
+                    PreviewProblemReason::TeamSignInNeeded,
+                    None,
+                    format!(
+                        "Sign in to the team catalog to see the {} this part uses.",
+                        noun(kind)
+                    ),
+                );
+            }
+            Err(TeamCadError::NotFound(message)) => {
+                return problem(
+                    kind,
+                    PreviewProblemReason::Unresolved,
+                    None,
+                    capitalize(&message),
+                );
+            }
+            Err(TeamCadError::Unreachable(message)) => {
+                let note = format!(
+                    "The team catalog could not be reached ({message}), so this is drawn from \
+                     your local library, which may differ from the revision this part uses."
+                );
+                return self.local_preview(request, install, Some(note));
+            }
+        };
+        let stored = match cad {
+            TeamCad::Unassigned => {
+                return problem(
+                    kind,
+                    PreviewProblemReason::Unassigned,
+                    None,
+                    format!(
+                        "{} has no {} assigned in the team catalog.",
+                        request.ipn,
+                        noun(kind)
+                    ),
+                );
+            }
+            TeamCad::Library { reference, .. } => {
+                let request = PreviewRequest {
+                    field: Some(reference),
+                    ..request.clone()
+                };
+                return self.local_preview(&request, install, None);
+            }
+            TeamCad::Stored(stored) => stored,
+        };
+        let load = || team.stored_bytes(&stored);
+        let exported = match kind {
+            PreviewKind::Symbol => {
+                self.previews
+                    .stored_symbol(install, &stored.item, load, request.selection)
+            }
+            PreviewKind::Footprint => {
+                self.previews
+                    .stored_footprint(install, &stored.item, load, request.selection)
+            }
+        };
+        let reference = stored.item.lib_ref.to_string();
+        match exported {
+            Ok(preview) => ready(
+                kind,
+                &reference,
+                &stored.alternates,
+                Drawn {
+                    library_path: String::new(),
+                    from_kicad_bundle: false,
+                    cad_item_revision: Some(stored.number),
+                    note: None,
+                },
+                install,
+                preview,
+            ),
+            Err(PreviewError::StoredBytes(message)) => {
+                let request = PreviewRequest {
+                    field: Some(reference.clone()),
+                    ..request.clone()
+                };
+                let note = self.fallback_note(kind, &stored, install, &message);
+                self.local_preview(&request, install, Some(note))
+            }
+            Err(error) => export_problem(kind, &reference, error),
+        }
+    }
+
+    /// Why a team part is drawn from the local library: its stored bytes
+    /// could not be fetched. Says whether the local copy has the same bytes.
+    fn fallback_note(
+        &self,
+        kind: PreviewKind,
+        stored: &StoredCad,
+        install: &KicadInstall,
+        why: &str,
+    ) -> String {
+        let reference = &stored.item.lib_ref;
+        let local = local_bytes(&self.resolver(install), reference, kind);
+        let comparison = match local {
+            Some(bytes) if sha256_hex(&bytes) == stored.item.blob_sha256 => {
+                "which has the same bytes"
+            }
+            Some(_) => "which differs from it",
+            None => "which may differ from it",
+        };
+        format!(
+            "Revision {} of {reference} could not be fetched from the team catalog ({}), so \
+             this is drawn from your local library, {comparison}.",
+            stored.number,
+            why.trim_end_matches('.')
+        )
+    }
+
+    /// Draws the part's symbol or footprint from the library on this
+    /// computer: `request.field` when given, otherwise the CSV catalog's.
+    fn local_preview(
+        &self,
+        request: &PreviewRequest,
+        install: &KicadInstall,
+        note: Option<String>,
+    ) -> PreviewOutcome {
+        let (ipn, kind) = (request.ipn.as_str(), request.kind);
+        let csv_field = self
+            .catalog
+            .as_ref()
+            .ok()
+            .and_then(|catalog| catalog.find(ipn))
+            .map(|part| match kind {
+                PreviewKind::Symbol => part.symbol.clone(),
+                PreviewKind::Footprint => part.footprint.clone(),
+            });
+        let field = match (&request.field, csv_field) {
+            (Some(field), _) => Some(field.trim().to_owned()).filter(|field| !field.is_empty()),
+            (None, Some(field)) => field,
+            (None, None) => {
+                return problem(
+                    kind,
+                    PreviewProblemReason::UnknownPart,
+                    None,
+                    format!("Part {ipn} is not in the catalog."),
+                );
+            }
+        };
+        // Footprint fields may list `;`-separated alternatives; symbol
+        // fields hold exactly one reference.
+        let choices = match (kind, field.as_deref()) {
+            (_, None) => Vec::new(),
+            (PreviewKind::Symbol, Some(field)) => vec![field],
+            (PreviewKind::Footprint, Some(field)) => footprint_choices(field),
+        };
+        let Some((&reference, alternates)) = choices.split_first() else {
+            return problem(
+                kind,
+                PreviewProblemReason::Unassigned,
+                None,
+                format!("{ipn} has no {} assigned in the catalog.", noun(kind)),
+            );
+        };
+        let alternates: Vec<String> = alternates
+            .iter()
+            .map(|choice| (*choice).to_owned())
+            .collect();
+        let resolver = self.resolver(install);
+        let selection = request.selection;
         let resolved = match kind {
             PreviewKind::Symbol => resolver.symbol(reference).map(|symbol| {
-                let library = symbol.library.clone();
-                let origin = symbol.origin;
-                (self.previews.symbol(&install, &symbol), library, origin)
+                let exported = self.previews.symbol_for(install, &symbol, selection);
+                (exported, symbol.library, symbol.origin)
             }),
             PreviewKind::Footprint => resolver.footprint(reference).map(|footprint| {
-                let library = footprint.library.clone();
-                let origin = footprint.origin;
-                (
-                    self.previews.footprint(&install, &footprint),
-                    library,
-                    origin,
-                )
+                let exported = self.previews.footprint_for(install, &footprint, selection);
+                (exported, footprint.library, footprint.origin)
             }),
         };
         let (exported, library, origin) = match resolved {
@@ -303,55 +479,147 @@ impl CatalogBrowser {
                     ResolveError::Unassigned => PreviewProblemReason::Unassigned,
                     _ => PreviewProblemReason::Unresolved,
                 };
-                return problem(reason, Some(reference), capitalize(&error.to_string()));
+                return problem(
+                    kind,
+                    reason,
+                    Some(reference),
+                    capitalize(&error.to_string()),
+                );
             }
         };
         match exported {
-            Ok(preview) => PreviewOutcome::Ready(PreviewSet {
+            Ok(preview) => ready(
                 kind,
-                reference: reference.to_owned(),
-                alternates: alternates
-                    .iter()
-                    .map(|choice| (*choice).to_owned())
-                    .collect(),
-                library_path: display(&library),
-                from_kicad_bundle: origin == LibraryOrigin::KicadBundled,
-                kicad_version: install.version.to_string(),
-                library_sha256: preview.library_sha256,
-                from_cache: preview.cache == CacheOutcome::Hit,
-                images: preview
-                    .images
-                    .iter()
-                    .map(|image| PreviewImage {
-                        unit: image.unit,
-                        demorgan: image.demorgan,
-                        data_uri: svg_data_uri(&image.svg),
-                    })
-                    .collect(),
-            }),
-            Err(PreviewError::ExportFailed {
-                command,
-                cli_message,
-            }) => PreviewOutcome::Problem(PreviewProblem {
-                kind,
-                reason: PreviewProblemReason::ExportFailed,
-                reference: Some(reference.to_owned()),
-                message: format!("kicad-cli could not export the {} {reference}.", noun(kind)),
-                command: Some(command),
-                cli_message: Some(cli_message),
-            }),
-            Err(PreviewError::Unexportable(message)) => {
-                problem(PreviewProblemReason::Unexportable, Some(reference), message)
-            }
-            Err(PreviewError::Io(message)) => {
-                problem(PreviewProblemReason::Internal, Some(reference), message)
-            }
+                reference,
+                &alternates,
+                Drawn {
+                    library_path: display(&library),
+                    from_kicad_bundle: origin == LibraryOrigin::KicadBundled,
+                    cad_item_revision: None,
+                    note,
+                },
+                install,
+                preview,
+            ),
+            Err(error) => export_problem(kind, reference, error),
         }
     }
 
-    /// How many times kicad-cli has exported a preview in this session.
-    pub fn export_count(&self) -> usize {
-        self.previews.export_count()
+    fn resolver(&self, install: &KicadInstall) -> LibraryResolver {
+        LibraryResolver::new(
+            Some(self.config.catalog_root.clone()),
+            install.share_dir.clone(),
+        )
+    }
+}
+
+/// Where a preview was drawn from, for [`PreviewSet`].
+struct Drawn {
+    library_path: String,
+    from_kicad_bundle: bool,
+    cad_item_revision: Option<u32>,
+    note: Option<String>,
+}
+
+fn ready(
+    kind: PreviewKind,
+    reference: &str,
+    alternates: &[String],
+    drawn: Drawn,
+    install: &KicadInstall,
+    preview: Preview,
+) -> PreviewOutcome {
+    PreviewOutcome::Ready(PreviewSet {
+        kind,
+        reference: reference.to_owned(),
+        alternates: alternates.to_vec(),
+        library_path: drawn.library_path,
+        from_kicad_bundle: drawn.from_kicad_bundle,
+        cad_item_revision: drawn.cad_item_revision,
+        note: drawn.note,
+        kicad_version: install.version.to_string(),
+        library_sha256: preview.library_sha256,
+        from_cache: preview.cache == CacheOutcome::Hit,
+        images: preview
+            .images
+            .iter()
+            .map(|image| PreviewImage {
+                unit: image.unit,
+                demorgan: image.demorgan,
+                data_uri: svg_data_uri(&image.svg),
+            })
+            .collect(),
+    })
+}
+
+fn problem(
+    kind: PreviewKind,
+    reason: PreviewProblemReason,
+    reference: Option<&str>,
+    message: String,
+) -> PreviewOutcome {
+    PreviewOutcome::Problem(PreviewProblem {
+        kind,
+        reason,
+        reference: reference.map(str::to_owned),
+        message,
+        command: None,
+        cli_message: None,
+    })
+}
+
+fn export_problem(kind: PreviewKind, reference: &str, error: PreviewError) -> PreviewOutcome {
+    match error {
+        PreviewError::ExportFailed {
+            command,
+            cli_message,
+        } => PreviewOutcome::Problem(PreviewProblem {
+            kind,
+            reason: PreviewProblemReason::ExportFailed,
+            reference: Some(reference.to_owned()),
+            message: format!("kicad-cli could not export the {} {reference}.", noun(kind)),
+            command: Some(command),
+            cli_message: Some(cli_message),
+        }),
+        PreviewError::Unexportable(message) => problem(
+            kind,
+            PreviewProblemReason::Unexportable,
+            Some(reference),
+            message,
+        ),
+        PreviewError::Superseded => problem(
+            kind,
+            PreviewProblemReason::Superseded,
+            Some(reference),
+            "A newer selection replaced this preview.".into(),
+        ),
+        PreviewError::StoredBytes(message) | PreviewError::Io(message) => problem(
+            kind,
+            PreviewProblemReason::Internal,
+            Some(reference),
+            message,
+        ),
+    }
+}
+
+/// The local copy of what `reference` names, as the team catalog would
+/// store it: one symbol's entry, or a whole footprint file.
+fn local_bytes(
+    resolver: &LibraryResolver,
+    reference: &LibRef,
+    kind: PreviewKind,
+) -> Option<Vec<u8>> {
+    let text = reference.to_string();
+    if kind == PreviewKind::Symbol {
+        let resolved = resolver.symbol(&text).ok()?;
+        let bytes = fs::read(&resolved.library).ok()?;
+        let library = SymbolLibrary::parse(&bytes).ok()?;
+        match library.find(&reference.item) {
+            SymbolLookup::Found(entry) => Some(bytes[entry.span.clone()].to_vec()),
+            _ => None,
+        }
+    } else {
+        fs::read(resolver.footprint(&text).ok()?.file).ok()
     }
 }
 

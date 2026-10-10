@@ -132,6 +132,14 @@ pub struct PreviewRequest {
     /// catalog's, such as the team catalog's current revision.
     #[serde(default)]
     pub field: Option<String>,
+    /// Draw what this revision of the part in the team catalog uses, from
+    /// the stored bytes of its exact CAD item revision.
+    #[serde(default)]
+    pub team_revision: Option<u32>,
+    /// Which selection the request is for; it grows with every new
+    /// selection. Waiting exports for older selections are dropped.
+    #[serde(default)]
+    pub selection: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -148,8 +156,17 @@ pub struct PreviewSet {
     pub reference: String,
     /// Other footprints the catalog lists for the part (after `;`).
     pub alternates: Vec<String>,
+    /// The library file drawn from; blank when drawn from stored bytes.
     pub library_path: String,
     pub from_kicad_bundle: bool,
+    /// When drawn from the team catalog's stored bytes, the number of the
+    /// CAD item revision they belong to.
+    #[serde(default)]
+    pub cad_item_revision: Option<u32>,
+    /// Something the person should know about where the drawing came from,
+    /// such as the stored bytes not being available.
+    #[serde(default)]
+    pub note: Option<String>,
     pub kicad_version: String,
     pub library_sha256: String,
     /// True when served from the cache without running kicad-cli.
@@ -187,6 +204,10 @@ pub enum PreviewProblemReason {
     Unassigned,
     /// The library reference does not resolve to a library on disk.
     Unresolved,
+    /// The team catalog's stored revision needs a sign-in to read.
+    TeamSignInNeeded,
+    /// A newer selection replaced the request before its export started.
+    Superseded,
     /// KiCad is missing or unsupported; see [`AppStatus::kicad`].
     KicadUnavailable,
     /// kicad-cli ran and failed.

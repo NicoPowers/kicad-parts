@@ -14,22 +14,24 @@
 
 use crate::PartValues;
 use catalog::pocketbase::{
-    ConflictingRevision, EditCommand, PublishOutcome, PublishReply, RestoreCommand, StoredChange,
-    StoredPart, StoredPartRevision, cad_item_revisions_by_id, changes_by_id, part_by_ipn,
-    part_revisions, submit_edit, submit_restore,
+    ConflictingRevision, EditCommand, PublishOutcome, PublishReply, RestoreCommand, StoredBlob,
+    StoredCadItemRevision, StoredChange, StoredPart, StoredPartRevision, cad_item_revisions_by_id,
+    changes_by_id, part_by_ipn, part_revisions, submit_edit, submit_restore,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
-    CadReference, CadReferenceRole, CadReferenceTarget, DetailField, PartDetails, compare_details,
+    CadItemDetails, CadReference, CadReferenceRole, CadReferenceTarget, DetailField, PartDetails,
+    compare_details,
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
-    CadItemUse, ConflictRow, DetailChange, Field, LiveUpdates, ManufacturerPart, PublishResult,
-    RevisionDetails, RevisionSummary, SignInRequest, TeamConflict, TeamEditRequest, TeamPart,
-    TeamRestoreRequest, TeamSession, TeamStatus,
+    CadItemUse, ConflictRow, DetailChange, Field, LiveUpdates, ManufacturerPart, PreviewKind,
+    PublishResult, RevisionDetails, RevisionSummary, SignInRequest, TeamConflict, TeamEditRequest,
+    TeamPart, TeamRestoreRequest, TeamSession, TeamStatus,
 };
+use kicad_integration::{LibRef, StoredItem, footprint_choices};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,6 +123,55 @@ pub struct TeamCatalog {
     /// saved, or replace what is saved.
     suggested: TeamSettings,
     state: Mutex<State>,
+    /// Revisions never change, so what was fetched for previews is kept
+    /// until the next sign-in or sign-out.
+    known: Mutex<KnownRevisions>,
+}
+
+#[derive(Default)]
+struct KnownRevisions {
+    /// Part details by (IPN, revision number).
+    parts: HashMap<(String, u32), PartDetails>,
+    /// CAD item revisions by (CAD item, snapshot SHA-256).
+    cad_items: HashMap<(String, String), StoredCadItemRevision>,
+}
+
+/// What one revision of a part uses for its symbol or footprint, for
+/// drawing a preview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TeamCad {
+    /// The revision assigns none.
+    Unassigned,
+    /// A library the team catalog does not store, such as KiCad's own, or
+    /// a reference that did not resolve when it was imported. Draw it from
+    /// the library on this computer.
+    Library {
+        reference: String,
+        alternates: Vec<String>,
+    },
+    /// One exact CAD item revision, whose bytes the team catalog stores.
+    Stored(StoredCad),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredCad {
+    pub item: StoredItem,
+    /// Other footprints the part lists (after `;`).
+    pub alternates: Vec<String>,
+    /// The CAD item revision number, as the part's details show it.
+    pub number: u32,
+    /// The ID of the blob record holding the bytes.
+    blob: String,
+}
+
+/// Why [`TeamCatalog::cad_for_preview`] could not answer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TeamCadError {
+    SignedOut,
+    /// The team catalog does not have that part or revision.
+    NotFound(String),
+    /// The team server could not be reached or refused the request.
+    Unreachable(String),
 }
 
 impl TeamCatalog {
@@ -146,6 +197,7 @@ impl TeamCatalog {
                 problem: None,
                 session: None,
             }),
+            known: Mutex::new(KnownRevisions::default()),
         }
     }
 
@@ -184,6 +236,7 @@ impl TeamCatalog {
     /// returned status, not as an error.
     pub fn sign_in(&self, request: SignInRequest) -> TeamStatus {
         let outcome = sign_in(&request);
+        self.forget_known();
         let earlier = {
             let mut state = self.lock();
             let earlier = state.session.take();
@@ -207,6 +260,7 @@ impl TeamCatalog {
     }
 
     pub fn sign_out(&self) -> TeamStatus {
+        self.forget_known();
         let earlier = {
             let mut state = self.lock();
             state.problem = None;
@@ -356,6 +410,156 @@ impl TeamCatalog {
         }
     }
 
+    /// What revision `part_revision` of `ipn` uses for its symbol or
+    /// footprint. Uses the followed replica, or what was fetched before,
+    /// when it can; otherwise asks the team server.
+    pub fn cad_for_preview(
+        &self,
+        ipn: &str,
+        part_revision: u32,
+        kind: PreviewKind,
+    ) -> Result<TeamCad, TeamCadError> {
+        let client = self.client().map_err(|_| TeamCadError::SignedOut)?;
+        let details = self.part_details(&client, ipn, part_revision)?;
+        let (field, role) = match kind {
+            PreviewKind::Symbol => ("Symbol", CadReferenceRole::Symbol),
+            PreviewKind::Footprint => ("Footprint", CadReferenceRole::Footprint),
+        };
+        let field = details.field(field).unwrap_or_default().trim();
+        // Footprint fields may list `;`-separated alternatives; symbol
+        // fields hold exactly one reference.
+        let choices = match kind {
+            _ if field.is_empty() => Vec::new(),
+            PreviewKind::Symbol => vec![field],
+            PreviewKind::Footprint => footprint_choices(field),
+        };
+        let Some((&reference, alternates)) = choices.split_first() else {
+            return Ok(TeamCad::Unassigned);
+        };
+        let alternates: Vec<String> = alternates
+            .iter()
+            .map(|choice| (*choice).to_owned())
+            .collect();
+        let target = details
+            .cad_references
+            .iter()
+            .find(|cad| cad.role == role && cad.reference == reference)
+            .map(|cad| &cad.target);
+        let Some(CadReferenceTarget::CadItemRevision {
+            cad_item,
+            snapshot_sha256,
+        }) = target
+        else {
+            return Ok(TeamCad::Library {
+                reference: reference.to_owned(),
+                alternates,
+            });
+        };
+        let revision = self.cad_item_revision(&client, cad_item, snapshot_sha256)?;
+        let snapshot: CadItemDetails =
+            serde_json::from_str(&revision.snapshot).map_err(|error| {
+                TeamCadError::Unreachable(format!(
+                    "the stored revision of {reference} is unreadable: {error}"
+                ))
+            })?;
+        let lib_ref =
+            LibRef::parse(reference).map_err(|error| TeamCadError::NotFound(error.to_string()))?;
+        Ok(TeamCad::Stored(StoredCad {
+            item: StoredItem {
+                lib_ref,
+                blob_sha256: snapshot.blob_sha256,
+                format_version: snapshot.format_version,
+            },
+            alternates,
+            number: revision.number,
+            blob: revision.blob,
+        }))
+    }
+
+    /// Downloads a CAD item revision's stored bytes. The preview cache
+    /// checks them against their SHA-256.
+    pub fn stored_bytes(&self, cad: &StoredCad) -> Result<Vec<u8>, String> {
+        let client = self.client()?;
+        let fail = |error: CollabError| format!("the team server did not send them: {error}");
+        let blob: StoredBlob = client
+            .get(&format!(
+                "/api/collections/catalog_blobs/records/{}",
+                cad.blob
+            ))
+            .and_then(|reply| reply.json())
+            .map_err(fail)?;
+        let token = client.file_token().map_err(fail)?;
+        client
+            .download_file("catalog_blobs", &blob.id, &blob.file, Some(&token))
+            .map_err(fail)
+    }
+
+    fn part_details(
+        &self,
+        client: &PocketBaseClient,
+        ipn: &str,
+        number: u32,
+    ) -> Result<PartDetails, TeamCadError> {
+        let key = (ipn.to_owned(), number);
+        if let Some(details) = self.lock_known().parts.get(&key) {
+            return Ok(details.clone());
+        }
+        let followed = self.lock().session.as_ref().and_then(|session| {
+            let live = session
+                .follower
+                .live
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            live.replica
+                .part_by_ipn(ipn)
+                .filter(|part| part.number == number)
+                .and_then(|part| part.details.clone())
+        });
+        let details = match followed {
+            Some(details) => details,
+            None => fetch_part_details(client, ipn, number)?,
+        };
+        self.lock_known().parts.insert(key, details.clone());
+        Ok(details)
+    }
+
+    fn cad_item_revision(
+        &self,
+        client: &PocketBaseClient,
+        cad_item: &str,
+        snapshot_sha256: &str,
+    ) -> Result<StoredCadItemRevision, TeamCadError> {
+        let key = (cad_item.to_owned(), snapshot_sha256.to_owned());
+        if let Some(revision) = self.lock_known().cad_items.get(&key) {
+            return Ok(revision.clone());
+        }
+        let filter = format!(
+            "cad_item = {} && snapshot_sha256 = {}",
+            serde_json::Value::from(cad_item),
+            serde_json::Value::from(snapshot_sha256)
+        );
+        let revision = client
+            .list_records::<StoredCadItemRevision>("catalog_cad_item_revisions", &filter, "number")
+            .map_err(unreachable)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                TeamCadError::NotFound(
+                    "the team catalog does not have that CAD item revision".into(),
+                )
+            })?;
+        self.lock_known().cad_items.insert(key, revision.clone());
+        Ok(revision)
+    }
+
+    fn forget_known(&self) {
+        *self.lock_known() = KnownRevisions::default();
+    }
+
+    fn lock_known(&self) -> std::sync::MutexGuard<'_, KnownRevisions> {
+        self.known.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn client(&self) -> Result<PocketBaseClient, String> {
         self.lock()
             .session
@@ -367,6 +571,34 @@ impl TeamCatalog {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// Revision `number` of `ipn`'s details, from the team server.
+fn fetch_part_details(
+    client: &PocketBaseClient,
+    ipn: &str,
+    number: u32,
+) -> Result<PartDetails, TeamCadError> {
+    let part = part_by_ipn(client, ipn)
+        .map_err(unreachable)?
+        .ok_or_else(|| TeamCadError::NotFound(format!("{ipn} is not in the team catalog")))?;
+    let filter = format!(
+        "part = {} && number = {number}",
+        serde_json::Value::from(part.id.as_str())
+    );
+    let revision = client
+        .list_records::<StoredPartRevision>("catalog_part_revisions", &filter, "number")
+        .map_err(unreachable)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| TeamCadError::NotFound(format!("{ipn} has no revision {number}")))?;
+    serde_json::from_str(&revision.snapshot).map_err(|error| {
+        TeamCadError::Unreachable(format!("revision {number} of {ipn} is unreadable: {error}"))
+    })
+}
+
+fn unreachable(error: CollabError) -> TeamCadError {
+    TeamCadError::Unreachable(error.to_string())
 }
 
 /// The correlation ID the UI made for this save attempt, so that retrying

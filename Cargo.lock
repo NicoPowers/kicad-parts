@@ -379,6 +379,7 @@ dependencies = [
 name = "catalog-import"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "catalog",
  "catalog-browser",
  "collaboration",
