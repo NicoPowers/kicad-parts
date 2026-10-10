@@ -743,6 +743,7 @@ module.exports = {
   PART_DETAILS_SCHEMA: PART_DETAILS_SCHEMA,
   SOURCE_SCHEMA: SOURCE_SCHEMA,
   publishPartRevision: publishPartRevision,
+  describeRevision: describeRevision,
   trimSpace: trimSpace,
   isReservedName: isReservedName,
   hasInvisible: hasInvisible,

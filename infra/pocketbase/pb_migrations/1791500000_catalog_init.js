@@ -169,9 +169,14 @@ migrate((app) => {
   parts.fields.add(new RelationField({ name: "current_revision", collectionId: partRevisions.id, maxSelect: 1 }));
   app.save(parts);
 
-  // One per import run that wrote anything: who ran it, when and why, and
-  // the Change it made, if any (a run that only found import problems makes
-  // no Change).
+  // One per run that wrote anything: who ran it, when and why, and the
+  // Change it made, if any (a run that adds no revision makes no Change).
+  //
+  // A CSV import run also records exactly what the CSV said, whether or not
+  // it made a Change, so the zero-loss report can rebuild the CSV from the
+  // latest run alone: the files it read with their byte hashes, each CSV
+  // file's header line and rows, and the current revision it left each part
+  // at.
   const auditEntries = new Collection(Object.assign({}, readOnly, {
     type: "base",
     name: "catalog_audit_entries",
@@ -183,7 +188,24 @@ migrate((app) => {
       { name: "correlation_id", type: "text", required: true, max: 100 },
       // JSON counts of what the run created.
       { name: "summary", type: "text", required: true, max: 10000 },
+      // CSV import runs only (empty or 0 for edits and restores):
+      // the CSV file imported, such as g-res;
+      { name: "csv_file", type: "text", max: 100 },
+      // the run's number among all CSV import runs, from 1, without gaps;
+      { name: "csv_import_number", type: "number", min: 0, onlyInt: true },
+      // the commit the files were read at, possibly ending in +dirty;
+      { name: "source_commit", type: "text", max: 100 },
+      // JSON { csv_file, files: [{ role, path, byte_sha256, size,
+      // header_raw, rows }], parts: [{ ipn, revision }] };
+      { name: "sources", type: "text", max: DOCUMENT },
+      // and whether the importer was told to import from a checkout older
+      // than the team catalog's latest imports.
+      { name: "allowed_older_checkout", type: "bool" },
       { name: "created", type: "autodate", onCreate: true, onUpdate: false },
+    ],
+    indexes: [
+      "CREATE UNIQUE INDEX idx_catalog_audit_entries_csv_import ON catalog_audit_entries (csv_import_number) WHERE csv_import_number > 0",
+      "CREATE INDEX idx_catalog_audit_entries_csv_file ON catalog_audit_entries (csv_file, csv_import_number)",
     ],
   }));
   app.save(auditEntries);

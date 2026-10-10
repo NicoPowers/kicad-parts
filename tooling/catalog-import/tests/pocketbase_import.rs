@@ -6,8 +6,8 @@
 //! read; changed inputs are made in temp copies.
 
 use catalog::pocketbase::{
-    CSV_IMPORT_ROUTE, CatalogReadback, EditCommand, ImportCommand, ImportOutcome, RestoreCommand,
-    read_back, submit_edit, submit_import, submit_restore,
+    CSV_IMPORT_ROUTE, CatalogReadback, EditCommand, ImportCommand, ImportOutcome, ImportReply,
+    RestoreCommand, read_back, read_import_state, submit_edit, submit_import, submit_restore,
 };
 use catalog::{CsvCatalog, PartDetails, sha256_hex};
 use catalog_import::services;
@@ -80,6 +80,48 @@ fn current_revision(readback: &CatalogReadback, ipn: &str) -> (u32, PartDetails)
         revision.number,
         serde_json::from_str(&revision.snapshot).unwrap(),
     )
+}
+
+/// Imports `import` as an importer does: it reads the team catalog first and
+/// expects each part's current revision as read. `suffix` makes the
+/// correlation ID unique. (The checkout check is left out: these tests
+/// import temp copies, which are not git checkouts.)
+fn import_reading_first(
+    admin: &PocketBaseClient,
+    import: &catalog::CsvImport,
+    suffix: &str,
+) -> ImportReply {
+    let state = read_import_state(admin).unwrap();
+    let mut command = ImportCommand::new(import, REASON).expecting(&state);
+    command.correlation_id.push_str(suffix);
+    submit_import(admin, &command).unwrap()
+}
+
+/// The JSON import run that the latest CSV import audit entry records.
+fn latest_run_sources(copy: &mut CatalogReadback) -> &mut String {
+    &mut copy
+        .audit_entries
+        .iter_mut()
+        .filter(|entry| entry.csv_import_number > 0)
+        .max_by_key(|entry| entry.csv_import_number)
+        .unwrap()
+        .sources
+}
+
+/// Changes the latest import run's recorded file `path` with `change`.
+fn tamper_run_file(
+    copy: &mut CatalogReadback,
+    path: &str,
+    change: impl Fn(&mut serde_json::Value),
+) {
+    let sources = latest_run_sources(copy);
+    let mut run: serde_json::Value = serde_json::from_str(sources).unwrap();
+    for file in run["files"].as_array_mut().unwrap() {
+        if file["path"] == path {
+            change(file);
+        }
+    }
+    *sources = run.to_string();
 }
 
 /// Sets one column of one stored record in a stopped instance's data.db.
@@ -281,11 +323,15 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
         },
         "field Value",
     );
+    // Supplier data is checked in the rows the latest import run recorded.
     fails(
         &|copy| {
-            let index = current_revision_of(copy, "RES-0000-0470");
-            let revision = &mut copy.part_revisions[index];
-            revision.source = revision.source.replace("\"C23182\"", "\"\"");
+            tamper_run_file(copy, "database/g-res.csv", |file| {
+                for row in file["rows"].as_array_mut().unwrap() {
+                    let text = row.as_str().unwrap().replace("\"C23182\"", "\"\"");
+                    *row = text.into();
+                }
+            })
         },
         "field LCSC",
     );
@@ -302,7 +348,7 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     );
     fails(
         &|copy| copy.parts.retain(|part| part.ipn != "RES-0000-1000"),
-        "neither a part nor an import problem",
+        "RES-0000-1000 is in the latest import run but not a part",
     );
     fails(&|copy| copy.problems.clear(), "no import problem");
     fails(
@@ -310,31 +356,30 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
         "stored blob is not the declared bytes",
     );
     fails(&|copy| copy.audit_entries.clear(), "has 0 audit entries");
-    // The stored header line and row bytes must rebuild the file exactly.
+    // The header line and row bytes the import run recorded must rebuild
+    // the file exactly.
     fails(
         &|copy| {
-            let mut sources: serde_json::Value =
-                serde_json::from_str(&copy.changes[0].sources).unwrap();
-            for file in sources["files"].as_array_mut().unwrap() {
-                if file["path"] == "database/g-res.csv" {
-                    let header = format!("{} ", file["header_raw"].as_str().unwrap());
-                    file["header_raw"] = header.into();
-                }
-            }
-            copy.changes[0].sources = sources.to_string();
+            tamper_run_file(copy, "database/g-res.csv", |file| {
+                let header = format!("{} ", file["header_raw"].as_str().unwrap());
+                file["header_raw"] = header.into();
+            })
         },
         "rebuilt from PocketBase",
     );
     fails(
         &|copy| {
-            let index = current_revision_of(copy, "RES-0000-0470");
-            let revision = &mut copy.part_revisions[index];
-            let mut source: serde_json::Value = serde_json::from_str(&revision.source).unwrap();
-            let raw = source["raw_record"].as_str().unwrap().replace('\n', "\r\n");
-            source["raw_record"] = raw.into();
-            revision.source = source.to_string();
+            tamper_run_file(copy, "database/g-res.csv", |file| {
+                let row = file["rows"][3].as_str().unwrap().replace('\n', "\r\n");
+                file["rows"][3] = row.into();
+            })
         },
         "rebuilt from PocketBase",
+    );
+    // A run that records no files cannot be checked.
+    fails(
+        &|copy| *latest_run_sources(copy) = String::new(),
+        "does not record the files it read",
     );
     // A symbol blob must be the whole symbol, not a prefix of it.
     fails(
@@ -395,7 +440,7 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     // A fresh import of the unchanged inputs is a no-op: no Change,
     // revision, CAD item or blob.
     let again = services::plan(&root, "g-res").unwrap();
-    let mut retry = ImportCommand::new(&again, REASON);
+    let mut retry = services::prepare_import(&admin, &root, &again, REASON, false).unwrap();
     retry.correlation_id.push_str("-again");
     let noop = submit_import(&admin, &retry).unwrap();
     assert_eq!(noop.status, 422, "{}", noop.body);
@@ -466,7 +511,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     );
     fs::write(&csv_path, &csv).unwrap();
     let changed = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
-    let reply = submit_import(&admin, &ImportCommand::new(&changed, REASON)).unwrap();
+    let reply = import_reading_first(&admin, &changed, "");
     let created = applied(&reply);
     assert_eq!(
         (created.parts, created.part_revisions, created.updated_parts),
@@ -498,7 +543,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     let csv = csv.replace("\"C22775\"", "\"C99999\"");
     fs::write(&csv_path, &csv).unwrap();
     let supplier_only = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
-    let reply = submit_import(&admin, &ImportCommand::new(&supplier_only, REASON)).unwrap();
+    let reply = import_reading_first(&admin, &supplier_only, "");
     let (audit_entry_id, recorded) = nothing_changed(&reply);
     assert_eq!(recorded, 1);
     let supplier = read_back(&admin).unwrap();
@@ -533,7 +578,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     )
     .unwrap();
     let with_row = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
-    let reply = submit_import(&admin, &ImportCommand::new(&with_row, REASON)).unwrap();
+    let reply = import_reading_first(&admin, &with_row, "");
     assert_eq!(applied(&reply).updated_parts, 1);
     fs::write(
         &substitutes_csv,
@@ -541,7 +586,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     )
     .unwrap();
     let supplier_pn_only = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
-    let reply = submit_import(&admin, &ImportCommand::new(&supplier_pn_only, REASON)).unwrap();
+    let reply = import_reading_first(&admin, &supplier_pn_only, "");
     let (audit_entry_id, recorded) = nothing_changed(&reply);
     assert_eq!(recorded, 1);
     let supplier = read_back(&admin).unwrap();
@@ -578,7 +623,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     let csv = csv.replace("\"47R\"", "\"47.0\"");
     fs::write(&csv_path, &csv).unwrap();
     let conflicting = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
-    let reply = submit_import(&admin, &ImportCommand::new(&conflicting, REASON)).unwrap();
+    let reply = import_reading_first(&admin, &conflicting, "");
     assert_eq!(nothing_changed(&reply).1, 1, "{}", reply.body);
     let last = read_back(&admin).unwrap();
     assert_eq!(last.changes, after_edit.changes);
@@ -619,9 +664,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     let restore = RestoreCommand::new("RES-0000-1001", 2, 1, "Back to the imported details");
     let restored = submit_restore(&admin, &restore).unwrap();
     assert_eq!(restored.status, 200, "{}", restored.body);
-    let mut command = ImportCommand::new(&conflicting, REASON);
-    command.correlation_id.push_str("-source");
-    let reply = submit_import(&admin, &command).unwrap();
+    let reply = import_reading_first(&admin, &conflicting, "-source");
     assert_eq!(nothing_changed(&reply).1, 1, "{}", reply.body);
     let kept = read_back(&admin).unwrap();
     let problem = kept
@@ -650,11 +693,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
                 .len()
         };
         let before = changes();
-        let mut command = ImportCommand::new(&conflicting, REASON);
-        command
-            .correlation_id
-            .push_str(&format!("-collision-{table}"));
-        let reply = submit_import(&admin, &command).unwrap();
+        let reply = import_reading_first(&admin, &conflicting, &format!("-collision-{table}"));
         assert_eq!(reply.status, 409, "{}", reply.body);
         let ImportOutcome::IdCollision { collisions, .. } = &reply.outcome else {
             panic!("expected an ID collision, got {}", reply.body);
@@ -829,9 +868,7 @@ fn adding_or_removing_a_manufacturer_part_makes_a_new_revision() {
     let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
     let submit = |correlation: &str| {
         let import = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
-        let mut command = ImportCommand::new(&import, REASON);
-        command.correlation_id.push_str(correlation);
-        submit_import(&admin, &command).unwrap()
+        import_reading_first(&admin, &import, correlation)
     };
     applied(&submit("-first"));
 

@@ -5,8 +5,11 @@
 //!   manifest.json`), field by field, CAD item by CAD item and diagnostic by
 //!   problem.
 //! - [`services`] starts a disposable PocketBase with the repository's
-//!   migrations and hooks.
+//!   migrations and hooks, and prepares import commands.
+//! - [`checkout`] refuses to import from a checkout older than the team
+//!   catalog's latest imports.
 
+pub mod checkout;
 pub mod run_folder;
 pub mod services;
 pub mod zero_loss;

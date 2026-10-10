@@ -4,12 +4,13 @@
 //! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`
 //! and `1791600000_catalog_edits.js`).
 
-use crate::csv_import::CsvImport;
+use crate::csv_import::{CsvImport, SourceFile};
 use crate::part::{DetailField, ManufacturerPart, PartDetails};
 use crate::sha256_hex;
 use collaboration::{CollabError, CollabResult, CorrelationId, PocketBaseClient};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 /// The route that publishes a CSV catalog import.
 pub const CSV_IMPORT_ROUTE: &str = "/api/catalog/csv-imports";
@@ -33,17 +34,44 @@ pub struct ImportCommand<'a> {
     pub correlation_id: String,
     pub reason: String,
     pub import: &'a CsvImport,
+    /// The current revision number the importer read for each IPN. A part
+    /// missing here is expected not to exist yet (number 0). If any part's
+    /// current revision differs when the import arrives, the route answers
+    /// 409 conflict and writes nothing. See [`ImportCommand::expecting`].
+    pub expected_revisions: BTreeMap<String, u32>,
+    /// Import even though the checkout is older than the team catalog's
+    /// latest imports. The run's audit entry records it.
+    pub allow_older_checkout: bool,
 }
 
 impl<'a> ImportCommand<'a> {
     /// A command whose correlation ID is derived from the import itself, so
-    /// retrying the same import replays the stored answer.
+    /// retrying the same import replays the stored answer. It expects every
+    /// part to be new; call [`ImportCommand::expecting`] before importing
+    /// into a catalog that already has parts.
     pub fn new(import: &'a CsvImport, reason: &str) -> Self {
         Self {
             correlation_id: format!("csv-import-{}", &import.fingerprint()[..32]),
             reason: reason.to_owned(),
             import,
+            expected_revisions: BTreeMap::new(),
+            allow_older_checkout: false,
         }
+    }
+
+    /// Expects each part's current revision to be the one in `state`.
+    pub fn expecting(mut self, state: &ImportState) -> Self {
+        self.expected_revisions = self
+            .import
+            .parts
+            .iter()
+            .filter_map(|part| {
+                let ipn = part.ipn.as_str();
+                let number = *state.current_revisions.get(ipn)?;
+                Some((ipn.to_owned(), number))
+            })
+            .collect();
+        self
     }
 
     pub fn body(&self) -> Value {
@@ -53,13 +81,20 @@ impl<'a> ImportCommand<'a> {
             "reason": self.reason,
             "csvFile": import.csv_file,
             "sourceCommit": import.source_commit,
-            "sources": import.sources.iter().map(|source| json!({
-                "role": source.role,
-                "path": source.path,
-                "byteSha256": source.byte_sha256,
-                "size": source.size,
-                "headerRaw": source.header_raw,
-            })).collect::<Vec<_>>(),
+            "allowOlderCheckout": self.allow_older_checkout,
+            "sources": import.sources.iter().map(|source| {
+                let mut file = json!({
+                    "role": source.role,
+                    "path": source.path,
+                    "byteSha256": source.byte_sha256,
+                    "size": source.size,
+                    "headerRaw": source.header_raw,
+                });
+                if let Some(rows) = &source.rows {
+                    file["rows"] = json!(rows);
+                }
+                file
+            }).collect::<Vec<_>>(),
             "blobs": import.blobs.iter().map(|blob| json!({
                 "sha256": blob.sha256,
                 "size": blob.bytes.len(),
@@ -77,6 +112,7 @@ impl<'a> ImportCommand<'a> {
             "parts": import.parts.iter().map(|part| json!({
                 "id": part.id,
                 "ipn": part.ipn.as_str(),
+                "expectedRevision": self.expected_revisions.get(part.ipn.as_str()).copied().unwrap_or(0),
                 "snapshot": part.snapshot_json,
                 "snapshotSha256": part.snapshot_sha256,
                 "source": part.source_json,
@@ -92,6 +128,59 @@ impl<'a> ImportCommand<'a> {
             })).collect::<Vec<_>>(),
         })
     }
+}
+
+/// What an importer reads from the team catalog before importing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ImportState {
+    /// Each part's current revision number, by IPN.
+    pub current_revisions: BTreeMap<String, u32>,
+    /// The latest import run of each CSV file, oldest first.
+    pub latest_imports: Vec<LatestImport>,
+}
+
+/// The latest import run of one CSV file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LatestImport {
+    /// Such as `g-res`.
+    pub csv_file: String,
+    pub csv_import_number: u64,
+    /// The commit its files were read at, possibly ending in `+dirty`;
+    /// empty if it was not recorded.
+    pub source_commit: String,
+    pub audit_entry: String,
+}
+
+/// Reads each part's current revision number and the latest import run of
+/// each CSV file.
+pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState> {
+    let parts: Vec<StoredPart> = client.list_records("catalog_parts", "", "ipn")?;
+    let entries: Vec<StoredAuditEntry> = client.list_records(
+        "catalog_audit_entries",
+        "csv_import_number > 0",
+        "csv_import_number",
+    )?;
+    let mut latest: BTreeMap<String, LatestImport> = BTreeMap::new();
+    for entry in entries {
+        latest.insert(
+            entry.csv_file.clone(),
+            LatestImport {
+                csv_file: entry.csv_file,
+                csv_import_number: entry.csv_import_number,
+                source_commit: entry.source_commit,
+                audit_entry: entry.id,
+            },
+        );
+    }
+    let mut latest_imports: Vec<LatestImport> = latest.into_values().collect();
+    latest_imports.sort_by_key(|run| run.csv_import_number);
+    Ok(ImportState {
+        current_revisions: parts
+            .into_iter()
+            .map(|part| (part.ipn, part.current_revision_number))
+            .collect(),
+        latest_imports,
+    })
 }
 
 /// What the import route answered.
@@ -118,9 +207,10 @@ pub enum ImportOutcome {
         created: Counts,
         unchanged: Value,
     },
-    /// 200: nothing in the catalog changed, so there is no Change, but the
-    /// run found new import problems (for example a row whose supplier data
-    /// changed). They are recorded against the run's audit entry.
+    /// 200: no part details changed, so there is no Change, but the run read
+    /// other CSV files than the last import run of this CSV file, or found
+    /// new import problems (for example a row whose supplier data changed).
+    /// The run's audit entry records the files, and the problems point to it.
     #[serde(rename_all = "camelCase")]
     NothingChanged {
         correlation_id: String,
@@ -128,7 +218,8 @@ pub enum ImportOutcome {
         problems_recorded: u64,
         unchanged: Value,
     },
-    /// 422: everything was already stored; nothing was written.
+    /// 422: everything was already stored and the last import run of this
+    /// CSV file read the same files; nothing was written.
     #[serde(rename_all = "camelCase")]
     Noop {
         correlation_id: String,
@@ -146,6 +237,26 @@ pub enum ImportOutcome {
         correlation_id: String,
         collisions: Vec<String>,
     },
+    /// 409: some parts' current revisions are not the ones the importer
+    /// read, because someone changed them in between. Nothing was written;
+    /// read the team catalog again and import again.
+    #[serde(rename_all = "camelCase")]
+    Conflict {
+        correlation_id: String,
+        conflicts: Vec<ImportConflict>,
+        message: String,
+    },
+}
+
+/// One part whose current revision changed after the importer read it.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportConflict {
+    pub ipn: String,
+    /// 0 when the importer expected no such part.
+    pub expected_revision: u32,
+    /// The part's current revision; `None` if there is no such part.
+    pub current_revision: Option<ConflictingRevision>,
 }
 
 /// What one import created.
@@ -595,12 +706,64 @@ pub struct StoredAuditEntry {
     /// The actor's name or email when the entry was made.
     #[serde(default)]
     pub actor_name: String,
-    /// The Change the run made, or empty if it only recorded import problems.
+    /// The Change the run made, or empty if it made no revision.
     pub change: String,
     pub reason: String,
     pub correlation_id: String,
     /// JSON counts of what the run created.
     pub summary: String,
+    /// For a CSV import run: the CSV file it imported, such as `g-res`.
+    #[serde(default)]
+    pub csv_file: String,
+    /// For a CSV import run: its number among all CSV import runs, counting
+    /// from 1. 0 for edits and restores.
+    #[serde(default)]
+    pub csv_import_number: u64,
+    /// For a CSV import run: the commit its files were read at.
+    #[serde(default)]
+    pub source_commit: String,
+    /// For a CSV import run: JSON [`ImportRun`], exactly what the CSV said.
+    #[serde(default)]
+    pub sources: String,
+    /// The importer was told to import from a checkout older than the team
+    /// catalog's latest imports.
+    #[serde(default)]
+    pub allowed_older_checkout: bool,
+}
+
+impl StoredAuditEntry {
+    /// What this CSV import run read, or `None` if the entry records no
+    /// readable import run (edits, restores, or a damaged record).
+    pub fn import_run(&self) -> Option<ImportRun> {
+        serde_json::from_str(&self.sources).ok()
+    }
+}
+
+/// What one CSV import run read and what it left each part at, as its audit
+/// entry records it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct ImportRun {
+    pub csv_file: String,
+    /// Every file read. The CSV files carry their header line and every
+    /// row, so the header followed by the rows is the file, byte for byte.
+    pub files: Vec<SourceFile>,
+    /// Every part a row of the CSV file made, in row order, with the number
+    /// of its current revision just after the run.
+    pub parts: Vec<ImportedPart>,
+}
+
+impl ImportRun {
+    pub fn file(&self, path: &str) -> Option<&SourceFile> {
+        self.files.iter().find(|file| file.path == path)
+    }
+}
+
+/// A part that a row of an import run's CSV file made, and the number of
+/// its current revision just after that run.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct ImportedPart {
+    pub ipn: String,
+    pub revision: u32,
 }
 
 /// Every Catalog record as stored, with each blob's bytes downloaded.

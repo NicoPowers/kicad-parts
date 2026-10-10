@@ -136,6 +136,11 @@ pub struct SourceFile {
     pub size: u64,
     /// For CSV files, the header line's exact bytes.
     pub header_raw: Option<String>,
+    /// For CSV files, every row's exact bytes in file order. The header line
+    /// followed by these rows is the file, byte for byte, so each import run
+    /// can record exactly what the CSV said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Vec<String>>,
 }
 
 /// One supplier part number or price, kept away from the part details.
@@ -408,26 +413,34 @@ impl<'a> Planner<'a> {
                 byte_sha256: sha.clone(),
                 size: bytes.len() as u64,
                 header_raw: None,
+                rows: None,
             });
         Ok((bytes, sha))
+    }
+
+    /// Keeps a read CSV file's header line and rows with its source.
+    fn record_csv_rows(&mut self, path: &str, table: &CsvTable) {
+        let source = self.sources.get_mut(path).expect("read before parsing");
+        source.header_raw = Some(table.header_raw.clone());
+        source.rows = Some(
+            table
+                .records
+                .iter()
+                .map(|record| record.raw.clone())
+                .collect(),
+        );
     }
 
     fn run(mut self) -> Result<CsvImport, ImportError> {
         let catalog_path = format!("database/{}.csv", self.csv_file);
         let (bytes, catalog_sha) = self.read_source("catalog-csv", &catalog_path)?;
         let table = parse_csv(&catalog_path, &bytes)?;
-        self.sources
-            .get_mut(&catalog_path)
-            .expect("just read")
-            .header_raw = Some(table.header_raw.clone());
+        self.record_csv_rows(&catalog_path, &table);
 
         let (substitutes_csv_bytes, substitutes_csv_sha) =
             self.read_source("substitutes-csv", SUBSTITUTES_PATH)?;
         let substitutes_csv = parse_csv(SUBSTITUTES_PATH, &substitutes_csv_bytes)?;
-        self.sources
-            .get_mut(SUBSTITUTES_PATH)
-            .expect("just read")
-            .header_raw = Some(substitutes_csv.header_raw.clone());
+        self.record_csv_rows(SUBSTITUTES_PATH, &substitutes_csv);
 
         let ipn_column = table.headers.iter().position(|header| header == "IPN");
         let mut parts = Vec::new();

@@ -2,7 +2,8 @@
 //!
 //! Imports one CSV catalog file (default `g-res`) into a disposable,
 //! loopback-only PocketBase, imports it again to show nothing new is
-//! created, reads every Catalog record back, and prints the zero-loss
+//! created (each import first reads the team catalog, refuses an older
+//! checkout and expects each part's current revision), reads every Catalog record back, and prints the zero-loss
 //! report against the oracle. The PocketBase and its data are deleted when
 //! the command ends; the repository is only read. Exits 1 if anything was
 //! lost.
@@ -67,9 +68,12 @@ fn pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let state = tempfile::tempdir()?;
     let (server, admin, _superuser) = services::start(&services::repository_root(), state.path())?;
-    let first = submit_import(&admin, &ImportCommand::new(&import, &reason))?;
+    // Each import reads the team catalog first, as a real import does: it
+    // refuses an older checkout and expects each part's current revision.
+    let first_command = services::prepare_import(&admin, &root, &import, &reason, false)?;
+    let first = submit_import(&admin, &first_command)?;
     let after_first = read_back(&admin)?;
-    let mut retry = ImportCommand::new(&import, &reason);
+    let mut retry = services::prepare_import(&admin, &root, &import, &reason, false)?;
     retry.correlation_id.push_str("-retry");
     let second = submit_import(&admin, &retry)?;
     let readback = read_back(&admin)?;

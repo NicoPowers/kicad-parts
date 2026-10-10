@@ -148,6 +148,12 @@ fn routes_every_field_and_binds_exact_cad_items() {
         )
         .collect();
     assert_eq!(rebuilt, csv);
+    // The source keeps every row, so the file can be rebuilt from it alone.
+    let from_source: String = std::iter::once(import.sources[1].header_raw.clone().unwrap())
+        .chain(import.sources[1].rows.clone().unwrap())
+        .collect();
+    assert_eq!(from_source, csv);
+    assert_eq!(import.sources[0].rows, None);
 
     // CadItems: one symbol span, one footprint file, one local 3D model.
     let kinds: Vec<_> = import

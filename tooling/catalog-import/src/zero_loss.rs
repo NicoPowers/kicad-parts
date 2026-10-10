@@ -3,24 +3,32 @@
 //! records read back from PocketBase.
 //!
 //! The expected side is always the oracle manifest, never this crate's own
-//! reading of the CSV. Each source field must be found in exactly one of
-//! these places, with the same value:
+//! reading of the CSV. The report rebuilds the CSV file from the latest
+//! import run of that file alone (its audit entry records the header line
+//! and every row's bytes), so later edits do not matter, and checks that it
+//! is the oracle's file byte for byte. Rows are matched by IPN, not by row
+//! number. Each source field must then be found in exactly one of these
+//! places, with the same value:
 //!
-//! | destination                       | where it is checked                              |
-//! |-----------------------------------|--------------------------------------------------|
-//! | `part-details`                    | the current revision's `ipn` or named field     |
-//! | `part-details.manufacturer-parts` | the current revision's manufacturer parts         |
-//! | `supplier-data`                   | the current revision's source                     |
-//! | `import-problem`                  | a stored import problem's detail                  |
+//! | destination                       | where it is checked                                         |
+//! |-----------------------------------|-------------------------------------------------------------|
+//! | `part-details`                    | the part's revision after the latest import run: `ipn` or a named field |
+//! | `part-details.manufacturer-parts` | that revision's manufacturer parts                          |
+//! | `supplier-data`                   | the latest import run's row (supplier data never makes a revision) |
+//! | `import-problem`                  | a stored import problem's detail                            |
 //!
 //! Manufacturer parts are part of the part details; the report names them
-//! separately only to show where each `MPN` and `Manufacturer` went.
+//! separately only to show where each `MPN` and `Manufacturer` went. A part
+//! that an earlier import run of the file made, but that the file no longer
+//! has, must have a `part-not-in-csv-file` import problem.
 
 use catalog::csv_import::{
-    CadItemSource, ColumnRoute, Source, SubstitutesCsvColumn, route_column,
+    CadItemSource, ColumnRoute, CsvRecord, SubstitutesCsvColumn, parse_csv, route_column,
     route_substitutes_csv_column,
 };
-use catalog::pocketbase::{CatalogReadback, StoredImportProblem, StoredPartRevision};
+use catalog::pocketbase::{
+    CatalogReadback, ImportRun, StoredAuditEntry, StoredImportProblem, StoredPartRevision,
+};
 use catalog::{
     CadItemDetails, CadItemId, CadItemRevisionId, CadReferenceRole, CadReferenceTarget, License,
     ModelTarget, PartDetails, sha256_hex,
@@ -37,15 +45,32 @@ pub const MANUFACTURER_PARTS: &str = "part-details.manufacturer-parts";
 pub const SUPPLIER_DATA: &str = "supplier-data";
 pub const IMPORT_PROBLEM: &str = "import-problem";
 
+/// The audit entry action of a CSV import run.
+pub const CSV_IMPORT_ACTION: &str = "catalog.csv-import";
+
+/// Import problems that keep a whole row of the CSV file that could not
+/// become a part.
+const ROW_PROBLEM_CODES: [&str; 3] = ["row-has-extra-fields", "invalid-ipn", "duplicate-ipn"];
+
+/// Import problems that keep a whole substitutes.csv row that could not
+/// become a manufacturer part.
+const SUBSTITUTES_ROW_PROBLEM_CODES: [&str; 3] = [
+    "incomplete-substitutes-csv-row",
+    "duplicate-manufacturer-part",
+    "substitutes-csv-row-has-unknown-columns",
+];
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ZeroLossReport {
     pub csv_file: String,
     pub source_path: String,
     pub oracle_byte_sha256: String,
-    /// The CSV's hash as recorded on the Change(s).
-    pub change_byte_sha256: Vec<String>,
-    /// The hash of the CSV rebuilt from PocketBase alone: the stored header
-    /// line plus every row's stored raw bytes in row order.
+    /// The latest import run of the CSV file, which the report checks.
+    pub import_run: Option<ImportRunAccount>,
+    /// The CSV's byte hash as that run recorded it.
+    pub recorded_byte_sha256: String,
+    /// The hash of the CSV rebuilt from PocketBase alone: the header line
+    /// and every row's bytes the latest import run recorded.
     pub rebuilt_byte_sha256: String,
     pub rows: usize,
     pub columns: usize,
@@ -56,6 +81,9 @@ pub struct ZeroLossReport {
     /// goes there instead).
     pub column_routes: Vec<(String, String)>,
     pub parts: usize,
+    /// Parts that earlier import runs made from this file but that it no
+    /// longer has, each kept by an import problem.
+    pub removed_parts: Vec<String>,
     pub substitutes_csv_rows: SubstitutesCsvAccount,
     pub cad_items: Vec<CadItemAccount>,
     pub model_references: Vec<ModelAccount>,
@@ -86,6 +114,16 @@ impl ZeroLossReport {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct ImportRunAccount {
+    pub audit_entry: String,
+    pub csv_import_number: u64,
+    /// The Change it made, or empty if it made no revision.
+    pub change: String,
+    pub source_commit: String,
+    pub allowed_older_checkout: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct FieldAccount {
     pub row_number: usize,
     pub ipn: String,
@@ -99,7 +137,8 @@ pub struct FieldAccount {
 pub struct SubstitutesCsvAccount {
     pub path: String,
     pub oracle_byte_sha256: String,
-    pub change_byte_sha256: Vec<String>,
+    /// The byte hash the latest import run recorded.
+    pub recorded_byte_sha256: String,
     pub rows: usize,
     pub rows_in_scope: usize,
     pub fields_in_scope: usize,
@@ -167,14 +206,91 @@ struct Reporter<'a> {
     csv_file: String,
     readback: &'a CatalogReadback,
     repository: &'a Path,
+    /// Each stored import problem's detail, parsed once.
+    details: Vec<Value>,
     problems: Vec<String>,
 }
 
-/// A part's current revision, decoded.
-struct CurrentRevision<'a> {
+/// A part's revision as the latest import run left it, decoded.
+struct RunRevision<'a> {
     revision: &'a StoredPartRevision,
-    snapshot: PartDetails,
-    source: Source,
+    details: PartDetails,
+}
+
+/// A CSV file rebuilt from what an import run recorded.
+#[derive(Default)]
+struct RebuiltCsv {
+    recorded_byte_sha256: String,
+    rebuilt_byte_sha256: String,
+    /// The rebuilt file's rows, one per oracle row when it matches.
+    records: Vec<CsvRecord>,
+}
+
+impl RebuiltCsv {
+    /// Row `index`'s field `column`, or empty if the row is shorter.
+    fn field(&self, index: usize, column: usize) -> String {
+        self.records
+            .get(index)
+            .and_then(|record| record.fields.get(column))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn raw(&self, index: usize) -> &str {
+        self.records
+            .get(index)
+            .map_or("", |record| record.raw.as_str())
+    }
+}
+
+/// The per-field ledger of the CSV file's rows.
+#[derive(Default)]
+struct Fields {
+    destinations: BTreeMap<String, usize>,
+    column_routes: BTreeMap<String, String>,
+    accounts: Vec<FieldAccount>,
+}
+
+impl Fields {
+    fn account(
+        &mut self,
+        row_number: usize,
+        ipn: &str,
+        column: &str,
+        destination: &str,
+        oracle: &str,
+        stored: Option<String>,
+    ) {
+        *self.destinations.entry(destination.to_owned()).or_default() += 1;
+        self.column_routes
+            .entry(column.to_owned())
+            .or_insert_with(|| destination.to_owned());
+        self.accounts.push(FieldAccount {
+            row_number,
+            ipn: ipn.to_owned(),
+            column: column.to_owned(),
+            destination: destination.to_owned(),
+            oracle: oracle.to_owned(),
+            stored,
+        });
+    }
+}
+
+/// Text fields of a JSON list, such as a problem detail's `record`.
+fn strings(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| item.as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+fn padded(mut fields: Vec<String>, length: usize) -> Vec<String> {
+    if fields.len() < length {
+        fields.resize(length, String::new());
+    }
+    fields
 }
 
 impl<'a> Reporter<'a> {
@@ -189,6 +305,11 @@ impl<'a> Reporter<'a> {
             csv_file: csv_file.to_owned(),
             readback,
             repository,
+            details: readback
+                .problems
+                .iter()
+                .map(|problem| serde_json::from_str(&problem.detail).unwrap_or_default())
+                .collect(),
             problems: Vec::new(),
         }
     }
@@ -197,8 +318,425 @@ impl<'a> Reporter<'a> {
         self.problems.push(message);
     }
 
-    fn current_revisions(&mut self) -> Vec<CurrentRevision<'a>> {
-        let mut current_revisions = Vec::new();
+    /// The first stored import problem, with its parsed detail, that
+    /// `matches`.
+    fn find_problem(
+        &self,
+        matches: impl Fn(&StoredImportProblem, &Value) -> bool,
+    ) -> Option<(&'a StoredImportProblem, Value)> {
+        let readback = self.readback;
+        readback
+            .problems
+            .iter()
+            .zip(&self.details)
+            .find(|(problem, detail)| matches(problem, detail))
+            .map(|(problem, detail)| (problem, detail.clone()))
+    }
+
+    fn run(mut self) -> ZeroLossReport {
+        let oracle = self.oracle;
+        let readback = self.readback;
+        let table = self.csv_file.trim_start_matches("g-").to_owned();
+        let Some(category) = oracle
+            .catalog
+            .categories
+            .iter()
+            .find(|category| category.table == table)
+        else {
+            self.problem(format!("the oracle has no category `{table}`"));
+            return self.empty(Vec::new());
+        };
+        let document = &category.document;
+        let source_path = document.path.clone();
+        let headers = &document.headers;
+        let ipn_column = headers.iter().position(|header| header == "IPN");
+
+        let changes = self.changes();
+        self.check_import_runs_record_their_files();
+        self.check_current_revisions();
+        let Some((entry, run)) = self.latest_import_run() else {
+            self.problem(format!(
+                "no import run of {source_path} is recorded in an audit entry"
+            ));
+            return self.empty(changes);
+        };
+        let import_run = ImportRunAccount {
+            audit_entry: entry.id.clone(),
+            csv_import_number: entry.csv_import_number,
+            change: entry.change.clone(),
+            source_commit: entry.source_commit.clone(),
+            allowed_older_checkout: entry.allowed_older_checkout,
+        };
+        let csv = self.rebuild_csv(&run, &source_path, &document.byte_sha256, &document.rows);
+        let run_parts: BTreeMap<&str, u32> = run
+            .parts
+            .iter()
+            .map(|part| (part.ipn.as_str(), part.revision))
+            .collect();
+
+        let mut fields = Fields::default();
+        let mut explained = BTreeSet::new();
+        // Parts whose row the latest run made, and the revision it left
+        // them at; parts whose row an import problem keeps instead.
+        let mut scope: BTreeMap<String, RunRevision> = BTreeMap::new();
+        let mut kept_by_problem: BTreeMap<String, Value> = BTreeMap::new();
+        let mut part_rows = BTreeSet::new();
+        let mut rows_with_main_part: BTreeMap<String, bool> = BTreeMap::new();
+
+        for (index, row) in document.rows.iter().enumerate() {
+            let row_number = index + 1;
+            let raw = csv.raw(index).to_owned();
+            let ipn = ipn_column
+                .and_then(|column| row.get(column))
+                .cloned()
+                .unwrap_or_default();
+
+            // A row that could not become a part.
+            if let Some((problem, detail)) = self.find_problem(|problem, detail| {
+                ROW_PROBLEM_CODES.contains(&problem.code.as_str())
+                    && problem.path == source_path
+                    && detail["row_number"].as_u64() == Some(row_number as u64)
+                    && detail["raw_record"].as_str() == Some(raw.as_str())
+            }) {
+                explained.insert(problem.id.clone());
+                let record = padded(strings(&detail["record"]), headers.len());
+                for (position, (column, value)) in headers.iter().zip(row).enumerate() {
+                    let stored = record.get(position).cloned();
+                    if stored.as_deref() != Some(value.as_str()) {
+                        self.problem(format!(
+                            "row {row_number} field {column}: oracle {value:?}, problem kept {stored:?}"
+                        ));
+                    }
+                    fields.account(row_number, &ipn, column, IMPORT_PROBLEM, value, stored);
+                }
+                continue;
+            }
+
+            let revision = match run_parts.get(ipn.as_str()) {
+                Some(&number) => self.run_revision(&ipn, number),
+                None => {
+                    self.problem(format!(
+                        "row {row_number} ({ipn}) is neither a part of the latest import run nor an import problem"
+                    ));
+                    None
+                }
+            };
+            let Some(revision) = revision else {
+                for (column, value) in headers.iter().zip(row) {
+                    fields.account(row_number, &ipn, column, "lost", value, None);
+                }
+                continue;
+            };
+            part_rows.insert(ipn.clone());
+
+            // A row whose part details differ from a revision that an edit
+            // or restore made is kept by an import problem instead.
+            let number = revision.revision.number;
+            if let Some((problem, detail)) = self.find_problem(|problem, detail| {
+                problem.code == "csv-row-conflicts-with-current-revision"
+                    && problem.subject == ipn
+                    && problem.path == source_path
+                    && detail["raw_record"].as_str() == Some(raw.as_str())
+                    && detail["current_revision_number"].as_u64() == Some(u64::from(number))
+            }) {
+                explained.insert(problem.id.clone());
+                kept_by_problem.insert(ipn.clone(), detail.clone());
+                for (position, (column, value)) in headers.iter().zip(row).enumerate() {
+                    let stored = Some(csv.field(index, position));
+                    fields.account(row_number, &ipn, column, IMPORT_PROBLEM, value, stored);
+                }
+                continue;
+            }
+
+            let details = &revision.details;
+            let has_main_columns = headers.iter().any(|header| {
+                matches!(
+                    route_column(header),
+                    ColumnRoute::MainMpn | ColumnRoute::MainManufacturer
+                )
+            });
+            // The row makes the main manufacturer part only when its MPN and
+            // Manufacturer are both there and not blank; otherwise an import
+            // problem keeps exactly these values and the first manufacturer
+            // part comes from substitutes.csv.
+            let main_values: Vec<(&String, &String)> = headers
+                .iter()
+                .zip(row)
+                .filter(|(header, _)| {
+                    matches!(
+                        route_column(header),
+                        ColumnRoute::MainMpn | ColumnRoute::MainManufacturer
+                    )
+                })
+                .collect();
+            let row_made_main =
+                main_values.len() == 2 && main_values.iter().all(|(_, value)| !value.is_empty());
+            let incomplete = if has_main_columns && !row_made_main {
+                self.find_problem(|problem, detail| {
+                    problem.code == "incomplete-main-manufacturer-part"
+                        && problem.subject == ipn
+                        && main_values
+                            .iter()
+                            .all(|(column, value)| detail[column.as_str()].as_str() == Some(value))
+                })
+            } else {
+                None
+            };
+            rows_with_main_part.insert(ipn.clone(), row_made_main);
+            let main = details.manufacturer_parts.first().filter(|_| row_made_main);
+
+            let mut part_detail_columns = Vec::new();
+            for (position, (column, value)) in headers.iter().zip(row).enumerate() {
+                let route = route_column(column);
+                let (destination, stored) = match route {
+                    ColumnRoute::Ipn => (PART_DETAILS, Some(details.ipn.clone())),
+                    ColumnRoute::PartDetails => {
+                        part_detail_columns.push(column.clone());
+                        (PART_DETAILS, details.field(column).map(str::to_owned))
+                    }
+                    ColumnRoute::MainMpn | ColumnRoute::MainManufacturer => {
+                        match (main, &incomplete) {
+                            (Some(main), _) => (
+                                MANUFACTURER_PARTS,
+                                Some(if route == ColumnRoute::MainMpn {
+                                    main.mpn.clone()
+                                } else {
+                                    main.manufacturer.clone()
+                                }),
+                            ),
+                            (None, Some((problem, detail))) => {
+                                explained.insert(problem.id.clone());
+                                (
+                                    IMPORT_PROBLEM,
+                                    detail[column.as_str()].as_str().map(str::to_owned),
+                                )
+                            }
+                            (None, None) => (MANUFACTURER_PARTS, None),
+                        }
+                    }
+                    // Supplier data never makes a revision; the latest run's
+                    // row keeps it.
+                    ColumnRoute::SupplierData => (SUPPLIER_DATA, Some(csv.field(index, position))),
+                };
+                if stored.as_deref() != Some(value.as_str()) {
+                    self.problem(format!(
+                        "row {row_number} ({ipn}) field {column}: oracle {value:?}, stored {stored:?} in {destination}"
+                    ));
+                }
+                fields.account(row_number, &ipn, column, destination, value, stored);
+            }
+            // Exactly one place: no extra or repeated part-details fields,
+            // and no supplier data in the part details.
+            let stored_fields: Vec<&String> =
+                details.fields.iter().map(|field| &field.name).collect();
+            if stored_fields != part_detail_columns.iter().collect::<Vec<_>>() {
+                self.problem(format!(
+                    "row {row_number} ({ipn}): part-details fields {stored_fields:?} are not the part-details columns {part_detail_columns:?}"
+                ));
+            }
+            for (column, value) in headers.iter().zip(row) {
+                if route_column(column) == ColumnRoute::SupplierData
+                    && !value.is_empty()
+                    && revision.revision.snapshot.contains(&format!("\"{value}\""))
+                {
+                    self.problem(format!(
+                        "row {row_number} ({ipn}): supplier data {column}={value} also appears in the part details"
+                    ));
+                }
+            }
+            scope.insert(ipn.clone(), revision);
+        }
+
+        for part in &run.parts {
+            if !part_rows.contains(&part.ipn) {
+                self.problem(format!(
+                    "{} is a part of the latest import run, but no row of {source_path} makes it",
+                    part.ipn
+                ));
+            }
+        }
+        let removed_parts = self.removed_parts(&source_path, &part_rows, &mut explained);
+        if csv.rebuilt_byte_sha256 != document.byte_sha256 {
+            self.problem(format!(
+                "{source_path} rebuilt from PocketBase hashes to {}, not the oracle's {}",
+                csv.rebuilt_byte_sha256, document.byte_sha256
+            ));
+        }
+
+        let in_scope: BTreeMap<String, &PartDetails> = scope
+            .iter()
+            .map(|(ipn, revision)| (ipn.clone(), &revision.details))
+            .collect();
+        let substitutes_csv_rows = self.substitutes_csv_rows(
+            &run,
+            &in_scope,
+            &kept_by_problem,
+            &rows_with_main_part,
+            &mut explained,
+        );
+        let (cad_items, footprint_paths) = self.cad_items(&in_scope, &mut explained);
+        let model_references = self.models(&footprint_paths, &mut explained);
+        let oracle_diagnostics =
+            self.oracle_diagnostics(&footprint_paths, &cad_items, &mut explained);
+        // Every import problem belongs to the audit entry of the run that
+        // first found it.
+        for problem in &readback.problems {
+            if !readback
+                .audit_entries
+                .iter()
+                .any(|entry| entry.id == problem.audit_entry)
+            {
+                self.problem(format!(
+                    "import problem {} at {} has no audit entry",
+                    problem.code, problem.location
+                ));
+            }
+        }
+        let other_problems = readback
+            .problems
+            .iter()
+            .filter(|problem| !explained.contains(&problem.id))
+            .map(|problem| format!("{} {} {}", problem.code, problem.path, problem.location))
+            .collect();
+
+        let field_count = fields.accounts.len();
+        if field_count != document.rows.len() * headers.len() {
+            self.problem(format!(
+                "{field_count} fields accounted for, but the oracle has {}",
+                document.rows.len() * headers.len()
+            ));
+        }
+        ZeroLossReport {
+            csv_file: self.csv_file.clone(),
+            source_path,
+            oracle_byte_sha256: document.byte_sha256.clone(),
+            import_run: Some(import_run),
+            recorded_byte_sha256: csv.recorded_byte_sha256,
+            rebuilt_byte_sha256: csv.rebuilt_byte_sha256,
+            rows: document.rows.len(),
+            columns: headers.len(),
+            fields: field_count,
+            destinations: fields.destinations,
+            column_routes: headers
+                .iter()
+                .map(|header| {
+                    (
+                        header.clone(),
+                        fields
+                            .column_routes
+                            .get(header)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+            parts: part_rows.len(),
+            removed_parts,
+            substitutes_csv_rows,
+            cad_items,
+            model_references,
+            oracle_diagnostics,
+            other_problems,
+            changes,
+            field_accounts: fields.accounts,
+            problems: self.problems,
+        }
+    }
+
+    fn empty(self, changes: Vec<ChangeAccount>) -> ZeroLossReport {
+        ZeroLossReport {
+            csv_file: self.csv_file,
+            source_path: String::new(),
+            oracle_byte_sha256: String::new(),
+            import_run: None,
+            recorded_byte_sha256: String::new(),
+            rebuilt_byte_sha256: String::new(),
+            rows: 0,
+            columns: 0,
+            fields: 0,
+            destinations: BTreeMap::new(),
+            column_routes: vec![],
+            parts: 0,
+            removed_parts: vec![],
+            substitutes_csv_rows: SubstitutesCsvAccount::default(),
+            cad_items: vec![],
+            model_references: vec![],
+            oracle_diagnostics: vec![],
+            other_problems: vec![],
+            changes,
+            field_accounts: vec![],
+            problems: self.problems,
+        }
+    }
+
+    /// Checks every Change: one audit entry, at least one revision, a
+    /// reason.
+    fn changes(&mut self) -> Vec<ChangeAccount> {
+        let readback = self.readback;
+        let mut changes = Vec::new();
+        for change in &readback.changes {
+            let audit_entries = readback
+                .audit_entries
+                .iter()
+                .filter(|entry| entry.change == change.id)
+                .count();
+            if audit_entries != 1 {
+                self.problem(format!(
+                    "Change {} has {audit_entries} audit entries",
+                    change.seq
+                ));
+            }
+            let revisions = readback
+                .part_revisions
+                .iter()
+                .filter(|revision| revision.change == change.id)
+                .count()
+                + readback
+                    .cad_item_revisions
+                    .iter()
+                    .filter(|revision| revision.change == change.id)
+                    .count();
+            if revisions == 0 {
+                self.problem(format!("Change {} has no revisions", change.seq));
+            }
+            if change.reason.trim().is_empty() {
+                self.problem(format!("Change {} has no reason", change.seq));
+            }
+            changes.push(ChangeAccount {
+                id: change.id.clone(),
+                seq: change.seq,
+                kind: change.kind.clone(),
+                reason: change.reason.clone(),
+                source_commit: change.source_commit.clone(),
+                audit_entries,
+            });
+        }
+        changes
+    }
+
+    /// Every CSV import run, including one that made no Change, records the
+    /// files it read with their byte hashes.
+    fn check_import_runs_record_their_files(&mut self) {
+        let readback = self.readback;
+        for entry in &readback.audit_entries {
+            if entry.action != CSV_IMPORT_ACTION {
+                continue;
+            }
+            let recorded = entry
+                .import_run()
+                .is_some_and(|run| !run.files.is_empty() && run.csv_file == entry.csv_file);
+            if !recorded || entry.csv_import_number == 0 {
+                self.problem(format!(
+                    "the audit entry of import run {} does not record the files it read",
+                    entry.correlation_id
+                ));
+            }
+        }
+    }
+
+    /// The current revision of every part is one of its own, matches its
+    /// hash and holds that part's details.
+    fn check_current_revisions(&mut self) {
         let readback = self.readback;
         for part in &readback.parts {
             let Some(revision) = readback.part_revision(&part.current_revision) else {
@@ -217,526 +755,270 @@ impl<'a> Reporter<'a> {
                     part.ipn
                 ));
             }
-            let snapshot = match serde_json::from_str::<PartDetails>(&revision.snapshot) {
-                Ok(snapshot) => snapshot,
+            match serde_json::from_str::<PartDetails>(&revision.snapshot) {
+                Ok(details) if details.ipn == part.ipn => {}
+                Ok(details) => {
+                    self.problem(format!("{}: snapshot names {}", part.ipn, details.ipn));
+                }
                 Err(error) => {
                     self.problem(format!("{}: snapshot does not parse: {error}", part.ipn));
-                    continue;
                 }
-            };
-            let source = match serde_json::from_str::<Source>(&revision.source) {
-                Ok(source) => source,
-                Err(error) => {
-                    self.problem(format!("{}: source does not parse: {error}", part.ipn));
-                    continue;
-                }
-            };
-            if snapshot.ipn != part.ipn {
-                self.problem(format!("{}: snapshot names {}", part.ipn, snapshot.ipn));
             }
-            current_revisions.push(CurrentRevision {
-                revision,
-                snapshot,
-                source,
-            });
         }
-        current_revisions
     }
 
-    fn run(mut self) -> ZeroLossReport {
-        let oracle = self.oracle;
+    /// The latest import run of this CSV file and what it recorded.
+    fn latest_import_run(&self) -> Option<(&'a StoredAuditEntry, ImportRun)> {
         let readback = self.readback;
-        let table = self.csv_file.trim_start_matches("g-").to_owned();
-        let Some(category) = oracle
-            .catalog
-            .categories
+        readback
+            .audit_entries
             .iter()
-            .find(|category| category.table == table)
-        else {
-            self.problem(format!("the oracle has no category `{table}`"));
-            return self.empty();
-        };
-        let document = &category.document;
-        let source_path = document.path.clone();
-        let headers = &document.headers;
-        let ipn_column = headers.iter().position(|header| header == "IPN");
-
-        // Changes and the source files they recorded.
-        let mut changes = Vec::new();
-        let mut csv_hashes = BTreeSet::new();
-        let mut substitutes_csv_hashes = BTreeSet::new();
-        let mut header_raw = None;
-        for change in &readback.changes {
-            let audit_entries = readback
-                .audit_entries
-                .iter()
-                .filter(|entry| entry.change == change.id)
-                .count();
-            if audit_entries != 1 {
-                self.problem(format!(
-                    "Change {} has {audit_entries} audit entries",
-                    change.seq
-                ));
-            }
-            // A Change never has zero revisions.
-            let revisions = readback
-                .part_revisions
-                .iter()
-                .filter(|revision| revision.change == change.id)
-                .count()
-                + readback
-                    .cad_item_revisions
-                    .iter()
-                    .filter(|revision| revision.change == change.id)
-                    .count();
-            if revisions == 0 {
-                self.problem(format!("Change {} has no revisions", change.seq));
-            }
-            if change.reason.trim().is_empty() {
-                self.problem(format!("Change {} has no reason", change.seq));
-            }
-            let sources: Value = serde_json::from_str(&change.sources).unwrap_or(Value::Null);
-            for file in sources["files"].as_array().into_iter().flatten() {
-                let path = file["path"].as_str().unwrap_or_default();
-                let sha = file["byte_sha256"].as_str().unwrap_or_default().to_owned();
-                if path == source_path {
-                    if sha == document.byte_sha256 {
-                        header_raw = file["header_raw"].as_str().map(str::to_owned);
-                    }
-                    csv_hashes.insert(sha);
-                } else if path == oracle.substitutes.path {
-                    substitutes_csv_hashes.insert(sha);
-                }
-            }
-            changes.push(ChangeAccount {
-                id: change.id.clone(),
-                seq: change.seq,
-                kind: change.kind.clone(),
-                reason: change.reason.clone(),
-                source_commit: change.source_commit.clone(),
-                audit_entries,
-            });
-        }
-        if !csv_hashes.contains(&document.byte_sha256) {
-            self.problem(format!(
-                "no Change recorded {source_path} with the oracle's byte hash"
-            ));
-        }
-
-        let current_revisions = self.current_revisions();
-        let by_row: BTreeMap<usize, &CurrentRevision> = current_revisions
-            .iter()
-            .filter(|current_revision| current_revision.source.path == source_path)
-            .map(|current_revision| (current_revision.source.row_number, current_revision))
-            .collect();
-        let problems = &readback.problems;
-        let problem_rows: BTreeMap<usize, (&StoredImportProblem, Value)> = problems
-            .iter()
-            .filter(|problem| problem.path == source_path)
-            .filter_map(|problem| {
-                let detail: Value = serde_json::from_str(&problem.detail).ok()?;
-                let row = detail["row_number"].as_u64()? as usize;
-                detail["raw_record"].as_str()?;
-                Some((row, (problem, detail)))
+            .filter(|entry| {
+                entry.action == CSV_IMPORT_ACTION
+                    && entry.csv_file == self.csv_file
+                    && entry.csv_import_number > 0
             })
-            .collect();
+            .max_by_key(|entry| entry.csv_import_number)
+            .and_then(|entry| Some((entry, entry.import_run()?)))
+    }
 
-        let mut destinations: BTreeMap<String, usize> = BTreeMap::new();
-        let mut column_routes: BTreeMap<String, String> = BTreeMap::new();
-        let mut field_accounts = Vec::new();
-        let mut explained_problems = BTreeSet::new();
-        let mut rebuilt = header_raw.clone().unwrap_or_default();
-        let mut scope_ipns = BTreeSet::new();
-        let mut matched_heads = BTreeSet::new();
-        let mut rows_with_main_part: BTreeMap<String, bool> = BTreeMap::new();
-        if header_raw.is_none() {
-            self.problem(format!("no Change kept the header line of {source_path}"));
-        }
-
-        for (index, row) in document.rows.iter().enumerate() {
-            let row_number = index + 1;
-            let ipn = ipn_column
-                .and_then(|column| row.get(column))
-                .cloned()
-                .unwrap_or_default();
-            let mut account =
-                |column: &str, destination: &str, oracle: &str, stored: Option<String>| {
-                    *destinations.entry(destination.to_owned()).or_default() += 1;
-                    column_routes
-                        .entry(column.to_owned())
-                        .or_insert_with(|| destination.to_owned());
-                    field_accounts.push(FieldAccount {
-                        row_number,
-                        ipn: ipn.clone(),
-                        column: column.to_owned(),
-                        destination: destination.to_owned(),
-                        oracle: oracle.to_owned(),
-                        stored,
-                    });
-                };
-            if let Some(current_revision) = by_row.get(&row_number) {
-                matched_heads.insert(current_revision.revision.id.clone());
-                scope_ipns.insert(current_revision.snapshot.ipn.clone());
-                let source = &current_revision.source;
-                rebuilt.push_str(&source.raw_record);
-                let mut padded = source.record.clone();
-                padded.resize(headers.len(), String::new());
-                if &source.headers != headers || &padded != row {
-                    self.problems.push(format!(
-                        "row {row_number} ({ipn}): Source does not hold the oracle row"
-                    ));
-                }
-                if source.byte_sha256 != document.byte_sha256 {
-                    self.problems.push(format!(
-                        "row {row_number} ({ipn}): Source names another version of {source_path}"
-                    ));
-                }
-                let snapshot = &current_revision.snapshot;
-                // The row made the main manufacturer part only if
-                // it has the columns and was not kept as an incomplete one;
-                // otherwise the first entry comes from substitutes.csv.
-                let incomplete = problems.iter().find(|problem| {
-                    problem.code == "incomplete-main-manufacturer-part"
-                        && problem.subject == snapshot.ipn
-                });
-                let has_columns = headers.iter().any(|header| {
-                    matches!(
-                        route_column(header),
-                        ColumnRoute::MainMpn | ColumnRoute::MainManufacturer
-                    )
-                });
-                let row_made_main = has_columns && incomplete.is_none();
-                rows_with_main_part.insert(snapshot.ipn.clone(), row_made_main);
-                let main = snapshot
-                    .manufacturer_parts
-                    .first()
-                    .filter(|_| row_made_main);
-                let mut snapshot_columns = Vec::new();
-                let mut supplier_columns = Vec::new();
-                for (column, value) in headers.iter().zip(row) {
-                    let route = route_column(column);
-                    let (destination, stored) = match route {
-                        ColumnRoute::Ipn => (PART_DETAILS, Some(snapshot.ipn.clone())),
-                        ColumnRoute::PartDetails => {
-                            snapshot_columns.push(column.clone());
-                            (PART_DETAILS, snapshot.field(column).map(str::to_owned))
-                        }
-                        ColumnRoute::MainMpn | ColumnRoute::MainManufacturer => {
-                            match (main, incomplete) {
-                                (Some(main), _) => (
-                                    MANUFACTURER_PARTS,
-                                    Some(if route == ColumnRoute::MainMpn {
-                                        main.mpn.clone()
-                                    } else {
-                                        main.manufacturer.clone()
-                                    }),
-                                ),
-                                (None, Some(problem)) => {
-                                    explained_problems.insert(problem.id.clone());
-                                    let detail: Value =
-                                        serde_json::from_str(&problem.detail).unwrap_or_default();
-                                    (
-                                        IMPORT_PROBLEM,
-                                        detail[column.as_str()].as_str().map(str::to_owned),
-                                    )
-                                }
-                                (None, None) => (MANUFACTURER_PARTS, None),
-                            }
-                        }
-                        ColumnRoute::SupplierData => {
-                            supplier_columns.push(column.clone());
-                            (
-                                SUPPLIER_DATA,
-                                source
-                                    .supplier_data
-                                    .iter()
-                                    .find(|fact| &fact.column == column)
-                                    .map(|fact| fact.value.clone()),
-                            )
-                        }
-                    };
-                    if stored.as_deref() != Some(value.as_str()) {
-                        self.problems.push(format!(
-                            "row {row_number} ({ipn}) field {column}: oracle {value:?}, stored {stored:?} in {destination}"
-                        ));
-                    }
-                    account(column, destination, value, stored);
-                }
-                // Exactly one place: no extra or repeated snapshot fields or
-                // supplier data.
-                let stored_fields: Vec<&String> =
-                    snapshot.fields.iter().map(|field| &field.name).collect();
-                if stored_fields != snapshot_columns.iter().collect::<Vec<_>>() {
-                    self.problems.push(format!(
-                        "row {row_number} ({ipn}): snapshot fields {stored_fields:?} are not the part-details columns {snapshot_columns:?}"
-                    ));
-                }
-                let stored_facts: Vec<&String> = source
-                    .supplier_data
-                    .iter()
-                    .map(|fact| &fact.column)
-                    .collect();
-                if stored_facts != supplier_columns.iter().collect::<Vec<_>>() {
-                    self.problems.push(format!(
-                        "row {row_number} ({ipn}): supplier data {stored_facts:?} are not {supplier_columns:?}"
-                    ));
-                }
-                for fact_column in &supplier_columns {
-                    if let Some(value) = row
-                        .get(
-                            headers
-                                .iter()
-                                .position(|h| h == fact_column)
-                                .unwrap_or(usize::MAX),
-                        )
-                        .filter(|value| !value.is_empty())
-                    {
-                        if current_revision
-                            .revision
-                            .snapshot
-                            .contains(&format!("\"{value}\""))
-                        {
-                            self.problems.push(format!(
-                                "row {row_number} ({ipn}): supplier data {fact_column}={value} also appears in the snapshot"
-                            ));
-                        }
-                    }
-                }
-            } else if let Some((problem, detail)) = problem_rows.get(&row_number) {
-                explained_problems.insert(problem.id.clone());
-                rebuilt.push_str(detail["raw_record"].as_str().unwrap_or_default());
-                let record: Vec<String> = detail["record"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|value| value.as_str().unwrap_or_default().to_owned())
-                    .collect();
-                for (position, (column, value)) in headers.iter().zip(row).enumerate() {
-                    let stored = Some(record.get(position).cloned().unwrap_or_default());
-                    if stored.as_deref() != Some(value.as_str()) {
-                        self.problems.push(format!(
-                            "row {row_number} field {column}: oracle {value:?}, problem kept {stored:?}"
-                        ));
-                    }
-                    account(column, IMPORT_PROBLEM, value, stored);
-                }
-            } else {
-                self.problems.push(format!(
-                    "row {row_number} ({ipn}) is neither a part nor an import problem"
-                ));
-                for (column, value) in headers.iter().zip(row) {
-                    account(column, "lost", value, None);
-                }
-            }
-        }
-        for current_revision in &current_revisions {
-            if current_revision.source.path == source_path
-                && !matched_heads.contains(&current_revision.revision.id)
-            {
-                self.problems.push(format!(
-                    "{} comes from row {}, which the oracle does not have",
-                    current_revision.snapshot.ipn, current_revision.source.row_number
-                ));
-            }
-        }
-        let rebuilt_byte_sha256 = sha256_hex(rebuilt.as_bytes());
-        if rebuilt_byte_sha256 != document.byte_sha256 {
-            self.problem(format!(
-                "{source_path} rebuilt from PocketBase hashes to {rebuilt_byte_sha256}, not the oracle's {}",
-                document.byte_sha256
-            ));
-        }
-
-        let substitutes_csv_rows = self.substitutes_csv_rows(
-            &current_revisions,
-            &scope_ipns,
-            &substitutes_csv_hashes,
-            &rows_with_main_part,
-            &mut explained_problems,
-        );
-        let (cad_items, footprint_paths) =
-            self.cad_items(&current_revisions, &scope_ipns, &mut explained_problems);
-        let model_references = self.models(&footprint_paths, &mut explained_problems);
-        let oracle_diagnostics =
-            self.oracle_diagnostics(&footprint_paths, &cad_items, &mut explained_problems);
-        // Every import problem belongs to the audit entry of the run that
-        // found it.
-        for problem in problems {
-            if !readback
-                .audit_entries
-                .iter()
-                .any(|entry| entry.id == problem.audit_entry)
-            {
-                self.problems.push(format!(
-                    "import problem {} at {} has no audit entry",
-                    problem.code, problem.location
-                ));
-            }
-        }
-        let other_problems = problems
+    /// Part `ipn`'s revision `number`, checked against its hash.
+    fn run_revision(&mut self, ipn: &str, number: u32) -> Option<RunRevision<'a>> {
+        let readback = self.readback;
+        let Some(part) = readback.part(ipn) else {
+            self.problem(format!("{ipn} is in the latest import run but not a part"));
+            return None;
+        };
+        let Some(revision) = readback
+            .part_revisions
             .iter()
-            .filter(|problem| !explained_problems.contains(&problem.id))
-            .map(|problem| format!("{} {} {}", problem.code, problem.path, problem.location))
-            .collect();
-
-        let fields = field_accounts.len();
-        if fields != document.rows.len() * headers.len() {
+            .find(|revision| revision.part == part.id && revision.number == number)
+        else {
             self.problem(format!(
-                "{fields} fields accounted for, but the oracle has {}",
-                document.rows.len() * headers.len()
+                "{ipn}: revision {number}, which the latest import run left it at, is missing"
             ));
+            return None;
+        };
+        if sha256_hex(&revision.snapshot) != revision.snapshot_sha256 {
+            self.problem(format!("{ipn}: revision {number} does not match its hash"));
         }
-        ZeroLossReport {
-            csv_file: self.csv_file.clone(),
-            source_path,
-            oracle_byte_sha256: document.byte_sha256.clone(),
-            change_byte_sha256: csv_hashes.into_iter().collect(),
-            rebuilt_byte_sha256,
-            rows: document.rows.len(),
-            columns: headers.len(),
-            fields,
-            destinations,
-            column_routes: headers
-                .iter()
-                .map(|header| {
-                    (
-                        header.clone(),
-                        column_routes.get(header).cloned().unwrap_or_default(),
-                    )
-                })
-                .collect(),
-            parts: matched_heads.len(),
-            substitutes_csv_rows,
-            cad_items,
-            model_references,
-            oracle_diagnostics,
-            other_problems,
-            changes,
-            field_accounts,
-            problems: self.problems,
+        match serde_json::from_str::<PartDetails>(&revision.snapshot) {
+            Ok(details) if details.ipn == ipn => Some(RunRevision { revision, details }),
+            Ok(details) => {
+                self.problem(format!("{ipn}: revision {number} names {}", details.ipn));
+                None
+            }
+            Err(error) => {
+                self.problem(format!("{ipn}: revision {number} does not parse: {error}"));
+                None
+            }
         }
     }
 
-    fn empty(self) -> ZeroLossReport {
-        ZeroLossReport {
-            csv_file: self.csv_file,
-            source_path: String::new(),
-            oracle_byte_sha256: String::new(),
-            change_byte_sha256: vec![],
-            rebuilt_byte_sha256: String::new(),
-            rows: 0,
-            columns: 0,
-            fields: 0,
-            destinations: BTreeMap::new(),
-            column_routes: vec![],
-            parts: 0,
-            substitutes_csv_rows: SubstitutesCsvAccount::default(),
-            cad_items: vec![],
-            model_references: vec![],
-            oracle_diagnostics: vec![],
-            other_problems: vec![],
-            changes: vec![],
-            field_accounts: vec![],
-            problems: self.problems,
+    /// Rebuilds `path` from the header line and rows `run` recorded, and
+    /// checks it against the oracle's byte hash and rows.
+    fn rebuild_csv(
+        &mut self,
+        run: &ImportRun,
+        path: &str,
+        oracle_byte_sha256: &str,
+        oracle_rows: &[Vec<String>],
+    ) -> RebuiltCsv {
+        let Some(file) = run.file(path) else {
+            self.problem(format!("the latest import run did not record {path}"));
+            return RebuiltCsv::default();
+        };
+        if file.byte_sha256 != oracle_byte_sha256 {
+            self.problem(format!(
+                "the latest import run read {path} with byte hash {}, not the oracle's {oracle_byte_sha256}",
+                file.byte_sha256
+            ));
         }
+        let (Some(header), Some(rows)) = (&file.header_raw, &file.rows) else {
+            self.problem(format!(
+                "the latest import run did not keep the header line and rows of {path}"
+            ));
+            return RebuiltCsv {
+                recorded_byte_sha256: file.byte_sha256.clone(),
+                ..RebuiltCsv::default()
+            };
+        };
+        let text: String = std::iter::once(header.as_str())
+            .chain(rows.iter().map(String::as_str))
+            .collect();
+        let rebuilt_byte_sha256 = sha256_hex(text.as_bytes());
+        let records = match parse_csv(path, text.as_bytes()) {
+            Ok(table) => table.records,
+            Err(error) => {
+                self.problem(format!(
+                    "{path} rebuilt from PocketBase does not parse: {error}"
+                ));
+                Vec::new()
+            }
+        };
+        if records.len() != oracle_rows.len() {
+            self.problem(format!(
+                "{path} rebuilt from PocketBase has {} rows, the oracle {}",
+                records.len(),
+                oracle_rows.len()
+            ));
+        }
+        for (index, (record, oracle_row)) in records.iter().zip(oracle_rows).enumerate() {
+            if &padded(record.fields.clone(), oracle_row.len()) != oracle_row {
+                self.problem(format!(
+                    "row {} of {path} rebuilt from PocketBase is not the oracle's row",
+                    index + 1
+                ));
+            }
+            if rows.get(index) != Some(&record.raw) {
+                self.problem(format!(
+                    "row {} of {path}: the bytes the import run recorded are not one whole row",
+                    index + 1
+                ));
+            }
+        }
+        RebuiltCsv {
+            recorded_byte_sha256: file.byte_sha256.clone(),
+            rebuilt_byte_sha256,
+            records,
+        }
+    }
+
+    /// Parts that an earlier import run made from `path`, but that no row of
+    /// it makes now. Each must be kept by a `part-not-in-csv-file` import
+    /// problem; nothing is ever deleted.
+    fn removed_parts(
+        &mut self,
+        path: &str,
+        part_rows: &BTreeSet<String>,
+        explained: &mut BTreeSet<String>,
+    ) -> Vec<String> {
+        let readback = self.readback;
+        let earlier: BTreeSet<String> = readback
+            .audit_entries
+            .iter()
+            .filter(|entry| entry.action == CSV_IMPORT_ACTION && entry.csv_file == self.csv_file)
+            .filter_map(StoredAuditEntry::import_run)
+            .flat_map(|run| run.parts.into_iter().map(|part| part.ipn))
+            .filter(|ipn| !part_rows.contains(ipn))
+            .collect();
+        let mut removed = Vec::new();
+        for ipn in earlier {
+            let kept = readback.problems.iter().find(|problem| {
+                problem.code == "part-not-in-csv-file"
+                    && problem.subject == ipn
+                    && problem.path == path
+            });
+            match kept {
+                Some(problem) => {
+                    explained.insert(problem.id.clone());
+                    removed.push(ipn);
+                }
+                None => self.problem(format!(
+                    "{ipn} was a part of {path} at an earlier import, is not in it now, and no import problem says so"
+                )),
+            }
+        }
+        removed
     }
 
     fn substitutes_csv_rows(
         &mut self,
-        current_revisions: &[CurrentRevision],
-        scope: &BTreeSet<String>,
-        hashes: &BTreeSet<String>,
+        run: &ImportRun,
+        scope: &BTreeMap<String, &PartDetails>,
+        kept_by_problem: &BTreeMap<String, Value>,
         rows_with_main_part: &BTreeMap<String, bool>,
         explained: &mut BTreeSet<String>,
     ) -> SubstitutesCsvAccount {
         let oracle = self.oracle;
-        let readback = self.readback;
         let document = &oracle.substitutes;
-        if !hashes.contains(&document.byte_sha256) {
+        let csv = self.rebuild_csv(run, &document.path, &document.byte_sha256, &document.rows);
+        if csv.rebuilt_byte_sha256 != document.byte_sha256 {
             self.problem(format!(
-                "no Change recorded {} with the oracle's byte hash",
-                document.path
+                "{} rebuilt from PocketBase hashes to {}, not the oracle's {}",
+                document.path, csv.rebuilt_byte_sha256, document.byte_sha256
             ));
         }
         let ipn_column = document.headers.iter().position(|header| header == "IPN");
         let mut account = SubstitutesCsvAccount {
             path: document.path.clone(),
             oracle_byte_sha256: document.byte_sha256.clone(),
-            change_byte_sha256: hashes.iter().cloned().collect(),
+            recorded_byte_sha256: csv.recorded_byte_sha256.clone(),
             rows: document.rows.len(),
             ..SubstitutesCsvAccount::default()
         };
+        // How many of each part's substitutes.csv rows became manufacturer
+        // parts so far, in file order.
+        let mut accepted: BTreeMap<String, usize> = BTreeMap::new();
         for (index, row) in document.rows.iter().enumerate() {
             let row_number = index + 1;
+            let raw = csv.raw(index).to_owned();
             let ipn = ipn_column
                 .and_then(|column| row.get(column))
                 .cloned()
                 .unwrap_or_default();
-            if !scope.contains(&ipn) {
+            if !scope.contains_key(&ipn) && !kept_by_problem.contains_key(&ipn) {
                 continue;
             }
             account.rows_in_scope += 1;
             account.fields_in_scope += row.len();
+            let location = format!("rows[{row_number}]");
+
+            // A row that could not become a manufacturer part is kept whole
+            // by an import problem.
+            if let Some((problem, detail)) = self.find_problem(|problem, detail| {
+                SUBSTITUTES_ROW_PROBLEM_CODES.contains(&problem.code.as_str())
+                    && problem.path == document.path
+                    && problem.location == location
+                    && detail["raw_record"].as_str() == Some(raw.as_str())
+            }) {
+                if &padded(strings(&detail["record"]), row.len()) != row {
+                    self.problem(format!(
+                        "substitutes.csv row {row_number} of {ipn}: its import problem does not hold the oracle row"
+                    ));
+                }
+                explained.insert(problem.id.clone());
+                *account
+                    .destinations
+                    .entry(IMPORT_PROBLEM.to_owned())
+                    .or_default() += row.len();
+                continue;
+            }
+            // The part's own row is kept by an import problem, together with
+            // its substitutes.csv rows.
+            if let Some(detail) = kept_by_problem.get(&ipn) {
+                let kept = detail["substitutes_csv_rows"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|kept| kept.as_str() == Some(raw.as_str()));
+                if kept {
+                    *account
+                        .destinations
+                        .entry(IMPORT_PROBLEM.to_owned())
+                        .or_default() += row.len();
+                } else {
+                    self.problem(format!(
+                        "substitutes.csv row {row_number} of {ipn} is neither in the import problem that keeps its part's row nor an import problem itself"
+                    ));
+                }
+                continue;
+            }
+
+            let details = scope[&ipn];
             // Entries come after the main manufacturer part only if the row
             // made one.
             let offset = usize::from(rows_with_main_part.get(&ipn).copied().unwrap_or(false));
-            let current = current_revisions
-                .iter()
-                .find(|current| current.snapshot.ipn == ipn);
-            let found = current.and_then(|current| {
-                let position = current
-                    .source
-                    .substitutes_csv_rows
-                    .iter()
-                    .position(|source| source.row_number == row_number)?;
-                let manufacturer_part =
-                    current.snapshot.manufacturer_parts.get(position + offset)?;
-                Some((
-                    current,
-                    manufacturer_part,
-                    &current.source.substitutes_csv_rows[position],
-                ))
-            });
-            let Some((current, manufacturer_part, source)) = found else {
-                // A row that could not become a manufacturer part
-                // must be kept whole by an import problem.
-                let location = format!("rows[{row_number}]");
-                let kept = readback.problems.iter().find(|problem| {
-                    let detail: Value = serde_json::from_str(&problem.detail).unwrap_or_default();
-                    let record: Vec<String> = detail["record"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|value| value.as_str().unwrap_or_default().to_owned())
-                        .collect();
-                    let mut padded = record;
-                    padded.resize(row.len(), String::new());
-                    problem.path == document.path && problem.location == location && &padded == row
-                });
-                match kept {
-                    Some(problem) => {
-                        explained.insert(problem.id.clone());
-                        *account
-                            .destinations
-                            .entry(IMPORT_PROBLEM.to_owned())
-                            .or_default() += row.len();
-                    }
-                    None => self.problem(format!(
-                        "substitutes.csv row {row_number} of {ipn} is neither a manufacturer part nor an import problem"
-                    )),
-                }
+            let position = accepted.entry(ipn.clone()).or_default();
+            let Some(manufacturer_part) = details.manufacturer_parts.get(offset + *position) else {
+                self.problem(format!(
+                    "substitutes.csv row {row_number} of {ipn} is neither a manufacturer part nor an import problem"
+                ));
                 continue;
             };
-            // The row's source keeps the whole row, datasheet included.
-            let mut padded = source.record.clone();
-            padded.resize(row.len(), String::new());
-            if &padded != row {
-                self.problem(format!(
-                    "substitutes.csv row {row_number} of {ipn}: its source does not hold the oracle row"
-                ));
-            }
-            let part_datasheet = current.snapshot.field("Datasheet").unwrap_or_default();
-            for (column, value) in document.headers.iter().zip(row) {
+            *position += 1;
+            let part_datasheet = details.field("Datasheet").unwrap_or_default();
+            for (column_index, (column, value)) in document.headers.iter().zip(row).enumerate() {
                 let (destination, stored) = match route_substitutes_csv_column(column) {
                     SubstitutesCsvColumn::Ipn => (MANUFACTURER_PARTS, Some(ipn.clone())),
                     SubstitutesCsvColumn::Mpn => {
@@ -756,28 +1038,22 @@ impl<'a> Reporter<'a> {
                         (PART_DETAILS, Some(part_datasheet.to_owned()))
                     }
                     SubstitutesCsvColumn::Datasheet => {
-                        let location = format!("rows[{row_number}]");
-                        let kept = readback.problems.iter().find(|problem| {
+                        let kept = self.find_problem(|problem, _| {
                             problem.code == "substitutes-csv-datasheet-differs"
                                 && problem.subject == ipn
                                 && problem.location == location
                         });
-                        let stored = kept.and_then(|problem| {
+                        let stored = kept.and_then(|(problem, detail)| {
                             explained.insert(problem.id.clone());
-                            let detail: Value =
-                                serde_json::from_str(&problem.detail).unwrap_or_default();
                             detail["datasheet"].as_str().map(str::to_owned)
                         });
                         (IMPORT_PROBLEM, stored)
                     }
-                    SubstitutesCsvColumn::SupplierData => (
-                        SUPPLIER_DATA,
-                        source
-                            .supplier_data
-                            .iter()
-                            .find(|fact| &fact.column == column)
-                            .map(|fact| fact.value.clone()),
-                    ),
+                    // Supplier data never makes a revision; the latest run's
+                    // row keeps it.
+                    SubstitutesCsvColumn::SupplierData => {
+                        (SUPPLIER_DATA, Some(csv.field(index, column_index)))
+                    }
                     SubstitutesCsvColumn::Unknown => ("lost", None),
                 };
                 *account
@@ -791,16 +1067,26 @@ impl<'a> Reporter<'a> {
                 }
             }
         }
+        // No manufacturer part without a row that made it.
+        for (ipn, details) in scope {
+            let offset = usize::from(rows_with_main_part.get(ipn).copied().unwrap_or(false));
+            let expected = offset + accepted.get(ipn).copied().unwrap_or(0);
+            if details.manufacturer_parts.len() != expected {
+                self.problem(format!(
+                    "{ipn} has {} manufacturer parts, but its row and substitutes.csv rows make {expected}",
+                    details.manufacturer_parts.len()
+                ));
+            }
+        }
         account
     }
 
-    /// Checks every symbol and footprint reference of the CSV file's rows.
+    /// Checks every symbol and footprint reference of the parts in `scope`.
     /// Returns the accounts and the repository paths of resolved
     /// footprints.
     fn cad_items(
         &mut self,
-        current_revisions: &[CurrentRevision],
-        scope: &BTreeSet<String>,
+        scope: &BTreeMap<String, &PartDetails>,
         explained: &mut BTreeSet<String>,
     ) -> (Vec<CadItemAccount>, BTreeSet<String>) {
         let oracle = self.oracle;
@@ -816,7 +1102,7 @@ impl<'a> Reporter<'a> {
             let users: Vec<&String> = reference
                 .source_ipns
                 .iter()
-                .filter(|ipn| scope.contains(*ipn))
+                .filter(|ipn| scope.contains_key(*ipn))
                 .collect();
             if users.is_empty() {
                 continue;
@@ -846,18 +1132,7 @@ impl<'a> Reporter<'a> {
             };
             let mut targets = BTreeSet::new();
             for ipn in &users {
-                let Some(current_revision) = current_revisions
-                    .iter()
-                    .find(|current_revision| &&current_revision.snapshot.ipn == ipn)
-                else {
-                    self.problem(format!(
-                        "{ipn} uses {} but is not a part",
-                        reference.reference
-                    ));
-                    continue;
-                };
-                let bindings: Vec<_> = current_revision
-                    .snapshot
+                let bindings: Vec<_> = scope[*ipn]
                     .cad_references
                     .iter()
                     .filter(|binding| {
