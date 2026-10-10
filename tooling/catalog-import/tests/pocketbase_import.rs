@@ -388,6 +388,33 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
         },
         "recorded 31 rows of database/g-res.csv, but the file it rebuilds has 29",
     );
+    // The short list of file hashes must match the files the run records.
+    fails(
+        &|copy| {
+            copy.audit_entries
+                .iter_mut()
+                .find(|entry| entry.csv_import_number > 0)
+                .unwrap()
+                .file_hashes = "[]".into();
+        },
+        "do not match the files it records",
+    );
+    // A symbol source naming today's file must name the symbol's exact
+    // range in it.
+    fails(
+        &|copy| {
+            let revision = copy
+                .cad_item_revisions
+                .iter_mut()
+                .find(|revision| revision.snapshot.contains("\"kind\":\"symbol\""))
+                .unwrap();
+            let mut source: serde_json::Value = serde_json::from_str(&revision.source).unwrap();
+            let start = source["byte_range"][0].as_u64().unwrap();
+            source["byte_range"][0] = (start + 1).into();
+            revision.source = source.to_string();
+        },
+        "are not the whole symbol",
+    );
     // A run that records no files cannot be checked.
     fails(
         &|copy| *latest_run_sources(copy) = String::new(),

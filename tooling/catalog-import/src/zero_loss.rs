@@ -750,12 +750,34 @@ impl<'a> Reporter<'a> {
             if entry.action != CSV_IMPORT_ACTION {
                 continue;
             }
-            let recorded = entry
+            let Some(run) = entry
                 .import_run()
-                .is_some_and(|run| !run.files.is_empty() && run.csv_file == entry.csv_file);
-            if !recorded || entry.csv_import_number == 0 {
+                .filter(|run| !run.files.is_empty() && run.csv_file == entry.csv_file)
+            else {
                 self.problem(format!(
                     "the audit entry of import run {} does not record the files it read",
+                    entry.correlation_id
+                ));
+                continue;
+            };
+            if entry.csv_import_number == 0 {
+                self.problem(format!(
+                    "the audit entry of import run {} has no import number",
+                    entry.correlation_id
+                ));
+            }
+            // The short list importers read must name the same files.
+            let mut files: Vec<(String, String)> = run
+                .files
+                .iter()
+                .map(|file| (file.path.clone(), file.byte_sha256.clone()))
+                .collect();
+            files.sort();
+            let listed: Option<Vec<(String, String)>> =
+                serde_json::from_str(&entry.file_hashes).ok();
+            if listed.as_ref() != Some(&files) {
+                self.problem(format!(
+                    "the file hashes of import run {} do not match the files it records",
                     entry.correlation_id
                 ));
             }
@@ -940,7 +962,8 @@ impl<'a> Reporter<'a> {
         let mut removed = Vec::new();
         for ipn in earlier {
             let kept = readback.problems.iter().find(|problem| {
-                problem.code == "part-not-in-csv-file"
+                self.in_run(problem)
+                    && problem.code == "part-not-in-csv-file"
                     && problem.subject == ipn
                     && problem.path == path
             });
@@ -1338,9 +1361,10 @@ impl<'a> Reporter<'a> {
             // stored range and file hash may name an older version of the
             // library: a symbol keeps its revision when only a neighbouring
             // symbol changes.
-            Some(_) => {
+            Some([start, end]) => {
                 let file = std::fs::read(self.repository.join(&source.path)).unwrap_or_default();
-                if Some(sha256_hex(&file).as_str()) != oracle_file_sha {
+                let file_sha256 = sha256_hex(&file);
+                if Some(file_sha256.as_str()) != oracle_file_sha {
                     self.problem(format!(
                         "{reference}: {} is not the oracle's file",
                         source.path
@@ -1357,6 +1381,15 @@ impl<'a> Reporter<'a> {
                     if bytes != Some(blob.bytes.as_slice()) {
                         self.problem(format!(
                             "{reference}: blob is not the whole symbol `{item}` of the oracle's file ({whole:?})"
+                        ));
+                    }
+                    // When the source names this very file, its range must
+                    // be exactly that symbol too.
+                    if source.byte_sha256 == file_sha256
+                        && whole != Some(start as usize..end as usize)
+                    {
+                        self.problem(format!(
+                            "{reference}: bytes {start}..{end} are not the whole symbol `{item}` ({whole:?})"
                         ));
                     }
                 }

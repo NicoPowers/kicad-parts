@@ -95,35 +95,99 @@ pub fn add_member(
 /// Marks a source commit whose inputs differ from it.
 pub const DIRTY_SUFFIX: &str = "+dirty";
 
-/// Runs git in `repository`, windowless and inside a kill-on-close job like
-/// every service, and returns its trimmed standard output on success.
-fn git(repository: &Path, args: &[&str]) -> Option<String> {
-    let mut command = Command::new("git");
-    command.arg("-C").arg(repository).args(args);
-    let output = native_services::run_hidden("git", &mut command).ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
+/// The git program the tooling runs.
+pub const GIT: &str = "git";
+
+/// What git said, or that it could not be started.
+#[derive(Debug)]
+pub(crate) enum GitAnswer {
+    /// git ran; its exit code and trimmed standard output.
+    Ran { code: Option<i32>, stdout: String },
+    /// git could not be started: it is not installed or not on the PATH.
+    Missing,
 }
 
-/// The `HEAD` commit the import read `inputs` (repository paths) at, with
-/// [`DIRTY_SUFFIX`] appended if any of them is modified, staged or untracked
-/// relative to it, so a dirty tree is never recorded as a clean commit.
-/// `None` outside a git repository.
-pub fn source_commit(repository: &Path, inputs: &[&str]) -> Option<String> {
-    let commit = git(repository, &["rev-parse", "HEAD"])?;
-    if commit.len() != 40 {
-        return None;
+/// Runs `program` (git) in `repository`, windowless and inside a
+/// kill-on-close job like every service.
+pub(crate) fn run_git(program: &str, repository: &Path, args: &[&str]) -> GitAnswer {
+    let mut command = Command::new(program);
+    command.arg("-C").arg(repository).args(args);
+    match native_services::run_hidden("git", &mut command) {
+        Err(_) => GitAnswer::Missing,
+        Ok(output) => GitAnswer::Ran {
+            code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        },
     }
+}
+
+/// git's trimmed standard output when it succeeds.
+#[cfg(test)]
+fn git(repository: &Path, args: &[&str]) -> Option<String> {
+    match run_git(GIT, repository, args) {
+        GitAnswer::Ran {
+            code: Some(0),
+            stdout,
+        } => Some(stdout),
+        _ => None,
+    }
+}
+
+/// Where the files an import reads came from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SourceCommit {
+    /// A commit, ending in [`DIRTY_SUFFIX`] if any input differs from it.
+    Commit(String),
+    /// The folder is not inside a git repository (or has no commit yet).
+    NotARepository,
+    /// git is not installed or not on the PATH, so nobody can tell.
+    GitMissing,
+}
+
+/// Where `inputs` (repository paths) under `repository` came from: the
+/// `HEAD` commit, with [`DIRTY_SUFFIX`] appended if any of them is modified,
+/// staged or untracked relative to it, so a dirty tree is never recorded as
+/// a clean commit.
+pub fn read_source_commit(repository: &Path, inputs: &[&str]) -> SourceCommit {
+    read_source_commit_with(GIT, repository, inputs)
+}
+
+pub(crate) fn read_source_commit_with(
+    program: &str,
+    repository: &Path,
+    inputs: &[&str],
+) -> SourceCommit {
+    let commit = match run_git(program, repository, &["rev-parse", "HEAD"]) {
+        GitAnswer::Missing => return SourceCommit::GitMissing,
+        GitAnswer::Ran {
+            code: Some(0),
+            stdout,
+        } if stdout.len() == 40 => stdout,
+        GitAnswer::Ran { .. } => return SourceCommit::NotARepository,
+    };
     let mut status = vec!["status", "--porcelain", "--untracked-files=all", "--"];
     status.extend_from_slice(inputs);
-    let changes = git(repository, &status)?;
-    Some(if changes.is_empty() {
-        commit
-    } else {
-        format!("{commit}{DIRTY_SUFFIX}")
-    })
+    match run_git(program, repository, &status) {
+        GitAnswer::Missing => SourceCommit::GitMissing,
+        GitAnswer::Ran {
+            code: Some(0),
+            stdout,
+        } => SourceCommit::Commit(if stdout.is_empty() {
+            commit
+        } else {
+            format!("{commit}{DIRTY_SUFFIX}")
+        }),
+        GitAnswer::Ran { .. } => SourceCommit::NotARepository,
+    }
+}
+
+/// The source commit of `inputs`, as [`read_source_commit`] finds it, or
+/// `None` if there is none (no repository, or git is missing).
+pub fn source_commit(repository: &Path, inputs: &[&str]) -> Option<String> {
+    match read_source_commit(repository, inputs) {
+        SourceCommit::Commit(commit) => Some(commit),
+        SourceCommit::NotARepository | SourceCommit::GitMissing => None,
+    }
 }
 
 /// Plans the import of `csv_file`, recording the source commit of exactly
@@ -211,5 +275,22 @@ mod tests {
                 .unwrap()
                 .ends_with(DIRTY_SUFFIX)
         );
+    }
+
+    #[test]
+    fn a_missing_git_is_told_apart_from_a_folder_outside_git() {
+        let folder = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_source_commit(folder.path(), &["a.csv"]),
+            SourceCommit::NotARepository
+        );
+        assert_eq!(
+            read_source_commit_with("kicad-parts-no-such-git", &repository_root(), &[]),
+            SourceCommit::GitMissing
+        );
+        assert!(matches!(
+            read_source_commit(&repository_root(), &[]),
+            SourceCommit::Commit(_)
+        ));
     }
 }

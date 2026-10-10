@@ -340,6 +340,8 @@ fn re_imports_stay_lossless() {
     let reply = import_reading_first(&admin, &plan(root), "");
     assert_eq!(outcome(&reply), "nothing_changed", "{}", reply.body);
     let report = lossless_report(root, &read_back(&admin).unwrap(), "neighbouring symbol");
+    // The removed part is still reported by this later run.
+    assert_eq!(report.removed_parts, ["RES-0000-1800"]);
     assert!(
         report
             .cad_items
@@ -469,7 +471,7 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
 
     // Allowed explicitly, it imports, and the audit entry records that.
     let command = services::prepare_import(&admin, root, &old_import, REASON, true).unwrap();
-    assert!(command.allow_older_checkout);
+    assert!(command.allow_older_checkout());
     assert_eq!(
         outcome(&submit_import(&admin, &command).unwrap()),
         "applied"
@@ -540,8 +542,50 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
     let same = services::plan(root, "g-res").unwrap();
     let command = services::prepare_import(&admin, root, &same, REASON, false).unwrap();
     assert_eq!(outcome(&submit_import(&admin, &command).unwrap()), "noop");
-    // Allowed explicitly, the clean checkout imports.
+    // An unrelated later commit on top of the clean commit would undo the
+    // uncommitted change just the same: refused.
     git(&["checkout", "-q", "--", SUBSTITUTES_CSV]);
+    fs::write(root.join("notes.txt"), "unrelated\n").unwrap();
+    git(&["add", "--", "notes.txt"]);
+    git(&["commit", "-q", "-m", "unrelated"]);
+    let unrelated = services::plan(root, "g-res").unwrap();
+    assert_eq!(
+        unrelated.source_commit.as_deref(),
+        Some(git(&["rev-parse", "HEAD"]).as_str())
+    );
+    let refused = services::prepare_import(&admin, root, &unrelated, REASON, false).unwrap_err();
+    assert!(
+        refused.contains("other copies of database/substitutes.csv"),
+        "{refused}"
+    );
+    // Committing the change itself imports (nothing new to record).
+    fs::write(
+        &substitutes,
+        format!("{header}RES-0000-1002,ALT-10K,Vishay,,DigiKey,541-10K-ND\n"),
+    )
+    .unwrap();
+    git(&[
+        "commit",
+        "-q",
+        "-m",
+        "commit the change",
+        "--",
+        SUBSTITUTES_CSV,
+    ]);
+    let committed = services::plan(root, "g-res").unwrap();
+    assert!(
+        !committed
+            .source_commit
+            .as_deref()
+            .unwrap()
+            .ends_with("+dirty")
+    );
+    let command = services::prepare_import(&admin, root, &committed, REASON, false).unwrap();
+    assert_eq!(outcome(&submit_import(&admin, &command).unwrap()), "noop");
+    assert_eq!(read_back(&admin).unwrap(), after_dirty);
+
+    // Allowed explicitly, the clean checkout imports.
+    git(&["checkout", "-q", &newer]);
     let command = services::prepare_import(&admin, root, &clean, REASON, true).unwrap();
     assert_eq!(
         outcome(&submit_import(&admin, &command).unwrap()),
@@ -578,7 +622,7 @@ fn a_part_changed_between_reading_and_importing_is_reported_not_overwritten() {
     let changed = plan(root);
     let read = read_import_state(&admin).unwrap();
     let command = ImportCommand::new(&changed, REASON).expecting(&read);
-    assert_eq!(command.expected_revisions["RES-0000-0470"], 1);
+    assert_eq!(command.expected_revisions()["RES-0000-0470"], 1);
 
     // ...someone edits the part before the import arrives...
     let edit = {

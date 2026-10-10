@@ -35,18 +35,21 @@ pub struct ImportCommand<'a> {
     pub reason: String,
     pub import: &'a CsvImport,
     /// The current revision number the importer read for each IPN. A part
-    /// missing here is expected not to exist yet (number 0). If any part's
+    /// missing here is expected not to exist yet (number 0). This and the
+    /// next two fields are private so that only [`ImportCommand::expecting`]
+    /// and [`ImportCommand::allowing_older_checkout`] set them, which derive
+    /// the correlation ID again. If any part's
     /// current revision differs when the import arrives, the route answers
     /// 409 conflict and writes nothing. See [`ImportCommand::expecting`].
-    pub expected_revisions: BTreeMap<String, u32>,
+    expected_revisions: BTreeMap<String, u32>,
     /// The number of the latest import run of this CSV file that the
     /// importer read (0 if none). If another import of the file lands
     /// first, the route answers 409 and writes nothing, because the checkout
     /// check was made against an older state.
-    pub expected_csv_import: u64,
+    expected_csv_import: u64,
     /// Import even though the checkout does not include the team catalog's
     /// latest imports. The run's audit entry records it.
-    pub allow_older_checkout: bool,
+    allow_older_checkout: bool,
 }
 
 impl<'a> ImportCommand<'a> {
@@ -87,6 +90,22 @@ impl<'a> ImportCommand<'a> {
             .map_or(0, |run| run.csv_import_number);
         self.correlation_id = self.derived_correlation_id();
         self
+    }
+
+    /// The current revision number expected for each IPN; a part missing
+    /// here is expected to be new.
+    pub fn expected_revisions(&self) -> &BTreeMap<String, u32> {
+        &self.expected_revisions
+    }
+
+    /// The number of the latest import run of this CSV file expected.
+    pub fn expected_csv_import(&self) -> u64 {
+        self.expected_csv_import
+    }
+
+    /// Whether the import is allowed from an older checkout.
+    pub fn allow_older_checkout(&self) -> bool {
+        self.allow_older_checkout
     }
 
     /// Imports even from a checkout that does not include the team catalog's
@@ -848,6 +867,9 @@ pub struct ImportRun {
     /// run's rows.
     #[serde(default)]
     pub problems: Vec<String>,
+    /// Parts that earlier runs of this CSV file made but no row makes now.
+    #[serde(default)]
+    pub removed_parts: Vec<String>,
 }
 
 impl ImportRun {

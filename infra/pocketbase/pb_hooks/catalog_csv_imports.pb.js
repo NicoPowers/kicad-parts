@@ -49,8 +49,9 @@
 // - a part whose part details changed gets a new revision if its current
 //   revision came from a CSV import, and otherwise an import problem, so a
 //   re-import never overwrites an edit made in the Catalog;
-// - a part that the previous import run of this CSV file made, but no row
-//   makes now, gets an import problem; nothing is deleted.
+// - a part that an earlier import run of this CSV file made, but no row
+//   makes now, gets an import problem, found again by every later run;
+//   nothing is deleted.
 //
 // A Change is created only when there is at least one new revision. Every
 // run that writes anything gets an audit entry, and new import problems
@@ -462,7 +463,7 @@ routerAdd(
             csvFile: csvFile,
             expectedCsvImport: expectedCsvImport,
             latestCsvImport: latestCsvImport,
-            message: `another import of ${catalogCsv.path} (import ${latestCsvImport}) landed after this import read the team catalog; nothing was imported, so read the team catalog again and import again`,
+            message: `another import of ${catalogCsv.path} landed after this import read the team catalog: its latest import run is now number ${latestCsvImport} (counting the runs of every CSV file), not number ${expectedCsvImport}. Nothing was imported, so read the team catalog again and import again`,
           },
         };
         return;
@@ -676,24 +677,30 @@ routerAdd(
         }
       }
 
-      // A part the previous import run of this CSV file made, but no row
-      // makes now, keeps its revisions; an import problem says it is gone.
-      if (previousRun && Array.isArray(previousRun.parts)) {
-        for (const previous of previousRun.parts) {
-          if (!previous || typeof previous.ipn !== "string" || seenIpns[previous.ipn]) {
+      // A part an earlier import run of this CSV file made, but no row makes
+      // now, keeps its revisions; an import problem says it is gone. Every
+      // run finds it again (the problem's detail does not name the run), so
+      // the latest run always lists it.
+      const removedParts = [];
+      if (previousRun) {
+        const earlier = []
+          .concat(Array.isArray(previousRun.parts) ? previousRun.parts.map((part) => part && part.ipn) : [])
+          .concat(Array.isArray(previousRun.removed_parts) ? previousRun.removed_parts : []);
+        for (const ipn of earlier) {
+          if (typeof ipn !== "string" || seenIpns[ipn] || removedParts.indexOf(ipn) >= 0) {
             continue;
           }
-          const stored = byId("catalog_parts", lib.deriveId("part", previous.ipn));
+          removedParts.push(ipn);
+          const stored = byId("catalog_parts", lib.deriveId("part", ipn));
           serverProblems.push(
             problem(
               "part-not-in-csv-file",
-              previous.ipn,
+              ipn,
               catalogCsv.path,
-              `rows[IPN=${previous.ipn}]`,
-              `${previous.ipn} was a row of ${catalogCsv.path} at the previous import, but no row of it makes that part now; the part and its revisions are kept as they are`,
+              `rows[IPN=${ipn}]`,
+              `${ipn} was a row of ${catalogCsv.path} at an earlier import, but no row of it makes that part now; the part and its revisions are kept as they are`,
               JSON.stringify({
                 path: catalogCsv.path,
-                previous_import: previousEntry.id,
                 current_revision_number: stored ? stored.getInt("current_revision_number") : 0,
               }),
             ),
@@ -843,6 +850,8 @@ routerAdd(
               return file;
             }),
             parts: parts.map((part) => ({ ipn: part.ipn, revision: part.revisionAfter })),
+            // Parts earlier runs made that no row makes now.
+            removed_parts: removedParts,
             // Problems are shared by content, so a report may count only the
             // ones this run found.
             problems: Object.keys(seenProblems).sort(),
