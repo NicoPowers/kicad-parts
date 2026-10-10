@@ -1388,10 +1388,22 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
     let state = tempfile::tempdir().unwrap();
     let options = services::options(&root, state.path());
     let (server, admin, superuser) = services::start(&root, state.path()).unwrap();
-    let import = CsvCatalog::new(&root).import("g-res", None).unwrap();
+    // Only the CSV files, so no symbol or footprint resolves and no CAD item
+    // revision is stored: undoing the numbering of CAD item revisions is
+    // refused when there are any (see the next test).
+    let csv_only = tempfile::tempdir().unwrap();
+    for path in ["database/g-res.csv", "database/substitutes.csv"] {
+        let target = csv_only.path().join(path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(root.join(path), target).unwrap();
+    }
+    let import = CsvCatalog::new(csv_only.path())
+        .import("g-res", None)
+        .unwrap();
     applied(&submit_import(&admin, &ImportCommand::new(&import, REASON)).unwrap());
     // Edits and a restore populate the edit migration's fields too.
     let stored = read_back(&admin).unwrap();
+    assert!(stored.cad_item_revisions.is_empty());
     let (number, details) = current_revision(&stored, "RES-0000-0470");
     let mut edit = EditCommand::starting_from(&details, number, "Before the rollback");
     edit.set_field("Value", "47R");
@@ -1516,8 +1528,11 @@ fn migrate(root: &Path, options: &native_services::PocketBaseOptions, args: &[&s
         .arg("--automigrate=false");
     let output =
         native_services::run_hidden_with_input("pocketbase migrate", &mut command, b"y\n").unwrap();
-    assert!(output.status.success(), "{output:?}");
-    String::from_utf8_lossy(&output.stdout).into_owned()
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 #[test]
@@ -1531,16 +1546,30 @@ fn team_server_data_from_before_numbered_cad_revisions_is_refused_not_changed() 
     let revision = read_back(&admin).unwrap().cad_item_revisions[0].clone();
     server.stop();
 
-    // Go back to the schema before this change and give one CAD item
-    // revision an ID that is not derived from its number, as data saved
-    // before numbered CAD item revisions has.
+    // Undoing the numbering is refused while CAD item revisions exist: the
+    // older version could not read their IDs or the numbers in part details.
     let said = migrate(&root, &options, &["down", "1"]);
     assert!(
-        said.contains("Reverted 1791700000_cad_item_revision_numbers.js"),
+        said.contains("which the older version cannot read"),
         "{said}"
     );
+    assert!(!said.contains("Reverted 1791700000"), "{said}");
+
+    // Make the data look like data saved before numbered CAD item
+    // revisions: the migration not yet applied, and one CAD item revision
+    // whose ID is not derived from its number.
     let old_id = "0123456789abcde";
     let database = rusqlite::Connection::open(options.data_dir.join("data.db")).unwrap();
+    assert_eq!(
+        database
+            .execute(
+                "DELETE FROM _migrations WHERE file = '1791700000_cad_item_revision_numbers.js'",
+                [],
+            )
+            .unwrap(),
+        1,
+        "the undo changed nothing"
+    );
     database
         .execute(
             "UPDATE catalog_cad_item_revisions SET id = ?1 WHERE id = ?2",
