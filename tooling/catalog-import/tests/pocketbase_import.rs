@@ -376,6 +376,18 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
         },
         "rebuilt from PocketBase",
     );
+    // Rows split differently from the file are caught even though they
+    // rebuild the same bytes.
+    fails(
+        &|copy| {
+            tamper_run_file(copy, "database/g-res.csv", |file| {
+                let rows = file["rows"].as_array_mut().unwrap();
+                rows.push("".into());
+                rows.push("".into());
+            })
+        },
+        "recorded 31 rows of database/g-res.csv, but the file it rebuilds has 29",
+    );
     // A run that records no files cannot be checked.
     fails(
         &|copy| *latest_run_sources(copy) = String::new(),
@@ -397,7 +409,7 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
             let blob = copy.blobs.iter_mut().find(|b| b.id == blob_id).unwrap();
             blob.bytes.pop();
         },
-        "are not the whole symbol",
+        "is not the whole symbol",
     );
     fails(
         &|copy| copy.cad_item_revisions[0].license = "MIT".into(),
@@ -437,15 +449,25 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     assert_eq!((replay.status, &replay.body), (200, &first.body));
     assert_eq!(read_back(&admin).unwrap(), stored);
 
-    // A fresh import of the unchanged inputs is a no-op: no Change,
-    // revision, CAD item or blob.
+    // A fresh import of the unchanged inputs, prepared as an importer does
+    // and with its own correlation ID, is a no-op: no Change, revision, CAD
+    // item or blob. Its ID differs from the first import's because it
+    // expects the parts that import made.
     let again = services::plan(&root, "g-res").unwrap();
-    let mut retry = services::prepare_import(&admin, &root, &again, REASON, false).unwrap();
-    retry.correlation_id.push_str("-again");
+    let retry = services::prepare_import(&admin, &root, &again, REASON, false).unwrap();
+    assert_ne!(retry.correlation_id, command.correlation_id);
     let noop = submit_import(&admin, &retry).unwrap();
     assert_eq!(noop.status, 422, "{}", noop.body);
     assert!(matches!(noop.outcome, ImportOutcome::Noop { .. }));
     assert_eq!(read_back(&admin).unwrap(), stored);
+    // Preparing and sending it once more replays that answer.
+    let rerun = services::prepare_import(&admin, &root, &again, REASON, false).unwrap();
+    assert_eq!(rerun.correlation_id, retry.correlation_id);
+    let replayed = submit_import(&admin, &rerun).unwrap();
+    assert_eq!(
+        (replayed.status, replayed.replayed, &replayed.body),
+        (422, true, &noop.body)
+    );
 
     // Reusing a correlation ID for a different request is refused.
     let mut reused = ImportCommand::new(&import, "a different reason");
@@ -534,6 +556,60 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
                 .remove("rows");
         },
         "must be a list of text",
+    );
+    refused(
+        "empty-rows",
+        &|body| {
+            let index = csv_source(body);
+            let rows = body["sources"][index]["rows"].as_array_mut().unwrap();
+            rows.push("".into());
+            rows.push("".into());
+        },
+        "include an empty row",
+    );
+    refused(
+        "not-a-row",
+        &|body| {
+            let mut source: serde_json::Value =
+                serde_json::from_str(body["parts"][0]["source"].as_str().unwrap()).unwrap();
+            source["raw_record"] = "\"RES-0000-0000\"\n".into();
+            body["parts"][0]["source"] = source.to_string().into();
+        },
+        "is not a row of the catalog-csv file",
+    );
+    refused(
+        "two-catalog-csvs",
+        &|body| {
+            let index = csv_source(body);
+            let copy = body["sources"][index].clone();
+            body["sources"].as_array_mut().unwrap().push(copy);
+        },
+        "exactly one catalog-csv file, not 2",
+    );
+    refused(
+        "other-catalog-path",
+        &|body| {
+            let index = csv_source(body);
+            body["sources"][index]["path"] = "database/g-other.csv".into();
+        },
+        "catalog-csv source of g-res must be database/g-res.csv",
+    );
+    refused(
+        "no-substitutes",
+        &|body| {
+            body["sources"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|source| source["role"] != "substitutes-csv");
+        },
+        "exactly one substitutes-csv file, not 0",
+    );
+    refused(
+        "no-expected-import",
+        &|body| {
+            body.as_object_mut().unwrap().remove("expectedCsvImport");
+        },
+        "expected CSV import number",
     );
     refused(
         "rows-of-a-footprint",
@@ -959,6 +1035,18 @@ fn adding_or_removing_a_manufacturer_part_makes_a_new_revision() {
     server.stop();
 }
 
+/// The two CSV sources every run reads, for a CSV file of its own
+/// (`g-<correlation>`) with only a header line, so each blob request is the
+/// first run of its file.
+fn header_only_csv_sources(correlation: &str) -> Vec<serde_json::Value> {
+    let header = "IPN\n";
+    let substitutes = "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n";
+    vec![
+        serde_json::json!({ "role": "catalog-csv", "path": format!("database/g-{correlation}.csv"), "byteSha256": sha256_hex(header), "size": header.len(), "headerRaw": header, "rows": [] }),
+        serde_json::json!({ "role": "substitutes-csv", "path": "database/substitutes.csv", "byteSha256": sha256_hex(substitutes), "size": substitutes.len(), "headerRaw": substitutes, "rows": [] }),
+    ]
+}
+
 /// An import request carrying one 3D model CAD item revision whose blob is
 /// `bytes`, hashed as `sha`.
 fn blob_request(correlation: &str, sha: &str, bytes: &[u8]) -> serde_json::Value {
@@ -983,9 +1071,13 @@ fn blob_request(correlation: &str, sha: &str, bytes: &[u8]) -> serde_json::Value
     serde_json::json!({
         "correlationId": correlation,
         "reason": "check blob hashing",
-        "csvFile": "g-res",
+        "csvFile": format!("g-{correlation}"),
         "sourceCommit": null,
-        "sources": [{ "role": "test", "path": "blob", "byteSha256": sha, "size": bytes.len(), "headerRaw": null }],
+        "expectedCsvImport": 0,
+        "sources": header_only_csv_sources(correlation)
+            .into_iter()
+            .chain([serde_json::json!({ "role": "test", "path": "blob", "byteSha256": sha, "size": bytes.len(), "headerRaw": null })])
+            .collect::<Vec<_>>(),
         "blobs": [{ "sha256": sha, "size": bytes.len(), "base64": catalog::pocketbase::base64(bytes) }],
         "cadItemRevisions": [{
             "id": id,
@@ -1006,9 +1098,13 @@ fn unused_blob_request(correlation: &str, sha: &str, bytes: &[u8]) -> serde_json
     serde_json::json!({
         "correlationId": correlation,
         "reason": "check blob hashing",
-        "csvFile": "g-res",
+        "csvFile": format!("g-{correlation}"),
         "sourceCommit": null,
-        "sources": [{ "role": "test", "path": "blob", "byteSha256": sha, "size": bytes.len(), "headerRaw": null }],
+        "expectedCsvImport": 0,
+        "sources": header_only_csv_sources(correlation)
+            .into_iter()
+            .chain([serde_json::json!({ "role": "test", "path": "blob", "byteSha256": sha, "size": bytes.len(), "headerRaw": null })])
+            .collect::<Vec<_>>(),
         "blobs": [{ "sha256": sha, "size": bytes.len(), "base64": catalog::pocketbase::base64(bytes) }],
         "cadItemRevisions": [],
         "parts": [],

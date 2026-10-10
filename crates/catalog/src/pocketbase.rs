@@ -39,27 +39,38 @@ pub struct ImportCommand<'a> {
     /// current revision differs when the import arrives, the route answers
     /// 409 conflict and writes nothing. See [`ImportCommand::expecting`].
     pub expected_revisions: BTreeMap<String, u32>,
-    /// Import even though the checkout is older than the team catalog's
+    /// The number of the latest import run of this CSV file that the
+    /// importer read (0 if none). If another import of the file lands
+    /// first, the route answers 409 and writes nothing, because the checkout
+    /// check was made against an older state.
+    pub expected_csv_import: u64,
+    /// Import even though the checkout does not include the team catalog's
     /// latest imports. The run's audit entry records it.
     pub allow_older_checkout: bool,
 }
 
 impl<'a> ImportCommand<'a> {
-    /// A command whose correlation ID is derived from the import itself, so
-    /// retrying the same import replays the stored answer. It expects every
-    /// part to be new; call [`ImportCommand::expecting`] before importing
-    /// into a catalog that already has parts.
+    /// A command whose correlation ID is derived from the import and what
+    /// it expects, so sending the same command again replays the stored
+    /// answer. It expects every part to be new; call
+    /// [`ImportCommand::expecting`] before importing into a catalog that
+    /// already has parts.
     pub fn new(import: &'a CsvImport, reason: &str) -> Self {
-        Self {
-            correlation_id: format!("csv-import-{}", &import.fingerprint()[..32]),
+        let mut command = Self {
+            correlation_id: String::new(),
             reason: reason.to_owned(),
             import,
             expected_revisions: BTreeMap::new(),
+            expected_csv_import: 0,
             allow_older_checkout: false,
-        }
+        };
+        command.correlation_id = command.derived_correlation_id();
+        command
     }
 
-    /// Expects each part's current revision to be the one in `state`.
+    /// Expects each part's current revision, and the latest import run of
+    /// this CSV file, to be the ones in `state`. Derives the correlation ID
+    /// again.
     pub fn expecting(mut self, state: &ImportState) -> Self {
         self.expected_revisions = self
             .import
@@ -71,7 +82,36 @@ impl<'a> ImportCommand<'a> {
                 Some((ipn.to_owned(), number))
             })
             .collect();
+        self.expected_csv_import = state
+            .latest_import(&self.import.csv_file)
+            .map_or(0, |run| run.csv_import_number);
+        self.correlation_id = self.derived_correlation_id();
         self
+    }
+
+    /// Imports even from a checkout that does not include the team catalog's
+    /// latest imports, if `allow`. Derives the correlation ID again.
+    pub fn allowing_older_checkout(mut self, allow: bool) -> Self {
+        self.allow_older_checkout = allow;
+        self.correlation_id = self.derived_correlation_id();
+        self
+    }
+
+    /// `csv-import-` and 32 hex digits of a hash of everything the route
+    /// keys the command on: the import, the expected revisions, the
+    /// expected import run and the older-checkout setting. The same import
+    /// sent again after the catalog moved on gets a new ID, so it is
+    /// compared afresh rather than refused as a reused ID.
+    fn derived_correlation_id(&self) -> String {
+        let mut key = self.import.fingerprint();
+        for (ipn, number) in &self.expected_revisions {
+            key.push_str(&format!("\n{ipn}={number}"));
+        }
+        key.push_str(&format!(
+            "\nimport={}\nallow-older-checkout={}",
+            self.expected_csv_import, self.allow_older_checkout
+        ));
+        format!("csv-import-{}", &sha256_hex(key)[..32])
     }
 
     pub fn body(&self) -> Value {
@@ -82,6 +122,7 @@ impl<'a> ImportCommand<'a> {
             "csvFile": import.csv_file,
             "sourceCommit": import.source_commit,
             "allowOlderCheckout": self.allow_older_checkout,
+            "expectedCsvImport": self.expected_csv_import,
             "sources": import.sources.iter().map(|source| {
                 let mut file = json!({
                     "role": source.role,
@@ -139,6 +180,15 @@ pub struct ImportState {
     pub latest_imports: Vec<LatestImport>,
 }
 
+impl ImportState {
+    /// The latest import run of `csv_file` (such as `g-res`), if any.
+    pub fn latest_import(&self, csv_file: &str) -> Option<&LatestImport> {
+        self.latest_imports
+            .iter()
+            .find(|run| run.csv_file == csv_file)
+    }
+}
+
 /// The latest import run of one CSV file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LatestImport {
@@ -149,19 +199,46 @@ pub struct LatestImport {
     /// empty if it was not recorded.
     pub source_commit: String,
     pub audit_entry: String,
+    /// `(path, byte_sha256)` of every file it read, sorted by path.
+    pub file_hashes: Vec<(String, String)>,
+}
+
+/// The few fields of an audit entry that [`read_import_state`] downloads.
+#[derive(Deserialize)]
+struct LatestImportFields {
+    id: String,
+    csv_file: String,
+    csv_import_number: u64,
+    #[serde(default)]
+    source_commit: String,
+    #[serde(default)]
+    file_hashes: String,
 }
 
 /// Reads each part's current revision number and the latest import run of
-/// each CSV file.
+/// each CSV file. Downloads only the fields it needs, never the recorded
+/// rows.
 pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState> {
-    let parts: Vec<StoredPart> = client.list_records("catalog_parts", "", "ipn")?;
-    let entries: Vec<StoredAuditEntry> = client.list_records(
+    let parts: Vec<StoredPart> = client.list_record_fields(
+        "catalog_parts",
+        "",
+        "ipn",
+        "id,ipn,ipn_prefix,variant,current_revision,current_revision_number,first_change",
+    )?;
+    let entries: Vec<LatestImportFields> = client.list_record_fields(
         "catalog_audit_entries",
         "csv_import_number > 0",
         "csv_import_number",
+        "id,csv_file,csv_import_number,source_commit,file_hashes",
     )?;
     let mut latest: BTreeMap<String, LatestImport> = BTreeMap::new();
     for entry in entries {
+        let file_hashes = serde_json::from_str(&entry.file_hashes).map_err(|error| {
+            CollabError::Protocol(format!(
+                "import run {} records no readable file hashes: {error}",
+                entry.csv_import_number
+            ))
+        })?;
         latest.insert(
             entry.csv_file.clone(),
             LatestImport {
@@ -169,6 +246,7 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
                 csv_import_number: entry.csv_import_number,
                 source_commit: entry.source_commit,
                 audit_entry: entry.id,
+                file_hashes,
             },
         );
     }
@@ -244,6 +322,17 @@ pub enum ImportOutcome {
     Conflict {
         correlation_id: String,
         conflicts: Vec<ImportConflict>,
+        message: String,
+    },
+    /// 409: another import of this CSV file landed after the importer read
+    /// the team catalog, so its checkout check is out of date. Nothing was
+    /// written; read the team catalog again and import again.
+    #[serde(rename_all = "camelCase")]
+    NewerImportRun {
+        correlation_id: String,
+        csv_file: String,
+        expected_csv_import: u64,
+        latest_csv_import: u64,
         message: String,
     },
 }
@@ -725,6 +814,10 @@ pub struct StoredAuditEntry {
     /// For a CSV import run: JSON [`ImportRun`], exactly what the CSV said.
     #[serde(default)]
     pub sources: String,
+    /// For a CSV import run: JSON `[[path, byte_sha256], ...]` of the files
+    /// it read, sorted by path.
+    #[serde(default)]
+    pub file_hashes: String,
     /// The importer was told to import from a checkout older than the team
     /// catalog's latest imports.
     #[serde(default)]
@@ -750,6 +843,11 @@ pub struct ImportRun {
     /// Every part a row of the CSV file made, in row order, with the number
     /// of its current revision just after the run.
     pub parts: Vec<ImportedPart>,
+    /// The IDs of every import problem the run found, new or already
+    /// stored. Problems are shared by content, so only these explain the
+    /// run's rows.
+    #[serde(default)]
+    pub problems: Vec<String>,
 }
 
 impl ImportRun {

@@ -141,7 +141,7 @@ pub fn plan(repository: &Path, csv_file: &str) -> Result<CsvImport, ImportError>
 
 /// Reads the team catalog and returns the command for `import`, expecting
 /// each part's current revision as read. Refuses, with a plain-language
-/// reason, if the import's checkout (`repository`) is older than the team
+/// reason, if the import's checkout (`repository`) does not include the team
 /// catalog's latest imports, unless `allow_older_checkout` is set; the run's
 /// audit entry then records that it was allowed.
 pub fn prepare_import<'a>(
@@ -153,11 +153,11 @@ pub fn prepare_import<'a>(
 ) -> Result<ImportCommand<'a>, String> {
     let state = read_import_state(client).map_err(|error| error.to_string())?;
     if !allow_older_checkout {
-        crate::checkout::check_checkout(repository, import.source_commit.as_deref(), &state)?;
+        crate::checkout::check_checkout(repository, import, &state)?;
     }
-    let mut command = ImportCommand::new(import, reason).expecting(&state);
-    command.allow_older_checkout = allow_older_checkout;
-    Ok(command)
+    Ok(ImportCommand::new(import, reason)
+        .expecting(&state)
+        .allowing_older_checkout(allow_older_checkout))
 }
 
 /// This repository's root.

@@ -5,6 +5,7 @@
 // pocketbase::ImportCommand):
 //
 //   { correlationId, reason, csvFile, sourceCommit, allowOlderCheckout,
+//     expectedCsvImport,
 //     sources: [{ role, path, byteSha256, size, headerRaw, rows }],
 //     blobs: [{ sha256, size, base64 }],
 //     cadItemRevisions: [{ id, cadItemId, kind, key, snapshotSha256,
@@ -13,8 +14,11 @@
 //               source }],
 //     problems: [{ id, code, subject, path, location, message, detail }] }
 //
-// `rows` is given for the two CSV files (catalog-csv and substitutes-csv)
-// only: every row's exact bytes, in file order. `expectedRevision` is the
+// Every run sends exactly one catalog-csv source (database/<csvFile>.csv)
+// and one substitutes-csv source (database/substitutes.csv). `rows` is
+// given for these two only: every row's exact bytes, in file order, none
+// empty. `expectedCsvImport` is the number of the latest import run of this
+// CSV file that the importer checked its checkout against, or 0. `expectedRevision` is the
 // number of the part's current revision when the importer read the team
 // catalog, or 0 for a part it expects to be new. `allowOlderCheckout` says
 // the importer was told to import from a checkout older than the team
@@ -28,6 +32,9 @@
 // names a CAD item revision that is stored or arrives in this request.
 //
 // Then, in one transaction, it compares the request with what is stored:
+// - if the latest import run of this CSV file is not the one the importer
+//   checked against, another import landed in between: 409
+//   newer_import_run and nothing is written;
 // - if any part's current revision is not the one the importer expected,
 //   someone changed it in between: 409 conflict and nothing is written;
 // - blobs, CAD items, CAD item revisions and import problems that already
@@ -49,7 +56,8 @@
 // run that writes anything gets an audit entry, and new import problems
 // point to it. A CSV import run's audit entry also records exactly what the
 // CSV said (the files read, their byte hashes, each CSV file's header line
-// and rows) and the current revision it left each part at. A run is
+// and rows), the current revision it left each part at, and the IDs of
+// every import problem it found, new or already stored. A run is
 // recorded whenever it read other files than the previous run of the same
 // CSV file, even if it adds nothing else, so the latest run always holds
 // what the CSV says now.
@@ -67,6 +75,9 @@
 //         currentRevision }], message }   someone changed these parts after
 //                                          the importer read them; nothing
 //                                          is written
+//   409 { outcome: "newer_import_run", csvFile, expectedCsvImport,
+//         latestCsvImport, message }   another import of this CSV file
+//                                          landed first; nothing is written
 //   409 { outcome: "correlation_reused" } the ID was used for another request
 //   409 { outcome: "id_collision", collisions } a stored record has a derived
 //                                          ID of this request but other
@@ -74,7 +85,8 @@
 //   400 bad or inconsistent input, 401/403 not a superuser.
 // Answers with status 200 or 422 are stored under the correlation ID and
 // replayed byte for byte (with X-Collab-Replayed: true) without writing
-// anything. Conflicts are not stored, so a retry is checked again.
+// anything. Conflicts and newer_import_run are not stored, so a retry is
+// checked again.
 routerAdd(
   "POST",
   "/api/catalog/csv-imports",
@@ -138,6 +150,12 @@ routerAdd(
     if (typeof allowOlderCheckout !== "boolean") {
       fail("the allowOlderCheckout setting must be true or false");
     }
+    // The number of the latest import run of this CSV file that the
+    // importer checked its checkout against (0 if there was none).
+    const expectedCsvImport = body.expectedCsvImport;
+    if (!Number.isInteger(expectedCsvImport) || expectedCsvImport < 0) {
+      fail("the expected CSV import number must be the number of the latest import run of this CSV file, or 0");
+    }
 
     // ---- Validate the request on its own -------------------------------
     // CSV files carry their header line and every row; the server checks
@@ -148,6 +166,11 @@ routerAdd(
       const rows = source.rows;
       if (!Array.isArray(rows) || rows.some((row) => typeof row !== "string" || row.length > DOCUMENT)) {
         fail(`the rows of ${path} must be a list of text`);
+      }
+      // Every CSV row has at least its line ending, so an empty row could
+      // only pad the list without changing the file's hash.
+      if (rows.some((row) => row.length === 0)) {
+        fail(`the rows of ${path} include an empty row; each row must be one whole row of the file`);
       }
       if (headerRaw === null || $security.sha256(headerRaw + rows.join("")) !== source.byteSha256) {
         fail(`the header line and rows of ${path} are not the file with its byte hash`);
@@ -174,18 +197,20 @@ routerAdd(
     if (sources.length === 0) {
       fail("sources must not be empty");
     }
-    const onlySource = (role) => {
+    // Every run reads exactly one catalog-csv file and one substitutes.csv,
+    // so the latest run of a CSV file always holds that whole file.
+    const onlySource = (role, path) => {
       const found = sources.filter((source) => source.role === role);
-      if (found.length > 1) {
-        fail(`sources name more than one ${role} file`);
+      if (found.length !== 1) {
+        fail(`sources must name exactly one ${role} file, not ${found.length}`);
       }
-      return found.length === 1 ? found[0] : null;
+      if (found[0].path !== path) {
+        fail(`the ${role} source of ${csvFile} must be ${path}`);
+      }
+      return found[0];
     };
-    const catalogCsv = onlySource("catalog-csv");
-    const substitutesCsv = onlySource("substitutes-csv");
-    if (catalogCsv && catalogCsv.path !== `database/${csvFile}.csv`) {
-      fail(`the catalog-csv source of ${csvFile} must be database/${csvFile}.csv`);
-    }
+    const catalogCsv = onlySource("catalog-csv", `database/${csvFile}.csv`);
+    const substitutesCsv = onlySource("substitutes-csv", "database/substitutes.csv");
 
     const blobs = list("blobs").map((blob) => {
       if (!isSha(blob.sha256)) {
@@ -367,6 +392,7 @@ routerAdd(
         csvFile,
         sourceCommit,
         allowOlderCheckout,
+        expectedCsvImport,
         // A CSV file's rows are fixed by its byte hash, checked above.
         sources.map((source) => [source.role, source.path, source.byte_sha256, source.size, source.header_raw]),
         blobs.map((blob) => blob.sha256),
@@ -407,9 +433,47 @@ routerAdd(
         return;
       }
 
+      // The latest earlier import run of this CSV file, if any.
+      const previousEntry = first(
+        "catalog_audit_entries",
+        "csv_file = {:csv_file} && csv_import_number > 0",
+        { csv_file: csvFile },
+        "-csv_import_number",
+      );
+      let previousRun = null;
+      if (previousEntry) {
+        try {
+          previousRun = JSON.parse(previousEntry.getString("sources"));
+        } catch (_) {
+          previousRun = null;
+        }
+      }
+
+      // The importer checked its checkout against the latest run it read.
+      // If another import of this CSV file landed since, that check is
+      // stale: 409, nothing written, not stored.
+      const latestCsvImport = previousEntry ? previousEntry.getInt("csv_import_number") : 0;
+      if (latestCsvImport !== expectedCsvImport) {
+        reply = {
+          status: 409,
+          body: {
+            outcome: "newer_import_run",
+            correlationId: correlationId,
+            csvFile: csvFile,
+            expectedCsvImport: expectedCsvImport,
+            latestCsvImport: latestCsvImport,
+            message: `another import of ${catalogCsv.path} (import ${latestCsvImport}) landed after this import read the team catalog; nothing was imported, so read the team catalog again and import again`,
+          },
+        };
+        return;
+      }
+
       // ---- Phase 0: refuse if someone changed a part since it was read --
       // As for edits: 409 conflict, nothing written, and not stored under
       // the correlation ID, so a retry is checked again.
+      // At most 10 names, then how many more.
+      const listed = (names) =>
+        names.length <= 10 ? names.join(", ") : `${names.slice(0, 10).join(", ")} and ${names.length - 10} more`;
       const conflicts = [];
       for (const part of parts) {
         const stored = byId("catalog_parts", part.id);
@@ -430,26 +494,10 @@ routerAdd(
             outcome: "conflict",
             correlationId: correlationId,
             conflicts: conflicts,
-            message: `someone else changed ${conflicts.map((item) => item.ipn).join(", ")} after this import read the team catalog; nothing was imported, so read the team catalog again and import again`,
+            message: `someone else changed ${listed(conflicts.map((item) => item.ipn))} after this import read the team catalog; nothing was imported, so read the team catalog again and import again`,
           },
         };
         return;
-      }
-
-      // The latest earlier import run of this CSV file, if any.
-      const previousEntry = first(
-        "catalog_audit_entries",
-        "csv_file = {:csv_file} && csv_import_number > 0",
-        { csv_file: csvFile },
-        "-csv_import_number",
-      );
-      let previousRun = null;
-      if (previousEntry) {
-        try {
-          previousRun = JSON.parse(previousEntry.getString("sources"));
-        } catch (_) {
-          previousRun = null;
-        }
       }
 
       // ---- Phase 1: decide what is new, writing nothing ----------------
@@ -630,7 +678,7 @@ routerAdd(
 
       // A part the previous import run of this CSV file made, but no row
       // makes now, keeps its revisions; an import problem says it is gone.
-      if (catalogCsv && previousRun && Array.isArray(previousRun.parts)) {
+      if (previousRun && Array.isArray(previousRun.parts)) {
         for (const previous of previousRun.parts) {
           if (!previous || typeof previous.ipn !== "string" || seenIpns[previous.ipn]) {
             continue;
@@ -708,13 +756,12 @@ routerAdd(
       // Whether the previous import run of this CSV file read exactly these
       // files. If not, this run is recorded even when it adds nothing else,
       // so the latest run always holds what the CSV says now.
-      const fileList = (files) =>
-        JSON.stringify(
-          (Array.isArray(files) ? files : [])
-            .map((file) => [file.path, file.byte_sha256])
-            .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
-        );
-      const sameFilesAsPreviousRun = previousRun !== null && fileList(previousRun.files) === fileList(sources);
+      const fileHashes = JSON.stringify(
+        sources
+          .map((source) => [source.path, source.byte_sha256])
+          .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+      );
+      const sameFilesAsPreviousRun = previousEntry !== null && previousEntry.getString("file_hashes") === fileHashes;
 
       let status;
       let result;
@@ -777,6 +824,7 @@ routerAdd(
         audit.set("csv_import_number", lastRun ? lastRun.getInt("csv_import_number") + 1 : 1);
         audit.set("source_commit", sourceCommit);
         audit.set("allowed_older_checkout", allowOlderCheckout);
+        audit.set("file_hashes", fileHashes);
         audit.set(
           "sources",
           JSON.stringify({
@@ -795,6 +843,9 @@ routerAdd(
               return file;
             }),
             parts: parts.map((part) => ({ ipn: part.ipn, revision: part.revisionAfter })),
+            // Problems are shared by content, so a report may count only the
+            // ones this run found.
+            problems: Object.keys(seenProblems).sort(),
           }),
         );
         txApp.save(audit);

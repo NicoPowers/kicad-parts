@@ -112,6 +112,7 @@ fn outcome(reply: &ImportReply) -> &'static str {
         ImportOutcome::Conflict { .. } => "conflict",
         ImportOutcome::CorrelationReused { .. } => "correlation_reused",
         ImportOutcome::IdCollision { .. } => "id_collision",
+        ImportOutcome::NewerImportRun { .. } => "newer_import_run",
     }
 }
 
@@ -315,9 +316,36 @@ fn re_imports_stay_lossless() {
     assert!(stored.problems.iter().any(
         |problem| problem.code == "part-not-in-csv-file" && problem.subject == "RES-0000-1800"
     ));
-    // Importing the same files again is a no-op.
-    let reply = import_reading_first(&admin, &plan(root), "-again");
+    // Importing the same files again, with the correlation ID the command
+    // derives itself, is a no-op; doing it once more replays that answer.
+    let reply = import_reading_first(&admin, &plan(root), "");
     assert_eq!(outcome(&reply), "noop", "{}", reply.body);
+    let rerun = import_reading_first(&admin, &plan(root), "");
+    assert_eq!(
+        (rerun.status, rerun.replayed),
+        (422, true),
+        "{}",
+        rerun.body
+    );
+
+    // A neighbouring symbol in the same library changes. The resistor
+    // symbol keeps its revision (whose source names the old file hash and
+    // byte range), and the report checks it against the file as it is now.
+    replace_once(
+        root,
+        "symbols/g-pas.kicad_sym",
+        "\t(symbol \"C\"\n",
+        "\t(symbol \"C\"\n\t\t(property \"Note\" \"a neighbouring change\"\n\t\t\t(at 0 0 0)\n\t\t)\n",
+    );
+    let reply = import_reading_first(&admin, &plan(root), "");
+    assert_eq!(outcome(&reply), "nothing_changed", "{}", reply.body);
+    let report = lossless_report(root, &read_back(&admin).unwrap(), "neighbouring symbol");
+    assert!(
+        report
+            .cad_items
+            .iter()
+            .any(|item| item.reference == "g-pas:R_US")
+    );
 
     // The report still detects a lost removal problem.
     let mut copy = stored.clone();
@@ -433,8 +461,7 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
     assert_eq!(old_import.source_commit.as_deref(), Some(older.as_str()));
     let refused = services::prepare_import(&admin, root, &old_import, REASON, false).unwrap_err();
     assert!(
-        refused.contains("is older than the team catalog")
-            && refused.contains(&newer[..12])
+        refused.contains(&format!("does not include commit {}", &newer[..12]))
             && refused.contains("database/g-res.csv"),
         "{refused}"
     );
@@ -480,18 +507,52 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
         outcome(&submit_import(&admin, &command).unwrap()),
         "applied"
     );
-    assert!(!latest_audit_entry(&read_back(&admin).unwrap()).allowed_older_checkout);
+    let after_dirty = read_back(&admin).unwrap();
+    assert!(!latest_audit_entry(&after_dirty).allowed_older_checkout);
 
-    // Now the latest run is `<newer>+dirty`, so the older checkout is
-    // refused again.
+    // A clean checkout of that same commit would undo the uncommitted
+    // change: refused unless allowed. So are other uncommitted files.
     git(&["checkout", "-q", "--", SUBSTITUTES_CSV]);
+    let clean = services::plan(root, "g-res").unwrap();
+    assert_eq!(clean.source_commit.as_deref(), Some(newer.as_str()));
+    let refused = services::prepare_import(&admin, root, &clean, REASON, false).unwrap_err();
+    assert!(
+        refused.contains("came from uncommitted changes on commit")
+            && refused.contains(&newer[..12]),
+        "{refused}"
+    );
+    fs::write(
+        &substitutes,
+        format!("{header}RES-0000-1002,ALT-10K,Vishay,,DigiKey,541-10K-OTHER\n"),
+    )
+    .unwrap();
+    let other = services::plan(root, "g-res").unwrap();
+    assert_eq!(other.source_commit, Some(format!("{newer}+dirty")));
+    let refused = services::prepare_import(&admin, root, &other, REASON, false).unwrap_err();
+    assert!(refused.contains("uncommitted changes"), "{refused}");
+    assert_eq!(read_back(&admin).unwrap(), after_dirty);
+    // The same uncommitted files again are accepted (and change nothing).
+    fs::write(
+        &substitutes,
+        format!("{header}RES-0000-1002,ALT-10K,Vishay,,DigiKey,541-10K-ND\n"),
+    )
+    .unwrap();
+    let same = services::plan(root, "g-res").unwrap();
+    let command = services::prepare_import(&admin, root, &same, REASON, false).unwrap();
+    assert_eq!(outcome(&submit_import(&admin, &command).unwrap()), "noop");
+    // Allowed explicitly, the clean checkout imports.
+    git(&["checkout", "-q", "--", SUBSTITUTES_CSV]);
+    let command = services::prepare_import(&admin, root, &clean, REASON, true).unwrap();
+    assert_eq!(
+        outcome(&submit_import(&admin, &command).unwrap()),
+        "applied"
+    );
+
+    // The older checkout is refused again.
     git(&["checkout", "-q", &older]);
     let old_again = services::plan(root, "g-res").unwrap();
     let refused = services::prepare_import(&admin, root, &old_again, REASON, false).unwrap_err();
-    assert!(
-        refused.contains("is older than the team catalog"),
-        "{refused}"
-    );
+    assert!(refused.contains("does not include commit"), "{refused}");
     server.stop();
 }
 
@@ -572,8 +633,9 @@ fn a_part_changed_between_reading_and_importing_is_reported_not_overwritten() {
 
     // A command that expects every part to be new, sent to a catalog that
     // has them, conflicts on every part.
-    let mut stale = ImportCommand::new(&changed, REASON);
-    stale.correlation_id.push_str("-stale");
+    let mut latest_only = read_import_state(&admin).unwrap();
+    latest_only.current_revisions.clear();
+    let stale = ImportCommand::new(&changed, REASON).expecting(&latest_only);
     let reply = submit_import(&admin, &stale).unwrap();
     let ImportOutcome::Conflict { conflicts, .. } = &reply.outcome else {
         panic!("expected a conflict, got {}", reply.body);
@@ -583,6 +645,92 @@ fn a_part_changed_between_reading_and_importing_is_reported_not_overwritten() {
         conflicts
             .iter()
             .all(|conflict| conflict.expected_revision == 0)
+    );
+    let ImportOutcome::Conflict { message, .. } = &reply.outcome else {
+        unreachable!()
+    };
+    assert!(message.contains("and 19 more"), "{message}");
+
+    // Another import of the file lands after the importer read the team
+    // catalog: its checkout check is out of date, so it is refused.
+    let read = read_import_state(&admin).unwrap();
+    replace_once(root, CSV, "\"C22775\"", "\"C99999\"");
+    let late = plan(root);
+    let command = ImportCommand::new(&late, REASON).expecting(&read);
+    replace_once(root, CSV, "\"C99999\"", "\"C88888\"");
+    let first = import_reading_first(&admin, &plan(root), "");
+    assert_eq!(outcome(&first), "nothing_changed", "{}", first.body);
+    let before = read_back(&admin).unwrap();
+    let reply = submit_import(&admin, &command).unwrap();
+    assert_eq!(reply.status, 409, "{}", reply.body);
+    let ImportOutcome::NewerImportRun {
+        expected_csv_import,
+        latest_csv_import,
+        message,
+        ..
+    } = &reply.outcome
+    else {
+        panic!("expected a newer import run, got {}", reply.body);
+    };
+    assert_eq!(*latest_csv_import, expected_csv_import + 1);
+    assert!(
+        message.contains("another import of database/g-res.csv"),
+        "{message}"
+    );
+    assert_eq!(read_back(&admin).unwrap(), before);
+    server.stop();
+}
+
+#[test]
+fn import_problems_of_earlier_runs_explain_no_rows() {
+    let copy = tempfile::tempdir().unwrap();
+    let root = copy.path();
+    copy_catalog(root);
+    // RES-0000-0470 appears again as row 4, so that row is kept by a
+    // duplicate-ipn import problem.
+    let original = row_of(root, CSV, "RES-0000-0470");
+    let third = row_of(root, CSV, "RES-0000-1000");
+    replace_once(root, CSV, &third, &format!("{third}{original}"));
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
+    let reply = import_reading_first(&admin, &plan(root), "");
+    assert_eq!(outcome(&reply), "applied", "{}", reply.body);
+    let stored = read_back(&admin).unwrap();
+    assert!(
+        stored
+            .problems
+            .iter()
+            .any(|problem| problem.code == "duplicate-ipn")
+    );
+
+    // The first RES-0000-0470 row goes and a new row comes first, so the
+    // copy is row 4 again with the same bytes, but it is now the part's
+    // only row. The old duplicate-ipn problem must not explain it.
+    let first_row = row_of(root, CSV, "RES-0000-0000");
+    let new_row = first_row
+        .replace("RES-0000-0000", "RES-0000-0001")
+        .replace("\"C21189\"", "\"C11111\"");
+    let text = fs::read_to_string(root.join(CSV)).unwrap();
+    let text =
+        text.replacen(&original, "", 1)
+            .replacen(&first_row, &format!("{new_row}{first_row}"), 1);
+    fs::write(root.join(CSV), text).unwrap();
+    assert_eq!(row_of(root, CSV, "RES-0000-0470"), original);
+    let reply = import_reading_first(&admin, &plan(root), "-moved");
+    assert_eq!(outcome(&reply), "applied", "{}", reply.body);
+    let stored = read_back(&admin).unwrap();
+    let report = lossless_report(root, &stored, "duplicate became the only row");
+    assert_eq!(
+        field(&report, "RES-0000-0470", "Value").destination,
+        "part-details"
+    );
+    assert!(
+        report
+            .other_problems
+            .iter()
+            .any(|line| line.starts_with("duplicate-ipn")),
+        "{:?}",
+        report.other_problems
     );
     server.stop();
 }

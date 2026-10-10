@@ -165,15 +165,31 @@ impl PocketBaseClient {
         filter: &str,
         sort: &str,
     ) -> CollabResult<Vec<T>> {
+        self.list_record_fields(collection, filter, sort, "")
+    }
+
+    /// Like [`PocketBaseClient::list_records`], but each record carries only
+    /// `fields` (comma-separated field names; empty means every field), so
+    /// large fields are not downloaded.
+    pub fn list_record_fields<T: DeserializeOwned>(
+        &self,
+        collection: &str,
+        filter: &str,
+        sort: &str,
+        fields: &str,
+    ) -> CollabResult<Vec<T>> {
         let mut items = Vec::new();
         for page in 1.. {
-            let query = [
+            let mut query = vec![
                 ("page", page.to_string()),
                 ("perPage", PAGE_SIZE.to_string()),
                 ("sort", sort.to_owned()),
                 ("filter", filter.to_owned()),
                 ("skipTotal", "1".to_owned()),
             ];
+            if !fields.is_empty() {
+                query.push(("fields", fields.to_owned()));
+            }
             let reply =
                 self.get_with_query(&format!("/api/collections/{collection}/records"), &query)?;
             let mut list: Value = reply.json()?;

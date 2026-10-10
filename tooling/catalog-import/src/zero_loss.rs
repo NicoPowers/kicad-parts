@@ -208,6 +208,12 @@ struct Reporter<'a> {
     repository: &'a Path,
     /// Each stored import problem's detail, parsed once.
     details: Vec<Value>,
+    /// The IDs of the import problems the latest import run found. Problems
+    /// are shared by content, so a problem an earlier run found explains a
+    /// row only if the latest run found it again.
+    run_problems: BTreeSet<String>,
+    /// Problems that already explain a row; none may explain two.
+    row_problems_used: BTreeSet<String>,
     problems: Vec<String>,
 }
 
@@ -310,7 +316,25 @@ impl<'a> Reporter<'a> {
                 .iter()
                 .map(|problem| serde_json::from_str(&problem.detail).unwrap_or_default())
                 .collect(),
+            run_problems: BTreeSet::new(),
+            row_problems_used: BTreeSet::new(),
             problems: Vec::new(),
+        }
+    }
+
+    /// Whether the latest import run found `problem`.
+    fn in_run(&self, problem: &StoredImportProblem) -> bool {
+        self.run_problems.contains(&problem.id)
+    }
+
+    /// Marks `problem` as keeping one row; reports a loss if it already
+    /// keeps another.
+    fn use_for_row(&mut self, problem: &StoredImportProblem) {
+        if !self.row_problems_used.insert(problem.id.clone()) {
+            self.problem(format!(
+                "import problem {} at {} is counted for more than one row",
+                problem.code, problem.location
+            ));
         }
     }
 
@@ -318,8 +342,8 @@ impl<'a> Reporter<'a> {
         self.problems.push(message);
     }
 
-    /// The first stored import problem, with its parsed detail, that
-    /// `matches`.
+    /// The first import problem the latest run found, with its parsed
+    /// detail, that `matches`.
     fn find_problem(
         &self,
         matches: impl Fn(&StoredImportProblem, &Value) -> bool,
@@ -329,6 +353,7 @@ impl<'a> Reporter<'a> {
             .problems
             .iter()
             .zip(&self.details)
+            .filter(|(problem, _)| self.in_run(problem))
             .find(|(problem, detail)| matches(problem, detail))
             .map(|(problem, detail)| (problem, detail.clone()))
     }
@@ -360,6 +385,7 @@ impl<'a> Reporter<'a> {
             ));
             return self.empty(changes);
         };
+        self.run_problems = run.problems.iter().cloned().collect();
         let import_run = ImportRunAccount {
             audit_entry: entry.id.clone(),
             csv_import_number: entry.csv_import_number,
@@ -399,6 +425,7 @@ impl<'a> Reporter<'a> {
                     && detail["raw_record"].as_str() == Some(raw.as_str())
             }) {
                 explained.insert(problem.id.clone());
+                self.use_for_row(problem);
                 let record = padded(strings(&detail["record"]), headers.len());
                 for (position, (column, value)) in headers.iter().zip(row).enumerate() {
                     let stored = record.get(position).cloned();
@@ -440,6 +467,7 @@ impl<'a> Reporter<'a> {
                     && detail["current_revision_number"].as_u64() == Some(u64::from(number))
             }) {
                 explained.insert(problem.id.clone());
+                self.use_for_row(problem);
                 kept_by_problem.insert(ipn.clone(), detail.clone());
                 for (position, (column, value)) in headers.iter().zip(row).enumerate() {
                     let stored = Some(csv.field(index, position));
@@ -856,6 +884,13 @@ impl<'a> Reporter<'a> {
                 Vec::new()
             }
         };
+        if rows.len() != records.len() {
+            self.problem(format!(
+                "the latest import run recorded {} rows of {path}, but the file it rebuilds has {}",
+                rows.len(),
+                records.len()
+            ));
+        }
         if records.len() != oracle_rows.len() {
             self.problem(format!(
                 "{path} rebuilt from PocketBase has {} rows, the oracle {}",
@@ -978,6 +1013,7 @@ impl<'a> Reporter<'a> {
                     ));
                 }
                 explained.insert(problem.id.clone());
+                self.use_for_row(problem);
                 *account
                     .destinations
                     .entry(IMPORT_PROBLEM.to_owned())
@@ -1082,17 +1118,17 @@ impl<'a> Reporter<'a> {
     }
 
     /// Checks every symbol and footprint reference of the parts in `scope`.
-    /// Returns the accounts and the repository paths of resolved
-    /// footprints.
+    /// Returns the accounts and, for each resolved footprint's repository
+    /// path, the CAD item revision the parts bind.
     fn cad_items(
         &mut self,
         scope: &BTreeMap<String, &PartDetails>,
         explained: &mut BTreeSet<String>,
-    ) -> (Vec<CadItemAccount>, BTreeSet<String>) {
+    ) -> (Vec<CadItemAccount>, BTreeMap<String, String>) {
         let oracle = self.oracle;
         let mut accounts = Vec::new();
         let readback = self.readback;
-        let mut footprint_paths = BTreeSet::new();
+        let mut footprint_paths = BTreeMap::new();
         let references = oracle
             .assets
             .symbol_references
@@ -1179,7 +1215,11 @@ impl<'a> Reporter<'a> {
                     );
                     if role == CadReferenceRole::Footprint {
                         if let Some(path) = &reference.asset_path {
-                            footprint_paths.insert(path.clone());
+                            let revision = CadItemRevisionId::new(
+                                &CadItemId::from_stored(cad_item),
+                                snapshot_sha256,
+                            );
+                            footprint_paths.insert(path.clone(), revision.to_string());
                         }
                     }
                 }
@@ -1193,11 +1233,9 @@ impl<'a> Reporter<'a> {
                     };
                     let code = format!("{status}-local-{}-reference", reference.kind);
                     let location = format!("{column}={}", reference.reference);
-                    match readback
-                        .problems
-                        .iter()
-                        .find(|problem| problem.code == code && problem.location == location)
-                    {
+                    match readback.problems.iter().find(|problem| {
+                        self.in_run(problem) && problem.code == code && problem.location == location
+                    }) {
                         Some(problem) => {
                             explained.insert(problem.id.clone());
                         }
@@ -1276,23 +1314,31 @@ impl<'a> Reporter<'a> {
             self.problem(format!("{reference}: source does not parse"));
             return;
         };
-        if Some(source.path.as_str()) != account.oracle_asset_path.as_deref()
-            || Some(source.byte_sha256.as_str()) != oracle_file_sha
-        {
+        if Some(source.path.as_str()) != account.oracle_asset_path.as_deref() {
             self.problem(format!(
-                "{reference}: Source names {} {}, the oracle {:?} {:?}",
-                source.path, source.byte_sha256, account.oracle_asset_path, oracle_file_sha
+                "{reference}: Source names {}, the oracle {:?}",
+                source.path, account.oracle_asset_path
             ));
         }
         match source.byte_range {
             // A whole file: the blob is the file the oracle hashed.
             None => {
+                if Some(source.byte_sha256.as_str()) != oracle_file_sha {
+                    self.problem(format!(
+                        "{reference}: Source names file hash {}, the oracle {oracle_file_sha:?}",
+                        source.byte_sha256
+                    ));
+                }
                 if Some(blob.sha256.as_str()) != oracle_file_sha {
                     self.problem(format!("{reference}: blob is not the oracle's file"));
                 }
             }
-            // One symbol: the blob is that byte range of the oracle's file.
-            Some([start, end]) => {
+            // One symbol: the blob is exactly that whole top-level symbol in
+            // the oracle's file today, as KiCad Integration reads it. The
+            // stored range and file hash may name an older version of the
+            // library: a symbol keeps its revision when only a neighbouring
+            // symbol changes.
+            Some(_) => {
                 let file = std::fs::read(self.repository.join(&source.path)).unwrap_or_default();
                 if Some(sha256_hex(&file).as_str()) != oracle_file_sha {
                     self.problem(format!(
@@ -1300,13 +1346,6 @@ impl<'a> Reporter<'a> {
                         source.path
                     ));
                 } else {
-                    if file.get(start as usize..end as usize) != Some(blob.bytes.as_slice()) {
-                        self.problem(format!(
-                            "{reference}: blob is not bytes {start}..{end} of the oracle's file"
-                        ));
-                    }
-                    // The range must be exactly the whole top-level symbol,
-                    // as KiCad Integration reads the oracle's file.
                     let item = reference.split_once(':').map_or("", |(_, item)| item);
                     let whole = SymbolLibrary::parse(&file)
                         .ok()
@@ -1314,9 +1353,10 @@ impl<'a> Reporter<'a> {
                             SymbolLookup::Found(entry) => Some(entry.span.clone()),
                             _ => None,
                         });
-                    if whole != Some(start as usize..end as usize) {
+                    let bytes = whole.clone().and_then(|span| file.get(span));
+                    if bytes != Some(blob.bytes.as_slice()) {
                         self.problem(format!(
-                            "{reference}: bytes {start}..{end} are not the whole symbol `{item}` ({whole:?})"
+                            "{reference}: blob is not the whole symbol `{item}` of the oracle's file ({whole:?})"
                         ));
                     }
                 }
@@ -1326,20 +1366,19 @@ impl<'a> Reporter<'a> {
 
     fn models(
         &mut self,
-        footprint_paths: &BTreeSet<String>,
+        footprint_paths: &BTreeMap<String, String>,
         explained: &mut BTreeSet<String>,
     ) -> Vec<ModelAccount> {
         let oracle = self.oracle;
         let readback = self.readback;
         let mut accounts = Vec::new();
         for model in &oracle.assets.model_references {
-            if !footprint_paths.contains(&model.source_footprint) {
+            let Some(bound) = footprint_paths.get(&model.source_footprint) else {
                 continue;
-            }
-            // The footprint's stored snapshot must list the reference.
-            let snapshot = readback.cad_item_revisions.iter().find_map(|revision| {
-                let source: CadItemSource = serde_json::from_str(&revision.source).ok()?;
-                (source.path == model.source_footprint).then_some(())?;
+            };
+            // The snapshot of the footprint revision the parts bind must list
+            // the reference.
+            let snapshot = readback.cad_item_revision(bound).and_then(|revision| {
                 serde_json::from_str::<CadItemDetails>(&revision.snapshot).ok()
             });
             let stored = snapshot.and_then(|snapshot| {
@@ -1407,7 +1446,8 @@ impl<'a> Reporter<'a> {
                             let code = format!("{status}-3d-model-reference");
                             let location = format!("model={}", model.reference);
                             match readback.problems.iter().find(|problem| {
-                                problem.code == code
+                                self.in_run(problem)
+                                    && problem.code == code
                                     && problem.path == model.source_footprint
                                     && problem.location == location
                             }) {
@@ -1447,7 +1487,7 @@ impl<'a> Reporter<'a> {
     /// models, the same footprint path and message).
     fn oracle_diagnostics(
         &mut self,
-        footprint_paths: &BTreeSet<String>,
+        footprint_paths: &BTreeMap<String, String>,
         cad_items: &[CadItemAccount],
         explained: &mut BTreeSet<String>,
     ) -> Vec<ProblemAccount> {
@@ -1466,14 +1506,15 @@ impl<'a> Reporter<'a> {
         let readback = self.readback;
         let mut accounts = Vec::new();
         for problem in &oracle.diagnostics {
-            let model = footprint_paths.contains(&problem.path);
+            let model = footprint_paths.contains_key(&problem.path);
             let reference =
                 problem.code.ends_with("-reference") && references.contains(&problem.location);
             if !model && !reference {
                 continue;
             }
             let stored = readback.problems.iter().find(|stored| {
-                stored.code == problem.code
+                self.in_run(stored)
+                    && stored.code == problem.code
                     && stored.location == problem.location
                     && (!model
                         || (stored.path == problem.path && stored.message == problem.message))

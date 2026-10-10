@@ -73,9 +73,10 @@ fn pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let first_command = services::prepare_import(&admin, &root, &import, &reason, false)?;
     let first = submit_import(&admin, &first_command)?;
     let after_first = read_back(&admin)?;
-    let mut retry = services::prepare_import(&admin, &root, &import, &reason, false)?;
-    retry.correlation_id.push_str("-retry");
-    let second = submit_import(&admin, &retry)?;
+    // Its correlation ID differs from the first one's because it expects
+    // the parts the first one made.
+    let second_command = services::prepare_import(&admin, &root, &import, &reason, false)?;
+    let second = submit_import(&admin, &second_command)?;
     let readback = read_back(&admin)?;
     server.stop();
 

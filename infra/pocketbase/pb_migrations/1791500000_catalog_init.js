@@ -196,8 +196,13 @@ migrate((app) => {
       // the commit the files were read at, possibly ending in +dirty;
       { name: "source_commit", type: "text", max: 100 },
       // JSON { csv_file, files: [{ role, path, byte_sha256, size,
-      // header_raw, rows }], parts: [{ ipn, revision }] };
+      // header_raw, rows }], parts: [{ ipn, revision }], problems: [id] },
+      // where problems lists every import problem the run found, new or
+      // already stored;
       { name: "sources", type: "text", max: DOCUMENT },
+      // JSON [[path, byte_sha256], ...] of the files read, sorted by path,
+      // so importers can compare runs without downloading the rows;
+      { name: "file_hashes", type: "text", max: 100000 },
       // and whether the importer was told to import from a checkout older
       // than the team catalog's latest imports.
       { name: "allowed_older_checkout", type: "bool" },
