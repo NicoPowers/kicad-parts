@@ -96,10 +96,12 @@ pub struct CadReference {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum CadReferenceTarget {
-    /// One exact revision of a CAD item, named by its CAD item and the
-    /// SHA-256 of that revision's snapshot.
+    /// One exact revision of a CAD item, named by its CAD item and revision
+    /// number (which give its ID) and the SHA-256 of that revision's
+    /// snapshot (so a reader can check the record it finds).
     CadItemRevision {
         cad_item: String,
+        number: u32,
         snapshot_sha256: String,
     },
     /// A library outside the CSV catalog, such as KiCad's bundled `Device`

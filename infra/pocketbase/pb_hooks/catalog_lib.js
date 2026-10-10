@@ -301,8 +301,11 @@ function base64Decode(text) {
 //   2. answer 409 conflict, with the part's current revision, if the
 //      caller expected another current revision;
 //   3. build the new part details: for an edit, from the caller's fields
-//      and manufacturer parts; for a restore, an exact copy of the older
-//      revision's details, CAD item revisions included;
+//      and manufacturer parts; for a restore, a copy of the older
+//      revision's details. Either way each CAD binding names the CAD item's
+//      current revision when that revision has the same content as the
+//      binding (see reboundTarget), so a part never names an older number
+//      for content that is current;
 //   4. answer 422 noop if they equal the current revision's details;
 //   5. otherwise save one Change, the new revision, the part's move to it,
 //      and one audit entry.
@@ -409,12 +412,108 @@ function editedDetails(body, currentDetails) {
   return { fields: checkedFields, manufacturerParts: checkedParts };
 }
 
+// ---- CAD item revisions ----------------------------------------------------
+//
+// CAD item revisions are numbered from 1 per CAD item, like part revisions,
+// and the current revision is the newest. Part details and footprint
+// snapshots name one as { kind: "cad-item-revision", cad_item, number,
+// snapshot_sha256 }: the CAD item and number give its ID, and the hash lets
+// a reader check the record it finds.
+
+// A CAD binding read from a client's snapshot, checked for shape: exactly
+// those four keys, a CAD item ID, a number from 1 and a SHA-256. `who` names
+// the binding in error messages. Returns { cadItem, number,
+// snapshotSha256, id, who }; throws BadRequestError.
+function cadItemRevisionTarget(target, who) {
+  const keys = Object.keys(target).sort().join(",");
+  if (keys !== "cad_item,kind,number,snapshot_sha256") {
+    throw new BadRequestError(`${who} must name a CAD item revision by cad_item, number and snapshot_sha256 only`);
+  }
+  const cadItem = target.cad_item;
+  const number = target.number;
+  const snapshotSha256 = target.snapshot_sha256;
+  if (typeof cadItem !== "string" || !/^[0-9a-f]{15}$/.test(cadItem)) {
+    throw new BadRequestError(`${who} names a CAD item that is not a CAD item ID`);
+  }
+  if (!Number.isInteger(number) || number < 1) {
+    throw new BadRequestError(`${who} names a revision number that is not a whole number from 1`);
+  }
+  if (typeof snapshotSha256 !== "string" || !/^[0-9a-f]{64}$/.test(snapshotSha256)) {
+    throw new BadRequestError(`${who} names a snapshot hash that is not 64 lowercase hex digits`);
+  }
+  return {
+    cadItem: cadItem,
+    number: number,
+    snapshotSha256: snapshotSha256,
+    id: deriveId("cad-item-revision", cadItem + "\n" + number),
+    who: who,
+  };
+}
+
+// Whether a stored record really is revision `number` of CAD item
+// `cadItemId`: its ID is the derived one and its snapshot matches its hash.
+function isCadItemRevision(record, cadItemId, number) {
+  return (
+    record.id === deriveId("cad-item-revision", cadItemId + "\n" + number) &&
+    record.getString("cad_item") === cadItemId &&
+    record.getInt("number") === number &&
+    $security.sha256(record.getString("snapshot")) === record.getString("snapshot_sha256")
+  );
+}
+
+// The current (newest) revision of a CAD item, or null if it has none.
+// Throws if the stored record is not what its ID says.
+function currentCadItemRevision(txApp, cadItemId) {
+  const found = txApp.findRecordsByFilter("catalog_cad_item_revisions", "cad_item = {:id}", "-number", 1, 0, {
+    id: cadItemId,
+  });
+  if (found.length === 0) {
+    return null;
+  }
+  const current = found[0];
+  if (!isCadItemRevision(current, cadItemId, current.getInt("number"))) {
+    throw new Error(`the stored record ${current.id} is not revision ${current.getInt("number")} of CAD item ${cadItemId}`);
+  }
+  return current;
+}
+
+// The binding to `revision`, with keys in the order Rust writes them.
+function bindingTo(cadItemId, revision) {
+  return {
+    kind: "cad-item-revision",
+    cad_item: cadItemId,
+    number: revision.getInt("number"),
+    snapshot_sha256: revision.getString("snapshot_sha256"),
+  };
+}
+
+// A stored binding, kept as it is unless the CAD item's current revision
+// has the same content (the same snapshot hash) under a newer number; then
+// it names the current revision instead. So a binding never names an older
+// number for content that is current, and never changes which bytes a part
+// uses. A binding whose content is no longer current keeps naming its exact
+// older revision.
+function reboundTarget(txApp, target) {
+  const current = currentCadItemRevision(txApp, target.cad_item);
+  if (current && current.getString("snapshot_sha256") === target.snapshot_sha256) {
+    return bindingTo(target.cad_item, current);
+  }
+  return {
+    kind: "cad-item-revision",
+    cad_item: target.cad_item,
+    number: target.number,
+    snapshot_sha256: target.snapshot_sha256,
+  };
+}
+
 // The CAD references of new part details, read from their Symbol and
 // Footprint fields the way the CSV import reads them (`;` separates
 // footprint choices). Each reference to the CSV catalog's own libraries
 // (`g-*`) is bound to one exact CAD item revision:
-// - a reference the current revision already binds keeps its exact
-//   revision, so editing another field never moves a CAD binding;
+// - a reference the current revision already binds keeps the content it
+//   binds, so editing another field never changes the CAD a part uses; it
+//   moves to the CAD item's current revision only when that revision has
+//   the same content (see reboundTarget);
 // - any other reference binds the current revision of the CAD item with
 //   exactly that library reference;
 // - a reference that the current revision kept as unresolved stays so;
@@ -425,12 +524,6 @@ function cadReferences(txApp, fields, currentDetails) {
   const value = (name) => {
     const field = fields.find((item) => item.name === name);
     return field ? field.value : null;
-  };
-  const latestRevision = (cadItemId) => {
-    const found = txApp.findRecordsByFilter("catalog_cad_item_revisions", "cad_item = {:id}", "-number", 1, 0, {
-      id: cadItemId,
-    });
-    return found.length > 0 ? found[0] : null;
   };
   const previous = currentDetails.cad_references || [];
   const references = [];
@@ -461,13 +554,13 @@ function cadReferences(txApp, fields, currentDetails) {
         }
         const same = previous.find((item) => item.role === role && item.reference === reference);
         if (cadItem && same && same.target.kind === "cad-item-revision" && same.target.cad_item === cadItemId) {
-          target = { kind: "cad-item-revision", cad_item: cadItemId, snapshot_sha256: same.target.snapshot_sha256 };
+          target = reboundTarget(txApp, same.target);
         } else if (cadItem) {
-          const latest = latestRevision(cadItemId);
-          if (!latest) {
+          const current = currentCadItemRevision(txApp, cadItemId);
+          if (!current) {
             throw new BadRequestError(`the ${role} ${reference} has no revision`);
           }
-          target = { kind: "cad-item-revision", cad_item: cadItemId, snapshot_sha256: latest.getString("snapshot_sha256") };
+          target = bindingTo(cadItemId, current);
         } else if (same && same.target.kind === "unresolved") {
           target = { kind: "unresolved", status: same.target.status };
         } else {
@@ -487,7 +580,7 @@ function boundCadItemRevisions(details) {
   const bound = [];
   for (const reference of details.cad_references || []) {
     if (reference.target && reference.target.kind === "cad-item-revision") {
-      bound.push(deriveId("cad-item-revision", reference.target.cad_item + "\n" + reference.target.snapshot_sha256));
+      bound.push(deriveId("cad-item-revision", reference.target.cad_item + "\n" + reference.target.number));
     }
   }
   return bound;
@@ -615,9 +708,27 @@ function publishPartRevision(e, kind) {
       if (!restored) {
         throw new NotFoundError(`${request.ipn} has no revision ${restoreRevision}`);
       }
-      // The exact stored bytes, so the restored revision has the same
-      // details and the same CAD item revisions.
+      // The older revision's details. Each CAD binding moves to the CAD
+      // item's current revision if that revision has the same content, and
+      // otherwise keeps its exact older revision, so the part gets back
+      // exactly the CAD it had. A restore never adds a CAD item revision.
+      // When no binding moves, the stored bytes are copied exactly.
       snapshot = restored.getString("snapshot");
+      const details = JSON.parse(snapshot);
+      let moved = false;
+      for (const reference of details.cad_references || []) {
+        if (reference.target && reference.target.kind === "cad-item-revision") {
+          const target = reboundTarget(txApp, reference.target);
+          if (target.number !== reference.target.number) {
+            reference.target = target;
+            moved = true;
+          }
+        }
+      }
+      if (moved) {
+        // Parsed from canonical JSON, so the keys keep Rust's order.
+        snapshot = JSON.stringify(details);
+      }
       source = {
         schema: SOURCE_SCHEMA,
         source: CHANGE_KINDS.restore,
@@ -750,6 +861,8 @@ module.exports = {
   SOURCE_SCHEMA: SOURCE_SCHEMA,
   publishPartRevision: publishPartRevision,
   describeRevision: describeRevision,
+  cadItemRevisionTarget: cadItemRevisionTarget,
+  isCadItemRevision: isCadItemRevision,
   trimSpace: trimSpace,
   isReservedName: isReservedName,
   hasInvisible: hasInvisible,

@@ -619,3 +619,132 @@ fn unknown_mpn_columns_are_import_problems() {
         .collect();
     assert_eq!(names, ["Value"]);
 }
+
+/// The numbers `import` gives each CAD item, by key: (expected, number).
+fn numbers(import: &CsvImport) -> Vec<(&str, u32, u32)> {
+    import
+        .cad_item_revisions
+        .iter()
+        .map(|draft| {
+            (
+                draft.cad_item.key.as_str(),
+                draft.expected_revision,
+                draft.number,
+            )
+        })
+        .collect()
+}
+
+/// What `import` would leave as each CAD item's current revision.
+fn current_after(import: &CsvImport) -> BTreeMap<String, CurrentCadItemRevision> {
+    import
+        .cad_item_revisions
+        .iter()
+        .map(|draft| {
+            (
+                draft.cad_item.id.as_str().to_owned(),
+                CurrentCadItemRevision {
+                    number: draft.number,
+                    snapshot_sha256: draft.snapshot_sha256.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
+    let csv = format!("{HEADER}RES-0000-0470,MPN47,Yageo,47,g-pas:R_US,g-res:R_0603,,\n");
+    let root = fixture(&csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
+    let plan = || CsvCatalog::new(root.path()).import("g-res", None).unwrap();
+    let footprint_target = |import: &CsvImport| {
+        import.parts[0]
+            .snapshot
+            .cad_references
+            .iter()
+            .find(|reference| reference.role == CadReferenceRole::Footprint)
+            .unwrap()
+            .target
+            .clone()
+    };
+
+    // A fresh import is numbered as if the catalog were empty.
+    let first = plan();
+    assert_eq!(first, first.numbered_against(&BTreeMap::new()));
+    assert_eq!(
+        numbers(&first),
+        [
+            ("g-pas:R_US", 0, 1),
+            ("3d-models/local.step", 0, 1),
+            ("g-res:R_0603", 0, 1)
+        ]
+    );
+    let after_a = current_after(&first);
+    // The same content again keeps every number and every snapshot, so
+    // nothing is new; only the revisions it expects to find differ.
+    let again = plan().numbered_against(&after_a);
+    assert_eq!(
+        numbers(&again),
+        [
+            ("g-pas:R_US", 1, 1),
+            ("3d-models/local.step", 1, 1),
+            ("g-res:R_0603", 1, 1)
+        ]
+    );
+    assert!(again.parts[0].snapshot_json == first.parts[0].snapshot_json);
+
+    // Footprint content B: revision 2. Then A again: revision 3, not 1.
+    let path = root.path().join("footprints/g-res.pretty/R_0603.kicad_mod");
+    fs::write(
+        &path,
+        FOOTPRINT.replace("R_0603\"\n", "R_0603\"\n\t(descr \"B\")\n"),
+    )
+    .unwrap();
+    let second = plan().numbered_against(&after_a);
+    assert_eq!(numbers(&second)[2], ("g-res:R_0603", 1, 2));
+    let after_b = current_after(&second);
+    fs::write(&path, FOOTPRINT).unwrap();
+    let third = plan().numbered_against(&after_b);
+    assert_eq!(numbers(&third)[2], ("g-res:R_0603", 2, 3));
+    // Same content as revision 1, so the same blob, but a new revision that
+    // the part binds.
+    assert_eq!(
+        third.cad_item_revisions[2].snapshot_sha256,
+        first.cad_item_revisions[2].snapshot_sha256
+    );
+    assert_eq!(
+        third.cad_item_revisions[2].id,
+        CadItemRevisionId::new(&third.cad_item_revisions[2].cad_item.id, 3)
+    );
+    let CadReferenceTarget::CadItemRevision { number, .. } = footprint_target(&third) else {
+        panic!("the footprint is bound");
+    };
+    assert_eq!(number, 3);
+    assert_ne!(
+        third.parts[0].snapshot_sha256,
+        first.parts[0].snapshot_sha256
+    );
+    assert_eq!(
+        third.parts[0].snapshot.canonical_json(),
+        third.parts[0].snapshot_json
+    );
+
+    // A new 3D model revision makes a new footprint revision that names it.
+    let after_third = current_after(&third);
+    fs::write(
+        root.path().join("3d-models/local.step"),
+        "ISO-10303-21;\nB\n",
+    )
+    .unwrap();
+    let fourth = plan().numbered_against(&after_third);
+    assert_eq!(
+        numbers(&fourth)[1..],
+        [("3d-models/local.step", 1, 2), ("g-res:R_0603", 3, 4)]
+    );
+    let names_model_2 = fourth.cad_item_revisions[2]
+        .snapshot
+        .model_references
+        .iter()
+        .any(|model| matches!(model.target, ModelTarget::CadItemRevision { number: 2, .. }));
+    assert!(names_model_2);
+}

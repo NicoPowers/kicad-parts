@@ -8,8 +8,8 @@
 //     expectedCsvImport,
 //     sources: [{ role, path, byteSha256, size, headerRaw, rows }],
 //     blobs: [{ sha256, size, text | base64 }],
-//     cadItemRevisions: [{ id, cadItemId, kind, key, snapshotSha256,
-//                          snapshot, source }],
+//     cadItemRevisions: [{ id, cadItemId, kind, key, expectedRevision,
+//                          number, snapshotSha256, snapshot, source }],
 //     parts: [{ id, ipn, expectedRevision, snapshot, snapshotSha256,
 //               source }],
 //     problems: [{ id, code, subject, path, location, message, detail }] }
@@ -25,22 +25,35 @@
 // catalog's latest imports (the importer checks git ancestry; the server
 // cannot), and is recorded on the audit entry.
 //
+// CAD item revisions are numbered from 1 per CAD item, like part
+// revisions, and the current revision is the newest. A request sends one
+// revision per CAD item. Its `expectedRevision` is the number of the CAD
+// item's current revision when the importer read the team catalog (0 for a
+// new CAD item), and its `number` is that same number if the content is the
+// current revision's, otherwise the next one, even if an older revision
+// had exactly this content. Part details and footprint snapshots name each
+// CAD item revision by CAD item, number and snapshot hash, and must name the
+// CAD item's current revision as it is after this request.
+//
 // The server trusts none of the derived values: it re-hashes every blob and
 // snapshot, re-derives every record ID, checks that each CSV file's header
 // line and rows are the file with its byte hash and that every part's
-// source row is one of those rows, and checks that every CAD reference
-// names a CAD item revision that is stored or arrives in this request.
+// source row is one of those rows, checks every CAD item revision number
+// against what is stored, and checks that every CAD reference names the
+// current revision of its CAD item.
 //
 // Then, in one transaction, it compares the request with what is stored:
 // - if the latest import run of this CSV file is not the one the importer
 //   checked against, another import landed in between: 409
 //   newer_import_run and nothing is written;
-// - if any part's current revision is not the one the importer expected,
-//   someone changed it in between: 409 conflict and nothing is written;
-// - blobs, CAD items, CAD item revisions and import problems that already
-//   exist are reused (they are content-addressed), after checking that the
-//   stored record's hash or key really matches, so an ID collision is
-//   refused, not merged;
+// - if any part's or CAD item's current revision is not the one the
+//   importer expected, someone changed it in between: 409 conflict and
+//   nothing is written;
+// - blobs, CAD items and import problems that already exist are reused
+//   (they are content-addressed), after checking that the stored record's
+//   hash or key really matches, so an ID collision is refused, not merged;
+// - a CAD item revision whose content is the current revision's is that
+//   revision; any other content is a new revision numbered after it;
 // - a new IPN becomes a part with revision 1;
 // - a part whose current revision has the same snapshot is unchanged. If its
 //   source row changed anyway (for example its supplier data), or the
@@ -73,9 +86,11 @@
 //                                          the previous run read the same
 //                                          files; nothing is written
 //   409 { outcome: "conflict", conflicts: [{ ipn, expectedRevision,
-//         currentRevision }], message }   someone changed these parts after
-//                                          the importer read them; nothing
-//                                          is written
+//         currentRevision }], cadItemConflicts: [{ kind, key,
+//         expectedRevision, currentRevision }], message }
+//                                          someone changed these parts or
+//                                          CAD items after the importer read
+//                                          them; nothing is written
 //   409 { outcome: "newer_import_run", csvFile, expectedCsvImport,
 //         latestCsvImport, message }   another import of this CSV file
 //                                          landed first; nothing is written
@@ -283,7 +298,18 @@ routerAdd(
       if (revision.snapshotSha256 !== snapshotSha256) {
         fail(`snapshotSha256 of ${kind} ${key} does not match its snapshot`);
       }
-      const id = lib.deriveId("cad-item-revision", cadItemId + "\n" + snapshotSha256);
+      const expectedRevision = revision.expectedRevision;
+      if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+        fail(`the expected revision of ${kind} ${key} must be the number of its current revision, or 0 for a new CAD item`);
+      }
+      // The current revision's number for its own content, or the next one
+      // for new content. Which of the two is right is checked against what
+      // is stored, in the transaction.
+      const number = revision.number;
+      if (!Number.isInteger(number) || (number !== expectedRevision && number !== expectedRevision + 1)) {
+        fail(`the revision number of ${kind} ${key} must be ${expectedRevision} or ${expectedRevision + 1}`);
+      }
+      const id = lib.deriveId("cad-item-revision", cadItemId + "\n" + number);
       if (revision.id !== id) {
         fail(`CAD item revision ID for ${kind} ${key} must be ${id}`);
       }
@@ -295,24 +321,33 @@ routerAdd(
       if (license.length === 0) {
         fail(`snapshot of ${kind} ${key} has no license snapshot`);
       }
+      const models = [];
+      for (const model of parsed.model_references || []) {
+        if (model && model.target && model.target.kind === "cad-item-revision") {
+          models.push(lib.cadItemRevisionTarget(model.target, `the 3D model ${model.reference} of ${key}`));
+        }
+      }
       return {
         id: id,
         cadItemId: cadItemId,
         kind: kind,
         key: key,
+        expectedRevision: expectedRevision,
+        number: number,
         snapshotSha256: snapshotSha256,
         snapshot: snapshot,
         parsed: parsed,
         license: license,
+        models: models,
         source: text(revision, "source", DOCUMENT, true),
       };
     });
     const requestRevisions = {};
     for (const revision of cadItemRevisions) {
-      if (requestRevisions[revision.id]) {
-        fail(`CAD item revision ${revision.id} appears twice`);
+      if (requestRevisions[revision.cadItemId]) {
+        fail(`${revision.kind} ${revision.key} appears twice; send one revision per CAD item`);
       }
-      requestRevisions[revision.id] = revision;
+      requestRevisions[revision.cadItemId] = revision;
     }
     // A blob is only ever saved for a CAD item revision, so that every
     // write belongs to a Change.
@@ -341,10 +376,10 @@ routerAdd(
         fail(`the snapshot of ${ipn} names ${parsed.ipn}`);
       }
       const source = text(part, "source", DOCUMENT, true);
-      const bound = [];
+      const targets = [];
       for (const binding of parsed.cad_references || []) {
-        if (binding.target && binding.target.kind === "cad-item-revision") {
-          bound.push(lib.deriveId("cad-item-revision", binding.target.cad_item + "\n" + binding.target.snapshot_sha256));
+        if (binding && binding.target && binding.target.kind === "cad-item-revision") {
+          targets.push(lib.cadItemRevisionTarget(binding.target, `${ipn}'s ${binding.reference}`));
         }
       }
       const parsedSource = parse(source, "source");
@@ -379,7 +414,8 @@ routerAdd(
         snapshotSha256: snapshotSha256,
         source: source,
         parsedSource: parsedSource,
-        bound: bound,
+        targets: targets,
+        bound: targets.map((target) => target.id),
       };
     });
     const seenIpns = {};
@@ -426,7 +462,7 @@ routerAdd(
         // A CSV file's rows are fixed by its byte hash, checked above.
         sources.map((source) => [source.role, source.path, source.byte_sha256, source.size, source.header_raw]),
         blobs.map((blob) => blob.sha256),
-        cadItemRevisions.map((revision) => [revision.id, revision.source]),
+        cadItemRevisions.map((revision) => [revision.id, revision.expectedRevision, revision.snapshotSha256, revision.source]),
         parts.map((part) => [part.id, part.expectedRevision, part.snapshotSha256, part.source]),
         problems.map((item) => [item.id, item.path, item.message]),
       ]),
@@ -505,6 +541,27 @@ routerAdd(
       const listed = (names) =>
         names.length <= 10 ? names.join(", ") : `${names.slice(0, 10).join(", ")} and ${names.length - 10} more`;
       const conflicts = [];
+      const cadItemConflicts = [];
+      // Each CAD item's newest stored revision, which is its current one.
+      const storedCurrent = {};
+      const currentStored = (cadItemId) => {
+        if (!(cadItemId in storedCurrent)) {
+          storedCurrent[cadItemId] = first("catalog_cad_item_revisions", "cad_item = {:cad_item}", { cad_item: cadItemId }, "-number");
+        }
+        return storedCurrent[cadItemId];
+      };
+      for (const revision of cadItemRevisions) {
+        const current = currentStored(revision.cadItemId);
+        const currentNumber = current ? current.getInt("number") : 0;
+        if (currentNumber !== revision.expectedRevision) {
+          cadItemConflicts.push({
+            kind: revision.kind,
+            key: revision.key,
+            expectedRevision: revision.expectedRevision,
+            currentRevision: currentNumber,
+          });
+        }
+      }
       for (const part of parts) {
         const stored = byId("catalog_parts", part.id);
         const currentNumber = stored ? stored.getInt("current_revision_number") : 0;
@@ -517,14 +574,16 @@ routerAdd(
           });
         }
       }
-      if (conflicts.length > 0) {
+      if (conflicts.length > 0 || cadItemConflicts.length > 0) {
+        const names = conflicts.map((item) => item.ipn).concat(cadItemConflicts.map((item) => item.key));
         reply = {
           status: 409,
           body: {
             outcome: "conflict",
             correlationId: correlationId,
             conflicts: conflicts,
-            message: `someone else changed ${listed(conflicts.map((item) => item.ipn))} after this import read the team catalog; nothing was imported, so read the team catalog again and import again`,
+            cadItemConflicts: cadItemConflicts,
+            message: `someone else changed ${listed(names)} after this import read the team catalog; nothing was imported, so read the team catalog again and import again`,
           },
         };
         return;
@@ -545,23 +604,14 @@ routerAdd(
         (blob) => !reuse("catalog_blobs", blob.id, (r) => r.getString("sha256") === blob.sha256, `blob ${blob.sha256}`),
       );
       const blobExists = (sha) => !!requestBlobs[sha] || !!byId("catalog_blobs", lib.deriveId("blob", sha));
-      const revisionExists = (id) => !!requestRevisions[id] || !!byId("catalog_cad_item_revisions", id);
 
+      // Each CAD item's current revision as it is after this request.
+      const currentAfter = {};
       const newCadItems = [];
       const newCadItemRevisions = [];
-      const pendingNumbers = {};
-      const seenCadItems = {};
       for (const revision of cadItemRevisions) {
         if (!blobExists(revision.parsed.blob_sha256)) {
-          fail(`CAD item revision ${revision.id} names blob ${revision.parsed.blob_sha256}, which is neither stored nor sent`);
-        }
-        for (const model of revision.parsed.model_references || []) {
-          if (model.target && model.target.kind === "cad-item-revision") {
-            const target = lib.deriveId("cad-item-revision", model.target.cad_item + "\n" + model.target.snapshot_sha256);
-            if (!revisionExists(target)) {
-              fail(`${revision.key} binds 3D model revision ${target}, which is neither stored nor sent`);
-            }
-          }
+          fail(`the ${revision.kind} ${revision.key} names blob ${revision.parsed.blob_sha256}, which is neither stored nor sent`);
         }
         const storedCadItem = reuse(
           "catalog_cad_items",
@@ -569,28 +619,57 @@ routerAdd(
           (r) => r.getString("kind") === revision.kind && r.getString("key") === revision.key,
           `${revision.kind} ${revision.key}`,
         );
-        if (!seenCadItems[revision.cadItemId] && !storedCadItem) {
+        if (!storedCadItem) {
           newCadItems.push(revision);
         }
-        seenCadItems[revision.cadItemId] = true;
-        const storedRevision = reuse(
-          "catalog_cad_item_revisions",
-          revision.id,
-          (r) => r.getString("cad_item") === revision.cadItemId && r.getString("snapshot_sha256") === revision.snapshotSha256,
-          `revision ${revision.snapshotSha256} of ${revision.key}`,
-        );
-        if (storedRevision) {
-          continue;
+        const current = currentStored(revision.cadItemId);
+        const currentNumber = current ? current.getInt("number") : 0;
+        if (current && !lib.isCadItemRevision(current, revision.cadItemId, currentNumber)) {
+          collisions.push(`catalog_cad_item_revisions/${current.id}: the stored record is not revision ${currentNumber} of ${revision.key}`);
         }
-        let latest = pendingNumbers[revision.cadItemId];
-        if (!latest) {
-          const stored = first("catalog_cad_item_revisions", "cad_item = {:cad_item}", { cad_item: revision.cadItemId }, "-number");
-          latest = stored ? { number: stored.getInt("number"), id: stored.id } : { number: 0, id: "" };
+        if (current && current.getString("snapshot_sha256") === revision.snapshotSha256) {
+          if (revision.number !== currentNumber) {
+            fail(`the ${revision.kind} ${revision.key} has the content of its current revision ${currentNumber}, so its revision number must be ${currentNumber}`);
+          }
+        } else {
+          if (revision.number !== currentNumber + 1) {
+            fail(`the ${revision.kind} ${revision.key} differs from its current revision ${currentNumber}, so its revision number must be ${currentNumber + 1}`);
+          }
+          // Nothing can be stored yet under the number after the current one.
+          reuse("catalog_cad_item_revisions", revision.id, () => false, `a new revision ${revision.number} of ${revision.key}`);
+          revision.predecessor = current ? current.id : "";
+          newCadItemRevisions.push(revision);
         }
-        revision.number = latest.number + 1;
-        revision.predecessor = latest.id;
-        pendingNumbers[revision.cadItemId] = { number: revision.number, id: revision.id };
-        newCadItemRevisions.push(revision);
+        currentAfter[revision.cadItemId] = { number: revision.number, snapshotSha256: revision.snapshotSha256 };
+      }
+      // Footprints and parts must bind the current revision of each CAD
+      // item, so an import never binds an older revision.
+      const currentOf = (cadItemId) => {
+        if (currentAfter[cadItemId]) {
+          return currentAfter[cadItemId];
+        }
+        const stored = currentStored(cadItemId);
+        if (!stored) {
+          return null;
+        }
+        const number = stored.getInt("number");
+        if (!lib.isCadItemRevision(stored, cadItemId, number)) {
+          collisions.push(`catalog_cad_item_revisions/${stored.id}: the stored record is not revision ${number} of CAD item ${cadItemId}`);
+        }
+        currentAfter[cadItemId] = { number: number, snapshotSha256: stored.getString("snapshot_sha256") };
+        return currentAfter[cadItemId];
+      };
+      const checkBinding = (target) => {
+        const current = currentOf(target.cadItem);
+        if (!current) {
+          fail(`${target.who} names CAD item ${target.cadItem}, which is neither stored nor sent`);
+        }
+        if (current.number !== target.number || current.snapshotSha256 !== target.snapshotSha256) {
+          fail(`${target.who} names revision ${target.number} of its CAD item, but an import must name the current revision, ${current.number}`);
+        }
+      };
+      for (const revision of cadItemRevisions) {
+        revision.models.forEach(checkBinding);
       }
 
       const newParts = [];
@@ -601,11 +680,7 @@ routerAdd(
       const substitutesCsvRows = (source) =>
         (Array.isArray(source.substitutes_csv_rows) ? source.substitutes_csv_rows : []).map((row) => row.raw_record);
       for (const part of parts) {
-        for (const bound of part.bound) {
-          if (!revisionExists(bound)) {
-            fail(`${part.ipn} binds CAD item revision ${bound}, which is neither stored nor sent`);
-          }
-        }
+        part.targets.forEach(checkBinding);
         const stored = byId("catalog_parts", part.id);
         if (!stored) {
           part.revisionAfter = 1;
@@ -772,7 +847,7 @@ routerAdd(
 
       const unchanged = {
         blobs: blobs.length - newBlobs.length,
-        cadItems: Object.keys(seenCadItems).length - newCadItems.length,
+        cadItems: cadItemRevisions.length - newCadItems.length,
         cadItemRevisions: cadItemRevisions.length - newCadItemRevisions.length,
         parts: unchangedParts,
         problems: Object.keys(seenProblems).length - newProblems.length,

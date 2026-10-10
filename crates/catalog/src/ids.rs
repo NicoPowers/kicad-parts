@@ -63,7 +63,9 @@ derived_id!(
     CadItemId
 );
 derived_id!(
-    /// A CAD item revision, from its CAD item and revision hash.
+    /// A CAD item revision, from its CAD item and revision number, like a
+    /// part revision. Two revisions may have the same content (going back
+    /// to earlier content adds a revision), so the content cannot be the ID.
     CadItemRevisionId
 );
 derived_id!(
@@ -108,10 +110,10 @@ impl CadItemId {
 }
 
 impl CadItemRevisionId {
-    pub fn new(cad_item: &CadItemId, snapshot_sha256: &str) -> Self {
+    pub fn new(cad_item: &CadItemId, number: u32) -> Self {
         Self(derive_id(
             "cad-item-revision",
-            &format!("{cad_item}\n{snapshot_sha256}"),
+            &format!("{cad_item}\n{number}"),
         ))
     }
 }
@@ -168,6 +170,17 @@ mod tests {
         assert_ne!(
             PartRevisionId::new(&id, 1).as_str(),
             PartRevisionId::new(&id, 2).as_str()
+        );
+        // CAD item revisions are numbered like part revisions; the route
+        // derives the same key (catalog_csv_imports.pb.js).
+        let cad_item = CadItemId::new(crate::CadItemKind::Footprint, "g-res:R_0603_1608Metric");
+        assert_eq!(
+            CadItemRevisionId::new(&cad_item, 3).as_str(),
+            &sha256_hex(format!("kicad-parts:cad-item-revision:v1\n{cad_item}\n3"))[..15]
+        );
+        assert_ne!(
+            CadItemRevisionId::new(&cad_item, 1),
+            CadItemRevisionId::new(&cad_item, 3)
         );
     }
 }

@@ -14,11 +14,16 @@
 //! - A **CAD item** is one symbol, footprint or 3D model, identified by its
 //!   kind and library reference (for example the symbol `g-pas:R_US`). A
 //!   revision of a CAD item saves its [`CadItemDetails`]: the exact
-//!   [`Blob`] it uses, its format and its [`License`]. The revision's
-//!   [`csv_import::CadItemSource`] is stored with it but is not hashed, so
-//!   reading identical content from a moved or edited library file finds
-//!   the same revision.
-//! - A [`Blob`] is exact bytes, addressed by their SHA-256. A symbol's blob
+//!   [`Blob`] it uses, its format and its [`License`]. CAD item revisions
+//!   are numbered from 1 per CAD item, like part revisions, and the
+//!   current revision is the newest: content that differs from the current
+//!   revision adds a revision, even if an older revision had exactly that
+//!   content. A part's details name each CAD item revision by number and
+//!   snapshot hash. The revision's [`csv_import::CadItemSource`] is stored
+//!   with it but is not hashed, so reading identical content from a moved
+//!   or edited library file adds no revision.
+//! - A [`Blob`] is exact bytes, addressed by their SHA-256, so revisions
+//!   with the same bytes share one stored blob. A symbol's blob
 //!   is the exact bytes of that one symbol in its library file, so editing
 //!   a neighbouring symbol does not revise it.
 //! - A **Change** groups the revisions one import, edit or restore
@@ -53,7 +58,8 @@ pub use cad_item::{
 pub use change::ChangeKind;
 pub use compare::{DetailDifference, DifferenceKind, compare_details, describe_binding};
 pub use csv_import::{
-    CadItemRevisionDraft, CsvCatalog, CsvImport, ImportProblem, PartDraft, Source, SourceFile,
+    CadItemRevisionDraft, CsvCatalog, CsvImport, CurrentCadItemRevision, ImportProblem, PartDraft,
+    Source, SourceFile,
 };
 pub use hash::sha256_hex;
 pub use ids::{

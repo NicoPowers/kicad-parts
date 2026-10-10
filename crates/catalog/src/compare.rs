@@ -121,17 +121,13 @@ fn binding_label(reference: &CadReference) -> String {
 }
 
 /// `g-pas:R_US` with what it is bound to, without looking anything up:
-/// the first 8 hex digits of an exact CAD item revision's hash, `KiCad
-/// library` for an external one, or why it did not resolve.
+/// the number of the exact CAD item revision, `KiCad library` for an
+/// external one, or why it did not resolve.
 pub fn describe_binding(reference: &CadReference) -> String {
     match &reference.target {
-        CadReferenceTarget::CadItemRevision {
-            snapshot_sha256, ..
-        } => format!(
-            "{} (exact revision {})",
-            reference.reference,
-            &snapshot_sha256[..snapshot_sha256.len().min(8)]
-        ),
+        CadReferenceTarget::CadItemRevision { number, .. } => {
+            format!("{} (revision {number})", reference.reference)
+        }
         CadReferenceTarget::External => format!("{} (KiCad library)", reference.reference),
         CadReferenceTarget::Unresolved { status } => {
             format!("{} (not found: {status})", reference.reference)
@@ -144,7 +140,7 @@ mod tests {
     use super::*;
     use crate::part::{DetailField, ManufacturerPart, PART_DETAILS_SCHEMA};
 
-    fn details(value: &str, sha: &str, parts: &[(&str, &str)]) -> PartDetails {
+    fn details(value: &str, number: u32, parts: &[(&str, &str)]) -> PartDetails {
         PartDetails {
             schema: PART_DETAILS_SCHEMA.into(),
             ipn: "RES-0000-0470".into(),
@@ -171,7 +167,8 @@ mod tests {
                 reference: "g-pas:R_US".into(),
                 target: CadReferenceTarget::CadItemRevision {
                     cad_item: "c".into(),
-                    snapshot_sha256: sha.into(),
+                    number,
+                    snapshot_sha256: number.to_string().repeat(64),
                 },
             }],
             excluded_from_bom: false,
@@ -180,11 +177,11 @@ mod tests {
 
     #[test]
     fn lists_changed_fields_manufacturer_parts_excluded_from_bom_and_cad_bindings() {
-        let before = details("47", &"a".repeat(64), &[("Yageo", "RC0603FR-0747RL")]);
+        let before = details("47", 1, &[("Yageo", "RC0603FR-0747RL")]);
         assert!(compare_details(&before, &before, describe_binding).is_empty());
         let mut after = details(
             "48",
-            &"b".repeat(64),
+            3,
             &[("Yageo", "RC0603FR-0747RL"), ("Vishay", "ALT-47")],
         );
         after.excluded_from_bom = true;
@@ -216,8 +213,8 @@ mod tests {
                 (
                     DifferenceKind::CadBinding,
                     "Symbol revision",
-                    "g-pas:R_US (exact revision aaaaaaaa)",
-                    "g-pas:R_US (exact revision bbbbbbbb)"
+                    "g-pas:R_US (revision 1)",
+                    "g-pas:R_US (revision 3)"
                 ),
             ]
         );

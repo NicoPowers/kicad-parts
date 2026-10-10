@@ -247,10 +247,20 @@ pub struct PartDraft {
     pub source_json: String,
 }
 
+/// A CAD item revision this import would publish, or find already stored
+/// as the CAD item's current revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CadItemRevisionDraft {
+    /// Derived from the CAD item and `number`.
     pub id: CadItemRevisionId,
     pub cad_item: CadItem,
+    /// The number of the CAD item's current revision when the importer read
+    /// the team catalog, or 0 if the CAD item is new. If the current
+    /// revision differs when the import arrives, the route answers 409.
+    pub expected_revision: u32,
+    /// `expected_revision` if this content is the current revision's,
+    /// otherwise the next number after it.
+    pub number: u32,
     pub snapshot: CadItemDetails,
     pub snapshot_json: String,
     pub snapshot_sha256: String,
@@ -341,6 +351,8 @@ impl CsvImport {
             push(&blob.sha256);
         }
         for revision in &self.cad_item_revisions {
+            push(&revision.expected_revision.to_string());
+            push(&revision.number.to_string());
             push(&revision.snapshot_sha256);
             push(&revision.source_json);
         }
@@ -353,6 +365,82 @@ impl CsvImport {
         }
         sha256_hex(text)
     }
+
+    /// This import, with its CAD item revisions numbered against `current`
+    /// (each CAD item's current revision in the team catalog, by CAD item
+    /// ID). Content equal to the current revision's keeps its number;
+    /// anything else is the next number, even if an older revision had
+    /// exactly that content. Footprint snapshots and part details then name
+    /// those numbers, so they bind each CAD item's current revision.
+    ///
+    /// A [`CsvImport`] fresh from [`CsvCatalog::import`] is numbered as if
+    /// the team catalog were empty, which is the same as
+    /// `numbered_against(&BTreeMap::new())`.
+    pub fn numbered_against(&self, current: &BTreeMap<String, CurrentCadItemRevision>) -> Self {
+        let mut numbered = self.clone();
+        // A footprint's snapshot names its 3D models' numbers, so 3D models
+        // are numbered first.
+        let mut order: Vec<usize> = (0..numbered.cad_item_revisions.len()).collect();
+        order.sort_by_key(|&index| {
+            numbered.cad_item_revisions[index].cad_item.kind != CadItemKind::Model3d
+        });
+        let mut assigned: BTreeMap<String, (u32, String)> = BTreeMap::new();
+        for index in order {
+            let draft = &mut numbered.cad_item_revisions[index];
+            for model in &mut draft.snapshot.model_references {
+                if let ModelTarget::CadItemRevision {
+                    cad_item,
+                    number,
+                    snapshot_sha256,
+                } = &mut model.target
+                {
+                    if let Some((assigned_number, assigned_sha)) = assigned.get(cad_item.as_str()) {
+                        *number = *assigned_number;
+                        snapshot_sha256.clone_from(assigned_sha);
+                    }
+                }
+            }
+            draft.snapshot_json = draft.snapshot.canonical_json();
+            draft.snapshot_sha256 = sha256_hex(&draft.snapshot_json);
+            let stored = current.get(draft.cad_item.id.as_str());
+            draft.expected_revision = stored.map_or(0, |stored| stored.number);
+            draft.number = match stored {
+                Some(stored) if stored.snapshot_sha256 == draft.snapshot_sha256 => stored.number,
+                _ => draft.expected_revision + 1,
+            };
+            draft.id = CadItemRevisionId::new(&draft.cad_item.id, draft.number);
+            assigned.insert(
+                draft.cad_item.id.as_str().to_owned(),
+                (draft.number, draft.snapshot_sha256.clone()),
+            );
+        }
+        for part in &mut numbered.parts {
+            for reference in &mut part.snapshot.cad_references {
+                if let CadReferenceTarget::CadItemRevision {
+                    cad_item,
+                    number,
+                    snapshot_sha256,
+                } = &mut reference.target
+                {
+                    if let Some((assigned_number, assigned_sha)) = assigned.get(cad_item.as_str()) {
+                        *number = *assigned_number;
+                        snapshot_sha256.clone_from(assigned_sha);
+                    }
+                }
+            }
+            part.snapshot_json = part.snapshot.canonical_json();
+            part.snapshot_sha256 = sha256_hex(&part.snapshot_json);
+        }
+        numbered
+    }
+}
+
+/// A CAD item's current revision in the team catalog: its number and the
+/// SHA-256 of its snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CurrentCadItemRevision {
+    pub number: u32,
+    pub snapshot_sha256: String,
 }
 
 /// The CSV catalog under a repository root, opened read-only.
@@ -409,6 +497,7 @@ struct Planner<'a> {
 enum CadItemOutcome {
     Revision {
         cad_item: String,
+        number: u32,
         snapshot_sha256: String,
         /// The symbol says `(in_bom no)` or the footprint's `(attr ...)`
         /// has `exclude_from_bom`.
@@ -1006,11 +1095,13 @@ impl<'a> Planner<'a> {
         Ok(match outcome {
             CadItemOutcome::Revision {
                 cad_item,
+                number,
                 snapshot_sha256,
                 excluded_from_bom,
             } => (
                 CadReferenceTarget::CadItemRevision {
                     cad_item,
+                    number,
                     snapshot_sha256,
                 },
                 excluded_from_bom,
@@ -1111,10 +1202,12 @@ impl<'a> Planner<'a> {
                     match self.model_cad_item(candidate)? {
                         CadItemOutcome::Revision {
                             cad_item,
+                            number,
                             snapshot_sha256,
                             ..
                         } => ModelTarget::CadItemRevision {
                             cad_item,
+                            number,
                             snapshot_sha256,
                         },
                         CadItemOutcome::Unresolved(status) => ModelTarget::Unresolved { status },
@@ -1236,15 +1329,20 @@ impl<'a> Planner<'a> {
             source_commit: self.source_commit.clone(),
             byte_range,
         };
+        // Numbered as if the team catalog were empty;
+        // CsvImport::numbered_against renumbers against what is stored.
         let outcome = CadItemOutcome::Revision {
             cad_item: cad_item.id.as_str().to_owned(),
+            number: 1,
             snapshot_sha256: snapshot_sha256.clone(),
             excluded_from_bom,
         };
         self.blobs.entry(blob.sha256.clone()).or_insert(blob);
         self.cad_item_revisions.push(CadItemRevisionDraft {
-            id: CadItemRevisionId::new(&cad_item.id, &snapshot_sha256),
+            id: CadItemRevisionId::new(&cad_item.id, 1),
             cad_item,
+            expected_revision: 0,
+            number: 1,
             snapshot,
             snapshot_json,
             snapshot_sha256,

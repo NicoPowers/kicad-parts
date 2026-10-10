@@ -90,8 +90,11 @@ pub struct ModelReference {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ModelTarget {
+    /// One exact revision of a 3D model, named like a part's CAD binding
+    /// (see `CadReferenceTarget::CadItemRevision`).
     CadItemRevision {
         cad_item: String,
+        number: u32,
         snapshot_sha256: String,
     },
     Unresolved {
@@ -101,7 +104,9 @@ pub enum ModelTarget {
 
 /// What a revision of a CAD item saves: which bytes, how to read them, and
 /// the license they come with. Its canonical JSON is stored exactly (the
-/// revision's snapshot) and its SHA-256 identifies the revision.
+/// revision's snapshot), and its SHA-256 lets a reader check it. A
+/// footprint's snapshot names the exact 3D model revisions it uses, so a
+/// new 3D model revision also makes a new footprint revision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CadItemDetails {

@@ -863,13 +863,12 @@ impl<'a> Reporter<'a> {
         let readback = self.readback;
         let marked = |reference: &CadReference| {
             let CadReferenceTarget::CadItemRevision {
-                cad_item,
-                snapshot_sha256,
+                cad_item, number, ..
             } = &reference.target
             else {
                 return false;
             };
-            let id = CadItemRevisionId::new(&CadItemId::from_stored(cad_item), snapshot_sha256);
+            let id = CadItemRevisionId::new(&CadItemId::from_stored(cad_item), *number);
             let Some(blob) = readback
                 .cad_item_revision(id.as_str())
                 .and_then(|revision| readback.blob(&revision.blob))
@@ -988,7 +987,34 @@ impl<'a> Reporter<'a> {
                 ));
             }
             match serde_json::from_str::<PartDetails>(&revision.snapshot) {
-                Ok(details) if details.ipn == part.ipn => {}
+                Ok(details) if details.ipn == part.ipn => {
+                    // The relation lists exactly the CAD item revisions the
+                    // details name, by CAD item and number.
+                    let named: Vec<String> = details
+                        .cad_references
+                        .iter()
+                        .filter_map(|reference| match &reference.target {
+                            CadReferenceTarget::CadItemRevision {
+                                cad_item, number, ..
+                            } => Some(
+                                CadItemRevisionId::new(&CadItemId::from_stored(cad_item), *number)
+                                    .to_string(),
+                            ),
+                            _ => None,
+                        })
+                        .collect();
+                    let (mut named, mut related) = (named, revision.cad_item_revisions.clone());
+                    named.sort();
+                    named.dedup();
+                    related.sort();
+                    related.dedup();
+                    if named != related {
+                        self.problem(format!(
+                            "{}: the current revision's CAD item revisions are not the ones its details name",
+                            part.ipn
+                        ));
+                    }
+                }
                 Ok(details) => {
                     self.problem(format!("{}: snapshot names {}", part.ipn, details.ipn));
                 }
@@ -1407,6 +1433,7 @@ impl<'a> Reporter<'a> {
                 (
                     CadReferenceTarget::CadItemRevision {
                         cad_item,
+                        number,
                         snapshot_sha256,
                     },
                     true,
@@ -1415,15 +1442,14 @@ impl<'a> Reporter<'a> {
                     self.check_cad_item_revision(
                         &mut account,
                         cad_item,
+                        *number,
                         snapshot_sha256,
                         oracle_file.map(|file| file.byte_sha256.as_str()),
                     );
                     if role == CadReferenceRole::Footprint {
                         if let Some(path) = &reference.asset_path {
-                            let revision = CadItemRevisionId::new(
-                                &CadItemId::from_stored(cad_item),
-                                snapshot_sha256,
-                            );
+                            let revision =
+                                CadItemRevisionId::new(&CadItemId::from_stored(cad_item), *number);
                             footprint_paths.insert(path.clone(), revision.to_string());
                         }
                     }
@@ -1461,6 +1487,7 @@ impl<'a> Reporter<'a> {
         &mut self,
         account: &mut CadItemAccount,
         cad_item_id: &str,
+        number: u32,
         snapshot_sha256: &str,
         oracle_file_sha: Option<&str>,
     ) {
@@ -1478,15 +1505,19 @@ impl<'a> Reporter<'a> {
                 cad_item.kind, cad_item.key
             ));
         }
-        let revision_id =
-            CadItemRevisionId::new(&CadItemId::from_stored(cad_item_id), snapshot_sha256);
+        let revision_id = CadItemRevisionId::new(&CadItemId::from_stored(cad_item_id), number);
         account.cad_item_revision = Some(revision_id.to_string());
         let Some(revision) = readback.cad_item_revision(revision_id.as_str()) else {
             self.problem(format!(
-                "{reference}: CAD item revision {revision_id} is missing"
+                "{reference}: CAD item revision {number} ({revision_id}) is missing"
             ));
             return;
         };
+        if revision.cad_item != cad_item_id || revision.number != number {
+            self.problem(format!(
+                "{reference}: record {revision_id} is not revision {number} of its CAD item"
+            ));
+        }
         if sha256_hex(&revision.snapshot) != snapshot_sha256
             || revision.snapshot_sha256 != snapshot_sha256
         {
@@ -1629,6 +1660,7 @@ impl<'a> Reporter<'a> {
                         (
                             ModelTarget::CadItemRevision {
                                 cad_item,
+                                number,
                                 snapshot_sha256,
                             },
                             "resolved",
@@ -1650,10 +1682,11 @@ impl<'a> Reporter<'a> {
                             self.check_cad_item_revision(
                                 &mut account,
                                 cad_item,
+                                *number,
                                 snapshot_sha256,
                                 oracle_sha.as_deref(),
                             );
-                            format!("cad-item-revision {snapshot_sha256}")
+                            format!("cad-item-revision {number} ({snapshot_sha256})")
                         }
                         // The oracle finds the file, but it is empty: the
                         // Catalog keeps it as an import problem, not a blob.

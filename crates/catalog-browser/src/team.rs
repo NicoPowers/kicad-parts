@@ -15,13 +15,13 @@
 use crate::PartValues;
 use catalog::pocketbase::{
     ConflictingRevision, EditCommand, PublishOutcome, PublishReply, RestoreCommand, StoredBlob,
-    StoredCadItemRevision, StoredChange, StoredPart, StoredPartRevision, cad_item_revisions_by_id,
-    changes_by_id, part_by_ipn, part_revisions, submit_edit, submit_restore,
+    StoredCadItemRevision, StoredChange, StoredPart, StoredPartRevision, changes_by_id,
+    part_by_ipn, part_revisions, submit_edit, submit_restore,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
-    CadItemDetails, CadItemKind, CadReference, CadReferenceRole, CadReferenceTarget, DetailField,
-    PartDetails, compare_details,
+    CadItemDetails, CadItemId, CadItemKind, CadItemRevisionId, CadReference, CadReferenceRole,
+    CadReferenceTarget, DetailField, PartDetails, compare_details,
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
@@ -132,8 +132,8 @@ pub struct TeamCatalog {
 struct KnownRevisions {
     /// Part details by (IPN, revision number).
     parts: HashMap<(String, u32), PartDetails>,
-    /// CAD item revisions by (CAD item, snapshot SHA-256).
-    cad_items: HashMap<(String, String), StoredCadItemRevision>,
+    /// CAD item revisions by (CAD item, revision number).
+    cad_items: HashMap<(String, u32), StoredCadItemRevision>,
 }
 
 /// What one revision of a part uses for its symbol or footprint, for
@@ -453,6 +453,7 @@ impl TeamCatalog {
             .map(|cad| &cad.target);
         let Some(CadReferenceTarget::CadItemRevision {
             cad_item,
+            number,
             snapshot_sha256,
         }) = target
         else {
@@ -461,12 +462,18 @@ impl TeamCatalog {
                 alternates,
             });
         };
-        let revision = self.cad_item_revision(&client, cad_item, snapshot_sha256)?;
-        let snapshot = checked_snapshot(&revision, cad_item, snapshot_sha256, reference, kind)
-            .map_err(|why| TeamCadError::Mismatch {
+        let revision = self.cad_item_revision(&client, cad_item, *number)?;
+        let named = NamedRevision {
+            cad_item,
+            number: *number,
+            snapshot_sha256,
+        };
+        let snapshot = checked_snapshot(&revision, &named, reference, kind).map_err(|why| {
+            TeamCadError::Mismatch {
                 reference: reference.to_owned(),
                 why,
-            })?;
+            }
+        })?;
         let lib_ref =
             LibRef::parse(reference).map_err(|error| TeamCadError::NotFound(error.to_string()))?;
         Ok(TeamCad::Stored(StoredCad {
@@ -528,21 +535,19 @@ impl TeamCatalog {
         Ok(details)
     }
 
+    /// Revision `number` of `cad_item`, found by the ID those two give.
     fn cad_item_revision(
         &self,
         client: &PocketBaseClient,
         cad_item: &str,
-        snapshot_sha256: &str,
+        number: u32,
     ) -> Result<StoredCadItemRevision, TeamCadError> {
-        let key = (cad_item.to_owned(), snapshot_sha256.to_owned());
+        let key = (cad_item.to_owned(), number);
         if let Some(revision) = self.lock_known().cad_items.get(&key) {
             return Ok(revision.clone());
         }
-        let filter = format!(
-            "cad_item = {} && snapshot_sha256 = {}",
-            serde_json::Value::from(cad_item),
-            serde_json::Value::from(snapshot_sha256)
-        );
+        let id = CadItemRevisionId::new(&CadItemId::from_stored(cad_item), number);
+        let filter = format!("id = {}", serde_json::Value::from(id.as_str()));
         let revision = client
             .list_records::<StoredCadItemRevision>("catalog_cad_item_revisions", &filter, "number")
             .map_err(unreachable)?
@@ -578,23 +583,32 @@ impl TeamCatalog {
     }
 }
 
+/// The CAD item revision a part's details name.
+struct NamedRevision<'a> {
+    cad_item: &'a str,
+    number: u32,
+    snapshot_sha256: &'a str,
+}
+
 /// The details of a CAD item revision record, once it is shown to be the
-/// revision a part's details name: its snapshot hashes to
-/// `snapshot_sha256`, it belongs to `cad_item`, and it is the right kind
-/// of item, in the format the preview reads, for `reference`. Otherwise
-/// says why not, finishing the sentence "... because ...".
+/// revision a part's details name: its snapshot hashes to the named
+/// SHA-256, it is the named revision of the named CAD item, and it is the
+/// right kind of item, in the format the preview reads, for `reference`.
+/// Otherwise says why not, finishing the sentence "... because ...".
 fn checked_snapshot(
     revision: &StoredCadItemRevision,
-    cad_item: &str,
-    snapshot_sha256: &str,
+    named: &NamedRevision<'_>,
     reference: &str,
     kind: PreviewKind,
 ) -> Result<CadItemDetails, String> {
-    if catalog::sha256_hex(revision.snapshot.as_bytes()) != snapshot_sha256 {
+    if catalog::sha256_hex(revision.snapshot.as_bytes()) != named.snapshot_sha256 {
         return Err("its record does not match its SHA-256".into());
     }
-    if revision.cad_item != cad_item {
+    if revision.cad_item != named.cad_item {
         return Err("its record belongs to another CAD item".into());
+    }
+    if revision.number != named.number {
+        return Err("its record is another revision of that CAD item".into());
     }
     let snapshot: CadItemDetails = serde_json::from_str(&revision.snapshot)
         .map_err(|_| "its record cannot be read".to_owned())?;
@@ -830,34 +844,8 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
         .into_iter()
         .map(|change| (change.id.clone(), change))
         .collect();
-    let mut cad_ids: Vec<&str> = revisions
-        .iter()
-        .flat_map(|revision| revision.cad_item_revisions.iter().map(String::as_str))
-        .collect();
-    cad_ids.sort_unstable();
-    cad_ids.dedup();
-    // CAD item revision numbers by (CAD item, snapshot hash).
-    let cad_numbers: BTreeMap<(String, String), u32> = cad_item_revisions_by_id(client, &cad_ids)
-        .map_err(fail)?
-        .into_iter()
-        .map(|revision| {
-            (
-                (revision.cad_item, revision.snapshot_sha256),
-                revision.number,
-            )
-        })
-        .collect();
     let binding = |reference: &CadReference| match &reference.target {
-        CadReferenceTarget::CadItemRevision {
-            cad_item,
-            snapshot_sha256,
-        } => match cad_numbers.get(&(cad_item.clone(), snapshot_sha256.clone())) {
-            Some(number) => format!("revision {number}"),
-            None => format!(
-                "exact revision {}",
-                &snapshot_sha256[..8.min(snapshot_sha256.len())]
-            ),
-        },
+        CadReferenceTarget::CadItemRevision { number, .. } => format!("revision {number}"),
         CadReferenceTarget::External => "KiCad library".to_owned(),
         CadReferenceTarget::Unresolved { status } => format!("not found ({status})"),
     };
@@ -1294,8 +1282,14 @@ mod tests {
         };
         let symbol = details(CadItemKind::Symbol, "kicad-symbol-entry", "g-pas:R_US");
         let good = record(&symbol);
+        let symbol_sha256 = symbol.sha256();
         let check = |revision: &StoredCadItemRevision, cad_item: &str, kind: PreviewKind| {
-            checked_snapshot(revision, cad_item, &symbol.sha256(), "g-pas:R_US", kind)
+            let named = NamedRevision {
+                cad_item,
+                number: 1,
+                snapshot_sha256: &symbol_sha256,
+            };
+            checked_snapshot(revision, &named, "g-pas:R_US", kind)
         };
         assert_eq!(
             check(&good, "item1", PreviewKind::Symbol),
@@ -1314,6 +1308,14 @@ mod tests {
             check(&good, "item2", PreviewKind::Symbol),
             Err("its record belongs to another CAD item".into())
         );
+        // Another revision of the same CAD item, even with the same content
+        // (going back to earlier content adds a revision).
+        let mut later = good.clone();
+        later.number = 3;
+        assert_eq!(
+            check(&later, "item1", PreviewKind::Symbol),
+            Err("its record is another revision of that CAD item".into())
+        );
         // A symbol asked for as a footprint.
         assert!(
             check(&good, "item1", PreviewKind::Footprint)
@@ -1326,8 +1328,11 @@ mod tests {
         assert!(
             checked_snapshot(
                 &wrong_kind,
-                "item1",
-                &footprint.sha256(),
+                &NamedRevision {
+                    cad_item: "item1",
+                    number: 1,
+                    snapshot_sha256: &footprint.sha256(),
+                },
                 "g-pas:R_US",
                 PreviewKind::Symbol
             )

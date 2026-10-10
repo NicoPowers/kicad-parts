@@ -666,6 +666,115 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         &|body| body["allowOlderCheckout"] = "yes".into(),
         "allowOlderCheckout setting must be true or false",
     );
+    // The server numbers CAD item revisions itself and refuses a forged ID
+    // or number, whether or not it is consistent with the rest.
+    refused(
+        "forged-cad-id",
+        &|body| body["cadItemRevisions"][0]["id"] = "aaaaaaaaaaaaaaa".into(),
+        "CAD item revision ID for",
+    );
+    refused(
+        "forged-cad-number",
+        &|body| body["cadItemRevisions"][0]["number"] = 7.into(),
+        "must be 0 or 1",
+    );
+    // From here the commands expect what is stored, so they pass the
+    // conflict check and reach the numbering checks.
+    let current =
+        ImportCommand::new(&original, REASON).expecting(&read_import_state(&admin).unwrap());
+    let refused_current = |name: &str, change: &dyn Fn(&mut serde_json::Value), says: &str| {
+        let mut body = current.body();
+        body["correlationId"] = name.into();
+        change(&mut body);
+        let reply = admin.post_json(CSV_IMPORT_ROUTE, &body).unwrap();
+        assert_eq!(reply.status, 400, "{name}: {}", reply.body);
+        assert!(reply.body.contains(says), "{name}: {}", reply.body);
+    };
+    // Content equal to the current revision cannot claim the next number,
+    // even with the ID derived from it.
+    refused_current(
+        "number-after-current",
+        &|body| {
+            let revision = &mut body["cadItemRevisions"][0];
+            assert_eq!(revision["expectedRevision"], 1);
+            let cad_item = catalog::CadItemId::from_stored(revision["cadItemId"].as_str().unwrap());
+            revision["number"] = 2.into();
+            revision["id"] = catalog::CadItemRevisionId::new(&cad_item, 2)
+                .as_str()
+                .into();
+        },
+        "has the content of its current revision 1, so its revision number must be 1",
+    );
+    // Part details must bind the current revision: not another number...
+    let rebind = |body: &mut serde_json::Value, change: &dyn Fn(&mut serde_json::Value)| {
+        let mut snapshot: serde_json::Value =
+            serde_json::from_str(body["parts"][0]["snapshot"].as_str().unwrap()).unwrap();
+        let target = snapshot["cad_references"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .map(|reference| &mut reference["target"])
+            .find(|target| target["kind"] == "cad-item-revision")
+            .unwrap();
+        change(target);
+        let snapshot = snapshot.to_string();
+        body["parts"][0]["snapshotSha256"] = sha256_hex(&snapshot).into();
+        body["parts"][0]["snapshot"] = snapshot.into();
+    };
+    refused_current(
+        "older-binding",
+        &|body| rebind(body, &|target| target["number"] = 7.into()),
+        "an import must name the current revision, 1",
+    );
+    // ...nor a record ID or anything else besides the three names.
+    refused_current(
+        "binding-with-id",
+        &|body| rebind(body, &|target| target["id"] = "aaaaaaaaaaaaaaa".into()),
+        "by cad_item, number and snapshot_sha256 only",
+    );
+    refused_current(
+        "same-cad-item-twice",
+        &|body| {
+            let copy = body["cadItemRevisions"][0].clone();
+            body["cadItemRevisions"].as_array_mut().unwrap().push(copy);
+        },
+        "appears twice",
+    );
+    // A CAD item that changed after the importer read it is a conflict,
+    // like a part: 409, nothing written, not stored.
+    let mut stale = current.body();
+    stale["correlationId"] = "stale-cad-item".into();
+    let revision = &mut stale["cadItemRevisions"][0];
+    let key = revision["key"].as_str().unwrap().to_owned();
+    let cad_item = catalog::CadItemId::from_stored(revision["cadItemId"].as_str().unwrap());
+    revision["expectedRevision"] = 0.into();
+    revision["number"] = 1.into();
+    revision["id"] = catalog::CadItemRevisionId::new(&cad_item, 1)
+        .as_str()
+        .into();
+    let reply = admin.post_json(CSV_IMPORT_ROUTE, &stale).unwrap();
+    assert_eq!(reply.status, 409, "{}", reply.body);
+    let outcome: ImportOutcome = serde_json::from_str(&reply.body).unwrap();
+    let ImportOutcome::Conflict {
+        conflicts,
+        cad_item_conflicts,
+        ..
+    } = outcome
+    else {
+        panic!("expected a conflict, got {}", reply.body);
+    };
+    assert!(conflicts.is_empty());
+    assert_eq!(
+        cad_item_conflicts
+            .iter()
+            .map(|conflict| (
+                conflict.key.as_str(),
+                conflict.expected_revision,
+                conflict.current_revision
+            ))
+            .collect::<Vec<_>>(),
+        [(key.as_str(), 0, 1)]
+    );
     assert_eq!(read_back(&admin).unwrap(), initial);
 
     // A changed part detail makes a new revision in a new Change; nothing
@@ -1114,7 +1223,8 @@ fn blob_request(correlation: &str, sha: &str, bytes: &[u8], form: BlobForm) -> s
     };
     let snapshot = details.canonical_json();
     let snapshot_sha256 = sha256_hex(&snapshot);
-    let id = catalog::CadItemRevisionId::new(&cad_item.id, &snapshot_sha256);
+    // A new 3D model, so its first revision.
+    let id = catalog::CadItemRevisionId::new(&cad_item.id, 1);
     serde_json::json!({
         "correlationId": correlation,
         "reason": "check blob hashing",
@@ -1131,6 +1241,8 @@ fn blob_request(correlation: &str, sha: &str, bytes: &[u8], form: BlobForm) -> s
             "cadItemId": cad_item.id,
             "kind": "model-3d",
             "key": cad_item.key,
+            "expectedRevision": 0,
+            "number": 1,
             "snapshotSha256": snapshot_sha256,
             "snapshot": snapshot,
             "source": "{\"schema\":\"kicad-parts/source/1\",\"source\":\"test\"}",
@@ -1311,7 +1423,7 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
     let binary = native_services::pocketbase_binary(&root).unwrap();
     let mut command = std::process::Command::new(&binary);
     command
-        .args(["migrate", "down", "2"])
+        .args(["migrate", "down", "3"])
         .arg("--dir")
         .arg(&options.data_dir)
         .arg("--migrationsDir")
@@ -1330,6 +1442,7 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
     let said = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success()
+            && said.contains("Reverted 1791700000_cad_item_revision_numbers.js")
             && said.contains("Reverted 1791600000_catalog_edits.js")
             && said.contains("Reverted 1791500000_catalog_init.js"),
         "{}{}",
@@ -1374,7 +1487,8 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
     assert_eq!(rule, "id = @request.auth.id");
     assert!(!fields.contains("can_edit_catalog"), "{fields}");
 
-    // Starting again re-applies both, and the import works on the new schema.
+    // Starting again re-applies all three, and the import works on the new
+    // schema.
     let server = native_services::PocketBaseServer::start(&binary, &options, &superuser).unwrap();
     let admin = PocketBaseClient::new(server.url())
         .authenticate("_superusers", &superuser.email, &superuser.password)
@@ -1383,4 +1497,83 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
     command.correlation_id.push_str("-after-rollback");
     assert_eq!(applied(&submit_import(&admin, &command).unwrap()).parts, 29);
     server.stop();
+}
+
+/// Runs `pocketbase migrate <args>` hidden on `options`, confirming the
+/// question `migrate down` asks.
+fn migrate(root: &Path, options: &native_services::PocketBaseOptions, args: &[&str]) -> String {
+    let binary = native_services::pocketbase_binary(root).unwrap();
+    let mut command = std::process::Command::new(&binary);
+    command
+        .arg("migrate")
+        .args(args)
+        .arg("--dir")
+        .arg(&options.data_dir)
+        .arg("--migrationsDir")
+        .arg(&options.migrations_dir)
+        .arg("--hooksDir")
+        .arg(&options.hooks_dir)
+        .arg("--automigrate=false");
+    let output =
+        native_services::run_hidden_with_input("pocketbase migrate", &mut command, b"y\n").unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn team_server_data_from_before_numbered_cad_revisions_is_refused_not_changed() {
+    let root = repository();
+    let state = tempfile::tempdir().unwrap();
+    let options = services::options(&root, state.path());
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let import = CsvCatalog::new(&root).import("g-res", None).unwrap();
+    applied(&submit_import(&admin, &ImportCommand::new(&import, REASON)).unwrap());
+    let revision = read_back(&admin).unwrap().cad_item_revisions[0].clone();
+    server.stop();
+
+    // Go back to the schema before this change and give one CAD item
+    // revision an ID that is not derived from its number, as data saved
+    // before numbered CAD item revisions has.
+    let said = migrate(&root, &options, &["down", "1"]);
+    assert!(
+        said.contains("Reverted 1791700000_cad_item_revision_numbers.js"),
+        "{said}"
+    );
+    let old_id = "0123456789abcde";
+    let database = rusqlite::Connection::open(options.data_dir.join("data.db")).unwrap();
+    database
+        .execute(
+            "UPDATE catalog_cad_item_revisions SET id = ?1 WHERE id = ?2",
+            rusqlite::params![old_id, revision.id],
+        )
+        .unwrap();
+    drop(database);
+
+    // Starting refuses with a plain message and changes nothing.
+    let refused = services::start(&root, state.path()).err().unwrap();
+    assert!(
+        refused.to_string().contains("cannot be upgraded"),
+        "{refused}"
+    );
+    let database = rusqlite::Connection::open_with_flags(
+        options.data_dir.join("data.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let applied_migrations: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM _migrations WHERE file = '1791700000_cad_item_revision_numbers.js'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(applied_migrations, 0);
+    let kept: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM catalog_cad_item_revisions WHERE id = ?1",
+            [old_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 1);
 }

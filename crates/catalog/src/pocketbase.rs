@@ -5,12 +5,13 @@
 //! and `1791600000_catalog_edits.js`).
 
 use crate::cad_item::Blob;
-use crate::csv_import::{CsvImport, SourceFile};
+use crate::csv_import::{CsvImport, CurrentCadItemRevision, SourceFile};
 use crate::part::{DetailField, ManufacturerPart, PartDetails};
 use crate::sha256_hex;
 use collaboration::{CollabError, CollabResult, CorrelationId, PocketBaseClient};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 /// The route that publishes a CSV catalog import.
@@ -40,7 +41,9 @@ pub const COLLECTIONS: [&str; 9] = [
 pub struct ImportCommand<'a> {
     pub correlation_id: String,
     pub reason: String,
-    pub import: &'a CsvImport,
+    /// The import to send. [`ImportCommand::expecting`] replaces it with a
+    /// copy whose CAD item revisions are numbered against the team catalog.
+    pub import: Cow<'a, CsvImport>,
     /// The current revision number the importer read for each IPN. A part
     /// missing here is expected not to exist yet (number 0). This and the
     /// next two fields are private so that only [`ImportCommand::expecting`]
@@ -69,7 +72,7 @@ impl<'a> ImportCommand<'a> {
         let mut command = Self {
             correlation_id: String::new(),
             reason: reason.to_owned(),
-            import,
+            import: Cow::Borrowed(import),
             expected_revisions: BTreeMap::new(),
             expected_csv_import: 0,
             allow_older_checkout: false,
@@ -78,10 +81,16 @@ impl<'a> ImportCommand<'a> {
         command
     }
 
-    /// Expects each part's current revision, and the latest import run of
-    /// this CSV file, to be the ones in `state`. Derives the correlation ID
-    /// again.
+    /// Expects each part's current revision, each CAD item's current
+    /// revision, and the latest import run of this CSV file, to be the ones
+    /// in `state`. Numbers the CAD item revisions against `state` (see
+    /// [`CsvImport::numbered_against`]), so the parts bind each CAD item's
+    /// current revision. Derives the correlation ID again.
     pub fn expecting(mut self, state: &ImportState) -> Self {
+        self.import = Cow::Owned(
+            self.import
+                .numbered_against(&state.current_cad_item_revisions),
+        );
         self.expected_revisions = self
             .import
             .parts
@@ -141,7 +150,7 @@ impl<'a> ImportCommand<'a> {
     }
 
     pub fn body(&self) -> Value {
-        let import = self.import;
+        let import = self.import.as_ref();
         json!({
             "correlationId": self.correlation_id,
             "reason": self.reason,
@@ -168,6 +177,8 @@ impl<'a> ImportCommand<'a> {
                 "cadItemId": revision.cad_item.id,
                 "kind": revision.cad_item.kind.as_str(),
                 "key": revision.cad_item.key,
+                "expectedRevision": revision.expected_revision,
+                "number": revision.number,
                 "snapshotSha256": revision.snapshot_sha256,
                 "snapshot": revision.snapshot_json,
                 "source": revision.source_json,
@@ -213,6 +224,8 @@ fn blob_body(blob: &Blob) -> Value {
 pub struct ImportState {
     /// Each part's current revision number, by IPN.
     pub current_revisions: BTreeMap<String, u32>,
+    /// Each CAD item's current revision (its newest), by CAD item ID.
+    pub current_cad_item_revisions: BTreeMap<String, CurrentCadItemRevision>,
     /// The latest import run of each CSV file, oldest first.
     pub latest_imports: Vec<LatestImport>,
 }
@@ -252,9 +265,18 @@ struct LatestImportFields {
     file_hashes: String,
 }
 
-/// Reads each part's current revision number and the latest import run of
-/// each CSV file. Downloads only the fields it needs, never the recorded
-/// rows.
+/// The few fields of a CAD item revision that [`read_import_state`]
+/// downloads.
+#[derive(Deserialize)]
+struct CadItemRevisionNumber {
+    cad_item: String,
+    number: u32,
+    snapshot_sha256: String,
+}
+
+/// Reads each part's current revision number, each CAD item's current
+/// revision, and the latest import run of each CSV file. Downloads only the
+/// fields it needs, never the recorded rows or snapshots.
 pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState> {
     let parts: Vec<StoredPart> = client.list_record_fields(
         "catalog_parts",
@@ -268,6 +290,23 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
         "csv_import_number",
         "id,csv_file,csv_import_number,source_commit,file_hashes",
     )?;
+    let cad_item_revisions: Vec<CadItemRevisionNumber> = client.list_record_fields(
+        "catalog_cad_item_revisions",
+        "",
+        "cad_item,number",
+        "cad_item,number,snapshot_sha256",
+    )?;
+    // Sorted by number, so the newest revision of each CAD item comes last.
+    let mut current_cad_item_revisions = BTreeMap::new();
+    for revision in cad_item_revisions {
+        current_cad_item_revisions.insert(
+            revision.cad_item,
+            CurrentCadItemRevision {
+                number: revision.number,
+                snapshot_sha256: revision.snapshot_sha256,
+            },
+        );
+    }
     let mut latest: BTreeMap<String, LatestImport> = BTreeMap::new();
     for entry in entries {
         let file_hashes = serde_json::from_str(&entry.file_hashes).map_err(|error| {
@@ -294,6 +333,7 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
             .into_iter()
             .map(|part| (part.ipn, part.current_revision_number))
             .collect(),
+        current_cad_item_revisions,
         latest_imports,
     })
 }
@@ -352,13 +392,15 @@ pub enum ImportOutcome {
         correlation_id: String,
         collisions: Vec<String>,
     },
-    /// 409: some parts' current revisions are not the ones the importer
-    /// read, because someone changed them in between. Nothing was written;
-    /// read the team catalog again and import again.
+    /// 409: some parts' or CAD items' current revisions are not the ones
+    /// the importer read, because someone changed them in between. Nothing
+    /// was written; read the team catalog again and import again.
     #[serde(rename_all = "camelCase")]
     Conflict {
         correlation_id: String,
         conflicts: Vec<ImportConflict>,
+        #[serde(default)]
+        cad_item_conflicts: Vec<CadItemConflict>,
         message: String,
     },
     /// 409: another import of this CSV file landed after the importer read
@@ -383,6 +425,19 @@ pub struct ImportConflict {
     pub expected_revision: u32,
     /// The part's current revision; `None` if there is no such part.
     pub current_revision: Option<ConflictingRevision>,
+}
+
+/// One CAD item whose current revision changed after the importer read it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CadItemConflict {
+    /// `symbol`, `footprint` or `model-3d`.
+    pub kind: String,
+    pub key: String,
+    /// 0 when the importer expected no such CAD item.
+    pub expected_revision: u32,
+    /// 0 when there is no such CAD item.
+    pub current_revision: u32,
 }
 
 /// What one import created.
@@ -498,8 +553,11 @@ impl EditCommand {
     }
 }
 
-/// A new revision of one part whose details are an exact copy of revision
-/// `restore_revision`, CAD item revisions included.
+/// A new revision of one part whose details are a copy of revision
+/// `restore_revision`. Each CAD binding names the CAD item's current
+/// revision if that revision has the same content, and otherwise keeps the
+/// exact older revision, so the part gets back exactly the CAD it had. A
+/// restore never adds a CAD item revision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoreCommand {
     pub correlation_id: CorrelationId,
@@ -1131,7 +1189,7 @@ mod tests {
             .unwrap();
         let state = ImportState {
             current_revisions: [("RES-0000-1000".to_owned(), 4)].into(),
-            latest_imports: vec![],
+            ..ImportState::default()
         };
         let body = ImportCommand::new(&import, "r").expecting(&state).body();
         let expected: Vec<(&str, u64)> = body["parts"]

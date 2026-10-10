@@ -15,6 +15,8 @@
 //   them.
 // - A part refuses every delete, and every update except moving its current
 //   revision forward to its own next revision. Its IPN never changes.
+// - A new CAD item revision must be numbered right after its CAD item's
+//   newest revision, so the current revision is always the newest.
 //
 // Raw SQL bypasses record hooks; only migrations and test fixtures that
 // tamper with a stopped instance's data.db use it.
@@ -136,6 +138,28 @@ onRecordUpdate((e) => {
   }
   return e.next();
 }, "catalog_parts");
+
+// A CAD item's current revision is its newest, so a new CAD item revision
+// must be numbered right after the newest stored one, name it as its
+// predecessor, and have the ID derived from its CAD item and number.
+onRecordCreate((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  const revision = e.record;
+  const cadItem = revision.getString("cad_item");
+  const number = revision.getInt("number");
+  const found = e.app.findRecordsByFilter("catalog_cad_item_revisions", "cad_item = {:id}", "-number", 1, 0, {
+    id: cadItem,
+  });
+  const newest = found.length > 0 ? found[0] : null;
+  const expected = newest ? newest.getInt("number") + 1 : 1;
+  if (number !== expected || revision.getString("predecessor") !== (newest ? newest.id : "")) {
+    throw new Error(`a new revision of CAD item ${cadItem} must be number ${expected}, right after its current revision`);
+  }
+  if (revision.id !== lib.deriveId("cad-item-revision", cadItem + "\n" + number)) {
+    throw new Error(`revision ${number} of CAD item ${cadItem} must have the ID derived from its CAD item and number`);
+  }
+  return e.next();
+}, "catalog_cad_item_revisions");
 
 // ---- Collections -----------------------------------------------------------
 //

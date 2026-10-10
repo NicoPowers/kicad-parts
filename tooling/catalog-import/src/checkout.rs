@@ -276,8 +276,8 @@ mod tests {
 
     fn state(runs: Vec<LatestImport>) -> ImportState {
         ImportState {
-            current_revisions: Default::default(),
             latest_imports: runs,
+            ..ImportState::default()
         }
     }
 
