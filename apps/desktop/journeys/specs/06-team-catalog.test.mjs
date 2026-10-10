@@ -234,7 +234,8 @@ describe('team catalog: history, edits, conflicts and restore', () => {
           [...tr.children].map((cell) => cell.textContent.trim()),
         ),
         alerts: document.querySelectorAll('[role="alert"]').length,
-        tabsHidden: document.querySelector('.team-tabs').hidden,
+        // Laid out at all? (A display rule can beat the hidden attribute.)
+        tabsHidden: document.querySelector('.team-tabs').getClientRects().length === 0,
       };
     });
     record({ event: 'conflict', ...conflict });
