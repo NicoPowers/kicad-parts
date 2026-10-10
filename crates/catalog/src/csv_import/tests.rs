@@ -501,3 +501,40 @@ fn extra_mpns_and_mpns_to_be_confirmed_are_import_problems() {
         assert_eq!(part.snapshot.manufacturer_parts.len(), 1);
     }
 }
+
+#[test]
+fn excluded_from_bom_is_set_only_by_a_marked_symbol_or_footprint() {
+    let csv = format!(
+        "{HEADER}RES-0000-0001,M1,Yageo,1,g-pas:TP,g-res:R_0603,,\nRES-0000-0002,M2,Yageo,2,g-pas:R_US,g-res:NoBom,,\nRES-0000-0003,M3,Yageo,3,g-pas:R_US,g-res:R_0603,,\nRES-0000-0004,M4,Yageo,does not appear in BOM,Device:R,g-res:R_0603,,\n"
+    );
+    let root = fixture(&csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
+    let symbols = SYMBOLS.replace("\n)\n", "\n\t(symbol \"TP\"\n\t\t(in_bom no)\n\t)\n)\n");
+    fs::write(root.path().join("symbols/g-pas.kicad_sym"), symbols).unwrap();
+    fs::write(
+        root.path().join("footprints/g-res.pretty/NoBom.kicad_mod"),
+        "(footprint \"NoBom\"\n\t(version 20241229)\n\t(attr smd exclude_from_pos_files exclude_from_bom)\n)\n",
+    )
+    .unwrap();
+    let import = CsvCatalog::new(root.path()).import("g-res", None).unwrap();
+    let excluded: Vec<(&str, bool)> = import
+        .parts
+        .iter()
+        .map(|part| (part.ipn.as_str(), part.snapshot.excluded_from_bom))
+        .collect();
+    // A note in a field is never read for it (RES-0000-0004).
+    assert_eq!(
+        excluded,
+        [
+            ("RES-0000-0001", true),
+            ("RES-0000-0002", true),
+            ("RES-0000-0003", false),
+            ("RES-0000-0004", false),
+        ]
+    );
+    assert!(
+        import.parts[0]
+            .snapshot_json
+            .ends_with(r#","excluded_from_bom":true}"#)
+    );
+    assert!(!import.parts[2].snapshot_json.contains("excluded_from_bom"));
+}

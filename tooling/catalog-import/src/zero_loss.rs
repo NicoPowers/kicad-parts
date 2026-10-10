@@ -64,6 +64,11 @@
 //! | g-trs | Value, Type, max(Vce), max(Ic), Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
 //!
 //! All 21 files also have the 7 supplier data columns.
+//!
+//! Excluded from BOM is part details but no column: the report checks that
+//! a part has it exactly when a symbol or footprint revision it binds is
+//! marked so in its stored bytes (`(in_bom no)`, or `exclude_from_bom` in a
+//! footprint's `(attr ...)`).
 
 use catalog::csv_import::{
     CadItemSource, ColumnRoute, CsvRecord, EMPTY_3D_MODEL, SubstitutesCsvColumn, parse_csv,
@@ -76,7 +81,7 @@ use catalog::{
     CadItemDetails, CadItemId, CadItemRevisionId, CadReferenceRole, CadReferenceTarget, License,
     ModelTarget, PartDetails, sha256_hex,
 };
-use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
+use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
 use legacy_import_fixture::Manifest;
 use serde::Serialize;
 use serde_json::Value;
@@ -127,6 +132,9 @@ pub struct ZeroLossReport {
     /// goes there instead).
     pub column_routes: Vec<(String, String)>,
     pub parts: usize,
+    /// Parts set Excluded from BOM, because a symbol or footprint they bind
+    /// is marked so in its stored bytes.
+    pub excluded_from_bom: Vec<String>,
     /// Parts that earlier import runs made from this file but that it no
     /// longer has, each kept by an import problem.
     pub removed_parts: Vec<String>,
@@ -652,6 +660,7 @@ impl<'a> Reporter<'a> {
                     ));
                 }
             }
+            self.check_excluded_from_bom(row_number, &ipn, details);
             scope.insert(ipn.clone(), revision);
         }
 
@@ -739,6 +748,11 @@ impl<'a> Reporter<'a> {
                 })
                 .collect(),
             parts: part_rows.len(),
+            excluded_from_bom: scope
+                .iter()
+                .filter(|(_, revision)| revision.details.excluded_from_bom)
+                .map(|(ipn, _)| ipn.clone())
+                .collect(),
             removed_parts,
             substitutes_csv_rows,
             cad_items,
@@ -765,6 +779,7 @@ impl<'a> Reporter<'a> {
             destinations: BTreeMap::new(),
             column_routes: vec![],
             parts: 0,
+            excluded_from_bom: vec![],
             removed_parts: vec![],
             substitutes_csv_rows: SubstitutesCsvAccount::default(),
             cad_items: vec![],
@@ -820,6 +835,50 @@ impl<'a> Reporter<'a> {
             });
         }
         changes
+    }
+
+    /// A part is Excluded from BOM exactly when a symbol or footprint
+    /// revision it binds is marked so in its stored bytes: the symbol says
+    /// `(in_bom no)`, or the footprint's `(attr ...)` has `exclude_from_bom`.
+    fn check_excluded_from_bom(&mut self, row_number: usize, ipn: &str, details: &PartDetails) {
+        let readback = self.readback;
+        let marked = details.cad_references.iter().any(|reference| {
+            let CadReferenceTarget::CadItemRevision {
+                cad_item,
+                snapshot_sha256,
+            } = &reference.target
+            else {
+                return false;
+            };
+            let id = CadItemRevisionId::new(&CadItemId::from_stored(cad_item), snapshot_sha256);
+            let Some(blob) = readback
+                .cad_item_revision(id.as_str())
+                .and_then(|revision| readback.blob(&revision.blob))
+            else {
+                return false;
+            };
+            match reference.role {
+                CadReferenceRole::Symbol => {
+                    let mut library = b"(kicad_symbol_lib ".to_vec();
+                    library.extend_from_slice(&blob.bytes);
+                    library.push(b')');
+                    SymbolLibrary::parse(&library).is_ok_and(|library| {
+                        library
+                            .entries
+                            .iter()
+                            .any(|entry| entry.in_bom == Some(false))
+                    })
+                }
+                CadReferenceRole::Footprint => FootprintFile::parse(&blob.bytes)
+                    .is_ok_and(|footprint| footprint.exclude_from_bom),
+            }
+        });
+        if marked != details.excluded_from_bom {
+            self.problem(format!(
+                "row {row_number} ({ipn}): Excluded from BOM is {}, but its symbols and footprints say {marked}",
+                details.excluded_from_bom
+            ));
+        }
     }
 
     /// Every CSV import run, including one that made no Change, records the

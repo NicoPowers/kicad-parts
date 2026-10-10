@@ -374,3 +374,56 @@ fn extra_mpn_columns_are_kept_as_import_problems_end_to_end() {
         assert!(!revision.snapshot.contains(kept), "{ipn}");
     }
 }
+
+#[test]
+fn excluded_from_bom_comes_from_the_symbol_and_survives_an_edit() {
+    // ART-0000-0001's symbol g-art:TestPoint says `(in_bom no)`, which
+    // matches its row's note "Artwork part only, does not appear in BOM".
+    // ART-0001-0006's symbol is in the BOM, so it is left unset.
+    use catalog::pocketbase::{EditCommand, submit_edit};
+    let root = repository();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let import = CsvCatalog::new(&root).import("g-art", None).unwrap();
+    let reply = submit_import(&admin, &ImportCommand::new(&import, "Import g-art")).unwrap();
+    assert!(
+        matches!(reply.outcome, ImportOutcome::Applied { .. }),
+        "{}",
+        reply.body
+    );
+    let current = |stored: &catalog::pocketbase::CatalogReadback, ipn: &str| {
+        let part = stored.part(ipn).unwrap();
+        let revision = stored.part_revision(&part.current_revision).unwrap();
+        let details: catalog::PartDetails = serde_json::from_str(&revision.snapshot).unwrap();
+        (revision.number, revision.snapshot.clone(), details)
+    };
+    let stored = read_back(&admin).unwrap();
+    let report = catalog_import::report(&oracle(), "g-art", &stored, &root);
+    assert!(
+        report.is_lossless(),
+        "{}",
+        serde_json::to_string_pretty(&report.summary()).unwrap()
+    );
+    assert_eq!(report.excluded_from_bom, ["ART-0000-0001"]);
+    let (_, snapshot, details) = current(&stored, "ART-0000-0001");
+    assert!(details.excluded_from_bom);
+    assert!(
+        snapshot.ends_with(r#","excluded_from_bom":true}"#),
+        "{snapshot}"
+    );
+    let (_, snapshot, details) = current(&stored, "ART-0001-0006");
+    assert!(!details.excluded_from_bom);
+    assert!(!snapshot.contains("excluded_from_bom"), "{snapshot}");
+
+    // An edit of another field keeps the setting, in Rust's canonical JSON.
+    let (number, _, details) = current(&stored, "ART-0000-0001");
+    let mut edit = EditCommand::starting_from(&details, number, "Say the pad size");
+    assert!(edit.set_field("Description", "SMT test point, 1.5 mm round pad"));
+    let reply = submit_edit(&admin, &edit).unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let (number, snapshot, details) = current(&read_back(&admin).unwrap(), "ART-0000-0001");
+    server.stop();
+    assert_eq!(number, 2);
+    assert!(details.excluded_from_bom);
+    assert_eq!(details.canonical_json(), snapshot);
+}

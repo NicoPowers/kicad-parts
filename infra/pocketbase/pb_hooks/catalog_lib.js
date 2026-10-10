@@ -628,13 +628,19 @@ function publishPartRevision(e, kind) {
       const edited = editedDetails(body, currentDetails);
       // Serialized in the field order of crates/catalog PartDetails, so the
       // stored bytes are its canonical JSON.
-      snapshot = JSON.stringify({
+      const details = {
         schema: PART_DETAILS_SCHEMA,
         ipn: request.ipn,
         fields: edited.fields,
         manufacturer_parts: edited.manufacturerParts,
         cad_references: cadReferences(txApp, edited.fields, currentDetails),
-      });
+      };
+      // An edit keeps Excluded from BOM as it is. Like PartDetails, the
+      // snapshot names it only when it is set.
+      if (currentDetails.excluded_from_bom === true) {
+        details.excluded_from_bom = true;
+      }
+      snapshot = JSON.stringify(details);
       source = {
         schema: SOURCE_SCHEMA,
         source: CHANGE_KINDS.edit,

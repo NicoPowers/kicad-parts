@@ -1,6 +1,7 @@
 //! What differs between two revisions' part details, in plain rows a
 //! person can read: one per changed field, one for the manufacturer parts,
-//! and one per symbol or footprint whose exact CAD item revision changed.
+//! one for Excluded from BOM, and one per symbol or footprint whose exact
+//! CAD item revision changed.
 
 use crate::part::{CadReference, CadReferenceRole, CadReferenceTarget, PartDetails};
 
@@ -25,11 +26,13 @@ pub enum DifferenceKind {
     /// revision. `before` and `after` come from the `describe` callback of
     /// [`compare_details`].
     CadBinding,
+    /// The Excluded from BOM setting, `yes` or `no`.
+    ExcludedFromBom,
 }
 
 /// Every difference from `before` to `after`, fields first in `after`'s
-/// order (then fields only `before` had), then manufacturer parts, then CAD
-/// bindings. `describe` turns a CAD reference into text, for example its
+/// order (then fields only `before` had), then manufacturer parts, then
+/// Excluded from BOM, then CAD bindings. `describe` turns a CAD reference into text, for example its
 /// library reference and CAD item revision number.
 pub fn compare_details(
     before: &PartDetails,
@@ -73,6 +76,15 @@ pub fn compare_details(
             label: "Manufacturer parts".to_owned(),
             before: list(before),
             after: list(after),
+        });
+    }
+    if before.excluded_from_bom != after.excluded_from_bom {
+        let text = |setting: bool| if setting { "yes" } else { "no" }.to_owned();
+        differences.push(DetailDifference {
+            what: DifferenceKind::ExcludedFromBom,
+            label: "Excluded from BOM".to_owned(),
+            before: text(before.excluded_from_bom),
+            after: text(after.excluded_from_bom),
         });
     }
     // CAD bindings by role and position: a changed reference already shows
@@ -162,18 +174,20 @@ mod tests {
                     snapshot_sha256: sha.into(),
                 },
             }],
+            excluded_from_bom: false,
         }
     }
 
     #[test]
-    fn lists_changed_fields_manufacturer_parts_and_cad_bindings() {
+    fn lists_changed_fields_manufacturer_parts_bom_setting_and_cad_bindings() {
         let before = details("47", &"a".repeat(64), &[("Yageo", "RC0603FR-0747RL")]);
         assert!(compare_details(&before, &before, describe_binding).is_empty());
-        let after = details(
+        let mut after = details(
             "48",
             &"b".repeat(64),
             &[("Yageo", "RC0603FR-0747RL"), ("Vishay", "ALT-47")],
         );
+        after.excluded_from_bom = true;
         let differences = compare_details(&before, &after, describe_binding);
         assert_eq!(
             differences
@@ -192,6 +206,12 @@ mod tests {
                     "Manufacturer parts",
                     "Yageo RC0603FR-0747RL",
                     "Yageo RC0603FR-0747RL\nVishay ALT-47"
+                ),
+                (
+                    DifferenceKind::ExcludedFromBom,
+                    "Excluded from BOM",
+                    "no",
+                    "yes"
                 ),
                 (
                     DifferenceKind::CadBinding,

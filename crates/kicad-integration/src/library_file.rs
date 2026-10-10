@@ -1,6 +1,7 @@
 //! Reads saved KiCad library files: the entries of a `.kicad_sym` symbol
-//! library, each with its exact byte span, and a `.kicad_mod` footprint's
-//! version and 3D model references.
+//! library, each with its exact byte span and whether it is in the BOM, and
+//! a `.kicad_mod` footprint's version, 3D model references and whether it
+//! is excluded from the BOM.
 //!
 //! Only as much s-expression syntax as that needs: lists, atoms and quoted
 //! strings with backslash escapes. Spans are byte ranges of the input, so a
@@ -37,6 +38,8 @@ pub struct SymbolEntry {
     pub span: Range<usize>,
     /// The parent this symbol `(extends ...)`, if any.
     pub extends: Option<String>,
+    /// The symbol's own `(in_bom yes|no)`; `None` when it does not say.
+    pub in_bom: Option<bool>,
 }
 
 /// The result of looking a symbol up by name.
@@ -68,10 +71,20 @@ impl SymbolLibrary {
                 .iter()
                 .find(|item| item.head == "extends")
                 .and_then(|item| item.first.clone());
+            let in_bom =
+                inner
+                    .iter()
+                    .find(|item| item.head == "in_bom")
+                    .and_then(|item| match item.first.as_deref() {
+                        Some("yes") => Some(true),
+                        Some("no") => Some(false),
+                        _ => None,
+                    });
             entries.push(SymbolEntry {
                 name,
                 span: child.span.clone(),
                 extends,
+                in_bom,
             });
         }
         Ok(Self {
@@ -98,6 +111,8 @@ pub struct FootprintFile {
     pub version: Option<String>,
     /// Every `(model "...")` path, in file order, exactly as written.
     pub model_references: Vec<String>,
+    /// The footprint's `(attr ...)` includes `exclude_from_bom`.
+    pub exclude_from_bom: bool,
 }
 
 impl FootprintFile {
@@ -109,9 +124,17 @@ impl FootprintFile {
                 "a footprint starts with `footprint` or `module`, not `{head}`"
             )));
         }
+        let mut exclude_from_bom = false;
+        for attr in children.iter().filter(|child| child.head == "attr") {
+            let text = &bytes[attr.span.clone()];
+            exclude_from_bom |= tokens(text)?.iter().any(|token| {
+                matches!(token, Token::Atom(range) if &text[range.clone()] == b"exclude_from_bom")
+            });
+        }
         Ok(Self {
             version: file_version(&children),
             model_references: model_references(&String::from_utf8_lossy(bytes)),
+            exclude_from_bom,
         })
     }
 }
@@ -327,6 +350,7 @@ mod tests {
         let footprint = "(footprint \"R\"\n (version 20241229)\n (model \"${KICAD9_3DMODEL_DIR}/R.step\"\n (offset)) (model \"${GITPLM_PARTS}/3d-models/x.step\"))";
         let file = FootprintFile::parse(footprint.as_bytes()).unwrap();
         assert_eq!(file.version.as_deref(), Some("20241229"));
+        assert!(!file.exclude_from_bom);
         assert_eq!(
             file.model_references,
             vec![
@@ -334,5 +358,28 @@ mod tests {
                 "${GITPLM_PARTS}/3d-models/x.step".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn reads_whether_symbols_and_footprints_are_in_the_bom() {
+        let library = "(kicad_symbol_lib (version 1) (symbol \"TP\" (in_bom no) (on_board yes)) (symbol \"R\" (in_bom yes)) (symbol \"C\"))";
+        let library = SymbolLibrary::parse(library.as_bytes()).unwrap();
+        let in_bom: Vec<Option<bool>> = library.entries.iter().map(|entry| entry.in_bom).collect();
+        assert_eq!(in_bom, [Some(false), Some(true), None]);
+        for (footprint, excluded) in [
+            (
+                "(footprint \"F\" (attr smd exclude_from_pos_files exclude_from_bom))",
+                true,
+            ),
+            ("(footprint \"F\" (attr exclude_from_bom))", true),
+            (
+                "(footprint \"F\" (attr smd) (fp_text value \"exclude_from_bom\"))",
+                false,
+            ),
+            ("(footprint \"F\")", false),
+        ] {
+            let file = FootprintFile::parse(footprint.as_bytes()).unwrap();
+            assert_eq!(file.exclude_from_bom, excluded, "{footprint}");
+        }
     }
 }

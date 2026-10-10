@@ -17,6 +17,11 @@
 //!   datasheet, an extra MPN (`MPN2`) whose manufacturer the CSV file does
 //!   not name, or MPNs still to be confirmed (`MPN TBC`).
 //!
+//! Excluded from BOM is set in the part details only from explicit
+//! evidence in the CAD libraries: a local symbol the part uses says
+//! `(in_bom no)`, or a local footprint it uses has `exclude_from_bom` in its
+//! `(attr ...)`.
+//!
 //! The CSV file name (`g-res`) is only part of the source. It is neither a
 //! category nor the IPN prefix.
 
@@ -397,6 +402,9 @@ enum CadItemOutcome {
     Revision {
         cad_item: String,
         snapshot_sha256: String,
+        /// The symbol says `(in_bom no)` or the footprint's `(attr ...)`
+        /// has `exclude_from_bom`.
+        excluded_from_bom: bool,
     },
     Unresolved(String),
 }
@@ -853,6 +861,11 @@ impl<'a> Planner<'a> {
         }
 
         let mut cad_references = Vec::new();
+        // Excluded from BOM is set only from explicit evidence: a local
+        // symbol the part uses says `(in_bom no)`, or a local footprint it
+        // uses has `exclude_from_bom` in its `(attr ...)`. Descriptions and
+        // notes are never read for it.
+        let mut excluded_from_bom = false;
         for (role, column) in [
             (CadReferenceRole::Symbol, "Symbol"),
             (CadReferenceRole::Footprint, "Footprint"),
@@ -867,7 +880,8 @@ impl<'a> Planner<'a> {
                 .filter(|reference| !reference.is_empty())
                 .collect();
             for (ordinal, reference) in references.into_iter().enumerate() {
-                let target = self.bind(role, reference, ipn)?;
+                let (target, marked_excluded) = self.bind(role, reference, ipn)?;
+                excluded_from_bom |= marked_excluded;
                 cad_references.push(CadReference {
                     role,
                     ordinal: ordinal as u32,
@@ -883,6 +897,7 @@ impl<'a> Planner<'a> {
             fields,
             manufacturer_parts,
             cad_references,
+            excluded_from_bom,
         };
         let source = Source {
             schema: SOURCE_SCHEMA.to_owned(),
@@ -910,18 +925,20 @@ impl<'a> Planner<'a> {
         })
     }
 
-    /// Resolves one symbol or footprint reference of `ipn`.
+    /// Resolves one symbol or footprint reference of `ipn`, and says
+    /// whether the CAD item revision it binds is marked excluded from the
+    /// BOM.
     fn bind(
         &mut self,
         role: CadReferenceRole,
         reference: &str,
         ipn: &Ipn,
-    ) -> Result<CadReferenceTarget, ImportError> {
+    ) -> Result<(CadReferenceTarget, bool), ImportError> {
         // The oracle's rule: `g-*` libraries are the CSV catalog's own;
         // anything else (KiCad's bundled libraries) is external.
         let namespace = reference.split_once(':').map_or(reference, |(lib, _)| lib);
         if !namespace.starts_with("g-") {
-            return Ok(CadReferenceTarget::External);
+            return Ok((CadReferenceTarget::External, false));
         }
         let kind = match role {
             CadReferenceRole::Symbol => CadItemKind::Symbol,
@@ -943,16 +960,20 @@ impl<'a> Planner<'a> {
             CadItemOutcome::Revision {
                 cad_item,
                 snapshot_sha256,
-            } => CadReferenceTarget::CadItemRevision {
-                cad_item,
-                snapshot_sha256,
-            },
+                excluded_from_bom,
+            } => (
+                CadReferenceTarget::CadItemRevision {
+                    cad_item,
+                    snapshot_sha256,
+                },
+                excluded_from_bom,
+            ),
             CadItemOutcome::Unresolved(status) => {
                 self.unresolved
                     .entry((role, reference.to_owned(), status.clone()))
                     .or_default()
                     .insert(ipn.as_str().to_owned());
-                CadReferenceTarget::Unresolved { status }
+                (CadReferenceTarget::Unresolved { status }, false)
             }
         })
     }
@@ -1013,6 +1034,7 @@ impl<'a> Planner<'a> {
             &path,
             &file_sha,
             Some([entry.span.start as u64, entry.span.end as u64]),
+            entry.in_bom == Some(false),
         ))
     }
 
@@ -1043,6 +1065,7 @@ impl<'a> Planner<'a> {
                         CadItemOutcome::Revision {
                             cad_item,
                             snapshot_sha256,
+                            ..
                         } => ModelTarget::CadItemRevision {
                             cad_item,
                             snapshot_sha256,
@@ -1094,6 +1117,7 @@ impl<'a> Planner<'a> {
             &path,
             &file_sha,
             None,
+            footprint.exclude_from_bom,
         ))
     }
 
@@ -1121,6 +1145,7 @@ impl<'a> Planner<'a> {
             path,
             &file_sha,
             None,
+            false,
         );
         self.cad_items
             .insert((CadItemKind::Model3d, path.to_owned()), outcome.clone());
@@ -1139,6 +1164,7 @@ impl<'a> Planner<'a> {
         path: &str,
         file_sha: &str,
         byte_range: Option<[u64; 2]>,
+        excluded_from_bom: bool,
     ) -> CadItemOutcome {
         let blob = Blob::new(bytes);
         let cad_item = CadItem::new(kind, key);
@@ -1166,6 +1192,7 @@ impl<'a> Planner<'a> {
         let outcome = CadItemOutcome::Revision {
             cad_item: cad_item.id.as_str().to_owned(),
             snapshot_sha256: snapshot_sha256.clone(),
+            excluded_from_bom,
         };
         self.blobs.entry(blob.sha256.clone()).or_insert(blob);
         self.cad_item_revisions.push(CadItemRevisionDraft {

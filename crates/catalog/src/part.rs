@@ -27,6 +27,16 @@ pub struct PartDetails {
     /// The exact CAD this revision uses, one entry per symbol or footprint
     /// reference in source order.
     pub cad_references: Vec<CadReference>,
+    /// Excluded from BOM: the part appears in designs but is never bought
+    /// or assembled, such as a test point. It is set only from explicit
+    /// evidence; when unset it is left out of the canonical JSON, so parts
+    /// without it keep the details (and hashes) they always had.
+    #[serde(default, skip_serializing_if = "is_unset")]
+    pub excluded_from_bom: bool,
+}
+
+fn is_unset(setting: &bool) -> bool {
+    !*setting
 }
 
 impl PartDetails {
@@ -128,6 +138,7 @@ mod tests {
                 reference: "Device:R".into(),
                 target: CadReferenceTarget::External,
             }],
+            excluded_from_bom: false,
         };
         let json = details.canonical_json();
         assert_eq!(
@@ -148,5 +159,17 @@ mod tests {
         let before = reordered.sha256();
         reordered.manufacturer_parts.reverse();
         assert_ne!(reordered.sha256(), before);
+        // Excluded from BOM is part details too: setting it makes a new
+        // revision, and only a set value is written.
+        let mut excluded = details.clone();
+        excluded.excluded_from_bom = true;
+        let excluded_json = excluded.canonical_json();
+        assert!(
+            excluded_json.ends_with(r#","excluded_from_bom":true}"#),
+            "{excluded_json}"
+        );
+        assert_ne!(excluded.sha256(), details.sha256());
+        let parsed: PartDetails = serde_json::from_str(&excluded_json).unwrap();
+        assert!(parsed.excluded_from_bom);
     }
 }
