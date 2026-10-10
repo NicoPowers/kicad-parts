@@ -207,7 +207,10 @@ pub fn plan(repository: &Path, csv_file: &str) -> Result<CsvImport, ImportError>
 /// each part's current revision as read. Refuses, with a plain-language
 /// reason, if the import's checkout (`repository`) does not include the team
 /// catalog's latest imports, unless `allow_older_checkout` is set; the run's
-/// audit entry then records that it was allowed.
+/// audit entry then records that it was allowed. Allowing it makes the
+/// checkout's older symbols, footprints and 3D models the current revisions
+/// of their CAD items, for every part that uses them (see
+/// `ImportCommand::allowing_older_checkout`).
 pub fn prepare_import<'a>(
     client: &PocketBaseClient,
     repository: &Path,

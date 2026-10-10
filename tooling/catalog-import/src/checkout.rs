@@ -169,7 +169,7 @@ fn changed_shared_files(run: &LatestImport, files: &[(String, String)]) -> Vec<S
 fn describe(refusal: &Refusal, paths: &str, importing: &str) -> String {
     match refusal {
         Refusal::NotIncluded(commit) => format!(
-            "this checkout (commit {}) does not include commit {}, which the latest import of {paths} came from. Importing could undo the part details that import added. Update the checkout to include that commit and import again, or allow an older checkout if you mean to go back.",
+            "this checkout (commit {}) does not include commit {}, which the latest import of {paths} came from. Importing could undo the part details that import added, and would make its older symbols, footprints and 3D models the current revisions for every part that uses them. Update the checkout to include that commit and import again, or allow an older checkout if you mean to go back.",
             short(importing),
             short(commit)
         ),
@@ -178,7 +178,7 @@ fn describe(refusal: &Refusal, paths: &str, importing: &str) -> String {
             short(commit)
         ),
         Refusal::UndoesLocalChanges(commit, files) => format!(
-            "the latest import of {paths} came from uncommitted changes on commit {}, and this checkout has other copies of {files} that do not include those changes, so importing them would undo them. Commit those changes and import from that commit, or allow an older checkout if you mean to go back.",
+            "the latest import of {paths} came from uncommitted changes on commit {}, and this checkout has other copies of {files} that do not include those changes, so importing them would undo them, including making older symbols, footprints or 3D models current again for every part that uses them. Commit those changes and import from that commit, or allow an older checkout if you mean to go back.",
             short(commit)
         ),
         Refusal::NotACommit(length) => format!(

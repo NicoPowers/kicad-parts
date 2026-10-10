@@ -172,11 +172,14 @@ mod tests {
             PartRevisionId::new(&id, 2).as_str()
         );
         // CAD item revisions are numbered like part revisions; the route
-        // derives the same key (catalog_csv_imports.pb.js).
+        // derives the same key (catalog_csv_imports.pb.js). Pinned, like the
+        // part ID above, so a change made to both Rust and the server is
+        // caught too.
         let cad_item = CadItemId::new(crate::CadItemKind::Footprint, "g-res:R_0603_1608Metric");
+        assert_eq!(cad_item.as_str(), "9e6c9e7e5caf1d9");
         assert_eq!(
             CadItemRevisionId::new(&cad_item, 3).as_str(),
-            &sha256_hex(format!("kicad-parts:cad-item-revision:v1\n{cad_item}\n3"))[..15]
+            "2d643dbe3931555"
         );
         assert_ne!(
             CadItemRevisionId::new(&cad_item, 1),

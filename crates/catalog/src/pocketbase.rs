@@ -126,6 +126,12 @@ impl<'a> ImportCommand<'a> {
 
     /// Imports even from a checkout that does not include the team catalog's
     /// latest imports, if `allow`. Derives the correlation ID again.
+    ///
+    /// Older CAD content then becomes the current revision of its CAD item
+    /// (a new number), so every part that uses that symbol, footprint or 3D
+    /// model, in any CSV file, binds the older content when it is next
+    /// imported, and KiCad Integration writes it. No CAD item is shared
+    /// between CSV files today.
     pub fn allowing_older_checkout(mut self, allow: bool) -> Self {
         self.allow_older_checkout = allow;
         self.correlation_id = self.derived_correlation_id();
