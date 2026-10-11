@@ -1064,3 +1064,10 @@ a {
 .part-fields .csv-review-form .changes tbody th {
   color: var(--ink);
 }
+
+/* A CSV value the CSV already had: accepting it undoes an edit. */
+.csv-review-form .csv-same {
+  display: block;
+  color: var(--muted);
+  font-size: 0.85em;
+}

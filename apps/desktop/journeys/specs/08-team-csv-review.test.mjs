@@ -5,8 +5,9 @@
 // Reviewing lists each field whose CSV value differs; accepting only the
 // value saves the part details (no revision) and leaves the rest. The
 // accepted values never show again; when the CSV changes again, the notice
-// comes back, and keeping the current values is a choice the app records
-// (kicad-parts-75a5).
+// comes back, and keeping the current values is a choice the app records.
+// A save that is half refused keeps only the values still open, so trying
+// again sends just those (kicad-parts-75a5).
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -39,9 +40,9 @@ const FORM = '.csv-review-form';
 
 /**
  * A copy of the CSV catalog whose row for IPN has this value and tolerance
- * instead of 47 and 1%.
+ * instead of 47 and 1%, with any other [from, to] replacements.
  */
-function changedCatalog(value, tolerance) {
+function changedCatalog(value, tolerance, others = []) {
   const root = tempDir('changed-csv');
   for (const folder of ['database', 'symbols', 'footprints']) {
     fs.cpSync(path.join(repoRoot, folder), path.join(root, folder), { recursive: true });
@@ -50,7 +51,12 @@ function changedCatalog(value, tolerance) {
   const text = fs.readFileSync(file, 'utf8');
   const row = (v, t) => `"${v}","g-pas:R_US","g-res:R_0603_1608Metric","${t}"`;
   assert.equal(text.split(row('47', '1%')).length, 2, 'the row of the part is found once');
-  fs.writeFileSync(file, text.replace(row('47', '1%'), row(value, tolerance)));
+  let changed = text.replace(row('47', '1%'), row(value, tolerance));
+  for (const [from, to] of others) {
+    assert.equal(changed.split(from).length, 2, `${from} is found once`);
+    changed = changed.replace(from, to);
+  }
+  fs.writeFileSync(file, changed);
   return root;
 }
 
@@ -116,7 +122,8 @@ describe('team catalog: reviewing new CSV values that were not applied', () => {
       [...document.querySelectorAll('.csv-review-form tbody tr')].map((tr) => ({
         field: tr.querySelector('th').textContent.trim(),
         now: tr.querySelectorAll('td')[1].textContent.trim(),
-        csv: tr.querySelectorAll('td')[2].textContent.trim(),
+        csv: tr.querySelector('.csv-value').textContent.trim(),
+        changedInCsv: tr.querySelector('.csv-same') === null,
         ticked: tr.querySelector('input[type="checkbox"]').checked,
       })),
     );
@@ -195,10 +202,19 @@ describe('team catalog: reviewing new CSV values that were not applied', () => {
       'csv-review-heading',
       'focus moves to the form',
     );
+    // The value the CSV changed comes first; the description is listed
+    // too, marked, since accepting it would undo the edit.
     assert.deepEqual(await reviewRows(), [
-      { field: 'Description', now: 'Thick film resistor, 47 ohm', csv: 'RES 47 OHM 1% 1/10W 0603', ticked: false },
-      { field: 'Value', now: '47 ohm', csv: '47R', ticked: false },
+      { field: 'Value', now: '47 ohm', csv: '47R', changedInCsv: true, ticked: false },
+      {
+        field: 'Description',
+        now: 'Thick film resistor, 47 ohm',
+        csv: 'RES 47 OHM 1% 1/10W 0603',
+        changedInCsv: false,
+        ticked: false,
+      },
     ]);
+    assert.match(await textOf(browser, `${FORM} tbody tr:last-child`), /\(not changed in the CSV\)/);
     assert.match(await textOf(browser, FORM), /g-res\.csv has new values for this part\. Tick the ones to accept\./);
     assert.equal(await textOf(browser, `label[for="csv-review-reason"]`), 'Reason (shown in the history)');
     assert.equal(await (await browser.$('#csv-review-reason')).getValue(), 'Accept CSV values from g-res.csv');
@@ -242,8 +258,11 @@ describe('team catalog: reviewing new CSV values that were not applied', () => {
     await clickButton(CSV_NOTICE, 'Review CSV values');
     await waitForText(browser, '#csv-review-heading', 'Review CSV values');
     assert.deepEqual(
-      (await reviewRows()).map((row) => row.field),
-      ['Description', 'Tolerance'],
+      (await reviewRows()).map((row) => [row.field, row.changedInCsv]),
+      [
+        ['Tolerance', true],
+        ['Description', false],
+      ],
     );
     await clickButton(FORM, 'Keep current values');
     await waitForText(
@@ -256,5 +275,78 @@ describe('team catalog: reviewing new CSV values that were not applied', () => {
     assert.equal(await fieldValue('Description'), 'Thick film resistor, 47 ohm');
     await clickButton(COLUMN, 'History (4)');
     assert.match(await textOf(browser, '.history li:first-child .history-title'), /^CSV values · Kept current part details by /);
+  });
+
+  it('keeps only the values still open after a half-refused save', async () => {
+    const ipn = 'RES-0000-1000';
+    const mpn = 'RC0603FR-07100RL';
+    await searchFor(browser, mpn, '1 matching part');
+    await selectResult(browser, mpn);
+    await browser.waitUntil(async () => (await sourceFact()) === 'Team catalog, revision 1 of this part', {
+      timeout: 20_000,
+      timeoutMsg: 'the second part never showed the team catalog',
+    });
+    // Someone else edits its description, then its symbol twice
+    // (revisions 2 and 3).
+    await editAsSomeoneElse(server.url, otherToken, ipn, { Description: 'Thick film resistor, 100 ohm' }, 'Plainer words');
+    await editAsSomeoneElse(server.url, otherToken, ipn, { Symbol: 'Device:R' }, "KiCad's symbol");
+    await editAsSomeoneElse(server.url, otherToken, ipn, { Symbol: 'Device:R_Small' }, 'Smaller symbol');
+    await waitForField('Description', 'Thick film resistor, 100 ohm');
+    // The CSV now says 100R and revision 2's symbol; then revision 2 is
+    // archived, so accepting that symbol will be refused.
+    const both = changedCatalog('47R', '0.5%', [
+      ['"100","g-pas:R_US","g-res:R_0603_1608Metric","1%"', '"100R","Device:R","g-res:R_0603_1608Metric","1%"'],
+    ]);
+    assert.equal(await server.reimport(both), 'nothing_changed');
+    const archived = await fetch(`${server.url}/api/catalog/archives`, {
+      method: 'POST',
+      headers: { Authorization: otherToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        correlationId: `journey-archive-${Date.now()}`,
+        reason: 'Wrong symbol',
+        ipn,
+        revision: 2,
+        archived: true,
+      }),
+    });
+    assert.equal(archived.status, 200, 'revision 2 is archived');
+    await waitForText(browser, CSV_NOTICE, /has new values for this part/);
+    await clickButton(CSV_NOTICE, 'Review CSV values');
+    await waitForText(browser, '#csv-review-heading', 'Review CSV values');
+    assert.deepEqual(
+      (await reviewRows()).map((row) => row.field),
+      ['Value', 'Description', 'Symbol'],
+    );
+    await tick('Value');
+    await tick('Symbol');
+    await clickButton(FORM, 'Accept the ticked values');
+    await waitForText(
+      browser,
+      '.team-problem',
+      /^Your choice for the part details was saved\. Your choice for the symbol and footprint was not: .*unarchive revision 2 instead/,
+    );
+    // The saved details left the form; only the symbol is still open.
+    await browser.waitUntil(async () => (await reviewRows()).length === 1, {
+      timeout: 5_000,
+      timeoutMsg: 'the saved details stayed in the form',
+    });
+    assert.deepEqual(
+      (await reviewRows()).map((row) => row.field),
+      ['Symbol'],
+    );
+    // Keeping the current symbol now sends only that group.
+    await clickButton(FORM, 'Keep current values');
+    await waitForText(
+      browser,
+      NOTICE,
+      'Kept the current values. You are asked about these CSV values again only if the CSV changes.',
+    );
+    assert.ok(await noCsvNotice());
+    assert.equal(await fieldValue('Value'), '100R');
+    assert.equal(await sourceFact(), 'Team catalog, revision 3 of this part');
+    assert.match(
+      await browser.execute(() => document.querySelector('#team-tab-history').textContent.trim()),
+      /^History \(7\)$/,
+    );
   });
 });

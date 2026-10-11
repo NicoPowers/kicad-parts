@@ -11,9 +11,9 @@
 
 use crate::backend;
 use desktop_contract::{
-    CsvChanges, DetailChange, Field, HistoryEntry, LiveUpdates, ManufacturerPart, PublishResult,
-    SignInRequest, TeamArchiveRequest, TeamConflict, TeamCsvReviewRequest, TeamEditRequest,
-    TeamPart, TeamSession, TeamStatus,
+    CsvChangeRow, CsvChanges, DetailChange, Field, HistoryEntry, LiveUpdates, ManufacturerPart,
+    PublishResult, SignInRequest, TeamArchiveRequest, TeamConflict, TeamCsvReviewRequest,
+    TeamEditRequest, TeamPart, TeamSession, TeamStatus,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -537,6 +537,9 @@ pub fn TeamColumn(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) 
             </button>
         }
     };
+    // The review form is drawn once when it opens; its rows follow
+    // ui.reviewing, so a saved group leaves without redrawing the form.
+    let reviewing_open = Memo::new(move |_| ui.reviewing.with(Option::is_some));
     // If the CSV values whose form is open are no longer open on the part
     // (someone else reviewed them, or a newer import found different ones),
     // close the form and say which, unless this app's own request is out.
@@ -575,7 +578,7 @@ pub fn TeamColumn(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) 
             let message = if newer {
                 "A newer import found different CSV values, so nothing was saved. Review them again."
             } else {
-                "Someone else already reviewed these CSV values, so nothing was saved."
+                "These CSV values are no longer open, so nothing was saved."
             };
             ui.notice.set(Some(Notice::Problem(message.into())));
         }
@@ -628,7 +631,7 @@ pub fn TeamColumn(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) 
                 aria-labelledby="team-tab-details"
                 hidden=move || ui.tab.get() != Tab::Details || ui.conflict.with(Option::is_some)
             >
-                {move || match (ui.editing.get(), ui.reviewing.with(Option::is_some)) {
+                {move || match (ui.editing.get(), reviewing_open.get()) {
                     (Some(_), _) => view! { <EditForm part=part ui=ui /> }.into_any(),
                     (None, true) => view! { <CsvReviewForm part=part ui=ui /> }.into_any(),
                     (None, false) => view! { <DetailsView part=part can_edit=can_edit ui=ui /> }.into_any(),
@@ -1356,17 +1359,14 @@ fn ArchiveSection(
 
 /// The review form: each field whose CSV value differs, with the part's
 /// value and the CSV's, and a box to tick to accept the CSV's. Fields not
-/// ticked stay as they are.
+/// ticked stay as they are. Values the CSV did not change since it was last
+/// applied or reviewed come last, marked, since accepting them undoes an
+/// edit. The rows and both buttons follow ui.reviewing, which a group leaves
+/// once its review is saved.
 #[component]
 fn CsvReviewForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
     let changes = ui.reviewing.get_untracked().unwrap_or_default();
-    let newest = part.with_untracked(|part| {
-        part.as_ref()
-            .and_then(|part| part.revisions.iter().map(|revision| revision.number).max())
-            .unwrap_or(0)
-    });
-    let current = part.with_untracked(|part| part.as_ref().map_or(0, |part| part.revision.number));
-    let has_cad = changes.iter().any(|changes| changes.cad);
+    let open = move || ui.reviewing.get_untracked().unwrap_or_default();
     let files = csv_files(&changes);
     let intro = format!(
         "{} has new values for this part. Tick the ones to accept. The others stay as they are, and you are not asked about these CSV values again unless the CSV changes.",
@@ -1377,53 +1377,45 @@ fn CsvReviewForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView 
         "Keep the values edited in this app, not the CSV values from {}",
         files.join(" and ")
     );
-    let rows = changes
-        .iter()
-        .flat_map(|changes| {
-            changes
-                .rows
-                .iter()
-                .map(move |row| (changes.problem.clone(), changes.cad, row.clone()))
-        })
-        .enumerate()
-        .map(|(index, (problem, cad, row))| {
-            let id = format!("csv-pick-{index}");
-            let key = (problem, row.field.clone());
-            let checked_key = key.clone();
-            let label = if cad {
-                format!("Accept the CSV's {} (adds a revision)", row.field)
-            } else {
-                format!("Accept the CSV's {}", row.field)
-            };
+    let rows = move || {
+        ui.reviewing
+            .get()
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|changes| {
+                changes
+                    .rows
+                    .iter()
+                    .map(move |row| (changes.problem.clone(), changes.cad, row.clone()))
+            })
+            .enumerate()
+            .map(|(index, (problem, cad, row))| review_row(ui, index, problem, cad, row))
+            .collect_view()
+    };
+    // The hint about a new revision, while symbol or footprint values are
+    // open.
+    let cad_hint = move || {
+        let has_cad = ui.reviewing.with(|open| {
+            open.as_ref()
+                .is_some_and(|open| open.iter().any(|changes| changes.cad))
+        });
+        has_cad.then(|| {
+            let (newest, current) = part.with_untracked(|part| {
+                part.as_ref().map_or((0, 0), |part| {
+                    let newest = part.revisions.iter().map(|revision| revision.number).max();
+                    (newest.unwrap_or(0), part.revision.number)
+                })
+            });
             view! {
-                <tr>
-                    <td class="pick">
-                        <input
-                            type="checkbox"
-                            id=id
-                            aria-label=label
-                            prop:checked=move || ui.review_picks.with(|picks| picks.contains(&checked_key))
-                            on:change:target=move |event| {
-                                let on = event.target().checked();
-                                let key = key.clone();
-                                ui.review_picks.update(|picks| {
-                                    picks.retain(|pick| *pick != key);
-                                    if on {
-                                        picks.push(key);
-                                    }
-                                });
-                            }
-                        />
-                    </td>
-                    <th scope="row">{row.field.clone()}</th>
-                    <td class:blank=row.now.is_empty()>{shown(&row.now)}</td>
-                    <td class:blank=row.csv.is_empty()>{shown(&row.csv)}</td>
-                </tr>
+                <p class="hint">
+                    {format!(
+                        "Accepting the Symbol or Footprint adds revision {} of this part. Designs that use revision {current} keep it.",
+                        newest + 1
+                    )}
+                </p>
             }
         })
-        .collect_view();
-    let for_take = changes.clone();
-    let for_keep = changes.clone();
+    };
     view! {
         <form
             class="csv-review-form"
@@ -1431,7 +1423,7 @@ fn CsvReviewForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView 
             on:submit=move |event| {
                 event.prevent_default();
                 let picks = ui.review_picks.get_untracked();
-                save_csv_review(ui, part, for_take.clone(), picks, ui.review_reason.get_untracked());
+                save_csv_review(ui, part, open(), picks, ui.review_reason.get_untracked());
             }
         >
             <h3 id="csv-review-heading" tabindex="-1">"Review CSV values"</h3>
@@ -1447,14 +1439,7 @@ fn CsvReviewForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView 
                 </thead>
                 <tbody>{rows}</tbody>
             </table>
-            {has_cad.then(|| view! {
-                <p class="hint">
-                    {format!(
-                        "Accepting the Symbol or Footprint adds revision {} of this part. Designs that use revision {current} keep it.",
-                        newest + 1
-                    )}
-                </p>
-            })}
+            {cad_hint}
             <label for="csv-review-reason" class="reason-label">"Reason (shown in the history)"</label>
             <textarea
                 id="csv-review-reason"
@@ -1474,11 +1459,12 @@ fn CsvReviewForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView 
                     type="button"
                     disabled=move || ui.busy.get()
                     on:click=move |_| {
-                        // The prefilled reason is about taking values; keeping
-                        // them gets its own unless the person wrote one.
+                        // The prefilled reason is about accepting values;
+                        // keeping them gets its own unless the person wrote
+                        // one.
                         let typed = ui.review_reason.get_untracked();
                         let reason = if typed == prefilled { keep_reason.clone() } else { typed };
-                        save_csv_review(ui, part, for_keep.clone(), Vec::new(), reason);
+                        save_csv_review(ui, part, open(), Vec::new(), reason);
                     }
                 >
                     "Keep current values"
@@ -1494,6 +1480,62 @@ fn CsvReviewForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView 
                 </button>
             </div>
         </form>
+    }
+}
+
+/// One row of the review form: a box to tick, the field, its value now and
+/// in the CSV, and a mark when the CSV did not change it.
+fn review_row(
+    ui: TeamUi,
+    index: usize,
+    problem: String,
+    cad: bool,
+    row: CsvChangeRow,
+) -> impl IntoView {
+    let id = format!("csv-pick-{index}");
+    let key = (problem, row.field.clone());
+    let checked_key = key.clone();
+    let notes: Vec<&str> = [
+        cad.then_some("adds a revision"),
+        (!row.changed_in_csv).then_some("not changed in the CSV"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let label = if notes.is_empty() {
+        format!("Accept the CSV's {}", row.field)
+    } else {
+        format!("Accept the CSV's {} ({})", row.field, notes.join(", "))
+    };
+    view! {
+        <tr>
+            <td class="pick">
+                <input
+                    type="checkbox"
+                    id=id
+                    aria-label=label
+                    prop:checked=move || ui.review_picks.with(|picks| picks.contains(&checked_key))
+                    on:change:target=move |event| {
+                        let on = event.target().checked();
+                        let key = key.clone();
+                        ui.review_picks.update(|picks| {
+                            picks.retain(|pick| *pick != key);
+                            if on {
+                                picks.push(key);
+                            }
+                        });
+                    }
+                />
+            </td>
+            <th scope="row">{row.field.clone()}</th>
+            <td class:blank=row.now.is_empty()>{shown(&row.now)}</td>
+            <td>
+                <span class="csv-value" class:blank=row.csv.is_empty()>{shown(&row.csv)}</span>
+                {(!row.changed_in_csv).then(|| view! {
+                    <span class="csv-same">"(not changed in the CSV)"</span>
+                })}
+            </td>
+        </tr>
     }
 }
 
