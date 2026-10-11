@@ -1589,9 +1589,10 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
             .unwrap()
     };
 
-    // With an archived revision, the newest undo refuses: the older version
-    // cannot read archive entries (nor, one step further, part details kept
-    // apart from revisions). Nothing is changed.
+    // With a CSV review and an archived revision, the newest undo refuses:
+    // the older version cannot read CSV reviews (nor, further back, archive
+    // entries or part details kept apart from revisions). Nothing is
+    // changed.
     let populated = tempfile::tempdir().unwrap();
     let options = services::options(&root, populated.path());
     let (server, admin, _superuser) = services::start(&root, populated.path()).unwrap();
@@ -1635,19 +1636,47 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
             .status,
         200
     );
+    // Importing again finds the edited value differs from the CSV; keeping
+    // the edited value saves a CSV review.
+    let state = catalog::pocketbase::read_import_state(&admin).unwrap();
+    let again = submit_import(
+        &admin,
+        &ImportCommand::new(&import, REASON).expecting(&state),
+    )
+    .unwrap();
+    assert_eq!(again.status, 200, "{}", again.body);
+    let problem = read_back(&admin)
+        .unwrap()
+        .problems
+        .into_iter()
+        .find(|problem| problem.code == catalog::pocketbase::CSV_DETAILS_DIFFER)
+        .unwrap();
+    let keep = catalog::pocketbase::CsvReviewCommand::new(
+        "RES-0000-0470",
+        &problem.id,
+        Vec::new(),
+        2,
+        "Keep the edited value",
+    );
+    assert_eq!(
+        catalog::pocketbase::submit_csv_review(&admin, &keep)
+            .unwrap()
+            .status,
+        200
+    );
     server.stop();
     let said = migrate(&root, &options, &["down", "1"]);
     assert!(
-        said.contains("has archived revisions")
+        said.contains("has CSV reviews")
             && said.contains("Nothing was changed")
             && !said.contains("Reverted"),
         "{said}"
     );
-    // Undoing past it is refused at the first step too, so the details
-    // migration is never undone.
-    let said = migrate(&root, &options, &["down", "2"]);
+    // Undoing further is refused at the first step too, so neither the
+    // archive nor the details migration is undone.
+    let said = migrate(&root, &options, &["down", "3"]);
     assert!(
-        said.contains("has archived revisions") && !said.contains("Reverted"),
+        said.contains("has CSV reviews") && !said.contains("Reverted"),
         "{said}"
     );
     let database = rusqlite::Connection::open_with_flags(
@@ -1675,8 +1704,9 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
         "(id = @request.auth.id) && @request.body.can_edit_catalog:isset = false && @request.body.name:isset = false"
     );
     assert!(fields.contains("can_edit_catalog"));
-    let said = migrate(&root, &options, &["down", "5"]);
+    let said = migrate(&root, &options, &["down", "6"]);
     for reverted in [
+        "1792000000_csv_reviews.js",
         "1791900000_archived_revisions.js",
         "1791800000_shared_part_details.js",
         "1791700000_cad_item_revision_numbers.js",
@@ -1770,9 +1800,10 @@ fn team_server_data_from_before_numbered_cad_revisions_is_refused_not_changed() 
     let revision = read_back(&admin).unwrap().cad_item_revisions[0].clone();
     server.stop();
 
-    // Undoing is refused while there is data: the newest undo already
-    // refuses saved part details, so the numbering is never undone either.
-    let said = migrate(&root, &options, &["down", "2"]);
+    // Undoing is refused while there is data: undoing the shared part
+    // details refuses saved part details, and the undo stops there as a
+    // whole, so the numbering is never undone either.
+    let said = migrate(&root, &options, &["down", "4"]);
     assert!(
         said.contains("which the older version cannot read"),
         "{said}"
