@@ -556,6 +556,28 @@ export async function waitForPreview(browser, section, timeout = 60_000) {
 }
 
 /**
+ * Waits until `section` shows a drawn preview: no longer busy, no problem
+ * card (such as "Sign in to see this symbol", left from before signing in)
+ * and every image loaded. Use it where a problem card would be wrong;
+ * waitForPreview also accepts a problem card as finished.
+ */
+export async function waitForPreviewImages(browser, section, timeout = 60_000) {
+  await browser.waitUntil(
+    async () =>
+      browser.execute(
+        (s) => {
+          const el = document.querySelector(s);
+          if (!el || el.querySelector('[aria-busy="true"]') || el.querySelector('.problem')) return false;
+          const imgs = [...el.querySelectorAll('img')];
+          return imgs.length > 0 && imgs.every((i) => i.complete && i.naturalWidth > 0);
+        },
+        section,
+      ),
+    { timeout, interval: 100, timeoutMsg: `${section} never showed a drawn preview` },
+  );
+}
+
+/**
  * Starts `catalog-import local-team-server --json`: a disposable PocketBase
  * on 127.0.0.1 with the resistors imported and three accounts. It runs
  * windowless in a kill-on-close job and stops when its input closes, so it

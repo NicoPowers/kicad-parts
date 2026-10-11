@@ -23,6 +23,7 @@ import {
   textOf,
   waitForLiveUpdates,
   waitForPreview,
+  waitForPreviewImages,
   waitForText,
 } from '../harness.mjs';
 
@@ -513,9 +514,11 @@ describe('team catalog: history, edits and conflicts', () => {
     await waitForText(browser, '#revision-heading', 'What changed in revision 1');
     assert.equal(await textOf(browser, '.revision .hint'), 'The first revision of this part.');
     await clickButton(COLUMN, 'Details');
-    // The previews redraw after signing in again; wait for them.
-    await waitForPreview(browser, SYMBOL);
-    await waitForPreview(browser, FOOTPRINT);
+    // The previews redraw after signing in again. Until they do, the cards
+    // from the signed-out moment ("Sign in to see this symbol") are still
+    // shown, so wait for the drawn images themselves.
+    await waitForPreviewImages(browser, SYMBOL);
+    await waitForPreviewImages(browser, FOOTPRINT);
     await assertAccessible(browser, '49-team-read-only');
     await screenshot(browser, '49-team-read-only');
   });
