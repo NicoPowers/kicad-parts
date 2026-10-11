@@ -2,7 +2,8 @@
 //! (`infra/pocketbase/pb_hooks/catalog_csv_imports.pb.js` for CSV imports,
 //! `catalog_edits.pb.js` for edits) and the `catalog_*`
 //! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`
-//! `1791600000_catalog_edits.js` and `1791800000_shared_part_details.js`).
+//! `1791600000_catalog_edits.js`, `1791800000_shared_part_details.js` and
+//! `1791900000_archived_revisions.js`).
 
 use crate::cad_item::Blob;
 use crate::cad_item::{CadItemDetails, ModelTarget};
@@ -25,7 +26,7 @@ pub const CSV_IMPORT_ROUTE: &str = "/api/catalog/csv-imports";
 pub const IMPORT_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Every Catalog collection, in dependency order.
-pub const COLLECTIONS: [&str; 10] = [
+pub const COLLECTIONS: [&str; 11] = [
     "catalog_changes",
     "catalog_blobs",
     "catalog_cad_items",
@@ -33,6 +34,7 @@ pub const COLLECTIONS: [&str; 10] = [
     "catalog_parts",
     "catalog_part_details",
     "catalog_part_revisions",
+    "catalog_archive_entries",
     "catalog_audit_entries",
     "catalog_import_problems",
     "catalog_commands",
@@ -810,6 +812,112 @@ pub struct PublishedRecord {
     pub snapshot_sha256: String,
 }
 
+/// The route that archives or unarchives one part revision.
+pub const ARCHIVE_ROUTE: &str = "/api/catalog/archives";
+
+/// Archives (or unarchives) revision `revision` of part `ipn`, with a
+/// reason. An archived revision is hidden from KiCad and the app, so nobody
+/// new picks it; designs that already use it keep it, and nothing is
+/// deleted. The part's current revision is its newest one not archived.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchiveCommand {
+    pub correlation_id: CorrelationId,
+    pub reason: String,
+    pub ipn: String,
+    pub revision: u32,
+    /// True to archive, false to unarchive.
+    pub archived: bool,
+}
+
+impl ArchiveCommand {
+    /// A command with a fresh correlation ID.
+    pub fn new(ipn: &str, revision: u32, archived: bool, reason: &str) -> Self {
+        Self {
+            correlation_id: CorrelationId::generate(),
+            reason: reason.to_owned(),
+            ipn: ipn.to_owned(),
+            revision,
+            archived,
+        }
+    }
+
+    pub fn body(&self) -> Value {
+        json!({
+            "correlationId": self.correlation_id,
+            "reason": self.reason,
+            "ipn": self.ipn,
+            "revision": self.revision,
+            "archived": self.archived,
+        })
+    }
+}
+
+/// What the archive route answered.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArchiveReply {
+    pub status: u16,
+    pub outcome: ArchiveOutcome,
+    /// The answer was replayed from the correlation-ID ledger.
+    pub replayed: bool,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ArchiveOutcome {
+    /// 200: one Change with one archive entry, the part moved to its newest
+    /// revision not archived (if that changed), and one audit entry.
+    #[serde(rename_all = "camelCase")]
+    Applied {
+        correlation_id: String,
+        ipn: String,
+        change_id: String,
+        seq: u64,
+        audit_entry_id: String,
+        revision: u32,
+        archived: bool,
+        /// The part's current revision afterwards.
+        current_revision: PublishedRecord,
+    },
+    /// 422: the revision already has that state; nothing was written.
+    #[serde(rename_all = "camelCase")]
+    Noop {
+        correlation_id: String,
+        ipn: String,
+        message: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    CorrelationReused {
+        correlation_id: String,
+        message: String,
+    },
+}
+
+/// Submits an archive or unarchive. Applied, no-op and correlation-reuse
+/// answers are `Ok`; bad input (400, including archiving the only revision
+/// not archived), 401, 403 and 404 are errors.
+pub fn submit_archive(
+    client: &PocketBaseClient,
+    command: &ArchiveCommand,
+) -> CollabResult<ArchiveReply> {
+    let reply = client.post_json(ARCHIVE_ROUTE, &command.body())?;
+    match reply.status {
+        200 | 409 | 422 => {
+            let outcome: ArchiveOutcome = serde_json::from_str(&reply.body)
+                .map_err(|parse| CollabError::Protocol(format!("{parse}: {}", reply.body)))?;
+            Ok(ArchiveReply {
+                status: reply.status,
+                outcome,
+                replayed: reply.replayed,
+                body: reply.body,
+            })
+        }
+        _ => Err(reply.success().err().unwrap_or_else(|| {
+            CollabError::Protocol(format!("unexpected status {}", reply.status))
+        })),
+    }
+}
+
 /// A part's current details or revision when a command expected another
 /// one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -945,6 +1053,40 @@ pub fn changes_since(
     client.list_records("catalog_changes", &format!("seq > {checkpoint}"), "seq")
 }
 
+/// Every archive entry of the part with ID `part_id`, oldest first.
+pub fn archive_entries_of(
+    client: &PocketBaseClient,
+    part_id: &str,
+) -> CollabResult<Vec<StoredArchiveEntry>> {
+    let filter = format!("part = {}", Value::from(part_id));
+    client.list_records("catalog_archive_entries", &filter, "seq")
+}
+
+/// The archive entries one Change saved.
+pub fn archive_entries_in_change(
+    client: &PocketBaseClient,
+    change_id: &str,
+) -> CollabResult<Vec<StoredArchiveEntry>> {
+    let filter = format!("change = {}", Value::from(change_id));
+    client.list_records("catalog_archive_entries", &filter, "part")
+}
+
+/// The part revisions with these IDs.
+pub fn part_revisions_by_id(
+    client: &PocketBaseClient,
+    ids: &[&str],
+) -> CollabResult<Vec<StoredPartRevision>> {
+    let mut revisions = Vec::new();
+    for filter in id_filters(ids) {
+        revisions.extend(client.list_records::<StoredPartRevision>(
+            "catalog_part_revisions",
+            &filter,
+            "part,number",
+        )?);
+    }
+    Ok(revisions)
+}
+
 /// The part details one Change saved.
 pub fn details_in_change(
     client: &PocketBaseClient,
@@ -994,6 +1136,39 @@ pub struct StoredPart {
     pub current_details: String,
     pub current_details_number: u32,
     pub first_change: String,
+}
+
+/// One archive or unarchive of a part revision. A revision's state is its
+/// newest entry (by `seq`).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct StoredArchiveEntry {
+    pub id: String,
+    pub part: String,
+    pub part_revision: String,
+    pub revision_number: u32,
+    /// True for an archive, false for an unarchive.
+    pub archived: bool,
+    pub change: String,
+    /// The Change's seq.
+    pub seq: u64,
+    /// The part's current revision once this entry was saved.
+    pub current_revision_after: String,
+    pub current_revision_number_after: u32,
+}
+
+/// The revision numbers of a part that are archived now, from its archive
+/// entries (any order).
+pub fn archived_numbers(entries: &[&StoredArchiveEntry]) -> std::collections::BTreeSet<u32> {
+    let mut sorted: Vec<&&StoredArchiveEntry> = entries.iter().collect();
+    sorted.sort_by_key(|entry| entry.seq);
+    let mut state = BTreeMap::new();
+    for entry in sorted {
+        state.insert(entry.revision_number, entry.archived);
+    }
+    state
+        .into_iter()
+        .filter_map(|(number, archived)| archived.then_some(number))
+        .collect()
 }
 
 /// One saved copy of a part's details.
@@ -1169,6 +1344,7 @@ pub struct CatalogReadback {
     pub parts: Vec<StoredPart>,
     pub part_details: Vec<StoredPartDetails>,
     pub part_revisions: Vec<StoredPartRevision>,
+    pub archive_entries: Vec<StoredArchiveEntry>,
     pub cad_items: Vec<StoredCadItem>,
     pub cad_item_revisions: Vec<StoredCadItemRevision>,
     pub blobs: Vec<StoredBlob>,
@@ -1183,6 +1359,16 @@ impl CatalogReadback {
 
     pub fn part_details(&self, id: &str) -> Option<&StoredPartDetails> {
         self.part_details.iter().find(|details| details.id == id)
+    }
+
+    /// The revision numbers of the part with ID `part_id` archived now.
+    pub fn archived(&self, part_id: &str) -> std::collections::BTreeSet<u32> {
+        let entries: Vec<&StoredArchiveEntry> = self
+            .archive_entries
+            .iter()
+            .filter(|entry| entry.part == part_id)
+            .collect();
+        archived_numbers(&entries)
     }
 
     pub fn part_revision(&self, id: &str) -> Option<&StoredPartRevision> {
@@ -1207,12 +1393,13 @@ impl CatalogReadback {
 
     /// The number of records in each Catalog collection (blobs counted
     /// once each), for idempotency checks.
-    pub fn counts(&self) -> [usize; 9] {
+    pub fn counts(&self) -> [usize; 10] {
         [
             self.changes.len(),
             self.parts.len(),
             self.part_details.len(),
             self.part_revisions.len(),
+            self.archive_entries.len(),
             self.cad_items.len(),
             self.cad_item_revisions.len(),
             self.blobs.len(),
@@ -1230,6 +1417,7 @@ pub fn read_back(client: &PocketBaseClient) -> CollabResult<CatalogReadback> {
         parts: client.list_records("catalog_parts", "", "ipn")?,
         part_details: client.list_records("catalog_part_details", "", "part,number")?,
         part_revisions: client.list_records("catalog_part_revisions", "", "part,number")?,
+        archive_entries: client.list_records("catalog_archive_entries", "", "seq")?,
         cad_items: client.list_records("catalog_cad_items", "", "kind,key")?,
         cad_item_revisions: client.list_records(
             "catalog_cad_item_revisions",

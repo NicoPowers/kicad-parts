@@ -14,15 +14,21 @@ pub enum ChangeKind {
     /// A change to one part's details, symbol or footprint, published by
     /// `POST /api/catalog/edits`.
     Edit,
+    /// One part revision archived, published by `POST /api/catalog/archives`.
+    Archive,
+    /// One part revision unarchived, published by `POST /api/catalog/archives`.
+    Unarchive,
 }
 
 impl ChangeKind {
-    pub const ALL: [Self; 2] = [Self::CsvImport, Self::Edit];
+    pub const ALL: [Self; 4] = [Self::CsvImport, Self::Edit, Self::Archive, Self::Unarchive];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CsvImport => "csv-import",
             Self::Edit => "edit",
+            Self::Archive => "archive",
+            Self::Unarchive => "unarchive",
         }
     }
 
@@ -53,7 +59,7 @@ mod tests {
             .map(|kind| format!("\"{}\"", kind.as_str()))
             .collect();
         // The latest migration that sets the kinds.
-        let migration = infra("pb_migrations/1791800000_shared_part_details.js");
+        let migration = infra("pb_migrations/1791900000_archived_revisions.js");
         assert!(
             migration.contains(&format!("const KINDS = [{}];", values.join(", "))),
             "the migration's kind values differ from ChangeKind"
@@ -62,6 +68,8 @@ mod tests {
         for (name, kind) in [
             ("csvImport", ChangeKind::CsvImport),
             ("edit", ChangeKind::Edit),
+            ("archive", ChangeKind::Archive),
+            ("unarchive", ChangeKind::Unarchive),
         ] {
             assert!(
                 library.contains(&format!("  {name}: \"{}\",", kind.as_str())),

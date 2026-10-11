@@ -14,8 +14,10 @@
 //! - A **revision** of a part saves its [`PartRevision`]: only the exact
 //!   CAD it uses (its Symbol and Footprint fields, the CAD item revisions
 //!   they bind, and Excluded from BOM), as canonical JSON. Only a change to
-//!   CAD adds one. Revisions are numbered from 1 per part; the **current
-//!   revision** is the newest.
+//!   CAD adds one. Revisions are numbered from 1 per part. A bad revision
+//!   is **archived**, never deleted: an append-only archive entry hides it
+//!   from KiCad and the app. The **current revision** is the newest
+//!   revision that is not archived.
 //! - A **CAD item** is one symbol, footprint or 3D model, identified by its
 //!   kind and library reference (for example the symbol `g-pas:R_US`). A
 //!   revision of a CAD item saves its [`CadItemDetails`]: the exact
@@ -32,8 +34,9 @@
 //!   with the same bytes share one stored blob. A symbol's blob
 //!   is the exact bytes of that one symbol in its library file, so editing
 //!   a neighbouring symbol does not revise it.
-//! - A **Change** groups what one import or edit saved, with its reason:
-//!   at least one part revision, CAD item revision or saved part details.
+//! - A **Change** groups what one import, edit, archive or unarchive saved,
+//!   with its reason: at least one part revision, CAD item revision, saved
+//!   part details or archive entry.
 //! - **Supplier data** (supplier part numbers and prices) is kept in a
 //!   revision's [`Source`], never in its part details, so it never creates
 //!   a revision.
