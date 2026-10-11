@@ -76,8 +76,9 @@
 //!
 //! A row whose details or CAD differ from what an edit saved is kept by an
 //! import problem for that kind only (`csv-details-differ-from-edited-details`
-//! or `csv-cad-differs-from-edited-revision`); its other columns are checked
-//! as usual.
+//! or `csv-cad-differs-from-edited-revision`); so is CAD whose content matches
+//! an archived revision (`csv-cad-matches-archived-revision`). Its other
+//! columns are checked as usual.
 //!
 //! Excluded from BOM belongs to the revision but is no column: the report
 //! checks that a part has it exactly when a symbol revision it binds says
@@ -547,7 +548,8 @@ impl<'a> Reporter<'a> {
                 .map(|(problem, detail)| (problem.clone(), detail.clone()));
             let cad_kept = self
                 .find_problem(|problem, detail| {
-                    problem.code == "csv-cad-differs-from-edited-revision"
+                    (problem.code == "csv-cad-differs-from-edited-revision"
+                        || problem.code == "csv-cad-matches-archived-revision")
                         && problem.subject == ipn
                         && problem.path == source_path
                         && detail["raw_record"].as_str() == Some(raw.as_str())
@@ -899,10 +901,15 @@ impl<'a> Reporter<'a> {
                     .part_details
                     .iter()
                     .filter(|details| details.change == change.id)
+                    .count()
+                + readback
+                    .archive_entries
+                    .iter()
+                    .filter(|entry| entry.change == change.id)
                     .count();
             if revisions == 0 {
                 self.problem(format!(
-                    "Change {} has no revisions and no part details",
+                    "Change {} has no revisions, no part details and no archive entry",
                     change.seq
                 ));
             }
@@ -1084,6 +1091,20 @@ impl<'a> Reporter<'a> {
                 self.problem(format!(
                     "{}: current revision pointer is inconsistent",
                     part.ipn
+                ));
+            }
+            // The current revision is the newest one that is not archived.
+            let archived = readback.archived(&part.id);
+            let newest = readback
+                .part_revisions
+                .iter()
+                .filter(|other| other.part == part.id && !archived.contains(&other.number))
+                .map(|other| other.number)
+                .max();
+            if newest != Some(revision.number) {
+                self.problem(format!(
+                    "{}: the current revision is {}, not the newest revision that is not archived ({newest:?})",
+                    part.ipn, revision.number
                 ));
             }
             match serde_json::from_str::<PartRevision>(&revision.snapshot) {
