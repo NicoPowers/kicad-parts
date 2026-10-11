@@ -42,6 +42,19 @@ impl ChangeRecords {
         } else {
             part_revisions_by_id(client, &ids)?
         };
+        // Without the revision an entry makes current, the replica cannot
+        // apply the Change; an error makes the follower reconnect and catch
+        // up instead of guessing.
+        if let Some(missing) = archive_entries.iter().find(|entry| {
+            !made_current
+                .iter()
+                .any(|revision| revision.id == entry.current_revision_after)
+        }) {
+            return Err(CollabError::Protocol(format!(
+                "Change {change_id} makes revision {} current, which could not be fetched",
+                missing.current_revision_after
+            )));
+        }
         Ok(Self {
             details: details_in_change(client, change_id)?,
             revisions: revisions_in_change(client, change_id)?,
@@ -116,6 +129,24 @@ impl CatalogReplica {
                 received: change.seq,
             };
         }
+        // Every revision an archive entry makes current must be at hand;
+        // otherwise nothing is applied and the caller catches up.
+        let complete = records
+            .archive_entries
+            .iter()
+            .filter(|entry| entry.change == change.id)
+            .all(|entry| {
+                records
+                    .made_current
+                    .iter()
+                    .any(|revision| revision.id == entry.current_revision_after)
+            });
+        if !complete {
+            return ApplyResult::Gap {
+                checkpoint: self.checkpoint,
+                received: change.seq,
+            };
+        }
         for saved in records
             .details
             .iter()
@@ -147,19 +178,12 @@ impl CatalogReplica {
             .iter()
             .filter(|entry| entry.change == change.id)
         {
-            match records
+            if let Some(revision) = records
                 .made_current
                 .iter()
                 .find(|revision| revision.id == entry.current_revision_after)
             {
-                Some(revision) => self.make_current(revision),
-                None => {
-                    let part = self.parts.entry(entry.part.clone()).or_default();
-                    part.revision_id.clone_from(&entry.current_revision_after);
-                    part.number = entry.current_revision_number_after;
-                    part.snapshot_sha256.clear();
-                    part.revision = None;
-                }
+                self.make_current(revision);
             }
         }
         self.checkpoint = change.seq;
@@ -393,6 +417,18 @@ mod tests {
                 )
             ),
             ApplyResult::Applied
+        );
+        assert_eq!(replica.parts()["p"].number, 2);
+        // An archive entry whose revision is not at hand applies nothing.
+        assert_eq!(
+            replica.apply(
+                &change(6),
+                &records(&[], &[], &[archive(6, "p", 2, true, 1)], &[])
+            ),
+            ApplyResult::Gap {
+                checkpoint: 5,
+                received: 6
+            }
         );
         assert_eq!(replica.parts()["p"].number, 2);
         assert_eq!(replica.applied_sequences(), [1, 2, 3, 4, 5]);
