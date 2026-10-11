@@ -1,6 +1,6 @@
 # Try the team catalog by hand
 
-This starts a throwaway team server on your computer and opens the desktop app connected to it. You can then edit a resistor, see its history, and restore an older revision. Nothing you do changes the CSV catalog or anything else in the repository.
+This starts a throwaway team server on your computer and opens the desktop app connected to it. You can then edit a resistor and see its history. Nothing you do changes the CSV catalog or anything else in the repository.
 
 ## Build once
 
@@ -48,7 +48,7 @@ The accounts are:
    ```
 
    Sign in there as `second.editor@example.test`. In the first app, choose **Edit details** on the part and change something, but do not save yet. In the second app, save a change to the same part. Now save in the first app: it shows where you started, their version and yours, and lets you save your changes on top of theirs. Changes saved in one app appear in the other by themselves.
-5. Open **History**, select an older revision, and choose **Restore revision N…**. Restoring adds a new revision with the old details; it never deletes or changes a revision.
+5. Open **History** and select a revision to see what changed in it, who changed it, when and why. Revisions are never deleted or changed. There is no way to copy an older revision back.
 
 ## Stop it
 
@@ -64,4 +64,4 @@ Without `--desktop`, the command prints the address and accounts and waits for y
 
 - The app saves only the server address and your email (in `team.json` in its settings folder). It never saves your password or the sign-in session; after a restart you sign in again.
 - For now the app only connects to a team server on this computer (`http://127.0.0.1`, `localhost` or `[::1]`). Live updates use plain HTTP, and a password must not cross a network unencrypted. Connecting to a shared server needs HTTPS first.
-- Members marked "can edit catalog" in PocketBase can edit and restore. Everyone else who signs in can only view. Only an administrator can change that mark, or a member's name, which the history shows as the author of each change.
+- Members marked "can edit catalog" in PocketBase can edit. Everyone else who signs in can only view. Only an administrator can change that mark, or a member's name, which the history shows as the author of each change.

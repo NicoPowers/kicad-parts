@@ -515,7 +515,7 @@ impl<'a> Reporter<'a> {
             part_rows.insert(ipn.clone());
 
             // A row whose part details differ from a revision that an edit
-            // or restore made is kept by an import problem instead.
+            // made is kept by an import problem instead.
             let number = revision.revision.number;
             if let Some((problem, detail)) = self.find_problem(|problem, detail| {
                 problem.code == "csv-row-conflicts-with-current-revision"
