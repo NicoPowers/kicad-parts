@@ -25,9 +25,10 @@
 //!   imports them from a copy of the CSV catalog in that folder instead;
 //! - otherwise, stops when you press Enter.
 //!
-//! Without `--json`, typing `reimport` and pressing Enter imports the
-//! resistors again (to see what an import does to parts edited in the app)
-//! and prints the outcome in words.
+//! Without `--json`, typing `reimport` (or `reimport <folder>`, a copy of
+//! the CSV catalog) and pressing Enter imports the resistors again, to see
+//! what an import does to parts edited in the app, and prints the outcome in
+//! words. Other text gets a short reminder; Enter alone stops the server.
 //!
 //! The server runs without a window in a kill-on-close job, so it also
 //! stops if this command is killed. Its data lives in
@@ -177,21 +178,11 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             std::thread::spawn(move || {
                 for line in std::io::stdin().lock().lines() {
                     let Ok(line) = line else { break };
-                    let line = line.trim();
-                    let from = match line.strip_prefix("reimport") {
-                        Some("") => None,
-                        Some(folder) if folder.starts_with(' ') => {
-                            Some(PathBuf::from(folder.trim()))
-                        }
-                        _ => continue,
+                    let Some(from) = reimport_command(&line) else {
+                        continue;
                     };
-                    let outcome = match from {
-                        None => reimport(&admin, &import),
-                        Some(folder) => services::plan(&folder, "g-res")
-                            .map_err(Into::into)
-                            .and_then(|copy| reimport(&admin, &copy)),
-                    }
-                    .unwrap_or_else(|error| format!("failed: {error}"));
+                    let outcome = reimport_from(&admin, &import, from)
+                        .unwrap_or_else(|error| format!("failed: {error}"));
                     println!("{}", serde_json::json!({ "reimported": outcome }));
                 }
                 let _ = sender.send(Stop::Finished);
@@ -215,23 +206,33 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             drop(out);
             let sender = stop_sender.clone();
             println!(
-                "Type reimport and press Enter to import the resistors again, for example after editing a part in the app."
+                "Type reimport and press Enter to import the resistors again. Type reimport <folder> to import them from a copy of the CSV catalog in that folder."
             );
             let (admin, import) = (admin.clone(), import.clone());
             let typed = (then == Then::WaitForEnter).then(|| sender.clone());
             std::thread::spawn(move || {
                 for line in std::io::stdin().lock().lines() {
                     let Ok(line) = line else { break };
-                    if line.trim() == "reimport" {
-                        match reimport(&admin, &import) {
+                    if let Some(from) = reimport_command(&line) {
+                        match reimport_from(&admin, &import, from) {
                             Ok(outcome) => {
                                 println!("Imported again: {}.", outcome.replace('_', " "))
                             }
                             Err(error) => println!("The import failed: {error}"),
                         }
-                    } else if let Some(sender) = &typed {
-                        let _ = sender.send(Stop::Finished);
-                        return;
+                    } else if line.trim().is_empty() {
+                        // Enter alone stops the server (not with --desktop,
+                        // where closing the app does).
+                        if let Some(sender) = &typed {
+                            let _ = sender.send(Stop::Finished);
+                            return;
+                        }
+                    } else if typed.is_some() {
+                        println!(
+                            "Unknown command. Type reimport or reimport <folder>, or press Enter to stop the team server."
+                        );
+                    } else {
+                        println!("Unknown command. Type reimport or reimport <folder>.");
                     }
                 }
                 if let Some(sender) = &typed {
@@ -268,6 +269,29 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
     removed?;
     Ok(())
+}
+
+/// For a `reimport` or `reimport <folder>` line, the folder to import from
+/// (`None` for the repository); `None` for any other line.
+fn reimport_command(line: &str) -> Option<Option<PathBuf>> {
+    match line.trim().strip_prefix("reimport")? {
+        "" => Some(None),
+        folder if folder.starts_with(' ') => Some(Some(PathBuf::from(folder.trim()))),
+        _ => None,
+    }
+}
+
+/// Imports the resistors again, from `folder` (a copy of the CSV catalog)
+/// or else as planned from the repository.
+fn reimport_from(
+    admin: &collaboration::PocketBaseClient,
+    import: &catalog::CsvImport,
+    folder: Option<PathBuf>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match folder {
+        None => reimport(admin, import),
+        Some(folder) => reimport(admin, &services::plan(&folder, "g-res")?),
+    }
 }
 
 /// Imports the resistors again as an importer would after reading the team
@@ -358,4 +382,22 @@ fn desktop_binary() -> PathBuf {
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
         .unwrap_or_else(|| PathBuf::from(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_reimport_lines_are_commands() {
+        assert_eq!(reimport_command("reimport"), Some(None));
+        assert_eq!(reimport_command("  reimport  "), Some(None));
+        assert_eq!(
+            reimport_command("reimport C:/copy of catalog"),
+            Some(Some(PathBuf::from("C:/copy of catalog")))
+        );
+        for other in ["", "reimprot", "reimports", "stop"] {
+            assert_eq!(reimport_command(other), None, "{other:?}");
+        }
+    }
 }
