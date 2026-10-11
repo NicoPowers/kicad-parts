@@ -3,7 +3,8 @@
 //! `catalog_edits.pb.js` for edits) and the `catalog_*`
 //! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`
 //! `1791600000_catalog_edits.js`, `1791800000_shared_part_details.js`,
-//! `1791900000_archived_revisions.js` and `1792000000_csv_reviews.js`).
+//! `1791900000_archived_revisions.js`, `1792000000_csv_reviews.js` and
+//! `1792100000_uncommitted_changes.js`).
 
 use crate::cad_item::Blob;
 use crate::cad_item::{CadItemDetails, ModelTarget};
@@ -51,8 +52,9 @@ pub struct ImportCommand<'a> {
     pub import: Cow<'a, CsvImport>,
     /// The current revision number the importer read for each IPN. A part
     /// missing here is expected not to exist yet (number 0). This and the
-    /// next three fields are private so that only [`ImportCommand::expecting`]
-    /// and [`ImportCommand::allowing_older_checkout`] set them, which derive
+    /// next four fields are private so that only [`ImportCommand::expecting`],
+    /// [`ImportCommand::allowing_older_checkout`] and
+    /// [`ImportCommand::allowing_uncommitted_changes`] set them, which derive
     /// the correlation ID again. If any part's
     /// current revision differs when the import arrives, the route answers
     /// 409 conflict and writes nothing. See [`ImportCommand::expecting`].
@@ -68,6 +70,10 @@ pub struct ImportCommand<'a> {
     /// Import even though the checkout does not include the team catalog's
     /// latest imports. The run's audit entry records it.
     allow_older_checkout: bool,
+    /// Import even though the files have changes that are not committed
+    /// (the source commit ends in `+dirty`). The route refuses such an
+    /// import without it, and the run's audit entry records it.
+    allow_uncommitted_changes: bool,
 }
 
 impl<'a> ImportCommand<'a> {
@@ -85,6 +91,7 @@ impl<'a> ImportCommand<'a> {
             expected_details: BTreeMap::new(),
             expected_csv_import: 0,
             allow_older_checkout: false,
+            allow_uncommitted_changes: false,
         };
         command.correlation_id = command.derived_correlation_id();
         command
@@ -161,9 +168,25 @@ impl<'a> ImportCommand<'a> {
         self
     }
 
+    /// Whether the import is allowed from files with uncommitted changes.
+    pub fn allow_uncommitted_changes(&self) -> bool {
+        self.allow_uncommitted_changes
+    }
+
+    /// Imports even from files with changes that are not committed, if
+    /// `allow`. Derives the correlation ID again.
+    ///
+    /// Until those changes are committed, a later import from a checkout
+    /// without them undoes them, like an import from an older checkout.
+    pub fn allowing_uncommitted_changes(mut self, allow: bool) -> Self {
+        self.allow_uncommitted_changes = allow;
+        self.correlation_id = self.derived_correlation_id();
+        self
+    }
+
     /// `csv-import-` and 32 hex digits of a hash of everything the route
     /// keys the command on: the import, the expected revisions, the
-    /// expected import run and the older-checkout setting. The same import
+    /// expected import run and the two settings that allow it anyway. The same import
     /// sent again after the catalog moved on gets a new ID, so it is
     /// compared afresh rather than refused as a reused ID.
     fn derived_correlation_id(&self) -> String {
@@ -175,8 +198,8 @@ impl<'a> ImportCommand<'a> {
             key.push_str(&format!("\n{ipn} details={number}"));
         }
         key.push_str(&format!(
-            "\nimport={}\nallow-older-checkout={}",
-            self.expected_csv_import, self.allow_older_checkout
+            "\nimport={}\nallow-older-checkout={}\nallow-uncommitted-changes={}",
+            self.expected_csv_import, self.allow_older_checkout, self.allow_uncommitted_changes
         ));
         format!("csv-import-{}", &sha256_hex(key)[..32])
     }
@@ -189,6 +212,7 @@ impl<'a> ImportCommand<'a> {
             "csvFile": import.csv_file,
             "sourceCommit": import.source_commit,
             "allowOlderCheckout": self.allow_older_checkout,
+            "allowUncommittedChanges": self.allow_uncommitted_changes,
             "expectedCsvImport": self.expected_csv_import,
             "sources": import.sources.iter().map(|source| {
                 let mut file = json!({
@@ -291,8 +315,6 @@ pub struct LatestImport {
     /// empty if it was not recorded.
     pub source_commit: String,
     pub audit_entry: String,
-    /// `(path, byte_sha256)` of every file it read, sorted by path.
-    pub file_hashes: Vec<(String, String)>,
 }
 
 /// The few fields of an audit entry that [`read_import_state`] downloads.
@@ -303,8 +325,6 @@ struct LatestImportFields {
     csv_import_number: u64,
     #[serde(default)]
     source_commit: String,
-    #[serde(default)]
-    file_hashes: String,
 }
 
 /// The few fields of a CAD item revision that [`read_import_state`]
@@ -342,17 +362,11 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
         "catalog_audit_entries",
         "csv_import_number > 0",
         "csv_import_number",
-        "id,csv_file,csv_import_number,source_commit,file_hashes",
+        "id,csv_file,csv_import_number,source_commit",
     )?;
     let current_cad = read_current_cad(client, &parts)?;
     let mut latest: BTreeMap<String, LatestImport> = BTreeMap::new();
     for entry in entries {
-        let file_hashes = serde_json::from_str(&entry.file_hashes).map_err(|error| {
-            CollabError::Protocol(format!(
-                "import run {} records no readable file hashes: {error}",
-                entry.csv_import_number
-            ))
-        })?;
         latest.insert(
             entry.csv_file.clone(),
             LatestImport {
@@ -360,7 +374,6 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
                 csv_import_number: entry.csv_import_number,
                 source_commit: entry.source_commit,
                 audit_entry: entry.id,
-                file_hashes,
             },
         );
     }
@@ -1505,6 +1518,9 @@ pub struct StoredAuditEntry {
     /// catalog's latest imports.
     #[serde(default)]
     pub allowed_older_checkout: bool,
+    /// The importer was told to import from files with uncommitted changes.
+    #[serde(default)]
+    pub allowed_uncommitted_changes: bool,
 }
 
 impl StoredAuditEntry {
@@ -1825,6 +1841,14 @@ mod tests {
                 .contains("part-revision/1")
         );
         assert_eq!(body["allowOlderCheckout"], false);
+        assert_eq!(body["allowUncommittedChanges"], false);
+        // Allowing uncommitted changes is sent and gives a new correlation
+        // ID, so it is never taken for the same request.
+        let plain = ImportCommand::new(&import, "r").expecting(&state);
+        let allowed = plain.clone().allowing_uncommitted_changes(true);
+        assert!(allowed.allow_uncommitted_changes());
+        assert_eq!(allowed.body()["allowUncommittedChanges"], true);
+        assert_ne!(allowed.correlation_id, plain.correlation_id);
         let csv = body["sources"]
             .as_array()
             .unwrap()

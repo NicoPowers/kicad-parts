@@ -10,7 +10,7 @@ use catalog::pocketbase::{
     read_back, read_import_state, submit_edit, submit_import,
 };
 use catalog::{CsvCatalog, PartDetails, PartRevision, sha256_hex};
-use catalog_import::services;
+use catalog_import::services::{self, Allow};
 use collaboration::{CollabError, PocketBaseClient};
 use native_services::PocketBaseServer;
 use std::fs;
@@ -529,14 +529,14 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     // item or blob. Its ID differs from the first import's because it
     // expects the parts that import made.
     let again = services::plan(&root, "g-res").unwrap();
-    let retry = services::prepare_import(&admin, &root, &again, REASON, false).unwrap();
+    let retry = services::prepare_import(&admin, &root, &again, REASON, Allow::default()).unwrap();
     assert_ne!(retry.correlation_id, command.correlation_id);
     let noop = submit_import(&admin, &retry).unwrap();
     assert_eq!(noop.status, 422, "{}", noop.body);
     assert!(matches!(noop.outcome, ImportOutcome::Noop { .. }));
     assert_eq!(read_back(&admin).unwrap(), stored);
     // Preparing and sending it once more replays that answer.
-    let rerun = services::prepare_import(&admin, &root, &again, REASON, false).unwrap();
+    let rerun = services::prepare_import(&admin, &root, &again, REASON, Allow::default()).unwrap();
     assert_eq!(rerun.correlation_id, retry.correlation_id);
     let replayed = submit_import(&admin, &rerun).unwrap();
     assert_eq!(
@@ -839,6 +839,23 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         &|body| body["allowOlderCheckout"] = "yes".into(),
         "allowOlderCheckout setting must be true or false",
     );
+    refused(
+        "allow-uncommitted-as-text",
+        &|body| body["allowUncommittedChanges"] = "yes".into(),
+        "allowUncommittedChanges setting must be true or false",
+    );
+    // Files with uncommitted changes come only with the setting that allows
+    // them; the server cannot run git, but it can check that.
+    for setting in [serde_json::Value::Null, false.into()] {
+        refused(
+            "uncommitted-without-setting",
+            &|body| {
+                body["sourceCommit"] = format!("{}+dirty", "a".repeat(40)).into();
+                body["allowUncommittedChanges"] = setting.clone();
+            },
+            "changes that are not committed (its source commit ends in +dirty). Commit them",
+        );
+    }
     // The server numbers CAD item revisions itself and refuses a forged ID
     // or number, whether or not it is consistent with the rest.
     refused(
@@ -1589,10 +1606,11 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
             .unwrap()
     };
 
-    // With a CSV review and an archived revision, the newest undo refuses:
-    // the older version cannot read CSV reviews (nor, further back, archive
-    // entries or part details kept apart from revisions). Nothing is
-    // changed.
+    // With a CSV review and an archived revision, undoing past the CSV
+    // reviews refuses: the older version cannot read CSV reviews (nor,
+    // further back, archive entries or part details kept apart from
+    // revisions). An undo of several steps is refused as a whole, so
+    // nothing is changed, not even the newest step, which this data allows.
     let populated = tempfile::tempdir().unwrap();
     let options = services::options(&root, populated.path());
     let (server, admin, _superuser) = services::start(&root, populated.path()).unwrap();
@@ -1665,7 +1683,7 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
         200
     );
     server.stop();
-    let said = migrate(&root, &options, &["down", "1"]);
+    let said = migrate(&root, &options, &["down", "2"]);
     assert!(
         said.contains("has CSV reviews")
             && said.contains("Nothing was changed")
@@ -1674,7 +1692,7 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
     );
     // Undoing further is refused at the first step too, so neither the
     // archive nor the details migration is undone.
-    let said = migrate(&root, &options, &["down", "3"]);
+    let said = migrate(&root, &options, &["down", "4"]);
     assert!(
         said.contains("has CSV reviews") && !said.contains("Reverted"),
         "{said}"
@@ -1704,8 +1722,9 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
         "(id = @request.auth.id) && @request.body.can_edit_catalog:isset = false && @request.body.name:isset = false"
     );
     assert!(fields.contains("can_edit_catalog"));
-    let said = migrate(&root, &options, &["down", "6"]);
+    let said = migrate(&root, &options, &["down", "7"]);
     for reverted in [
+        "1792100000_uncommitted_changes.js",
         "1792000000_csv_reviews.js",
         "1791900000_archived_revisions.js",
         "1791800000_shared_part_details.js",
@@ -1790,6 +1809,55 @@ fn migrate(root: &Path, options: &native_services::PocketBaseOptions, args: &[&s
 }
 
 #[test]
+fn an_import_allowed_from_uncommitted_changes_is_recorded_kept_and_not_undone() {
+    let root = repository();
+    let state = tempfile::tempdir().unwrap();
+    let options = services::options(&root, state.path());
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let dirty = format!("{}+dirty", "b".repeat(40));
+    let import = CsvCatalog::new(&root)
+        .import("g-res", Some(dirty.clone()))
+        .unwrap();
+    applied(
+        &submit_import(
+            &admin,
+            &ImportCommand::new(&import, REASON).allowing_uncommitted_changes(true),
+        )
+        .unwrap(),
+    );
+    let entry = read_back(&admin).unwrap().audit_entries[0].clone();
+    assert!(entry.allowed_uncommitted_changes && !entry.allowed_older_checkout);
+    assert_eq!(entry.source_commit, dirty);
+    // Nobody changes the record afterwards, not even a superuser.
+    let path = format!(
+        "/api/collections/catalog_audit_entries/records/{}",
+        entry.id
+    );
+    let changed = admin
+        .patch_json(
+            &path,
+            &serde_json::json!({ "allowed_uncommitted_changes": false }),
+        )
+        .unwrap();
+    assert_eq!(changed.status, 403, "{}", changed.body);
+    assert!(
+        read_back(&admin).unwrap().audit_entries[0].allowed_uncommitted_changes,
+        "the record changed"
+    );
+    server.stop();
+
+    // The older version would lose that record, so the undo refuses and
+    // changes nothing.
+    let said = migrate(&root, &options, &["down", "1"]);
+    assert!(
+        said.contains("allowed from uncommitted changes")
+            && said.contains("Nothing was changed")
+            && !said.contains("Reverted"),
+        "{said}"
+    );
+}
+
+#[test]
 fn team_server_data_from_before_numbered_cad_revisions_is_refused_not_changed() {
     let root = repository();
     let state = tempfile::tempdir().unwrap();
@@ -1803,7 +1871,7 @@ fn team_server_data_from_before_numbered_cad_revisions_is_refused_not_changed() 
     // Undoing is refused while there is data: undoing the shared part
     // details refuses saved part details, and the undo stops there as a
     // whole, so the numbering is never undone either.
-    let said = migrate(&root, &options, &["down", "4"]);
+    let said = migrate(&root, &options, &["down", "5"]);
     assert!(
         said.contains("which the older version cannot read"),
         "{said}"

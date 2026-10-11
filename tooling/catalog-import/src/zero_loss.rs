@@ -200,6 +200,7 @@ pub struct ImportRunAccount {
     pub change: String,
     pub source_commit: String,
     pub allowed_older_checkout: bool,
+    pub allowed_uncommitted_changes: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -475,6 +476,7 @@ impl<'a> Reporter<'a> {
             change: entry.change.clone(),
             source_commit: entry.source_commit.clone(),
             allowed_older_checkout: entry.allowed_older_checkout,
+            allowed_uncommitted_changes: entry.allowed_uncommitted_changes,
         };
         let csv = self.rebuild_csv(&run, &source_path, &document.byte_sha256, &document.rows);
         let run_parts: BTreeMap<&str, (u32, u32)> = run

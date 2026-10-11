@@ -5,7 +5,7 @@
 // pocketbase::ImportCommand):
 //
 //   { correlationId, reason, csvFile, sourceCommit, allowOlderCheckout,
-//     expectedCsvImport,
+//     allowUncommittedChanges, expectedCsvImport,
 //     sources: [{ role, path, byteSha256, size, headerRaw, rows }],
 //     blobs: [{ sha256, size, text | base64 }],
 //     cadItemRevisions: [{ id, cadItemId, kind, key, expectedRevision,
@@ -28,7 +28,13 @@
 // Excluded from BOM); `source` is the CSV row both came from. `allowOlderCheckout` says
 // the importer was told to import from a checkout older than the team
 // catalog's latest imports (the importer checks git ancestry; the server
-// cannot), and is recorded on the audit entry.
+// cannot), and is recorded on the audit entry. A `sourceCommit` ending in
+// `+dirty` means the files have changes that are not committed; such an
+// import is refused (400) unless `allowUncommittedChanges` is true, which
+// says the importer was told to import them anyway, and is recorded on the
+// audit entry too. The server cannot run git, so it trusts the importer to
+// mark uncommitted changes; it checks only that the mark comes with the
+// setting.
 //
 // CAD item revisions are numbered from 1 per CAD item, like part
 // revisions, and the current revision is the newest. A request sends one
@@ -192,6 +198,17 @@ routerAdd(
     const allowOlderCheckout = body.allowOlderCheckout === undefined || body.allowOlderCheckout === null ? false : body.allowOlderCheckout;
     if (typeof allowOlderCheckout !== "boolean") {
       fail("the allowOlderCheckout setting must be true or false");
+    }
+    const allowUncommittedChanges =
+      body.allowUncommittedChanges === undefined || body.allowUncommittedChanges === null ? false : body.allowUncommittedChanges;
+    if (typeof allowUncommittedChanges !== "boolean") {
+      fail("the allowUncommittedChanges setting must be true or false");
+    }
+    if (sourceCommit.endsWith("+dirty") && !allowUncommittedChanges) {
+      fail(
+        "the files of this import have changes that are not committed (its source commit ends in +dirty). " +
+          "Commit them and import again, or allow uncommitted changes to import them anyway",
+      );
     }
     // The number of the latest import run of this CSV file that the
     // importer checked its checkout against (0 if there was none).
@@ -511,6 +528,7 @@ routerAdd(
         csvFile,
         sourceCommit,
         allowOlderCheckout,
+        allowUncommittedChanges,
         expectedCsvImport,
         // A CSV file's rows are fixed by its byte hash, checked above.
         sources.map((source) => [source.role, source.path, source.byte_sha256, source.size, source.header_raw]),
@@ -1196,6 +1214,7 @@ routerAdd(
         audit.set("csv_import_number", lastRun ? lastRun.getInt("csv_import_number") + 1 : 1);
         audit.set("source_commit", sourceCommit);
         audit.set("allowed_older_checkout", allowOlderCheckout);
+        audit.set("allowed_uncommitted_changes", allowUncommittedChanges);
         audit.set("file_hashes", fileHashes);
         audit.set(
           "sources",

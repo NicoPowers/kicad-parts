@@ -101,7 +101,8 @@ pub const GIT: &str = "git";
 /// What git said, or that it could not be started.
 #[derive(Debug)]
 pub(crate) enum GitAnswer {
-    /// git ran; its exit code and trimmed standard output.
+    /// git ran; its exit code and its standard output without the
+    /// whitespace at its end.
     Ran { code: Option<i32>, stdout: String },
     /// git could not be started: it is not installed or not on the PATH.
     Missing,
@@ -116,7 +117,11 @@ pub(crate) fn run_git(program: &str, repository: &Path, args: &[&str]) -> GitAns
         Err(_) => GitAnswer::Missing,
         Ok(output) => GitAnswer::Ran {
             code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+            // Only the end is trimmed: `git status --porcelain` starts
+            // lines with a space that matters.
+            stdout: String::from_utf8_lossy(&output.stdout)
+                .trim_end()
+                .to_owned(),
         },
     }
 }
@@ -203,28 +208,127 @@ pub fn plan(repository: &Path, csv_file: &str) -> Result<CsvImport, ImportError>
     catalog.import(csv_file, source_commit(repository, &inputs))
 }
 
+/// What an import is allowed to do although it is normally refused. Each
+/// one that is used is recorded on the run's audit entry.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Allow {
+    /// Import from a checkout that does not include the team catalog's
+    /// latest imports. This makes the checkout's older symbols, footprints
+    /// and 3D models the current revisions of their CAD items, for every
+    /// part that uses them (see `ImportCommand::allowing_older_checkout`).
+    pub older_checkout: bool,
+    /// Import files that have changes that are not committed. Until they
+    /// are committed, a later import from a checkout without them undoes
+    /// them.
+    pub uncommitted_changes: bool,
+}
+
 /// Reads the team catalog and returns the command for `import`, expecting
 /// each part's current revision as read. Refuses, with a plain-language
-/// reason, if the import's checkout (`repository`) does not include the team
-/// catalog's latest imports, unless `allow_older_checkout` is set; the run's
-/// audit entry then records that it was allowed. Allowing it makes the
-/// checkout's older symbols, footprints and 3D models the current revisions
-/// of their CAD items, for every part that uses them (see
-/// `ImportCommand::allowing_older_checkout`).
+/// reason:
+///
+/// - before sending anything, if the files `import` reads have changes
+///   that are not committed, unless `allow.uncommitted_changes` is set
+///   (see [`check_committed`]);
+/// - if the import's checkout (`repository`) does not include the team
+///   catalog's latest imports, unless `allow.older_checkout` is set.
+///
+/// The run's audit entry records each one that was allowed and used.
 pub fn prepare_import<'a>(
     client: &PocketBaseClient,
     repository: &Path,
     import: &'a CsvImport,
     reason: &str,
-    allow_older_checkout: bool,
+    allow: Allow,
 ) -> Result<ImportCommand<'a>, String> {
+    check_committed(repository, import, allow)?;
     let state = read_import_state(client).map_err(|error| error.to_string())?;
-    if !allow_older_checkout {
+    if !allow.older_checkout {
         crate::checkout::check_checkout(repository, import, &state)?;
     }
     Ok(ImportCommand::new(import, reason)
         .expecting(&state)
-        .allowing_older_checkout(allow_older_checkout))
+        .allowing_older_checkout(allow.older_checkout)
+        .allowing_uncommitted_changes(allow.uncommitted_changes && has_uncommitted_changes(import)))
+}
+
+/// Refuses `import` if the files it reads have changes that are not
+/// committed, unless `allow.uncommitted_changes` is set. Only the files the
+/// import reads count (its CSV file, substitutes.csv, and the symbols,
+/// footprints and 3D models its parts use), so other work in the checkout
+/// never blocks an import. The reason names the changed files (at most 10).
+pub fn check_committed(repository: &Path, import: &CsvImport, allow: Allow) -> Result<(), String> {
+    if allow.uncommitted_changes || !has_uncommitted_changes(import) {
+        return Ok(());
+    }
+    let inputs: Vec<&str> = import
+        .sources
+        .iter()
+        .map(|source| source.path.as_str())
+        .collect();
+    let mut changed = uncommitted_files(repository, &inputs);
+    let named = if changed.is_empty() {
+        // The files were changed back after the import was planned.
+        "the files this import reads".to_owned()
+    } else if changed.len() > 10 {
+        let more = changed.len() - 10;
+        changed.truncate(10);
+        format!("{} and {more} more", changed.join(", "))
+    } else {
+        changed.join(", ")
+    };
+    Err(format!(
+        "{named} {} changes that are not committed. Commit them first and import again, so the team catalog matches a commit everyone can check out. To import them anyway, allow uncommitted changes (--allow-uncommitted-changes); until they are committed, a later import from a checkout without them will undo them.",
+        if changed.len() == 1 { "has" } else { "have" }
+    ))
+}
+
+/// Whether `import` was read from files with changes that are not
+/// committed: its source commit ends in [`DIRTY_SUFFIX`].
+pub fn has_uncommitted_changes(import: &CsvImport) -> bool {
+    import
+        .source_commit
+        .as_deref()
+        .is_some_and(|commit| commit.ends_with(DIRTY_SUFFIX))
+}
+
+/// The paths among `inputs` that are modified, staged or untracked in
+/// `repository`, as git names them, sorted. Empty if git cannot tell.
+pub fn uncommitted_files(repository: &Path, inputs: &[&str]) -> Vec<String> {
+    // Paths are taken literally, never as patterns.
+    let mut status = vec![
+        "--literal-pathspecs",
+        "status",
+        "--porcelain",
+        "-z",
+        "--untracked-files=all",
+        "--",
+    ];
+    status.extend_from_slice(inputs);
+    let GitAnswer::Ran {
+        code: Some(0),
+        stdout,
+    } = run_git(GIT, repository, &status)
+    else {
+        return Vec::new();
+    };
+    // Each entry is two status letters, a space and the path, ending in a
+    // NUL; a rename or copy is followed by its old path, also ending in a
+    // NUL, which is skipped.
+    let mut paths = Vec::new();
+    let mut entries = stdout.split('\0');
+    while let Some(entry) = entries.next() {
+        let Some(path) = entry.get(3..) else {
+            continue;
+        };
+        if entry.starts_with('R') || entry.starts_with('C') {
+            entries.next();
+        }
+        paths.push(path.to_owned());
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 /// This repository's root.
@@ -295,5 +399,136 @@ mod tests {
             read_source_commit(&repository_root(), &[]),
             SourceCommit::Commit(_)
         ));
+    }
+
+    /// Every file the resistor import reads.
+    const RESISTOR_INPUTS: [&str; 4] = [
+        "database/g-res.csv",
+        "database/substitutes.csv",
+        "symbols/g-pas.kicad_sym",
+        "footprints/g-res.pretty/R_0603_1608Metric.kicad_mod",
+    ];
+
+    /// A throwaway git repository holding a committed copy of the resistor
+    /// inputs, so tests can change files without touching this repository.
+    /// Returns the repository and the folder its (empty) hooks live in.
+    fn committed_resistors() -> (tempfile::TempDir, tempfile::TempDir) {
+        let repository = tempfile::tempdir().unwrap();
+        let hooks = tempfile::tempdir().unwrap();
+        let root = repository.path();
+        for path in RESISTOR_INPUTS {
+            let target = root.join(path);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(repository_root().join(path), target).unwrap();
+        }
+        let hooks_path = format!("core.hooksPath={}", hooks.path().display());
+        let fixture = |args: &[&str]| {
+            let mut all = vec![
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.autocrlf=false",
+                "-c",
+                hooks_path.as_str(),
+            ];
+            all.extend_from_slice(args);
+            git(root, &all).unwrap()
+        };
+        fixture(&["init", "-q"]);
+        let mut add = vec!["add", "--"];
+        add.extend_from_slice(&RESISTOR_INPUTS);
+        fixture(&add);
+        fixture(&["commit", "-q", "-m", "fixture"]);
+        (repository, hooks)
+    }
+
+    /// A client for an address where nothing listens, so any request it
+    /// sends fails with a transport error.
+    fn nobody_listening() -> PocketBaseClient {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        PocketBaseClient::new(&format!("http://{address}"))
+    }
+
+    #[test]
+    fn uncommitted_changes_are_refused_before_anything_is_sent() {
+        let (repository, _hooks) = committed_resistors();
+        let root = repository.path();
+        let symbols = root.join("symbols/g-pas.kicad_sym");
+        let text = std::fs::read_to_string(&symbols).unwrap();
+        std::fs::write(&symbols, format!("{text}\n")).unwrap();
+        let substitutes = root.join("database/substitutes.csv");
+        let header = std::fs::read_to_string(&substitutes).unwrap();
+        std::fs::write(
+            &substitutes,
+            format!("{header}RES-0000-1002,ALT-10K,Vishay,,DigiKey,541-10K-ND\n"),
+        )
+        .unwrap();
+        let import = plan(root, "g-res").unwrap();
+        assert!(has_uncommitted_changes(&import));
+        // Nothing listens at the client's address: a request would fail
+        // with a transport error, not with this reason.
+        let refused =
+            prepare_import(&nobody_listening(), root, &import, "r", Allow::default()).unwrap_err();
+        assert!(
+            refused.starts_with(
+                "database/substitutes.csv, symbols/g-pas.kicad_sym have changes that are not committed. Commit them first"
+            ) && refused.contains("--allow-uncommitted-changes"),
+            "{refused}"
+        );
+        // Allowing an older checkout does not allow uncommitted changes.
+        let older = Allow {
+            older_checkout: true,
+            ..Allow::default()
+        };
+        assert!(
+            check_committed(root, &import, older)
+                .unwrap_err()
+                .contains("not committed")
+        );
+        let allowed = Allow {
+            uncommitted_changes: true,
+            ..Allow::default()
+        };
+        assert_eq!(check_committed(root, &import, allowed), Ok(()));
+    }
+
+    #[test]
+    fn only_changes_to_the_files_an_import_reads_count() {
+        let (repository, _hooks) = committed_resistors();
+        let root = repository.path();
+        let clean = plan(root, "g-res").unwrap();
+        assert!(!has_uncommitted_changes(&clean));
+        assert_eq!(check_committed(root, &clean, Allow::default()), Ok(()));
+        // Other work in the checkout: a new file and a file the resistor
+        // import does not read.
+        std::fs::write(root.join("notes.txt"), "unrelated\n").unwrap();
+        std::fs::write(root.join("database/g-cap.csv"), "IPN\n").unwrap();
+        let unrelated = plan(root, "g-res").unwrap();
+        assert_eq!(unrelated.source_commit, clean.source_commit);
+        assert_eq!(check_committed(root, &unrelated, Allow::default()), Ok(()));
+        // A file it reads, changed and staged, then a new file under a
+        // name with a space, are named as git names them.
+        let csv = root.join("database/g-res.csv");
+        let text = std::fs::read_to_string(&csv).unwrap();
+        std::fs::write(&csv, format!("{text}\n")).unwrap();
+        git(root, &["add", "--", "database/g-res.csv"]).unwrap();
+        std::fs::write(root.join("a new.txt"), "x\n").unwrap();
+        assert_eq!(
+            uncommitted_files(
+                root,
+                &[
+                    "database/g-res.csv",
+                    "a new.txt",
+                    "database/substitutes.csv"
+                ]
+            ),
+            ["a new.txt", "database/g-res.csv"]
+        );
     }
 }

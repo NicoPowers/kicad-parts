@@ -1,12 +1,14 @@
-//! `catalog-import pilot [REPOSITORY_ROOT] [CSV_FILE]`
+//! `catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]`
 //!
 //! Imports one CSV catalog file (default `g-res`) into a disposable,
 //! loopback-only PocketBase, imports it again to show nothing new is
-//! created (each import first reads the team catalog, refuses an older
-//! checkout and expects each part's current revision), reads every Catalog record back, and prints the zero-loss
-//! report against the oracle. The PocketBase and its data are deleted when
-//! the command ends; the repository is only read. Exits 1 if anything was
-//! lost.
+//! created, reads every Catalog record back, and prints the zero-loss
+//! report against the oracle. Each import does what an import into the
+//! team catalog does: it refuses files with changes that are not committed
+//! unless `--allow-uncommitted-changes` is given, reads the team catalog,
+//! refuses an older checkout and expects each part's current revision. The
+//! PocketBase and its data are deleted when the command ends; the
+//! repository is only read. Exits 1 if anything was lost.
 //!
 //! `catalog-import local-team-server [--desktop | --json]`
 //!
@@ -25,6 +27,10 @@
 //!   imports them from a copy of the CSV catalog in that folder instead;
 //! - otherwise, stops when you press Enter.
 //!
+//! The team server is thrown away when it stops, so its imports are allowed
+//! from files with uncommitted changes (each such run records that), and
+//! trying out a change does not need a commit.
+//!
 //! Without `--json`, typing `reimport` (or `reimport <folder>`, a copy of
 //! the CSV catalog) and pressing Enter imports the resistors again, to see
 //! what an import does to parts edited in the app, and prints the outcome in
@@ -40,7 +46,7 @@ use catalog::pocketbase::{
     ImportCommand, ImportOutcome, read_back, read_import_state, submit_import,
 };
 use catalog_import::run_folder::RunFolder;
-use catalog_import::services::{self, Member};
+use catalog_import::services::{self, Allow, Member};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::Command;
@@ -53,7 +59,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage: catalog-import pilot [REPOSITORY_ROOT] [CSV_FILE]\n       catalog-import local-team-server [--desktop | --json]";
+const USAGE: &str = "usage: catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]\n       catalog-import local-team-server [--desktop | --json]";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -65,28 +71,43 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let root = args
+    const ALLOW_UNCOMMITTED: &str = "--allow-uncommitted-changes";
+    let allow = Allow {
+        uncommitted_changes: args.iter().any(|arg| arg == ALLOW_UNCOMMITTED),
+        ..Allow::default()
+    };
+    let positional: Vec<&String> = args
+        .iter()
+        .filter(|arg| *arg != ALLOW_UNCOMMITTED)
+        .collect();
+    if positional.len() > 2 || positional.iter().any(|arg| arg.starts_with("--")) {
+        return Err(USAGE.into());
+    }
+    let root = positional
         .first()
-        .map(PathBuf::from)
+        .map(|arg| PathBuf::from(arg.as_str()))
         .unwrap_or_else(services::repository_root);
-    let csv_file = args.get(1).map(String::as_str).unwrap_or("g-res");
+    let csv_file = positional.get(1).map(|arg| arg.as_str()).unwrap_or("g-res");
     let oracle = csv_catalog_fixture::load_manifest(
         &root.join("fixtures/import/csv-catalog/manifest.json"),
     )?;
 
     let import = services::plan(&root, csv_file)?;
+    // Refuse uncommitted changes before starting PocketBase; prepare_import
+    // checks again.
+    services::check_committed(&root, &import, allow)?;
     let reason = format!("Import the parts from database/{csv_file}.csv");
 
     let state = tempfile::tempdir()?;
     let (server, admin, _superuser) = services::start(&services::repository_root(), state.path())?;
     // Each import reads the team catalog first, as a real import does: it
     // refuses an older checkout and expects each part's current revision.
-    let first_command = services::prepare_import(&admin, &root, &import, &reason, false)?;
+    let first_command = services::prepare_import(&admin, &root, &import, &reason, allow)?;
     let first = submit_import(&admin, &first_command)?;
     let after_first = read_back(&admin)?;
     // Its correlation ID differs from the first one's because it expects
     // the parts the first one made.
-    let second_command = services::prepare_import(&admin, &root, &import, &reason, false)?;
+    let second_command = services::prepare_import(&admin, &root, &import, &reason, allow)?;
     let second = submit_import(&admin, &second_command)?;
     let readback = read_back(&admin)?;
     server.stop();
@@ -139,7 +160,8 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let (server, admin, _superuser) = services::start(&root, folder.path())?;
     let reply = submit_import(
         &admin,
-        &ImportCommand::new(&import, "Import the resistors from database/g-res.csv"),
+        &ImportCommand::new(&import, "Import the resistors from database/g-res.csv")
+            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
     )?;
     if !matches!(reply.outcome, ImportOutcome::Applied { .. }) {
         return Err(format!("the import did not apply: {}", reply.body).into());
@@ -295,14 +317,16 @@ fn reimport_from(
 }
 
 /// Imports the resistors again as an importer would after reading the team
-/// catalog, and names the outcome.
+/// catalog, and names the outcome. Uncommitted changes are allowed, because
+/// this team server is thrown away when it stops.
 fn reimport(
     admin: &collaboration::PocketBaseClient,
     import: &catalog::CsvImport,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let state = read_import_state(admin)?;
     let command = ImportCommand::new(import, "Import the resistors from database/g-res.csv")
-        .expecting(&state);
+        .expecting(&state)
+        .allowing_uncommitted_changes(services::has_uncommitted_changes(import));
     let reply = submit_import(admin, &command)?;
     Ok(match reply.outcome {
         ImportOutcome::Applied { .. } => "applied".to_owned(),

@@ -1,6 +1,7 @@
 //! Re-imports of the resistor CSV file (g-res) into a real, disposable
 //! PocketBase: the zero-loss report holds after every kind of change to the
-//! CSV catalog, and an import never undoes newer changes.
+//! CSV catalog, an import never undoes newer changes, and files with
+//! uncommitted changes import only when that is allowed.
 //!
 //! Each test starts its own PocketBase on a random 127.0.0.1 port with a
 //! temp data directory and stops it at the end. The repository is only
@@ -14,7 +15,8 @@ use catalog::{
     CadItemDetails, CadItemId, CadItemKind, CadItemRevisionId, CadReferenceRole,
     CadReferenceTarget, CsvCatalog, CsvImport, ModelTarget, PartDetails, PartRevision, sha256_hex,
 };
-use catalog_import::{ZeroLossReport, services};
+use catalog_import::ZeroLossReport;
+use catalog_import::services::{self, Allow};
 use collaboration::PocketBaseClient;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -491,7 +493,8 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
     let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
     let import = services::plan(root, "g-res").unwrap();
     assert_eq!(import.source_commit.as_deref(), Some(newer.as_str()));
-    let command = services::prepare_import(&admin, root, &import, REASON, false).unwrap();
+    let command =
+        services::prepare_import(&admin, root, &import, REASON, Allow::default()).unwrap();
     assert_eq!(
         outcome(&submit_import(&admin, &command).unwrap()),
         "applied"
@@ -507,7 +510,8 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
     git(&["checkout", "-q", &older]);
     let old_import = services::plan(root, "g-res").unwrap();
     assert_eq!(old_import.source_commit.as_deref(), Some(older.as_str()));
-    let refused = services::prepare_import(&admin, root, &old_import, REASON, false).unwrap_err();
+    let refused =
+        services::prepare_import(&admin, root, &old_import, REASON, Allow::default()).unwrap_err();
     assert!(
         refused.contains(&format!("does not include commit {}", &newer[..12]))
             && refused.contains("database/g-res.csv"),
@@ -516,7 +520,17 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
     assert_eq!(read_back(&admin).unwrap(), imported);
 
     // Allowed explicitly, it imports, and the audit entry records that.
-    let command = services::prepare_import(&admin, root, &old_import, REASON, true).unwrap();
+    let command = services::prepare_import(
+        &admin,
+        root,
+        &old_import,
+        REASON,
+        Allow {
+            older_checkout: true,
+            ..Allow::default()
+        },
+    )
+    .unwrap();
     assert!(command.allow_older_checkout());
     assert_eq!(
         outcome(&submit_import(&admin, &command).unwrap()),
@@ -538,8 +552,8 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
         1
     );
 
-    // A changed input makes the source commit `<commit>+dirty`, which counts
-    // as its base commit: the newer checkout with a local change imports.
+    // A changed input makes the source commit `<commit>+dirty`. That import
+    // is refused before anything is sent: commit first.
     git(&["checkout", "-q", &newer]);
     let substitutes = root.join(SUBSTITUTES_CSV);
     let header = fs::read_to_string(&substitutes).unwrap();
@@ -550,66 +564,52 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
     .unwrap();
     let dirty = services::plan(root, "g-res").unwrap();
     assert_eq!(dirty.source_commit, Some(format!("{newer}+dirty")));
-    let command = services::prepare_import(&admin, root, &dirty, REASON, false).unwrap();
+    let refused =
+        services::prepare_import(&admin, root, &dirty, REASON, Allow::default()).unwrap_err();
+    assert!(
+        refused.starts_with(
+            "database/substitutes.csv has changes that are not committed. Commit them first"
+        ),
+        "{refused}"
+    );
+    // A client that skips that check is refused by the server, which
+    // writes nothing.
+    let unchecked =
+        ImportCommand::new(&dirty, REASON).expecting(&read_import_state(&admin).unwrap());
+    let reply = admin
+        .post_json(catalog::pocketbase::CSV_IMPORT_ROUTE, &unchecked.body())
+        .unwrap();
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert!(reply.body.contains("not committed"), "{}", reply.body);
+    assert_eq!(read_back(&admin).unwrap(), stored);
+
+    // Allowed explicitly, it imports, and the audit entry records that.
+    let allow_uncommitted = Allow {
+        uncommitted_changes: true,
+        ..Allow::default()
+    };
+    let command =
+        services::prepare_import(&admin, root, &dirty, REASON, allow_uncommitted).unwrap();
+    assert!(command.allow_uncommitted_changes() && !command.allow_older_checkout());
     assert_eq!(
         outcome(&submit_import(&admin, &command).unwrap()),
         "applied"
     );
     let after_dirty = read_back(&admin).unwrap();
-    assert!(!latest_audit_entry(&after_dirty).allowed_older_checkout);
-
-    // A clean checkout of that same commit would undo the uncommitted
-    // change: refused unless allowed. So are other uncommitted files.
-    git(&["checkout", "-q", "--", SUBSTITUTES_CSV]);
-    let clean = services::plan(root, "g-res").unwrap();
-    assert_eq!(clean.source_commit.as_deref(), Some(newer.as_str()));
-    let refused = services::prepare_import(&admin, root, &clean, REASON, false).unwrap_err();
-    assert!(
-        refused.contains("came from uncommitted changes on commit")
-            && refused.contains(&newer[..12]),
-        "{refused}"
-    );
-    fs::write(
-        &substitutes,
-        format!("{header}RES-0000-1002,ALT-10K,Vishay,,DigiKey,541-10K-OTHER\n"),
-    )
-    .unwrap();
-    let other = services::plan(root, "g-res").unwrap();
-    assert_eq!(other.source_commit, Some(format!("{newer}+dirty")));
-    let refused = services::prepare_import(&admin, root, &other, REASON, false).unwrap_err();
-    assert!(refused.contains("uncommitted changes"), "{refused}");
-    assert_eq!(read_back(&admin).unwrap(), after_dirty);
-    // The same uncommitted files again are accepted (and change nothing).
-    fs::write(
-        &substitutes,
-        format!("{header}RES-0000-1002,ALT-10K,Vishay,,DigiKey,541-10K-ND\n"),
-    )
-    .unwrap();
-    let same = services::plan(root, "g-res").unwrap();
-    let command = services::prepare_import(&admin, root, &same, REASON, false).unwrap();
-    assert_eq!(outcome(&submit_import(&admin, &command).unwrap()), "noop");
-    // An unrelated later commit on top of the clean commit would undo the
-    // uncommitted change just the same: refused.
-    git(&["checkout", "-q", "--", SUBSTITUTES_CSV]);
-    fs::write(root.join("notes.txt"), "unrelated\n").unwrap();
-    git(&["add", "--", "notes.txt"]);
-    git(&["commit", "-q", "-m", "unrelated"]);
-    let unrelated = services::plan(root, "g-res").unwrap();
+    let entry = latest_audit_entry(&after_dirty);
+    assert!(entry.allowed_uncommitted_changes && !entry.allowed_older_checkout);
+    assert_eq!(entry.source_commit, format!("{newer}+dirty"));
     assert_eq!(
-        unrelated.source_commit.as_deref(),
-        Some(git(&["rev-parse", "HEAD"]).as_str())
+        after_dirty
+            .audit_entries
+            .iter()
+            .filter(|entry| entry.allowed_uncommitted_changes)
+            .count(),
+        1
     );
-    let refused = services::prepare_import(&admin, root, &unrelated, REASON, false).unwrap_err();
-    assert!(
-        refused.contains("other copies of database/substitutes.csv"),
-        "{refused}"
-    );
-    // Committing the change itself imports (nothing new to record).
-    fs::write(
-        &substitutes,
-        format!("{header}RES-0000-1002,ALT-10K,Vishay,,DigiKey,541-10K-ND\n"),
-    )
-    .unwrap();
+
+    // It counts as its commit, so committing the change imports with
+    // nothing new to record.
     git(&[
         "commit",
         "-q",
@@ -619,29 +619,28 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
         SUBSTITUTES_CSV,
     ]);
     let committed = services::plan(root, "g-res").unwrap();
-    assert!(
-        !committed
-            .source_commit
-            .as_deref()
-            .unwrap()
-            .ends_with("+dirty")
-    );
-    let command = services::prepare_import(&admin, root, &committed, REASON, false).unwrap();
+    assert!(!services::has_uncommitted_changes(&committed));
+    let command =
+        services::prepare_import(&admin, root, &committed, REASON, Allow::default()).unwrap();
+    assert_eq!(outcome(&submit_import(&admin, &command).unwrap()), "noop");
+
+    // Uncommitted changes to files the import does not read never block
+    // it, and allowing uncommitted changes when there are none records
+    // nothing.
+    fs::write(root.join("notes.txt"), "unrelated\n").unwrap();
+    let unrelated = services::plan(root, "g-res").unwrap();
+    assert_eq!(unrelated.source_commit, committed.source_commit);
+    let command =
+        services::prepare_import(&admin, root, &unrelated, REASON, allow_uncommitted).unwrap();
+    assert!(!command.allow_uncommitted_changes());
     assert_eq!(outcome(&submit_import(&admin, &command).unwrap()), "noop");
     assert_eq!(read_back(&admin).unwrap(), after_dirty);
-
-    // Allowed explicitly, the clean checkout imports.
-    git(&["checkout", "-q", &newer]);
-    let command = services::prepare_import(&admin, root, &clean, REASON, true).unwrap();
-    assert_eq!(
-        outcome(&submit_import(&admin, &command).unwrap()),
-        "applied"
-    );
 
     // The older checkout is refused again.
     git(&["checkout", "-q", &older]);
     let old_again = services::plan(root, "g-res").unwrap();
-    let refused = services::prepare_import(&admin, root, &old_again, REASON, false).unwrap_err();
+    let refused =
+        services::prepare_import(&admin, root, &old_again, REASON, Allow::default()).unwrap_err();
     assert!(refused.contains("does not include commit"), "{refused}");
     server.stop();
 }
