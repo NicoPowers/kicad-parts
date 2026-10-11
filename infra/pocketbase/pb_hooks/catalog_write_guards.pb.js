@@ -198,6 +198,7 @@ onRecordCreate((e) => {
 // copies, under the ID derived from that Change's correlation ID; it must
 // really change the revision's state, leave at least one revision not
 // archived, and name the newest such revision as current afterwards.
+// Saving it moves the part's current revision there.
 onRecordCreate((e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
   const entry = e.record;
@@ -240,7 +241,17 @@ onRecordCreate((e) => {
       `an archive entry must name revision ${current.getInt("number")}, the newest not archived, as current afterwards`,
     );
   }
-  return e.next();
+  const saved = e.next();
+  // Saving the entry moves the part to that revision, in the same
+  // transaction, so no code can leave the part on an archived or older
+  // revision. The part-update guard checks the move.
+  const record = e.app.findRecordById("catalog_parts", part);
+  if (record.getString("current_revision") !== current.id) {
+    record.set("current_revision", current.id);
+    record.set("current_revision_number", current.getInt("number"));
+    e.app.save(record);
+  }
+  return saved;
 }, "catalog_archive_entries");
 
 // Saved part details are numbered from 1 per part: new ones must be the

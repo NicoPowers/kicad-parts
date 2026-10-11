@@ -1230,13 +1230,9 @@ function publishArchive(e) {
       entry.set("seq", seq);
       entry.set("current_revision_after", current.id);
       entry.set("current_revision_number_after", current.getInt("number"));
+      // Saving the entry moves the part's current revision to `current`
+      // (catalog_write_guards.pb.js), so the route does not save the part.
       txApp.save(entry);
-
-      if (part.getString("current_revision") !== current.id) {
-        part.set("current_revision", current.id);
-        part.set("current_revision_number", current.getInt("number"));
-        txApp.save(part);
-      }
 
       const auditEntryId = deriveId("audit-entry", request.correlationId);
       const audit = record("catalog_audit_entries", auditEntryId);

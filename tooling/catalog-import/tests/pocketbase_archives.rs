@@ -574,6 +574,24 @@ fn server_code_can_only_add_the_next_revision_and_point_at_the_newest_not_archiv
         revision_state(&read_back(&admin).unwrap(), IPN),
         (1, vec![2, 3])
     );
+    // Saving an entry moves the part itself, so server code that forgets to
+    // cannot leave it on an older revision: unarchiving 2 makes 2 current...
+    let unarchived = entry(
+        serde_json::json!({ "ipn": IPN, "revision": 2, "archived": false, "currentAfter": 2 }),
+    );
+    assert_eq!(unarchived.status, 200, "{}", unarchived.body);
+    assert_eq!(
+        revision_state(&read_back(&admin).unwrap(), IPN),
+        (2, vec![3])
+    );
+    // ...nor on an archived one: archiving the current revision 2 makes 1
+    // current.
+    let archived = entry(serde_json::json!({ "ipn": IPN, "revision": 2, "currentAfter": 1 }));
+    assert_eq!(archived.status, 200, "{}", archived.body);
+    assert_eq!(
+        revision_state(&read_back(&admin).unwrap(), IPN),
+        (1, vec![2, 3])
+    );
     server.stop();
 }
 
