@@ -325,6 +325,11 @@ pub struct CsvImport {
     /// commit, so a dirty tree is never recorded as a clean one.
     pub source_commit: Option<String>,
     pub sources: Vec<SourceFile>,
+    /// The repository paths the import looked for but did not find, such
+    /// as a footprint file a part names, sorted. They are not sent; the
+    /// import tooling checks them with `sources` against the commit, so a
+    /// deleted or renamed file is seen as an uncommitted change.
+    pub missing_inputs: Vec<String>,
     pub blobs: Vec<Blob>,
     pub cad_item_revisions: Vec<CadItemRevisionDraft>,
     pub parts: Vec<PartDraft>,
@@ -548,6 +553,7 @@ struct Planner<'a> {
     csv_file: String,
     source_commit: Option<String>,
     sources: BTreeMap<String, SourceFile>,
+    missing_inputs: BTreeSet<String>,
     blobs: BTreeMap<String, Blob>,
     cad_items: BTreeMap<(CadItemKind, String), CadItemOutcome>,
     cad_item_revisions: Vec<CadItemRevisionDraft>,
@@ -577,6 +583,7 @@ impl<'a> Planner<'a> {
             csv_file: csv_file.to_owned(),
             source_commit,
             sources: BTreeMap::new(),
+            missing_inputs: BTreeSet::new(),
             blobs: BTreeMap::new(),
             cad_items: BTreeMap::new(),
             cad_item_revisions: Vec::new(),
@@ -811,6 +818,7 @@ impl<'a> Planner<'a> {
             csv_file: self.csv_file,
             source_commit: self.source_commit,
             sources: self.sources.into_values().collect(),
+            missing_inputs: self.missing_inputs.into_iter().collect(),
             blobs: self.blobs.into_values().collect(),
             cad_item_revisions: self.cad_item_revisions,
             parts: drafts,
@@ -1216,6 +1224,12 @@ impl<'a> Planner<'a> {
         let resolved = match self.catalog.resolver.symbol(reference) {
             Ok(resolved) => resolved,
             Err(error) => {
+                if let (ResolveError::LibraryNotFound { .. }, Ok(lib_ref)) =
+                    (&error, LibRef::parse(reference))
+                {
+                    self.missing_inputs
+                        .insert(format!("symbols/{}.kicad_sym", lib_ref.library));
+                }
                 return Ok(CadItemOutcome::Unresolved(Self::unresolved_reference(
                     reference, &error,
                 )));
@@ -1257,14 +1271,31 @@ impl<'a> Planner<'a> {
         ))
     }
 
+    /// Notes the footprint file that `field` names (its first choice) as
+    /// looked for but not found.
+    fn footprint_not_found(&mut self, field: &str) {
+        let first = kicad_integration::resolver::footprint_choices(field)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        if let Ok(LibRef { library, item }) = LibRef::parse(first) {
+            self.missing_inputs
+                .insert(format!("footprints/{library}.pretty/{item}.kicad_mod"));
+        }
+    }
+
     fn footprint_cad_item(&mut self, reference: &str) -> Result<CadItemOutcome, ImportError> {
         let resolved = match self.catalog.resolver.footprint(reference) {
             Ok(resolved) => resolved,
             Err(ResolveError::LibraryNotFound { .. }) => {
+                self.footprint_not_found(reference);
                 // The oracle checks only for the footprint file itself.
                 return Ok(CadItemOutcome::Unresolved("missing-member".into()));
             }
             Err(error) => {
+                if let ResolveError::FootprintNotFound { .. } = error {
+                    self.footprint_not_found(reference);
+                }
                 return Ok(CadItemOutcome::Unresolved(Self::unresolved_reference(
                     reference, &error,
                 )));
@@ -1294,9 +1325,12 @@ impl<'a> Planner<'a> {
                         CadItemOutcome::Unresolved(status) => ModelTarget::Unresolved { status },
                     }
                 }
-                Some(_) => ModelTarget::Unresolved {
-                    status: "missing".into(),
-                },
+                Some(candidate) => {
+                    self.missing_inputs.insert(candidate.clone());
+                    ModelTarget::Unresolved {
+                        status: "missing".into(),
+                    }
+                }
                 None => ModelTarget::Unresolved {
                     status: classified.status.into(),
                 },

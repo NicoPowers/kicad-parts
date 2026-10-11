@@ -11,10 +11,13 @@
 //! An import from uncommitted changes (`X+dirty`) counts as its commit X,
 //! both when it is the latest run and when it is the import being checked.
 //! Such an import is refused unless it is allowed explicitly (see
-//! `services::check_committed`). Until its changes are committed, a later
-//! import from a checkout without them undoes them, like an import from an
-//! older checkout; this check does not try to stop that, because whoever
-//! allows uncommitted changes is told to commit them.
+//! `services::check_committed`). Until its changes are committed and
+//! imported again, a later import from a checkout without them undoes them,
+//! like an import from an older checkout; this check does not try to stop
+//! that, because whoever allows uncommitted changes is told to commit them.
+//! Importing them again from that commit records a new run even when
+//! nothing else changed (the route does that after a run from uncommitted
+//! changes), so from then on the commit is protected like any other.
 
 use crate::services::{self, DIRTY_SUFFIX, GIT, GitAnswer, SourceCommit};
 use catalog::csv_import::CsvImport;
@@ -73,7 +76,9 @@ fn check_commit_with(
         return Ok(());
     }
     let Some(importing_commit) = importing else {
-        if services::read_source_commit_with(program, repository, &[]) == SourceCommit::GitMissing {
+        if services::read_source_commit_with(program, repository, &[], &[])
+            == SourceCommit::GitMissing
+        {
             return Err(GIT_MISSING.to_owned());
         }
         let run = recorded[recorded.len() - 1];
