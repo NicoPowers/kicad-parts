@@ -39,10 +39,8 @@ migrate((app) => {
     fields: [
       { name: "seq", type: "number", required: true, min: 1, onlyInt: true },
       // A closed set shared with catalog_lib.js (CHANGE_KINDS) and
-      // crates/catalog (ChangeKind). Only csv-import is published
-      // today; edit and restore are reserved for kicad-parts-2254. (Restores
-      // were removed again in kicad-parts-9296; old restore Changes keep
-      // the value until kicad-parts-7556 replaces the kinds.)
+      // crates/catalog (ChangeKind). These were the first values;
+      // 1791800000_shared_part_details.js sets the current ones.
       { name: "kind", type: "select", required: true, maxSelect: 1, values: ["csv-import", "edit", "restore"] },
       { name: "reason", type: "text", required: true, max: 2000 },
       { name: "correlation_id", type: "text", required: true, max: 100 },
