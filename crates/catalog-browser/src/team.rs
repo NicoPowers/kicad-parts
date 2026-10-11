@@ -1,6 +1,6 @@
 //! The team catalog use cases behind the desktop: sign in to the team's
 //! PocketBase server, read one part's details and history, publish edits,
-//! and follow changes others make.
+//! archive and unarchive revisions, and follow changes others make.
 //!
 //! The session (the auth token) lives only in memory: the app saves the
 //! server address and email, never the password or the token, so signing in
@@ -14,9 +14,10 @@
 
 use crate::PartValues;
 use catalog::pocketbase::{
-    ConflictingRecord, EditCommand, PublishOutcome, PublishReply, StoredBlob,
-    StoredCadItemRevision, StoredChange, StoredPart, StoredPartRevision, changes_by_id,
-    part_by_ipn, part_details_of, part_revisions, submit_edit,
+    ArchiveCommand, ArchiveOutcome, ConflictingRecord, EditCommand, PublishOutcome, PublishReply,
+    StoredArchiveEntry, StoredBlob, StoredCadItemRevision, StoredChange, StoredPart,
+    StoredPartRevision, archive_entries_of, archived_numbers, changes_by_id, part_by_ipn,
+    part_details_of, part_revisions, submit_archive, submit_edit,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
@@ -25,9 +26,10 @@ use catalog::{
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
-    CadItemUse, ConflictRow, CurrentDetails, CurrentRevision, DetailChange, Field, HistoryEntry,
-    LiveUpdates, ManufacturerPart, PreviewKind, PublishResult, SignInRequest, TeamConflict,
-    TeamEditRequest, TeamPart, TeamSession, TeamStatus,
+    ArchiveNote, CadItemUse, ConflictRow, CurrentDetails, CurrentRevision, DetailChange, Field,
+    HistoryEntry, LiveUpdates, ManufacturerPart, PreviewKind, PublishResult, RevisionStatus,
+    SignInRequest, TeamArchiveRequest, TeamConflict, TeamEditRequest, TeamPart, TeamSession,
+    TeamStatus,
 };
 use kicad_integration::{LibRef, StoredItem, footprint_choices};
 use serde::{Deserialize, Serialize};
@@ -370,6 +372,58 @@ impl TeamCatalog {
         self.published(&client, &request.ipn, reply, |details, revision, part| {
             edit_conflict(&request, details, revision, part)
         })
+    }
+
+    /// Archives or unarchives one revision, with a reason.
+    pub fn archive(&self, request: TeamArchiveRequest) -> Result<PublishResult, String> {
+        let client = self.client()?;
+        let mut command = ArchiveCommand::new(
+            &request.ipn,
+            request.revision,
+            request.archived,
+            &request.reason,
+        );
+        command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
+        let reload = || -> Result<TeamPart, String> {
+            let part = part_by_ipn(&client, &request.ipn)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("{} is no longer in the team catalog", request.ipn))?;
+            load_part(&client, &part)
+        };
+        match submit_archive(&client, &command) {
+            Ok(reply) => match reply.outcome {
+                ArchiveOutcome::Applied {
+                    revision,
+                    archived,
+                    current_revision,
+                    ..
+                } => Ok(PublishResult::Archived {
+                    revision,
+                    archived,
+                    current: current_revision.number,
+                    part: reload()?,
+                }),
+                ArchiveOutcome::Noop { .. } => Ok(PublishResult::NothingToSave {
+                    message: if request.archived {
+                        format!("Revision {} is already archived.", request.revision)
+                    } else {
+                        format!("Revision {} is not archived.", request.revision)
+                    },
+                }),
+                ArchiveOutcome::CorrelationReused { message, .. } => {
+                    Ok(PublishResult::Refused { message })
+                }
+            },
+            Err(CollabError::Http {
+                status: 400 | 404,
+                message,
+            }) => Ok(PublishResult::Refused { message }),
+            Err(CollabError::Forbidden(message)) => Ok(PublishResult::Refused { message }),
+            Err(CollabError::Unauthorized(_)) => Ok(PublishResult::Refused {
+                message: "Your sign-in has ended. Sign in again, then save.".into(),
+            }),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     fn published(
@@ -862,10 +916,12 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
     let fail = |error: CollabError| error.to_string();
     let saved_details = part_details_of(client, &part.id).map_err(fail)?;
     let revisions = part_revisions(client, &part.id).map_err(fail)?;
+    let archive_entries = archive_entries_of(client, &part.id).map_err(fail)?;
     let change_ids: Vec<&str> = saved_details
         .iter()
         .map(|d| d.change.as_str())
         .chain(revisions.iter().map(|r| r.change.as_str()))
+        .chain(archive_entries.iter().map(|a| a.change.as_str()))
         .collect();
     let change_records: BTreeMap<String, StoredChange> = changes_by_id(client, &change_ids)
         .map_err(fail)?
@@ -933,10 +989,23 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
             entry.changes.extend(changes);
         }
     }
+    for entry in &archive_entries {
+        if let Some(change) = change_records.get(&entry.change) {
+            history_entry(&mut entries, change).archive = Some(archive_note(entry));
+        }
+    }
+    let archived = archived_numbers(&archive_entries.iter().collect::<Vec<_>>());
     let view = TeamPart {
         ipn: part.ipn.clone(),
         details: current_details_view(part.current_details_number, current_details),
         revision: current_revision_view(part.current_revision_number, current_revision),
+        revisions: revisions
+            .iter()
+            .map(|revision| RevisionStatus {
+                number: revision.number,
+                archived: archived.contains(&revision.number),
+            })
+            .collect(),
         history: entries.into_values().rev().collect(),
     };
     Ok(LoadedPart {
@@ -955,12 +1024,21 @@ fn history_entry<'a>(
         seq: change.seq,
         revision: None,
         details: None,
+        archive: None,
         action: action(&change.kind).to_owned(),
         actor_name: actor_name(change),
         saved_at: saved_at(&change.created),
         reason: change.reason.clone(),
         changes: Vec::new(),
     })
+}
+
+fn archive_note(entry: &StoredArchiveEntry) -> ArchiveNote {
+    ArchiveNote {
+        revision: entry.revision_number,
+        archived: entry.archived,
+        current_after: entry.current_revision_number_after,
+    }
 }
 
 fn to_changes(differences: Vec<catalog::DetailDifference>) -> Vec<DetailChange> {
@@ -1023,6 +1101,8 @@ fn action(kind: &str) -> &'static str {
     match kind {
         "csv-import" => "Imported",
         "edit" => "Edited",
+        "archive" => "Archived",
+        "unarchive" => "Unarchived",
         _ => "Saved",
     }
 }
@@ -1238,6 +1318,7 @@ fn edit_conflict(
                 seq: 0,
                 revision: None,
                 details: None,
+                archive: None,
                 action: action(&record.change_kind).to_owned(),
                 actor_name: plain_actor(&record.actor, &record.actor_name),
                 saved_at: saved_at(&record.created),

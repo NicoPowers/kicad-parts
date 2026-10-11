@@ -18,6 +18,7 @@ pub mod command {
     pub const TEAM_SIGN_OUT: &str = "team_sign_out";
     pub const TEAM_PART: &str = "team_part";
     pub const TEAM_EDIT: &str = "team_edit";
+    pub const TEAM_ARCHIVE: &str = "team_archive";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -301,10 +302,22 @@ pub struct TeamPart {
     pub ipn: String,
     /// What the part is, shared by every revision.
     pub details: CurrentDetails,
-    /// The exact symbol and footprint new designs get.
+    /// The exact symbol and footprint new designs get: the newest revision
+    /// that is not archived.
     pub revision: CurrentRevision,
+    /// Every revision of the part, oldest first, and whether it is archived.
+    pub revisions: Vec<RevisionStatus>,
     /// One entry per Change that saved this part, newest first.
     pub history: Vec<HistoryEntry>,
+}
+
+/// One revision of a part and whether it is archived. An archived revision
+/// is hidden from KiCad and the app, so nobody new picks it; designs that
+/// already use it keep it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RevisionStatus {
+    pub number: u32,
+    pub archived: bool,
 }
 
 /// A part's current details: every describing field and its
@@ -365,7 +378,7 @@ pub struct CadItemUse {
 }
 
 /// What one Change did to a part: added a revision, saved its details, or
-/// both.
+/// both; or archived or unarchived one revision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HistoryEntry {
     /// The Change's number, which also tells entries apart.
@@ -374,7 +387,10 @@ pub struct HistoryEntry {
     pub revision: Option<u32>,
     /// The number of the part details this Change saved, if it saved them.
     pub details: Option<u32>,
-    /// `Imported` or `Edited`.
+    /// The revision this Change archived or unarchived, if it did.
+    #[serde(default)]
+    pub archive: Option<ArchiveNote>,
+    /// `Imported`, `Edited`, `Archived` or `Unarchived`.
     pub action: String,
     pub actor_name: String,
     /// When it was saved, as `2026-10-09 18:02 UTC`.
@@ -383,6 +399,29 @@ pub struct HistoryEntry {
     /// What changed compared with the details and revision before it; empty
     /// for the part's first entry.
     pub changes: Vec<DetailChange>,
+}
+
+/// What an archive or unarchive did.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArchiveNote {
+    pub revision: u32,
+    /// True for an archive, false for an unarchive.
+    pub archived: bool,
+    /// The part's current revision afterwards.
+    pub current_after: u32,
+}
+
+/// Archive (or unarchive) one revision of a part, with a reason.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamArchiveRequest {
+    /// As in [`TeamEditRequest`].
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    pub ipn: String,
+    pub revision: u32,
+    /// True to archive, false to unarchive.
+    pub archived: bool,
+    pub reason: String,
 }
 
 /// One difference between a part's details or CAD before and after a change.
@@ -415,7 +454,7 @@ pub struct TeamEditRequest {
     pub cad_fields: Vec<Field>,
 }
 
-/// What publishing an edit did.
+/// What publishing an edit, archive or unarchive did.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum PublishResult {
@@ -423,6 +462,14 @@ pub enum PublishResult {
         /// The revision the edit added, or `None` when it only changed the
         /// part details.
         revision: Option<u32>,
+        part: TeamPart,
+    },
+    /// A revision was archived or unarchived.
+    Archived {
+        revision: u32,
+        archived: bool,
+        /// The part's current revision afterwards.
+        current: u32,
         part: TeamPart,
     },
     /// Nothing would change, so nothing was saved.

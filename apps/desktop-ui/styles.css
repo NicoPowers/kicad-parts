@@ -689,7 +689,8 @@ a {
 
 .team-sign-in input,
 .edit-form input,
-.edit-form textarea {
+.edit-form textarea,
+.archive-form textarea {
   width: 100%;
   font: inherit;
   padding: 0.4rem 0.6rem;
@@ -914,6 +915,23 @@ a {
 }
 
 .revision > p {
+  margin: 0 0 0.5rem;
+}
+
+.archive-open {
+  margin-top: 0.2rem;
+}
+
+/* The small form that archives or unarchives one revision. */
+.archive-form {
+  margin-top: 0.6rem;
+  padding: 0.75rem;
+  background: #f5f7fa;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.archive-form p {
   margin: 0 0 0.5rem;
 }
 

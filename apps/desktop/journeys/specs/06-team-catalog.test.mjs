@@ -2,8 +2,8 @@
 // part's details and current revision from the team catalog, edit its
 // details (which adds no revision), watch someone else's change arrive by
 // itself, resolve a conflict, read the history with what changed, and view
-// as a read-only member. Changing the symbol adds a revision. There is no
-// Restore: an earlier revision is never
+// as a read-only member. Changing the symbol adds a revision, and archiving
+// it makes the earlier revision current again. There is no Restore: an earlier revision is never
 // copied back (kicad-parts-9296).
 
 import assert from 'node:assert/strict';
@@ -407,22 +407,84 @@ describe('team catalog: history, edits and conflicts', () => {
     await screenshot(browser, '47-team-new-revision');
   });
 
+  it('archives the new revision, which makes revision 1 current again', async () => {
+    // The newest entry, revision 2, is selected.
+    await clickButton('.revision', 'Archive revision 2…');
+    await waitForText(browser, '#archive-heading', 'Archive revision 2');
+    assert.equal(
+      await textOf(browser, '.archive-form p'),
+      'KiCad and this app stop offering revision 2, so nobody new picks it. Designs that already use it keep it. Nothing is deleted. The current revision becomes revision 1.',
+    );
+    await (await browser.$('#archive-reason')).setValue("KiCad's symbol confuses the assembly house");
+    await assertAccessible(browser, '48-team-archive');
+    await screenshot(browser, '48-team-archive');
+    await clickButton('.archive-form', 'Archive revision 2');
+    await waitForText(browser, NOTICE, 'Revision 2 is archived. The current revision is now revision 1.');
+    await columnAtTop();
+    await waitForRevision(1);
+    await waitForHistory(7);
+    const titles = await browser.execute(() =>
+      [...document.querySelectorAll('.history .history-title')].map((t) => t.textContent.trim()),
+    );
+    assert.deepEqual(titles, [
+      `Revision 2 · Archived by ${editor.name}`,
+      `Revision 2 · Edited by ${editor.name} (archived)`,
+      `Part details · Edited by ${editor.name}`,
+      `Part details · Edited by ${other.name}`,
+      `Part details · Edited by ${other.name}`,
+      `Part details · Edited by ${editor.name}`,
+      'Revision 1 · Imported by an administrator (current)',
+    ]);
+    await waitForText(browser, '#revision-heading', 'Revision 2 archived');
+    assert.equal(
+      await textOf(browser, '.revision .hint'),
+      'Revision 2 was archived. The current revision became revision 1.',
+    );
+    await assertAccessible(browser, '53-team-archived');
+    await screenshot(browser, '53-team-archived');
+    // The only revision that is not archived cannot be archived: the app
+    // says so before anyone tries.
+    await (await browser.$('.history li:last-child button')).click();
+    await waitForText(browser, '#revision-heading', 'What changed in revision 1');
+    assert.equal(
+      await browser.execute(() => [...document.querySelectorAll('.revision button')].map((b) => b.textContent.trim()).join()),
+      '',
+    );
+    assert.match(
+      await textOf(browser, '.revision'),
+      /Revision 1 is the only revision that is not archived, so it cannot be archived\. Add a corrected revision first\./,
+    );
+    // The archived revision offers to unarchive it.
+    await (await browser.$('.history li:nth-child(2) button')).click();
+    await waitForText(browser, '#revision-heading', 'What changed in revision 2');
+    await clickButton('.revision', 'Unarchive revision 2…');
+    assert.equal(
+      await textOf(browser, '.archive-form p'),
+      'KiCad and this app offer revision 2 again. The current revision becomes revision 2.',
+    );
+    await clickButton('.archive-form', 'Cancel');
+    // The Details tab shows revision 1 again and names the archived one.
+    await clickButton(COLUMN, 'Details');
+    assert.equal(await textOf(browser, '#cad-items-heading'), 'Symbol and footprint (revision 1 of this part)');
+    assert.equal(await textOf(browser, '.other-revisions'), 'Other revisions: revision 2 (archived).');
+  });
+
   it('lets a read-only member see everything but not edit', async () => {
     await signOut();
     await signIn(viewer);
     await waitForText(browser, BADGE, `Team catalog · ${viewer.name}`);
     await waitForLiveUpdates(browser);
-    await waitForRevision(2);
-    await waitForHistory(6);
+    await waitForRevision(1);
+    await waitForHistory(7);
     await waitForText(browser, '.read-only', 'You can view this part but not edit it.');
     assert.equal((await browser.$$(NOTICE)).length, 0, "no message left from the editor's session");
     const buttons = await browser.execute(() =>
       [...document.querySelectorAll('.part-fields button')].map((b) => b.textContent.trim()),
     );
     assert.ok(!buttons.includes('Edit part'), `no edit button: ${buttons}`);
-    await clickButton(COLUMN, 'History (6)');
-    await browser.waitUntil(async () => (await browser.$$('.history li')).length === 6, { timeout: 5_000 });
-    const second = await browser.$('.history li:nth-child(2) button');
+    await clickButton(COLUMN, 'History (7)');
+    await browser.waitUntil(async () => (await browser.$$('.history li')).length === 7, { timeout: 5_000 });
+    const second = await browser.$('.history li:nth-child(3) button');
     await second.click();
     await waitForText(browser, '#revision-heading', 'What changed in the part details');
     assert.equal(await browser.execute(() => document.querySelectorAll('.revision button').length), 0);
