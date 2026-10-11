@@ -969,19 +969,21 @@ function publishEdit(e) {
         document.excluded_from_bom = true;
       }
       refuse("revision", revisionProblem(document));
-      const archived = archivedRevisionWithContent(
-        txApp,
-        partId,
-        partRevisionContent(document, storedCadContent(txApp)),
-      );
-      if (archived > 0) {
-        throw new BadRequestError(
-          `this symbol and footprint are those of archived revision ${archived} of ${request.ipn}; unarchive revision ${archived} instead of saving them again`,
-        );
-      }
       const snapshot = JSON.stringify(document);
       const sha = $security.sha256(snapshot);
+      // Only CAD that really changes can bring an archived design back; an
+      // unchanged CAD section (sent with a details edit) never does.
       if (sha !== currentRevision.getString("snapshot_sha256")) {
+        const archived = archivedRevisionWithContent(
+          txApp,
+          partId,
+          partRevisionContent(document, storedCadContent(txApp)),
+        );
+        if (archived > 0) {
+          throw new BadRequestError(
+            `this symbol and footprint are those of archived revision ${archived} of ${request.ipn}; unarchive revision ${archived} instead of saving them again`,
+          );
+        }
         revision = { snapshot: snapshot, sha: sha };
       }
     }

@@ -1216,7 +1216,11 @@ routerAdd("POST", "/api/test/save-part", (e) => {
     made.set("snapshot", current.getString("snapshot"));
     made.set("snapshot_sha256", current.getString("snapshot_sha256"));
     made.set("source", "{}");
-    $app.save(made);
+    try {
+      $app.save(made);
+    } catch (error) {
+      return e.json(409, { refused: String(error) });
+    }
     revisionId = made.id;
   }
   if (body.ipnChange) {
@@ -1313,10 +1317,15 @@ fn server_code_cannot_move_a_part_backwards_or_skip_a_revision() {
         back.body
     );
     // Skipping to a revision 4 (made directly, after revision 2): the
-    // part-revision create guard refuses it before the part is touched
-    // (pocketbase_archives tests that guard's messages).
+    // part-revision create guard refuses it before the part is touched.
     let skip = save(json!({ "ipn": IPN, "createNumber": 4 }));
-    assert_ne!(skip.status, 200, "{}", skip.body);
+    assert_eq!(skip.status, 409, "{}", skip.body);
+    assert!(
+        skip.body
+            .contains("must be number 3, right after its newest revision"),
+        "{}",
+        skip.body
+    );
     // Changing the IPN.
     let ipn = save(json!({ "ipn": IPN, "ipnChange": "RES-9999-9999" }));
     assert_eq!(ipn.status, 409, "{}", ipn.body);

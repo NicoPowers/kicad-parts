@@ -193,6 +193,56 @@ onRecordCreate((e) => {
   return e.next();
 }, "catalog_part_revisions");
 
+// An archive entry must be exactly what the archive route saves: for one of
+// the part's own revisions, in a Change of the matching kind whose seq it
+// copies, under the ID derived from that Change's correlation ID; it must
+// really change the revision's state, leave at least one revision not
+// archived, and name the newest such revision as current afterwards.
+onRecordCreate((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  const entry = e.record;
+  const part = entry.getString("part");
+  const number = entry.getInt("revision_number");
+  const archived = entry.getBool("archived");
+  const find = (collection, id) => {
+    try {
+      return e.app.findRecordById(collection, id);
+    } catch (_) {
+      return null;
+    }
+  };
+  const revision = find("catalog_part_revisions", entry.getString("part_revision"));
+  if (!revision || revision.getString("part") !== part || revision.getInt("number") !== number) {
+    throw new Error(`an archive entry must name revision ${number} of its own part ${part}`);
+  }
+  const change = find("catalog_changes", entry.getString("change"));
+  const kind = archived ? "archive" : "unarchive";
+  if (!change || change.getString("kind") !== kind || change.getInt("seq") !== entry.getInt("seq")) {
+    throw new Error(`an archive entry must belong to a Change of kind ${kind} and copy its seq`);
+  }
+  if (entry.id !== lib.deriveId("archive-entry", change.getString("correlation_id"))) {
+    throw new Error("an archive entry must have the ID derived from its Change's correlation ID");
+  }
+  const state = lib.archiveState(e.app, part);
+  if ((state[number] === true) === archived) {
+    throw new Error(`an archive entry must change the state of revision ${number}`);
+  }
+  state[number] = archived;
+  const current = lib.newestNotArchived(e.app, part, state);
+  if (!current) {
+    throw new Error(`an archive entry cannot archive the only revision of part ${part} that is not archived`);
+  }
+  if (
+    entry.getString("current_revision_after") !== current.id ||
+    entry.getInt("current_revision_number_after") !== current.getInt("number")
+  ) {
+    throw new Error(
+      `an archive entry must name revision ${current.getInt("number")}, the newest not archived, as current afterwards`,
+    );
+  }
+  return e.next();
+}, "catalog_archive_entries");
+
 // Saved part details are numbered from 1 per part: new ones must be the
 // newest number + 1, name the newest as their predecessor, and have the ID
 // derived from their part and number.

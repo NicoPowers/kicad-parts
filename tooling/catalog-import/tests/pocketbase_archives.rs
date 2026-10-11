@@ -410,6 +410,59 @@ routerAdd("POST", "/api/test/part-revision", (e) => {
   }
   return e.json(200, { saved: true });
 }, $apis.requireSuperuserAuth());
+
+// Saves an archive entry directly, in a new Change, as buggy server code
+// might: a valid entry unless the body overrides a field. With movePointer
+// it also moves the part to the entry's current_revision_after.
+routerAdd("POST", "/api/test/archive-entry", (e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  const body = e.requestInfo().body;
+  try {
+    $app.runInTransaction((txApp) => {
+      const part = txApp.findFirstRecordByData("catalog_parts", "ipn", body.ipn);
+      const revisionOf = (number) =>
+        txApp.findFirstRecordByFilter("catalog_part_revisions", "part = {:part} && number = {:number}", {
+          part: part.id,
+          number: number,
+        });
+      const last = txApp.findRecordsByFilter("catalog_changes", "seq > 0", "-seq", 1, 0)[0];
+      const seq = last.getInt("seq") + 1;
+      const correlation = "test-" + seq;
+      const archived = body.archived !== false;
+      const change = new Record(txApp.findCollectionByNameOrId("catalog_changes"));
+      change.set("id", lib.deriveId("change", correlation));
+      change.set("seq", seq);
+      change.set("kind", body.kind || (archived ? "archive" : "unarchive"));
+      change.set("reason", "test");
+      change.set("correlation_id", correlation);
+      change.set("actor", "test");
+      change.set("sources", "{}");
+      change.set("summary", "{}");
+      txApp.save(change);
+      const target = revisionOf(body.revision);
+      const after = revisionOf(body.currentAfter);
+      const entry = new Record(txApp.findCollectionByNameOrId("catalog_archive_entries"));
+      entry.set("id", body.id || lib.deriveId("archive-entry", correlation));
+      entry.set("part", part.id);
+      entry.set("part_revision", body.revisionOf ? revisionOf(body.revisionOf).id : target.id);
+      entry.set("revision_number", body.revision);
+      entry.set("archived", archived);
+      entry.set("change", change.id);
+      entry.set("seq", body.seq || seq);
+      entry.set("current_revision_after", after.id);
+      entry.set("current_revision_number_after", body.currentAfter);
+      txApp.save(entry);
+      if (body.movePointer) {
+        part.set("current_revision", after.id);
+        part.set("current_revision_number", body.currentAfter);
+        txApp.save(part);
+      }
+    });
+  } catch (error) {
+    return e.json(409, { refused: String(error) });
+  }
+  return e.json(200, { saved: true });
+}, $apis.requireSuperuserAuth());
 "#;
 
 #[test]
@@ -463,5 +516,99 @@ fn server_code_can_only_add_the_next_revision_and_point_at_the_newest_not_archiv
         );
     }
     assert_eq!(read_back(&admin).unwrap(), before);
+
+    // Archive entries are held to what the archive route saves. Revisions
+    // 1, 2 and 3 exist, 3 is archived and 2 is current.
+    let entry =
+        |body: serde_json::Value| admin.post_json("/api/test/archive-entry", &body).unwrap();
+    let refused_entry = |body: serde_json::Value, says: &str| {
+        let reply = entry(body);
+        assert_eq!(reply.status, 409, "{}", reply.body);
+        assert!(reply.body.contains(says), "{says}: {}", reply.body);
+    };
+    // Another revision's record under this number.
+    refused_entry(
+        serde_json::json!({ "ipn": IPN, "revision": 2, "revisionOf": 1, "currentAfter": 1 }),
+        "must name revision 2 of its own part",
+    );
+    // A Change of the other kind, or a seq that is not the Change's.
+    refused_entry(
+        serde_json::json!({ "ipn": IPN, "revision": 2, "kind": "unarchive", "currentAfter": 1 }),
+        "a Change of kind archive",
+    );
+    refused_entry(
+        serde_json::json!({ "ipn": IPN, "revision": 2, "seq": 999, "currentAfter": 1 }),
+        "copy its seq",
+    );
+    // A made-up ID.
+    refused_entry(
+        serde_json::json!({ "ipn": IPN, "revision": 2, "id": "aaaaaaaaaaaaaaa", "currentAfter": 1 }),
+        "ID derived from its Change",
+    );
+    // No change of state: 3 is already archived, 2 is not.
+    refused_entry(
+        serde_json::json!({ "ipn": IPN, "revision": 3, "currentAfter": 2 }),
+        "must change the state of revision 3",
+    );
+    refused_entry(
+        serde_json::json!({ "ipn": IPN, "revision": 2, "archived": false, "currentAfter": 2 }),
+        "must change the state of revision 2",
+    );
+    // The wrong current revision afterwards: archiving 2 makes 1 current.
+    refused_entry(
+        serde_json::json!({ "ipn": IPN, "revision": 2, "currentAfter": 2 }),
+        "must name revision 1, the newest not archived",
+    );
+    // Archiving a part's only revision.
+    refused_entry(
+        serde_json::json!({ "ipn": "RES-0000-1000", "revision": 1, "currentAfter": 1 }),
+        "only revision",
+    );
+    assert_eq!(read_back(&admin).unwrap(), before);
+    // A valid entry, with the part moved to match, is accepted.
+    let valid = entry(
+        serde_json::json!({ "ipn": IPN, "revision": 2, "currentAfter": 1, "movePointer": true }),
+    );
+    assert_eq!(valid.status, 200, "{}", valid.body);
+    assert_eq!(
+        revision_state(&read_back(&admin).unwrap(), IPN),
+        (1, vec![2, 3])
+    );
     server.stop();
+}
+
+#[test]
+fn a_details_edit_with_unchanged_cad_is_never_taken_for_archived_cad() {
+    // Revision 3 has the same CAD content as revision 1, which is then
+    // archived. A details edit that sends the unchanged CAD section of
+    // revision 3 saves its details: the CAD does not change, so it brings
+    // nothing archived back.
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    change_symbol(&editor, &team.read(), IPN, "Device:R");
+    change_symbol(&editor, &team.read(), IPN, "g-pas:R_US");
+    applied(&submit_archive(&editor, &ArchiveCommand::new(IPN, 1, true, "Old drawing")).unwrap());
+    let stored = team.read();
+    assert_eq!(revision_state(&stored, IPN), (3, vec![1]));
+    let part = stored.part(IPN).unwrap();
+    let details: PartDetails =
+        serde_json::from_str(&stored.part_details(&part.current_details).unwrap().snapshot)
+            .unwrap();
+    let revision: PartRevision = serde_json::from_str(
+        &stored
+            .part_revision(&part.current_revision)
+            .unwrap()
+            .snapshot,
+    )
+    .unwrap();
+    let mut edit = EditCommand::new(IPN, "Note the exact value")
+        .editing_details(&details, part.current_details_number)
+        .editing_cad(&revision, 3);
+    assert!(edit.set_field("Value", "47 Ohm"));
+    let reply = submit_edit(&editor, &edit).unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let after = team.read();
+    assert_eq!(revision_state(&after, IPN), (3, vec![1]));
+    assert_eq!(after.part(IPN).unwrap().current_details_number, 2);
+    team.server.stop();
 }

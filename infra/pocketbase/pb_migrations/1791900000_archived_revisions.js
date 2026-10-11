@@ -42,7 +42,8 @@ migrate((app) => {
     ],
     indexes: [
       "CREATE INDEX idx_catalog_archive_entries_part ON catalog_archive_entries (part, seq)",
-      "CREATE INDEX idx_catalog_archive_entries_change ON catalog_archive_entries (change)",
+      // One archive entry per Change.
+      "CREATE UNIQUE INDEX idx_catalog_archive_entries_change ON catalog_archive_entries (change)",
     ],
   });
   app.save(entries);
