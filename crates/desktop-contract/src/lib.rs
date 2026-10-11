@@ -294,34 +294,59 @@ impl std::fmt::Debug for SignInRequest {
     }
 }
 
-/// One part in the team catalog: its current details and its history.
+/// One part in the team catalog: its current details, its current
+/// revision, and its history.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamPart {
     pub ipn: String,
-    pub current: RevisionDetails,
-    /// Newest first; the first is the current revision.
-    pub history: Vec<RevisionSummary>,
+    /// What the part is, shared by every revision.
+    pub details: CurrentDetails,
+    /// The exact symbol and footprint new designs get.
+    pub revision: CurrentRevision,
+    /// One entry per Change that saved this part, newest first.
+    pub history: Vec<HistoryEntry>,
 }
 
-/// The part details one revision saved.
+/// A part's current details: every describing field and its
+/// manufacturer parts.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RevisionDetails {
+pub struct CurrentDetails {
+    /// Counts each save of the details; never shown as a revision.
     pub number: u32,
     /// Every field, blanks included, in order.
     pub fields: Vec<Field>,
     /// The first is the main one.
     pub manufacturer_parts: Vec<ManufacturerPart>,
+}
+
+impl CurrentDetails {
+    pub fn field(&self, name: &str) -> Option<&str> {
+        find_field(&self.fields, name)
+    }
+}
+
+/// A part's current revision: its Symbol and Footprint fields and the
+/// exact CAD item revision each reference uses.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CurrentRevision {
+    pub number: u32,
+    /// The Symbol and Footprint fields exactly as saved, in order.
+    pub cad_fields: Vec<Field>,
     /// The exact CAD item revision each symbol and footprint reference uses.
     pub cad_items: Vec<CadItemUse>,
 }
 
-impl RevisionDetails {
+impl CurrentRevision {
     pub fn field(&self, name: &str) -> Option<&str> {
-        self.fields
-            .iter()
-            .find(|field| field.name == name)
-            .map(|field| field.value.as_str())
+        find_field(&self.cad_fields, name)
     }
+}
+
+fn find_field<'a>(fields: &'a [Field], name: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|field| field.name == name)
+        .map(|field| field.value.as_str())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -339,21 +364,28 @@ pub struct CadItemUse {
     pub binding: String,
 }
 
+/// What one Change did to a part: added a revision, saved its details, or
+/// both.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RevisionSummary {
-    pub number: u32,
-    /// `Imported` or `Edited` (`Restored` for revisions saved before
-    /// restores were removed).
+pub struct HistoryEntry {
+    /// The Change's number, which also tells entries apart.
+    pub seq: u64,
+    /// The revision this Change added, if it added one.
+    pub revision: Option<u32>,
+    /// The number of the part details this Change saved, if it saved them.
+    pub details: Option<u32>,
+    /// `Imported` or `Edited`.
     pub action: String,
     pub actor_name: String,
     /// When it was saved, as `2026-10-09 18:02 UTC`.
     pub saved_at: String,
     pub reason: String,
-    /// What changed compared with the revision before it.
+    /// What changed compared with the details and revision before it; empty
+    /// for the part's first entry.
     pub changes: Vec<DetailChange>,
 }
 
-/// One difference between two versions of a part's details.
+/// One difference between two versions of a part's details or CAD.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DetailChange {
     pub label: String,
@@ -361,8 +393,10 @@ pub struct DetailChange {
     pub after: String,
 }
 
-/// A change to part details: every field with its new value, and the full
-/// list of manufacturer parts.
+/// A change to a part: every details field and the full list of
+/// manufacturer parts, and the Symbol and Footprint fields, each with the
+/// number it started from. Only what changed is saved: new details add no
+/// revision, and a new Symbol or Footprint adds one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamEditRequest {
     /// Names this save attempt. Retrying the same save with the same ID
@@ -371,11 +405,14 @@ pub struct TeamEditRequest {
     #[serde(default)]
     pub correlation_id: Option<String>,
     pub ipn: String,
+    /// The number of the part details the edit starts from.
+    pub expected_details: u32,
     /// The revision the edit starts from.
     pub expected_revision: u32,
     pub reason: String,
     pub fields: Vec<Field>,
     pub manufacturer_parts: Vec<ManufacturerPart>,
+    pub cad_fields: Vec<Field>,
 }
 
 /// What publishing an edit did.
@@ -383,32 +420,28 @@ pub struct TeamEditRequest {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum PublishResult {
     Saved {
-        revision: u32,
+        /// The revision the edit added, or `None` when it only changed the
+        /// part details.
+        revision: Option<u32>,
         part: TeamPart,
     },
-    /// The details would not change, so nothing was saved.
-    NothingToSave {
-        message: String,
-    },
-    /// Someone else saved a revision after the one the edit started from.
-    /// Nothing was saved.
+    /// Nothing would change, so nothing was saved.
+    NothingToSave { message: String },
+    /// Someone else saved the details or the revision the edit started
+    /// from. Nothing was saved.
     Conflict(Box<TeamConflict>),
     /// The server refused it, for example a symbol the Catalog does not
     /// have, or no edit access.
-    Refused {
-        message: String,
-    },
+    Refused { message: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamConflict {
-    /// The revision the edit started from.
-    pub started_from: u32,
-    /// The revision someone else saved, now the current one.
-    pub theirs: RevisionSummary,
+    /// The newest change someone else saved to what the edit changes.
+    pub theirs: HistoryEntry,
     /// Every field or list that either side changed.
     pub rows: Vec<ConflictRow>,
-    /// Their revision with only your changes applied on top: what "save my
+    /// Their version with only your changes applied on top: what "save my
     /// changes on top of theirs" publishes.
     pub merged: TeamEditRequest,
     /// The part as it is now.

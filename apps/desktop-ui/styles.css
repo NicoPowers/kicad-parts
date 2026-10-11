@@ -745,6 +745,12 @@ a {
   margin: 0;
 }
 
+/* The line right under a section's heading, such as "Every revision of the
+   part shares these details." */
+.team-toolbar + .hint {
+  margin: 0 0 0.5rem;
+}
+
 .part-fields h4 {
   margin: 0.2rem 0 0.35rem;
   font-size: 1rem;

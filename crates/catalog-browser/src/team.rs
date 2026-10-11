@@ -14,20 +14,20 @@
 
 use crate::PartValues;
 use catalog::pocketbase::{
-    ConflictingRevision, EditCommand, PublishOutcome, PublishReply, StoredBlob,
+    ConflictingRecord, EditCommand, PublishOutcome, PublishReply, StoredBlob,
     StoredCadItemRevision, StoredChange, StoredPart, StoredPartRevision, changes_by_id,
-    part_by_ipn, part_revisions, submit_edit,
+    part_by_ipn, part_details_of, part_revisions, submit_edit,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
     CadItemDetails, CadItemId, CadItemKind, CadItemRevisionId, CadReference, CadReferenceRole,
-    CadReferenceTarget, DetailField, PartDetails, compare_details,
+    CadReferenceTarget, DetailField, PartDetails, PartRevision, compare_details, compare_revisions,
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
-    CadItemUse, ConflictRow, DetailChange, Field, LiveUpdates, ManufacturerPart, PreviewKind,
-    PublishResult, RevisionDetails, RevisionSummary, SignInRequest, TeamConflict, TeamEditRequest,
-    TeamPart, TeamSession, TeamStatus,
+    CadItemUse, ConflictRow, CurrentDetails, CurrentRevision, DetailChange, Field, HistoryEntry,
+    LiveUpdates, ManufacturerPart, PreviewKind, PublishResult, SignInRequest, TeamConflict,
+    TeamEditRequest, TeamPart, TeamSession, TeamStatus,
 };
 use kicad_integration::{LibRef, StoredItem, footprint_choices};
 use serde::{Deserialize, Serialize};
@@ -130,8 +130,8 @@ pub struct TeamCatalog {
 
 #[derive(Default)]
 struct KnownRevisions {
-    /// Part details by (IPN, revision number).
-    parts: HashMap<(String, u32), PartDetails>,
+    /// Part revisions by (IPN, revision number).
+    parts: HashMap<(String, u32), PartRevision>,
     /// CAD item revisions by (CAD item, revision number).
     cad_items: HashMap<(String, u32), StoredCadItemRevision>,
 }
@@ -294,10 +294,11 @@ impl TeamCatalog {
         live.replica
             .parts()
             .values()
-            .filter_map(|part| part.details.as_ref())
-            .map(|details| {
+            .filter_map(|part| Some((part.details.as_ref()?, part.revision.as_ref()?)))
+            .map(|(details, revision)| {
                 let main = details.manufacturer_parts.first();
                 let field = |name: &str| details.field(name).map(str::to_owned);
+                let cad = |name: &str| revision.field(name).map(str::to_owned);
                 let values = PartValues {
                     mpn: Some(main.map(|part| part.mpn.clone()).unwrap_or_default()),
                     manufacturer: Some(
@@ -306,8 +307,8 @@ impl TeamCatalog {
                     ),
                     description: field("Description"),
                     value: field("Value"),
-                    symbol: field("Symbol"),
-                    footprint: field("Footprint"),
+                    symbol: cad("Symbol"),
+                    footprint: cad("Footprint"),
                 };
                 (details.ipn.clone(), values)
             })
@@ -324,33 +325,50 @@ impl TeamCatalog {
         load_part(&client, &part).map(Some)
     }
 
+    /// Saves what the edit changed: the details when any details field or
+    /// manufacturer part differs from the details it started from, and the
+    /// Symbol and Footprint when they differ from the revision it started
+    /// from. Each is checked only against its own starting number.
     pub fn edit(&self, request: TeamEditRequest) -> Result<PublishResult, String> {
         let client = self.client()?;
-        let command = EditCommand {
-            correlation_id: attempt_id(request.correlation_id.as_deref())?,
-            reason: request.reason.clone(),
-            ipn: request.ipn.clone(),
-            expected_revision: request.expected_revision,
-            fields: request
-                .fields
-                .iter()
-                .map(|field| DetailField {
-                    name: field.name.clone(),
-                    value: field.value.clone(),
-                })
-                .collect(),
-            manufacturer_parts: request
-                .manufacturer_parts
-                .iter()
-                .map(|part| catalog::ManufacturerPart {
-                    manufacturer: part.manufacturer.clone(),
-                    mpn: part.mpn.clone(),
-                })
-                .collect(),
-        };
+        let part = part_by_ipn(&client, &request.ipn)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("{} is no longer in the team catalog", request.ipn))?;
+        let started = load(&client, &part)?;
+        let base_details = started
+            .details
+            .get(&request.expected_details)
+            .ok_or_else(|| format!("details {} are missing", request.expected_details))?;
+        let base_revision = started
+            .revisions
+            .get(&request.expected_revision)
+            .ok_or_else(|| format!("revision {} is missing", request.expected_revision))?;
+        let fields = detail_fields(&request.fields);
+        let parts = catalog_parts(&request.manufacturer_parts);
+        let cad_fields = detail_fields(&request.cad_fields);
+        let mut command = EditCommand::new(&request.ipn, &request.reason);
+        command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
+        if fields != base_details.fields || parts != base_details.manufacturer_parts {
+            command = command.editing_details(base_details, request.expected_details);
+            if let Some(details) = &mut command.details {
+                details.fields = fields;
+                details.manufacturer_parts = parts;
+            }
+        }
+        if cad_fields != base_revision.cad_fields {
+            command = command.editing_cad(base_revision, request.expected_revision);
+            if let Some(cad) = &mut command.cad {
+                cad.fields = cad_fields;
+            }
+        }
+        if command.details.is_none() && command.cad.is_none() {
+            return Ok(PublishResult::NothingToSave {
+                message: "Nothing changed, so nothing was saved.".into(),
+            });
+        }
         let reply = submit_edit(&client, &command);
-        self.published(&client, &request.ipn, reply, |current, part| {
-            edit_conflict(&request, current, part)
+        self.published(&client, &request.ipn, reply, |details, revision, part| {
+            edit_conflict(&request, details, revision, part)
         })
     }
 
@@ -359,7 +377,11 @@ impl TeamCatalog {
         client: &PocketBaseClient,
         ipn: &str,
         reply: Result<PublishReply, CollabError>,
-        conflict: impl FnOnce(&ConflictingRevision, &LoadedPart) -> Result<TeamConflict, String>,
+        conflict: impl FnOnce(
+            Option<&ConflictingRecord>,
+            Option<&ConflictingRecord>,
+            &LoadedPart,
+        ) -> Result<TeamConflict, String>,
     ) -> Result<PublishResult, String> {
         let reload = || -> Result<LoadedPart, String> {
             let part = part_by_ipn(client, ipn)
@@ -370,16 +392,19 @@ impl TeamCatalog {
         match reply {
             Ok(reply) => match reply.outcome {
                 PublishOutcome::Applied { revision, .. } => Ok(PublishResult::Saved {
-                    revision: revision.number,
+                    revision: revision.map(|revision| revision.number),
                     part: reload()?.view,
                 }),
                 PublishOutcome::Noop { .. } => Ok(PublishResult::NothingToSave {
                     message: "Nothing changed, so nothing was saved.".into(),
                 }),
                 PublishOutcome::Conflict {
-                    current_revision, ..
+                    current_details,
+                    current_revision,
+                    ..
                 } => Ok(PublishResult::Conflict(Box::new(conflict(
-                    &current_revision,
+                    current_details.as_deref(),
+                    current_revision.as_deref(),
                     &reload()?,
                 )?))),
                 PublishOutcome::CorrelationReused { message, .. } => {
@@ -408,7 +433,7 @@ impl TeamCatalog {
         kind: PreviewKind,
     ) -> Result<TeamCad, TeamCadError> {
         let client = self.client().map_err(|_| TeamCadError::SignedOut)?;
-        let details = self.part_details(&client, ipn, part_revision)?;
+        let details = self.part_revision(&client, ipn, part_revision)?;
         let (field, role) = match kind {
             PreviewKind::Symbol => ("Symbol", CadReferenceRole::Symbol),
             PreviewKind::Footprint => ("Footprint", CadReferenceRole::Footprint),
@@ -488,12 +513,12 @@ impl TeamCatalog {
             .map_err(fail)
     }
 
-    fn part_details(
+    fn part_revision(
         &self,
         client: &PocketBaseClient,
         ipn: &str,
         number: u32,
-    ) -> Result<PartDetails, TeamCadError> {
+    ) -> Result<PartRevision, TeamCadError> {
         let key = (ipn.to_owned(), number);
         if let Some(details) = self.lock_known().parts.get(&key) {
             return Ok(details.clone());
@@ -507,11 +532,11 @@ impl TeamCatalog {
             live.replica
                 .part_by_ipn(ipn)
                 .filter(|part| part.number == number)
-                .and_then(|part| part.details.clone())
+                .and_then(|part| part.revision.clone())
         });
         let details = match followed {
             Some(details) => details,
-            None => fetch_part_details(client, ipn, number)?,
+            None => fetch_part_revision(client, ipn, number)?,
         };
         self.lock_known().parts.insert(key, details.clone());
         Ok(details)
@@ -612,12 +637,12 @@ fn checked_snapshot(
     Ok(snapshot)
 }
 
-/// Revision `number` of `ipn`'s details, from the team server.
-fn fetch_part_details(
+/// Revision `number` of `ipn`, from the team server.
+fn fetch_part_revision(
     client: &PocketBaseClient,
     ipn: &str,
     number: u32,
-) -> Result<PartDetails, TeamCadError> {
+) -> Result<PartRevision, TeamCadError> {
     let part = part_by_ipn(client, ipn)
         .map_err(unreachable)?
         .ok_or_else(|| TeamCadError::NotFound(format!("{ipn} is not in the team catalog")))?;
@@ -805,99 +830,158 @@ fn next_delay(delay: Duration) -> Duration {
     (delay * 2).min(MAX_RECONNECT_DELAY)
 }
 
-/// A part's revisions as the app shows them, with what it needs to build a
-/// conflict.
+/// A part as the app shows it, with every saved details and revision, which
+/// edits and conflicts compare with.
 struct LoadedPart {
     view: TeamPart,
-    /// By revision number.
+    /// By number.
     details: BTreeMap<u32, PartDetails>,
+    /// By number.
+    revisions: BTreeMap<u32, PartRevision>,
 }
 
 fn load_part(client: &PocketBaseClient, part: &StoredPart) -> Result<TeamPart, String> {
     load(client, part).map(|loaded| loaded.view)
 }
 
+/// How a CAD reference is bound, in plain words.
+fn binding(reference: &CadReference) -> String {
+    match &reference.target {
+        CadReferenceTarget::CadItemRevision { number, .. } => format!("revision {number}"),
+        CadReferenceTarget::External => "KiCad library".to_owned(),
+        CadReferenceTarget::Unresolved { status } => format!("not found ({status})"),
+    }
+}
+
 fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, String> {
     let fail = |error: CollabError| error.to_string();
+    let saved_details = part_details_of(client, &part.id).map_err(fail)?;
     let revisions = part_revisions(client, &part.id).map_err(fail)?;
-    let change_ids: Vec<&str> = revisions.iter().map(|r| r.change.as_str()).collect();
+    let change_ids: Vec<&str> = saved_details
+        .iter()
+        .map(|d| d.change.as_str())
+        .chain(revisions.iter().map(|r| r.change.as_str()))
+        .collect();
     let change_records: BTreeMap<String, StoredChange> = changes_by_id(client, &change_ids)
         .map_err(fail)?
         .into_iter()
         .map(|change| (change.id.clone(), change))
         .collect();
-    let binding = |reference: &CadReference| match &reference.target {
-        CadReferenceTarget::CadItemRevision { number, .. } => format!("revision {number}"),
-        CadReferenceTarget::External => "KiCad library".to_owned(),
-        CadReferenceTarget::Unresolved { status } => format!("not found ({status})"),
-    };
 
     let mut details = BTreeMap::new();
-    for revision in &revisions {
-        let parsed: PartDetails = serde_json::from_str(&revision.snapshot)
-            .map_err(|error| format!("revision {} of {}: {error}", revision.number, part.ipn))?;
-        details.insert(revision.number, parsed);
+    for saved in &saved_details {
+        let parsed: PartDetails = serde_json::from_str(&saved.snapshot)
+            .map_err(|error| format!("details {} of {}: {error}", saved.number, part.ipn))?;
+        details.insert(saved.number, parsed);
     }
-    let current_number = part.current_revision_number;
-    let current = details
-        .get(&current_number)
-        .ok_or_else(|| format!("{} has no revision {current_number}", part.ipn))?;
+    let mut cad = BTreeMap::new();
+    for revision in &revisions {
+        let parsed: PartRevision = serde_json::from_str(&revision.snapshot)
+            .map_err(|error| format!("revision {} of {}: {error}", revision.number, part.ipn))?;
+        cad.insert(revision.number, parsed);
+    }
+    let current_details = details.get(&part.current_details_number).ok_or_else(|| {
+        format!(
+            "{} has no details {}",
+            part.ipn, part.current_details_number
+        )
+    })?;
+    let current_revision = cad.get(&part.current_revision_number).ok_or_else(|| {
+        format!(
+            "{} has no revision {}",
+            part.ipn, part.current_revision_number
+        )
+    })?;
     let describe =
         |reference: &CadReference| format!("{}, {}", reference.reference, binding(reference));
-    let to_changes = |before: &PartDetails, after: &PartDetails| -> Vec<DetailChange> {
-        compare_details(before, after, describe)
-            .into_iter()
-            .map(|difference| DetailChange {
-                label: difference.label,
-                before: difference.before,
-                after: difference.after,
+
+    // One history entry per Change, newest first.
+    let mut entries: BTreeMap<u64, HistoryEntry> = BTreeMap::new();
+    for saved in &saved_details {
+        let previous = saved.number.checked_sub(1).and_then(|n| details.get(&n));
+        let changes = previous
+            .map(|previous| to_changes(compare_details(previous, &details[&saved.number])))
+            .unwrap_or_default();
+        if let Some(change) = change_records.get(&saved.change) {
+            let entry = history_entry(&mut entries, change);
+            entry.details = Some(saved.number);
+            // Details rows come first.
+            let mut rows = changes;
+            rows.append(&mut entry.changes);
+            entry.changes = rows;
+        }
+    }
+    for revision in &revisions {
+        let previous = revision.number.checked_sub(1).and_then(|n| cad.get(&n));
+        let changes = previous
+            .map(|previous| {
+                to_changes(compare_revisions(
+                    previous,
+                    &cad[&revision.number],
+                    describe,
+                ))
             })
-            .collect()
-    };
-    let history = revisions
-        .iter()
-        .rev()
-        .map(|revision| {
-            let this = &details[&revision.number];
-            let changes = match revision.number.checked_sub(1).and_then(|n| details.get(&n)) {
-                Some(previous) => to_changes(previous, this),
-                None => Vec::new(),
-            };
-            summary(revision, change_records.get(&revision.change), changes)
-        })
-        .collect();
+            .unwrap_or_default();
+        if let Some(change) = change_records.get(&revision.change) {
+            let entry = history_entry(&mut entries, change);
+            entry.revision = Some(revision.number);
+            entry.changes.extend(changes);
+        }
+    }
     let view = TeamPart {
         ipn: part.ipn.clone(),
-        current: revision_details(current_number, current, &binding),
-        history,
+        details: current_details_view(part.current_details_number, current_details),
+        revision: current_revision_view(part.current_revision_number, current_revision),
+        history: entries.into_values().rev().collect(),
     };
-    Ok(LoadedPart { view, details })
+    Ok(LoadedPart {
+        view,
+        details,
+        revisions: cad,
+    })
 }
 
-fn revision_details(
-    number: u32,
-    details: &PartDetails,
-    binding: &dyn Fn(&CadReference) -> String,
-) -> RevisionDetails {
-    RevisionDetails {
+/// The history entry of `change`, made when first needed.
+fn history_entry<'a>(
+    entries: &'a mut BTreeMap<u64, HistoryEntry>,
+    change: &StoredChange,
+) -> &'a mut HistoryEntry {
+    entries.entry(change.seq).or_insert_with(|| HistoryEntry {
+        seq: change.seq,
+        revision: None,
+        details: None,
+        action: action(&change.kind).to_owned(),
+        actor_name: actor_name(change),
+        saved_at: saved_at(&change.created),
+        reason: change.reason.clone(),
+        changes: Vec::new(),
+    })
+}
+
+fn to_changes(differences: Vec<catalog::DetailDifference>) -> Vec<DetailChange> {
+    differences
+        .into_iter()
+        .map(|difference| DetailChange {
+            label: difference.label,
+            before: difference.before,
+            after: difference.after,
+        })
+        .collect()
+}
+
+fn current_details_view(number: u32, details: &PartDetails) -> CurrentDetails {
+    CurrentDetails {
         number,
-        fields: details
-            .fields
-            .iter()
-            .map(|field| Field {
-                name: field.name.clone(),
-                value: field.value.clone(),
-            })
-            .collect(),
-        manufacturer_parts: details
-            .manufacturer_parts
-            .iter()
-            .map(|part| ManufacturerPart {
-                manufacturer: part.manufacturer.clone(),
-                mpn: part.mpn.clone(),
-            })
-            .collect(),
-        cad_items: details
+        fields: fields_of(&details.fields),
+        manufacturer_parts: manufacturer_parts_of(details),
+    }
+}
+
+fn current_revision_view(number: u32, revision: &PartRevision) -> CurrentRevision {
+    CurrentRevision {
+        number,
+        cad_fields: fields_of(&revision.cad_fields),
+        cad_items: revision
             .cad_references
             .iter()
             .map(|reference| CadItemUse {
@@ -912,48 +996,28 @@ fn revision_details(
     }
 }
 
-fn summary(
-    revision: &StoredPartRevision,
-    change: Option<&StoredChange>,
-    changes: Vec<DetailChange>,
-) -> RevisionSummary {
-    let kind = change
-        .map(|change| change.kind.as_str())
-        .unwrap_or_default();
-    RevisionSummary {
-        number: revision.number,
-        action: action(kind).to_owned(),
-        actor_name: change.map_or_else(|| "someone".to_owned(), actor_name),
-        saved_at: change
-            .map(|change| saved_at(&change.created))
-            .unwrap_or_default(),
-        reason: change
-            .map(|change| change.reason.clone())
-            .unwrap_or_default(),
-        changes,
-    }
-}
-
 /// Who made a Change, in words a team member understands. Administrator
 /// accounts (such as the one that runs imports) are not team members, so
 /// their email is not shown.
 fn actor_name(change: &StoredChange) -> String {
-    if change.actor.starts_with("_superusers:") {
+    plain_actor(&change.actor, &change.actor_name)
+}
+
+fn plain_actor(actor: &str, name: &str) -> String {
+    if actor.starts_with("_superusers:") {
         "an administrator".to_owned()
-    } else if change.actor_name.is_empty() {
+    } else if name.is_empty() {
         "someone".to_owned()
     } else {
-        change.actor_name.clone()
+        name.to_owned()
     }
 }
 
-/// The plain word for a Change kind. Nothing publishes restores any more,
-/// but revisions saved before they were removed still say so.
+/// The plain word for a Change kind.
 fn action(kind: &str) -> &'static str {
     match kind {
         "csv-import" => "Imported",
         "edit" => "Edited",
-        "restore" => "Restored",
         _ => "Saved",
     }
 }
@@ -994,31 +1058,58 @@ fn manufacturer_parts_of(details: &PartDetails) -> Vec<ManufacturerPart> {
         .collect()
 }
 
-/// Every field or list that the edit or the other person changed since the
-/// revision the edit started from, and their revision with only the edit
-/// changes applied on top.
-fn edit_conflict(
-    request: &TeamEditRequest,
-    current: &ConflictingRevision,
-    part: &LoadedPart,
-) -> Result<TeamConflict, String> {
-    let base = part
-        .details
-        .get(&request.expected_revision)
-        .ok_or_else(|| format!("revision {} is missing", request.expected_revision))?;
-    let theirs = current.details().map_err(|error| error.to_string())?;
-    let yours = |name: &str| {
-        request
-            .fields
+fn fields_of(fields: &[DetailField]) -> Vec<Field> {
+    fields
+        .iter()
+        .map(|field| Field {
+            name: field.name.clone(),
+            value: field.value.clone(),
+        })
+        .collect()
+}
+
+fn detail_fields(fields: &[Field]) -> Vec<DetailField> {
+    fields
+        .iter()
+        .map(|field| DetailField {
+            name: field.name.clone(),
+            value: field.value.clone(),
+        })
+        .collect()
+}
+
+fn catalog_parts(parts: &[ManufacturerPart]) -> Vec<catalog::ManufacturerPart> {
+    parts
+        .iter()
+        .map(|part| catalog::ManufacturerPart {
+            manufacturer: part.manufacturer.clone(),
+            mpn: part.mpn.clone(),
+        })
+        .collect()
+}
+
+/// Rows for the fields either side changed since `started`, and the merged
+/// fields: theirs, with yours where you changed something.
+fn field_rows(
+    started: &[DetailField],
+    theirs: &[DetailField],
+    yours: &[Field],
+    rows: &mut Vec<ConflictRow>,
+) -> Vec<Field> {
+    let started_value = |name: &str| {
+        started
             .iter()
             .find(|field| field.name == name)
             .map(|field| field.value.clone())
+            .unwrap_or_default()
     };
-    let mut rows = Vec::new();
-    let mut merged_fields = Vec::new();
-    for field in &theirs.fields {
-        let started = base.field(&field.name).unwrap_or_default().to_owned();
-        let mine = yours(&field.name).unwrap_or_else(|| started.clone());
+    let mut merged = Vec::new();
+    for field in theirs {
+        let started = started_value(&field.name);
+        let mine = yours
+            .iter()
+            .find(|yours| yours.name == field.name)
+            .map_or_else(|| started.clone(), |yours| yours.value.clone());
         let you_changed = mine != started;
         if you_changed || field.value != started {
             rows.push(ConflictRow {
@@ -1030,7 +1121,7 @@ fn edit_conflict(
                 you_changed,
             });
         }
-        merged_fields.push(Field {
+        merged.push(Field {
             name: field.name.clone(),
             value: if you_changed {
                 mine
@@ -1039,8 +1130,51 @@ fn edit_conflict(
             },
         });
     }
-    let started_parts = stored_lines(base);
-    let their_parts = stored_lines(&theirs);
+    merged
+}
+
+/// Every field or list that the edit or the other person changed since the
+/// details and revision the edit started from, and their version with only
+/// the edit's changes applied on top. `details` and `revision` are the
+/// current ones the server gave for whatever moved.
+fn edit_conflict(
+    request: &TeamEditRequest,
+    details: Option<&ConflictingRecord>,
+    revision: Option<&ConflictingRecord>,
+    part: &LoadedPart,
+) -> Result<TeamConflict, String> {
+    let base_details = part
+        .details
+        .get(&request.expected_details)
+        .ok_or_else(|| format!("details {} are missing", request.expected_details))?;
+    let base_revision = part
+        .revisions
+        .get(&request.expected_revision)
+        .ok_or_else(|| format!("revision {} is missing", request.expected_revision))?;
+    // What the server gave, or the part as it is now.
+    let (their_details_number, their_details) = match details {
+        Some(record) => (record.number, record.details().map_err(|e| e.to_string())?),
+        None => (
+            part.view.details.number,
+            part.details[&part.view.details.number].clone(),
+        ),
+    };
+    let (their_revision_number, their_revision) = match revision {
+        Some(record) => (record.number, record.revision().map_err(|e| e.to_string())?),
+        None => (
+            part.view.revision.number,
+            part.revisions[&part.view.revision.number].clone(),
+        ),
+    };
+    let mut rows = Vec::new();
+    let merged_fields = field_rows(
+        &base_details.fields,
+        &their_details.fields,
+        &request.fields,
+        &mut rows,
+    );
+    let started_parts = stored_lines(base_details);
+    let their_parts = stored_lines(&their_details);
     let your_parts = manufacturer_lines(
         request
             .manufacturer_parts
@@ -1060,47 +1194,59 @@ fn edit_conflict(
             you_changed: you_changed_parts,
         });
     }
+    let merged_cad = field_rows(
+        &base_revision.cad_fields,
+        &their_revision.cad_fields,
+        &request.cad_fields,
+        &mut rows,
+    );
     let merged = TeamEditRequest {
         correlation_id: None,
         ipn: request.ipn.clone(),
-        expected_revision: current.number,
+        expected_details: their_details_number,
+        expected_revision: their_revision_number,
         reason: request.reason.clone(),
         fields: merged_fields,
         manufacturer_parts: if you_changed_parts {
             request.manufacturer_parts.clone()
         } else {
-            manufacturer_parts_of(&theirs)
+            manufacturer_parts_of(&their_details)
         },
+        cad_fields: merged_cad,
     };
+    // The newest of the changes that moved what the edit started from.
+    let newest = [details, revision]
+        .into_iter()
+        .flatten()
+        .max_by(|a, b| a.created.cmp(&b.created));
+    let theirs = part
+        .view
+        .history
+        .iter()
+        .find(|entry| {
+            details.is_some_and(|d| entry.details == Some(d.number))
+                || revision.is_some_and(|r| entry.revision == Some(r.number))
+        })
+        .cloned()
+        .or_else(|| {
+            newest.map(|record| HistoryEntry {
+                seq: 0,
+                revision: None,
+                details: None,
+                action: action(&record.change_kind).to_owned(),
+                actor_name: plain_actor(&record.actor, &record.actor_name),
+                saved_at: saved_at(&record.created),
+                reason: record.reason.clone(),
+                changes: Vec::new(),
+            })
+        })
+        .ok_or_else(|| "the conflict names nothing that moved".to_owned())?;
     Ok(TeamConflict {
-        started_from: request.expected_revision,
-        theirs: their_summary(current, part),
+        theirs,
         rows,
         merged,
         part: part.view.clone(),
     })
-}
-
-/// Their revision from the part's history, or from the conflict answer if
-/// the history is behind.
-fn their_summary(current: &ConflictingRevision, part: &LoadedPart) -> RevisionSummary {
-    part.view
-        .history
-        .iter()
-        .find(|revision| revision.number == current.number)
-        .cloned()
-        .unwrap_or_else(|| RevisionSummary {
-            number: current.number,
-            action: action(&current.change_kind).to_owned(),
-            actor_name: if current.actor.starts_with("_superusers:") {
-                "an administrator".to_owned()
-            } else {
-                current.actor_name.clone()
-            },
-            saved_at: saved_at(&current.created),
-            reason: current.reason.clone(),
-            changes: Vec::new(),
-        })
 }
 
 fn save_settings(path: &Path, settings: &TeamSettings) -> Result<(), String> {

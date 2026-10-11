@@ -617,38 +617,42 @@ export async function teamSignIn(url, account) {
 
 /**
  * Publishes an edit of `ipn` as someone else, the way another desktop
- * would: read the current revision, change fields, POST /api/catalog/edits.
+ * would: read the current details and revision, change fields, and POST
+ * /api/catalog/edits with only the section that changed (Symbol and
+ * Footprint belong to the revision, every other field to the details).
+ * Returns the Change's number.
  * @param {Record<string, string>} values field name to new value
  */
 export async function editAsSomeoneElse(url, token, ipn, values, reason) {
   const headers = { Authorization: token, 'Content-Type': 'application/json' };
-  const parts = await fetch(
-    `${url}/api/collections/catalog_parts/records?filter=${encodeURIComponent(`ipn = "${ipn}"`)}`,
-    { headers },
-  ).then((r) => r.json());
+  const get = (path) => fetch(`${url}${path}`, { headers }).then((r) => r.json());
+  const parts = await get(`/api/collections/catalog_parts/records?filter=${encodeURIComponent(`ipn = "${ipn}"`)}`);
   const part = parts.items[0];
-  const revision = await fetch(
-    `${url}/api/collections/catalog_part_revisions/records/${part.current_revision}`,
-    { headers },
-  ).then((r) => r.json());
-  const details = JSON.parse(revision.snapshot);
-  const fields = details.fields.map((field) =>
-    field.name in values ? { name: field.name, value: values[field.name] } : field,
-  );
-  const reply = await fetch(`${url}/api/catalog/edits`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      correlationId: `journey-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
-      reason,
-      ipn,
-      expectedRevision: revision.number,
-      fields,
+  const savedDetails = await get(`/api/collections/catalog_part_details/records/${part.current_details}`);
+  const revision = await get(`/api/collections/catalog_part_revisions/records/${part.current_revision}`);
+  const details = JSON.parse(savedDetails.snapshot);
+  const cad = JSON.parse(revision.snapshot);
+  const changed = (fields) => fields.some((field) => field.name in values);
+  const apply = (fields) =>
+    fields.map((field) => (field.name in values ? { name: field.name, value: values[field.name] } : field));
+  const body = {
+    correlationId: `journey-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    reason,
+    ipn,
+  };
+  if (changed(details.fields)) {
+    body.details = {
+      expectedDetails: savedDetails.number,
+      fields: apply(details.fields),
       manufacturerParts: details.manufacturer_parts,
-    }),
-  });
-  const body = await reply.json();
-  assert.equal(reply.status, 200, `someone else's edit: ${JSON.stringify(body)}`);
-  record({ event: 'edit-by-someone-else', ipn, revision: body.revision.number, values });
-  return body.revision.number;
+    };
+  }
+  if (changed(cad.cad_fields)) {
+    body.cad = { expectedRevision: revision.number, fields: apply(cad.cad_fields) };
+  }
+  const reply = await fetch(`${url}/api/catalog/edits`, { method: 'POST', headers, body: JSON.stringify(body) });
+  const answer = await reply.json();
+  assert.equal(reply.status, 200, `someone else's edit: ${JSON.stringify(answer)}`);
+  record({ event: 'edit-by-someone-else', ipn, seq: answer.seq, values });
+  return answer.seq;
 }

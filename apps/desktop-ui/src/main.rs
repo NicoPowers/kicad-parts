@@ -563,8 +563,8 @@ fn PartPanel(
     let preview_source = Memo::new(move |_| {
         team_part.with(|part| {
             part.as_ref().map(|part| {
-                let field = |name: &str| part.current.field(name).unwrap_or_default().to_owned();
-                (part.current.number, field("Symbol"), field("Footprint"))
+                let field = |name: &str| part.revision.field(name).unwrap_or_default().to_owned();
+                (part.revision.number, field("Symbol"), field("Footprint"))
             })
         })
     });
@@ -606,11 +606,11 @@ fn PartPanel(
             {
                 // Keep showing the last good view if a refresh fails.
                 if let Ok(part) = result {
-                    // A revision someone else saved makes an earlier
-                    // "saved" message out of date.
-                    let shown =
-                        team_part.with_untracked(|shown| shown.as_ref().map(|p| p.current.number));
-                    let fetched = part.as_ref().map(|p| p.current.number);
+                    // A change someone else saved makes an earlier "saved"
+                    // message out of date.
+                    let numbers = |p: &TeamPart| (p.details.number, p.revision.number);
+                    let shown = team_part.with_untracked(|shown| shown.as_ref().map(numbers));
+                    let fetched = part.as_ref().map(numbers);
                     if shown.is_some() && shown != fetched {
                         ui.notice.set(None);
                     }
@@ -736,17 +736,17 @@ fn PartView(
 ) -> impl IntoView {
     let in_team = Memo::new(move |_| team_part.with(Option::is_some));
     let summary = part.summary.clone();
-    // The header: from the team catalog's current revision when it has the
-    // part, otherwise from the CSV catalog.
+    // The header: from the team catalog's current details and revision when
+    // it has the part, otherwise from the CSV catalog.
     let header = move || {
         let team = team_part.get();
         let field = |name: &str| {
             team.as_ref()
-                .and_then(|part| part.current.field(name).map(str::to_owned))
+                .and_then(|part| part.details.field(name).map(str::to_owned))
         };
         let main = team
             .as_ref()
-            .and_then(|part| part.current.manufacturer_parts.first().cloned());
+            .and_then(|part| part.details.manufacturer_parts.first().cloned());
         let (mpn, manufacturer) = match (&team, main) {
             (Some(_), Some(main)) => (main.mpn, main.manufacturer),
             (Some(_), None) => (String::new(), String::new()),
@@ -766,7 +766,7 @@ fn PartView(
             .map(|(prefix, _)| prefix.to_owned())
             .unwrap_or_default();
         let source = match &team {
-            Some(part) => format!("Team catalog, revision {}", part.current.number),
+            Some(part) => format!("Team catalog, revision {}", part.revision.number),
             None => summary.csv_file.clone(),
         };
         let facts: Vec<(&str, String)> = [

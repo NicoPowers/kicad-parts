@@ -1,8 +1,9 @@
 // Team catalog journey: sign in to a disposable local team server, see a
-// part's details from the team catalog, edit it, watch someone else's
-// change arrive by itself, resolve a conflict, read the history with what
-// changed, and view as a read-only member. There is no Restore: an earlier
-// revision is never copied back (kicad-parts-9296).
+// part's details and current revision from the team catalog, edit its
+// details (which adds no revision), watch someone else's change arrive by
+// itself, resolve a conflict, read the history with what changed, and view
+// as a read-only member. There is no Restore: an earlier revision is never
+// copied back (kicad-parts-9296).
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -113,6 +114,25 @@ describe('team catalog: history, edits and conflicts', () => {
     });
   }
 
+  /** Waits until the History tab counts `count` entries. */
+  async function waitForHistory(count) {
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(() => document.querySelector('#team-tab-history')?.textContent.trim())) ===
+        `History (${count})`,
+      { timeout: 20_000, interval: 100, timeoutMsg: `the history never counted ${count}` },
+    );
+  }
+
+  /** Asserts that the right-hand column is scrolled to its top, where the notice is. */
+  async function columnAtTop() {
+    assert.equal(
+      await browser.execute(() => document.querySelector('.part-fields').scrollTop),
+      0,
+      'the column scrolls back to the message',
+    );
+  }
+
   async function waitForRevision(number) {
     await browser.waitUntil(async () => (await sourceFact()) === `Team catalog, revision ${number}`, {
       timeout: 20_000,
@@ -174,9 +194,12 @@ describe('team catalog: history, edits and conflicts', () => {
     await waitForPreview(browser, FOOTPRINT);
     assert.equal(await textOf(browser, `${COLUMN} [role="tab"][aria-selected="true"]`), 'Details');
     assert.equal(await textOf(browser, `${COLUMN} [role="tab"][aria-selected="false"]`), 'History (1)');
-    assert.equal(await textOf(browser, '#fields-heading'), 'Part details (6)');
+    // Symbol and Footprint belong to the revision, so the details list the
+    // other four fields.
+    assert.equal(await textOf(browser, '#fields-heading'), 'Part details (4)');
     assert.equal(await fieldValue('Value'), '47');
     assert.match(await textOf(browser, '.manufacturer-parts'), /Yageo RC0603FR-0747RL \(main\)/);
+    assert.equal(await textOf(browser, '#cad-items-heading'), 'Symbol and footprint (revision 1)');
     assert.match(await textOf(browser, COLUMN), /g-pas:R_US, revision 1/);
     const layout = await windowFits();
     record({ event: 'layout', state: 'team-details', ...layout });
@@ -185,24 +208,38 @@ describe('team catalog: history, edits and conflicts', () => {
     await screenshot(browser, '42-team-part-details');
   });
 
-  it('edits the part and saves a new revision', async () => {
-    await clickButton(COLUMN, 'Edit details');
-    await waitForText(browser, '#edit-heading', 'Edit details (starting from revision 1)');
+  it('edits the part details, which adds no revision', async () => {
+    await clickButton(COLUMN, 'Edit part');
+    await waitForText(browser, '#edit-heading', 'Edit part');
+    assert.match(
+      await textOf(browser, '.edit-form'),
+      /Change details only to correct them\. A part with a different value, package or pinout needs a new IPN\./,
+    );
+    const legends = await browser.execute(() =>
+      [...document.querySelectorAll('.edit-form legend')].map((legend) => legend.textContent.trim()),
+    );
+    assert.deepEqual(legends, ['Part details', 'Manufacturer parts (the first is the main one)', 'Symbol and footprint']);
+    assert.match(
+      await textOf(browser, '.edit-form fieldset:last-of-type .hint'),
+      /^Changing these adds a revision after revision 1\. Designs that use an earlier revision keep it\.$/,
+    );
     await (await fieldInput('Value')).setValue('47R');
     await (await browser.$('#edit-reason')).setValue('Write the value the way the BOM does');
     await assertAccessible(browser, '43-team-edit');
     await screenshot(browser, '43-team-edit');
     await clickButton('.edit-form', 'Save');
-    await waitForText(browser, NOTICE, 'Saved as revision 2.');
-    await waitForRevision(2);
+    await waitForText(browser, NOTICE, 'Saved. The part details changed; no revision was added.');
+    await columnAtTop();
+    await waitForHistory(2);
+    assert.equal(await sourceFact(), 'Team catalog, revision 1');
     assert.equal(await fieldValue('Value'), '47R');
-    assert.equal(await textOf(browser, `${COLUMN} [role="tab"][aria-selected="false"]`), 'History (2)');
   });
 
   it("shows someone else's change without being asked", async () => {
     await editAsSomeoneElse(server.url, otherToken, IPN, { Description: 'Thick film resistor, 47 ohm, 1%' }, 'Clearer description');
-    await waitForRevision(3);
+    await waitForHistory(3);
     await waitForText(browser, '.part-description', 'Thick film resistor, 47 ohm, 1%');
+    assert.equal(await sourceFact(), 'Team catalog, revision 1');
     // The results list shows the team catalog's description too.
     await waitForText(browser, '.results li .result-description', 'Thick film resistor, 47 ohm, 1%');
     // The earlier "saved" message would now be out of date.
@@ -225,13 +262,21 @@ describe('team catalog: history, edits and conflicts', () => {
   });
 
   it('shows both versions when someone else saved first, and saves on top', async () => {
-    await clickButton(COLUMN, 'Edit details');
-    await waitForText(browser, '#edit-heading', 'Edit details (starting from revision 3)');
+    await clickButton(COLUMN, 'Edit part');
+    await waitForText(browser, '#edit-heading', 'Edit part');
     await (await fieldInput('Tolerance')).setValue('0.5%');
     await (await browser.$('#edit-reason')).setValue('Use the tighter tolerance part');
     // Meanwhile someone else changes the value.
     await editAsSomeoneElse(server.url, otherToken, IPN, { Value: '47.0' }, 'One decimal place');
-    await waitForText(browser, '.edit-form .hint', /Someone else saved revision 4 while you were editing/);
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() =>
+          [...document.querySelectorAll('.edit-form .hint')].some((hint) =>
+            hint.textContent.startsWith('Someone else saved a change to this part while you were editing.'),
+          ),
+        ),
+      { timeout: 20_000, timeoutMsg: 'the edit form never said someone else saved a change' },
+    );
     // What was typed survives their change arriving.
     assert.equal(await (await fieldInput('Tolerance')).getValue(), '0.5%');
     await clickButton('.edit-form', 'Save');
@@ -253,8 +298,8 @@ describe('team catalog: history, edits and conflicts', () => {
     record({ event: 'conflict', ...conflict });
     assert.equal(conflict.role, 'alert');
     assert.equal(conflict.alerts, 1, 'one alert for the conflict');
-    assert.match(conflict.summary, new RegExp(`^${other.name} saved revision 4 on .* after you started editing revision 3\\. Your changes are not saved yet\\.$`));
-    assert.deepEqual(conflict.headers, ['Field', 'Revision 3 (you started here)', 'Theirs (revision 4)', 'Yours']);
+    assert.match(conflict.summary, new RegExp(`^${other.name} saved a change on .* after you started editing\\. Your changes are not saved yet\\.$`));
+    assert.deepEqual(conflict.headers, ['Field', 'You started from', 'Theirs', 'Yours']);
     assert.deepEqual(conflict.rows, [
       // You did not change the value, so yours says so; saving on top keeps
       // their 47.0.
@@ -265,32 +310,35 @@ describe('team catalog: history, edits and conflicts', () => {
     await assertAccessible(browser, '45-team-conflict');
     await screenshot(browser, '45-team-conflict');
     await clickButton('.conflict', 'Save my changes on top of theirs');
-    await waitForText(browser, NOTICE, 'Saved as revision 5.');
-    await waitForRevision(5);
+    await waitForText(browser, NOTICE, 'Saved. The part details changed; no revision was added.');
+    await columnAtTop();
+    await waitForHistory(5);
     assert.equal(await fieldValue('Value'), '47.0', 'their value is kept');
     assert.equal(await fieldValue('Tolerance'), '0.5%', 'your change is added');
   });
 
-  it('lists the history and what changed in each revision', async () => {
+  it('lists the history and what changed in each entry', async () => {
     await clickButton(COLUMN, 'History (5)');
     await browser.waitUntil(async () => (await browser.$$('.history li')).length === 5, {
       timeout: 5_000,
-      timeoutMsg: 'the history did not list 5 revisions',
+      timeoutMsg: 'the history did not list 5 entries',
     });
     const titles = await browser.execute(() =>
       [...document.querySelectorAll('.history .history-title')].map((t) => t.textContent.trim()),
     );
-    assert.deepEqual(titles.slice(0, 4), [
-      `Revision 5 · Edited by ${editor.name} (current)`,
-      `Revision 4 · Edited by ${other.name}`,
-      `Revision 3 · Edited by ${other.name}`,
-      `Revision 2 · Edited by ${editor.name}`,
+    // Details changes add no revision; the import added revision 1, still
+    // the current one. The import ran as an administrator account, which is
+    // not a team member.
+    assert.deepEqual(titles, [
+      `Part details · Edited by ${editor.name}`,
+      `Part details · Edited by ${other.name}`,
+      `Part details · Edited by ${other.name}`,
+      `Part details · Edited by ${editor.name}`,
+      'Revision 1 · Imported by an administrator (current)',
     ]);
-    // The import ran as an administrator account, which is not a team member.
-    assert.equal(titles[4], 'Revision 1 · Imported by an administrator');
     assert.match(await textOf(browser, '.history li:nth-child(4) .history-reason'), /^“Write the value the way the BOM does”$/);
     await (await browser.$('.history li:nth-child(4) button')).click();
-    await waitForText(browser, '#revision-heading', 'What changed in revision 2');
+    await waitForText(browser, '#revision-heading', 'What changed in the part details');
     assert.equal(
       await browser.execute(() => document.querySelector('.history li:nth-child(4) button').getAttribute('aria-pressed')),
       'true',
@@ -314,19 +362,24 @@ describe('team catalog: history, edits and conflicts', () => {
     await signIn(viewer);
     await waitForText(browser, BADGE, `Team catalog · ${viewer.name}`);
     await waitForLiveUpdates(browser);
-    await waitForRevision(5);
+    await waitForRevision(1);
+    await waitForHistory(5);
     await waitForText(browser, '.read-only', 'You can view this part but not edit it.');
     assert.equal((await browser.$$(NOTICE)).length, 0, "no message left from the editor's session");
     const buttons = await browser.execute(() =>
       [...document.querySelectorAll('.part-fields button')].map((b) => b.textContent.trim()),
     );
-    assert.ok(!buttons.includes('Edit details'), `no edit button: ${buttons}`);
+    assert.ok(!buttons.includes('Edit part'), `no edit button: ${buttons}`);
     await clickButton(COLUMN, 'History (5)');
     await browser.waitUntil(async () => (await browser.$$('.history li')).length === 5, { timeout: 5_000 });
     const second = await browser.$('.history li:nth-child(2) button');
     await second.click();
-    await waitForText(browser, '#revision-heading', 'What changed in revision 4');
+    await waitForText(browser, '#revision-heading', 'What changed in the part details');
     assert.equal(await browser.execute(() => document.querySelectorAll('.revision button').length), 0);
+    const last = await browser.$('.history li:last-child button');
+    await last.click();
+    await waitForText(browser, '#revision-heading', 'What changed in revision 1');
+    assert.equal(await textOf(browser, '.revision .hint'), 'The first revision of this part.');
     await clickButton(COLUMN, 'Details');
     await assertAccessible(browser, '49-team-read-only');
     await screenshot(browser, '49-team-read-only');

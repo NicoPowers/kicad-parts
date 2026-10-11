@@ -1,11 +1,14 @@
 //! The team catalog in the desktop UI: the sign-in badge in the header,
-//! and, for a part the team catalog has, its details, history, edits and
-//! conflicts in the right-hand column of the part panel.
+//! and, for a part the team catalog has, its details and current revision,
+//! history, edits and conflicts in the right-hand column of the part panel.
+//!
+//! Part details are shared by every revision, so saving them adds no
+//! revision; only a new symbol or footprint does.
 
 use crate::backend;
 use desktop_contract::{
-    DetailChange, Field, LiveUpdates, ManufacturerPart, PublishResult, RevisionSummary,
-    SignInRequest, TeamConflict, TeamEditRequest, TeamPart, TeamSession, TeamStatus,
+    DetailChange, Field, HistoryEntry, LiveUpdates, ManufacturerPart, PublishResult, SignInRequest,
+    TeamConflict, TeamEditRequest, TeamPart, TeamSession, TeamStatus,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -209,9 +212,14 @@ pub enum Notice {
 #[derive(Clone, Debug, Default)]
 pub struct Draft {
     pub ipn: String,
-    pub base: u32,
+    /// The number of the part details the edit starts from.
+    pub base_details: u32,
+    /// The revision the edit starts from.
+    pub base_revision: u32,
     pub fields: Vec<Field>,
     pub parts: Vec<ManufacturerPart>,
+    /// The Symbol and Footprint fields.
+    pub cad_fields: Vec<Field>,
     pub reason: String,
 }
 
@@ -227,8 +235,8 @@ pub struct TeamUi {
     pub parts_version: RwSignal<u32>,
     pub conflict: RwSignal<Option<TeamConflict>>,
     pub notice: RwSignal<Option<Notice>>,
-    /// The revision selected in the history.
-    pub selected: RwSignal<Option<u32>>,
+    /// The history entry selected, by its Change's number.
+    pub selected: RwSignal<Option<u64>>,
     pub busy: RwSignal<bool>,
     /// The last save sent and its correlation ID: sending the same save
     /// again (after a lost answer) reuses the ID, so the server replays its
@@ -286,9 +294,11 @@ impl TeamUi {
 fn draft_of(part: &TeamPart) -> Draft {
     Draft {
         ipn: part.ipn.clone(),
-        base: part.current.number,
-        fields: part.current.fields.clone(),
-        parts: part.current.manufacturer_parts.clone(),
+        base_details: part.details.number,
+        base_revision: part.revision.number,
+        fields: part.details.fields.clone(),
+        parts: part.details.manufacturer_parts.clone(),
+        cad_fields: part.revision.cad_fields.clone(),
         reason: String::new(),
     }
 }
@@ -296,10 +306,25 @@ fn draft_of(part: &TeamPart) -> Draft {
 fn draft_from_request(request: &TeamEditRequest) -> Draft {
     Draft {
         ipn: request.ipn.clone(),
-        base: request.expected_revision,
+        base_details: request.expected_details,
+        base_revision: request.expected_revision,
         fields: request.fields.clone(),
         parts: request.manufacturer_parts.clone(),
+        cad_fields: request.cad_fields.clone(),
         reason: request.reason.clone(),
+    }
+}
+
+fn request_of(draft: Draft) -> TeamEditRequest {
+    TeamEditRequest {
+        correlation_id: None,
+        ipn: draft.ipn,
+        expected_details: draft.base_details,
+        expected_revision: draft.base_revision,
+        reason: draft.reason,
+        fields: draft.fields,
+        manufacturer_parts: draft.parts,
+        cad_fields: draft.cad_fields,
     }
 }
 
@@ -312,12 +337,7 @@ fn scroll_column_to_top() {
 }
 
 /// Applies what the server answered to an edit.
-fn published(
-    ui: TeamUi,
-    part: RwSignal<Option<TeamPart>>,
-    result: Result<PublishResult, String>,
-    done: impl FnOnce(u32) -> String,
-) {
+fn published(ui: TeamUi, part: RwSignal<Option<TeamPart>>, result: Result<PublishResult, String>) {
     ui.busy.set(false);
     match result {
         Ok(PublishResult::Saved {
@@ -328,7 +348,11 @@ fn published(
             ui.editing.set(None);
             ui.conflict.set(None);
             ui.selected.set(None);
-            ui.notice.set(Some(Notice::Done(done(revision))));
+            let message = match revision {
+                Some(revision) => format!("Saved as revision {revision}."),
+                None => "Saved. The part details changed; no revision was added.".to_owned(),
+            };
+            ui.notice.set(Some(Notice::Done(message)));
             scroll_column_to_top();
         }
         Ok(PublishResult::NothingToSave { message }) => ui.notice.set(Some(Notice::Done(message))),
@@ -389,9 +413,7 @@ fn save_edit(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamEditRequ
     ui.busy.set(true);
     spawn_local(async move {
         let result = backend::team_edit(request).await;
-        published(ui, part, result, |revision| {
-            format!("Saved as revision {revision}.")
-        });
+        published(ui, part, result);
     });
 }
 
@@ -508,14 +530,35 @@ fn is_url(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
 }
 
+/// One row per field: its name and its value, blanks shown as `(blank)` and
+/// web addresses on one line.
+fn field_rows(fields: Vec<Field>) -> impl IntoView {
+    fields
+        .into_iter()
+        .map(|field| {
+            let url = is_url(&field.value);
+            let title = url.then(|| field.value.clone());
+            view! {
+                <tr>
+                    <th scope="row">{field.name}</th>
+                    <td class:field-url=url class:blank=field.value.is_empty() title=title>
+                        {shown(&field.value)}
+                    </td>
+                </tr>
+            }
+        })
+        .collect_view()
+}
+
 #[component]
 fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> impl IntoView {
     move || {
         let Some(team_part) = part.get() else {
             return ().into_any();
         };
-        let current = team_part.current.clone();
-        let count = current.fields.len();
+        let details = team_part.details.clone();
+        let revision = team_part.revision.clone();
+        let count = details.fields.len();
         let for_edit = team_part.clone();
         view! {
             <div class="team-toolbar">
@@ -527,7 +570,7 @@ fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                             class="primary"
                             on:click=move |_| ui.start_editing(draft_of(&for_edit))
                         >
-                            "Edit details"
+                            "Edit part"
                         </button>
                     }
                     .into_any()
@@ -536,36 +579,20 @@ fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                         .into_any()
                 }}
             </div>
+            <p class="hint">"Every revision of the part shares these details."</p>
             <table aria-labelledby="fields-heading">
                 <thead>
                     <tr><th scope="col">"Field"</th><th scope="col">"Value"</th></tr>
                 </thead>
-                <tbody>
-                    {current
-                        .fields
-                        .iter()
-                        .map(|field| {
-                            let url = is_url(&field.value);
-                            let title = url.then(|| field.value.clone());
-                            view! {
-                                <tr>
-                                    <th scope="row">{field.name.clone()}</th>
-                                    <td class:field-url=url class:blank=field.value.is_empty() title=title>
-                                        {shown(&field.value)}
-                                    </td>
-                                </tr>
-                            }
-                        })
-                        .collect_view()}
-                </tbody>
+                <tbody>{field_rows(details.fields.clone())}</tbody>
             </table>
             <h3 id="manufacturer-parts-heading">"Manufacturer parts"</h3>
-            {if current.manufacturer_parts.is_empty() {
+            {if details.manufacturer_parts.is_empty() {
                 view! { <p class="hint">"None listed."</p> }.into_any()
             } else {
                 view! {
                     <ol class="manufacturer-parts" aria-labelledby="manufacturer-parts-heading">
-                        {current
+                        {details
                             .manufacturer_parts
                             .iter()
                             .enumerate()
@@ -578,40 +605,49 @@ fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                 }
                 .into_any()
             }}
-            <h3 id="cad-items-heading">"Symbol and footprint used"</h3>
-            <table aria-labelledby="cad-items-heading">
-                <tbody>
-                    {current
-                        .cad_items
-                        .iter()
-                        .map(|item| view! {
-                            <tr>
-                                <th scope="row">{item.role.clone()}</th>
-                                <td><code>{item.reference.clone()}</code>{format!(", {}", item.binding)}</td>
-                            </tr>
-                        })
-                        .collect_view()}
-                </tbody>
-            </table>
+            <h3 id="cad-items-heading">{format!("Symbol and footprint (revision {})", revision.number)}</h3>
+            {if revision.cad_items.is_empty() {
+                view! { <p class="hint">"This part uses no symbol or footprint."</p> }.into_any()
+            } else {
+                view! {
+                    <table aria-labelledby="cad-items-heading">
+                        <tbody>
+                            {revision
+                                .cad_items
+                                .iter()
+                                .map(|item| view! {
+                                    <tr>
+                                        <th scope="row">{item.role.clone()}</th>
+                                        <td><code>{item.reference.clone()}</code>{format!(", {}", item.binding)}</td>
+                                    </tr>
+                                })
+                                .collect_view()}
+                        </tbody>
+                    </table>
+                }
+                .into_any()
+            }}
         }
         .into_any()
     }
 }
 
-#[component]
-fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
-    let draft = ui.draft.get_value();
-    let base = draft.base;
-    let fields = draft
-        .fields
-        .iter()
+/// Text inputs for `fields`, which write into the draft through `set`.
+fn field_inputs(
+    fields: Vec<Field>,
+    prefix: &'static str,
+    ui: TeamUi,
+    set: fn(&mut Draft, usize, String),
+) -> impl IntoView {
+    fields
+        .into_iter()
         .enumerate()
         .map(|(index, field)| {
-            let id = format!("edit-field-{index}");
-            let value = field.value.clone();
+            let id = format!("{prefix}-{index}");
+            let value = field.value;
             view! {
                 <div class="edit-row">
-                    <label for=id.clone()>{field.name.clone()}</label>
+                    <label for=id.clone()>{field.name}</label>
                     <input
                         id=id
                         type="text"
@@ -619,28 +655,37 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
                         prop:value=value
                         on:input:target=move |event| {
                             let value = event.target().value();
-                            ui.draft.update_value(|draft| draft.fields[index].value = value);
+                            ui.draft.update_value(|draft| set(draft, index, value));
                         }
                     />
                 </div>
             }
         })
-        .collect_view();
-    let save = move || {
-        let draft = ui.draft.get_value();
-        save_edit(
-            ui,
-            part,
-            TeamEditRequest {
-                correlation_id: None,
-                ipn: draft.ipn,
-                expected_revision: draft.base,
-                reason: draft.reason,
-                fields: draft.fields,
-                manufacturer_parts: draft.parts,
-            },
-        );
-    };
+        .collect_view()
+}
+
+#[component]
+fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
+    let draft = ui.draft.get_value();
+    let (base_details, base_revision) = (draft.base_details, draft.base_revision);
+    let fields = field_inputs(
+        draft.fields.clone(),
+        "edit-field",
+        ui,
+        |draft, index, value| {
+            draft.fields[index].value = value;
+        },
+    );
+    let cad_fields = field_inputs(
+        draft.cad_fields.clone(),
+        "edit-cad",
+        ui,
+        |draft, index, value| {
+            draft.cad_fields[index].value = value;
+        },
+    );
+    let has_cad = !draft.cad_fields.is_empty();
+    let save = move || save_edit(ui, part, request_of(ui.draft.get_value()));
     view! {
         <form
             class="edit-form"
@@ -650,23 +695,25 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
                 save();
             }
         >
-            <h3 id="edit-heading">{format!("Edit details (starting from revision {base})")}</h3>
+            <h3 id="edit-heading">"Edit part"</h3>
+            <p class="hint">
+                "Change details only to correct them. A part with a different value, package or pinout needs a new IPN."
+            </p>
             {move || {
                 part.with(|part| {
                     part.as_ref()
-                        .filter(|part| part.current.number > base)
-                        .map(|part| view! {
+                        .filter(|part| {
+                            part.details.number > base_details || part.revision.number > base_revision
+                        })
+                        .map(|_| view! {
                             <p class="hint">
-                                {format!(
-                                    "Someone else saved revision {} while you were editing. When you save, you can compare both versions.",
-                                    part.current.number,
-                                )}
+                                "Someone else saved a change to this part while you were editing. When you save, you can compare both versions."
                             </p>
                         })
                 })
             }}
             <fieldset>
-                <legend>"Fields"</legend>
+                <legend>"Part details"</legend>
                 {fields}
             </fieldset>
             <fieldset>
@@ -735,6 +782,15 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
                     "Add a manufacturer part"
                 </button>
             </fieldset>
+            {has_cad.then(|| view! {
+                <fieldset>
+                    <legend>"Symbol and footprint"</legend>
+                    <p class="hint">
+                        {format!("Changing these adds a revision after revision {base_revision}. Designs that use an earlier revision keep it.")}
+                    </p>
+                    {cad_fields}
+                </fieldset>
+            })}
             <label for="edit-reason" class="reason-label">"Why are you changing it?"</label>
             <textarea
                 id="edit-reason"
@@ -808,11 +864,15 @@ fn machine_time(shown: &str) -> Option<String> {
     Some(format!("{date}T{time}Z"))
 }
 
-fn revision_title(revision: &RevisionSummary) -> String {
-    format!(
-        "Revision {} · {} by {}",
-        revision.number, revision.action, revision.actor_name
-    )
+/// `Revision 2 · Imported by an administrator` for an entry that added a
+/// revision, `Part details · Edited by Ada` for one that only saved the
+/// details.
+fn entry_title(entry: &HistoryEntry) -> String {
+    let what = match entry.revision {
+        Some(number) => format!("Revision {number}"),
+        None => "Part details".to_owned(),
+    };
+    format!("{what} · {} by {}", entry.action, entry.actor_name)
 }
 
 #[component]
@@ -821,12 +881,13 @@ fn HistoryView(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
         let Some(team_part) = part.get() else {
             return ().into_any();
         };
-        let current = team_part.current.number;
-        let chosen = ui.selected.get().unwrap_or(current);
+        let current = team_part.revision.number;
+        let newest = team_part.history.first().map(|entry| entry.seq);
+        let chosen = ui.selected.get().or(newest);
         let selected = team_part
             .history
             .iter()
-            .find(|revision| revision.number == chosen)
+            .find(|entry| Some(entry.seq) == chosen)
             .or(team_part.history.first())
             .cloned();
         view! {
@@ -835,13 +896,13 @@ fn HistoryView(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
                 {team_part
                     .history
                     .iter()
-                    .map(|revision| {
-                        let number = revision.number;
-                        let is_selected = number == chosen;
-                        let reason = if revision.reason.is_empty() {
+                    .map(|entry| {
+                        let seq = entry.seq;
+                        let is_selected = Some(seq) == chosen;
+                        let reason = if entry.reason.is_empty() {
                             String::new()
                         } else {
-                            format!("“{}”", revision.reason)
+                            format!("“{}”", entry.reason)
                         };
                         view! {
                             <li>
@@ -849,13 +910,13 @@ fn HistoryView(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
                                     type="button"
                                     class="history-entry"
                                     aria-pressed=if is_selected { "true" } else { "false" }
-                                    on:click=move |_| ui.selected.set(Some(number))
+                                    on:click=move |_| ui.selected.set(Some(seq))
                                 >
                                     <span class="history-title">
-                                        {revision_title(revision)}
-                                        {(number == current).then_some(" (current)")}
+                                        {entry_title(entry)}
+                                        {(entry.revision == Some(current)).then_some(" (current)")}
                                     </span>
-                                    <span class="history-when">{saved_at_view(revision.saved_at.clone())}</span>
+                                    <span class="history-when">{saved_at_view(entry.saved_at.clone())}</span>
                                     <span class="history-reason">{reason}</span>
                                 </button>
                             </li>
@@ -863,36 +924,31 @@ fn HistoryView(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
                     })
                     .collect_view()}
             </ol>
-            {selected.map(|revision| view! {
-                <RevisionView revision=revision />
-            })}
+            {selected.map(|entry| view! { <EntryView entry=entry /> })}
         }
         .into_any()
     }
 }
 
 #[component]
-fn RevisionView(revision: RevisionSummary) -> impl IntoView {
-    let number = revision.number;
-    let what_changed = if number == 1 {
+fn EntryView(entry: HistoryEntry) -> impl IntoView {
+    let heading = match entry.revision {
+        Some(number) => format!("What changed in revision {number}"),
+        None => "What changed in the part details".to_owned(),
+    };
+    let what_changed = if entry.revision == Some(1) {
         view! { <p class="hint">"The first revision of this part."</p> }.into_any()
-    } else if revision.changes.is_empty() {
-        view! { <p class="hint">"Nothing changed in this revision."</p> }.into_any()
+    } else if entry.changes.is_empty() {
+        view! { <p class="hint">"Nothing changed."</p> }.into_any()
     } else {
-        changes_table(
-            format!("What changed in revision {number}"),
-            "Before",
-            "After",
-            revision.changes.clone(),
-        )
-        .into_any()
+        changes_table(heading.clone(), "Before", "After", entry.changes.clone()).into_any()
     };
     view! {
         <section class="revision" aria-labelledby="revision-heading">
-            <h4 id="revision-heading">{format!("What changed in revision {number}")}</h4>
+            <h4 id="revision-heading">{heading}</h4>
             <p class="history-when">
-                {format!("{} by {} on ", revision.action, revision.actor_name)}
-                {saved_at_view(revision.saved_at.clone())}
+                {format!("{} by {} on ", entry.action, entry.actor_name)}
+                {saved_at_view(entry.saved_at.clone())}
             </p>
             {what_changed}
         </section>
@@ -912,11 +968,9 @@ fn ConflictView(
         format!(" (“{}”)", theirs.reason)
     };
     // The sentence is split around the save time, which is a <time>.
-    let summary_start = format!("{} saved revision {} on ", theirs.actor_name, theirs.number);
-    let summary_end = format!(
-        "{reason} after you started editing revision {}. Your changes are not saved yet.",
-        conflict.started_from,
-    );
+    let summary_start = format!("{} saved a change on ", theirs.actor_name);
+    let summary_end =
+        format!("{reason} after you started editing. Your changes are not saved yet.");
     let rows = conflict.rows.clone();
     let save_merged = conflict.merged.clone();
     let edit_merged = conflict.merged.clone();
@@ -955,8 +1009,8 @@ fn ConflictView(
                 <thead>
                     <tr>
                         <th scope="col">"Field"</th>
-                        <th scope="col">{format!("Revision {} (you started here)", conflict.started_from)}</th>
-                        <th scope="col">{format!("Theirs (revision {})", theirs.number)}</th>
+                        <th scope="col">"You started from"</th>
+                        <th scope="col">"Theirs"</th>
                         <th scope="col">"Yours"</th>
                     </tr>
                 </thead>
