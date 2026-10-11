@@ -67,7 +67,7 @@ pub fn compare_revisions(
 ) -> Vec<DetailDifference> {
     let mut differences = compare_fields(&before.cad_fields, &after.cad_fields);
     if before.excluded_from_bom != after.excluded_from_bom {
-        let text = |setting: bool| if setting { "yes" } else { "no" }.to_owned();
+        let text = |setting: bool| if setting { "Yes" } else { "No" }.to_owned();
         differences.push(DetailDifference {
             what: DifferenceKind::ExcludedFromBom,
             label: "Excluded from BOM".to_owned(),
@@ -246,8 +246,8 @@ mod tests {
                 (
                     DifferenceKind::ExcludedFromBom,
                     "Excluded from BOM".to_owned(),
-                    "no".to_owned(),
-                    "yes".to_owned()
+                    "No".to_owned(),
+                    "Yes".to_owned()
                 ),
                 (
                     DifferenceKind::CadBinding,

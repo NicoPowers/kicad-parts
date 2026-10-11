@@ -40,7 +40,7 @@ The accounts are:
 
 1. In the app, open **Team catalog: not signed in** at the top right and sign in with the first account's password from the console.
 2. Search for `RC0603FR-0747RL` and select it. The right-hand column shows **Details** and **History**.
-3. Choose **Edit part**, change a value, give a reason, and save. The part details change, but the part gets no new revision: every revision shares the same details. Only changing the **Symbol** or **Footprint** adds a revision. The revision also shows **Excluded from BOM**, which the team server works out from the symbol and footprints the revision uses, never by hand. It says "Not known" while one of them comes from KiCad's own library, which the app does not read yet.
+3. Choose **Edit part**, change a value, give a reason, and save. The part details change, but the part gets no new revision: every revision shares the same details. Only changing the **Symbol** or **Footprint** adds a revision. The revision also shows **Excluded from BOM**, which the team server works out from the symbol and footprints the revision uses, never by hand. It says which mark sets it ("Yes: its symbol says it is not in the BOM"), "No: only some footprint choices say it is not in the BOM" when the choices disagree, and "Not known" when the answer depends on a symbol or footprint the server cannot read: one from KiCad's own library, which the app does not read yet, or one that is not in the Catalog.
 4. To see a conflict, keep the first app open and open a second copy pointed at the same server, with its own settings folder:
 
    ```

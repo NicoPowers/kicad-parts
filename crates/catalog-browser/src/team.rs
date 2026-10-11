@@ -36,6 +36,9 @@ use desktop_contract::{
     PublishResult, RevisionStatus, SignInRequest, TeamArchiveRequest, TeamConflict,
     TeamCsvReviewRequest, TeamEditRequest, TeamPart, TeamSession, TeamStatus,
 };
+use kicad_integration::library_file::{
+    footprint_says_excluded_from_bom, symbol_entries_say_not_in_bom,
+};
 use kicad_integration::{LibRef, StoredItem, footprint_choices};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -1130,7 +1133,11 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
     let view = TeamPart {
         ipn: part.ipn.clone(),
         details: current_details_view(part.current_details_number, current_details),
-        revision: current_revision_view(part.current_revision_number, current_revision),
+        revision: current_revision_view(
+            part.current_revision_number,
+            current_revision,
+            &bom_marks(client, current_revision),
+        ),
         revisions: revisions
             .iter()
             .map(|revision| RevisionStatus {
@@ -1437,7 +1444,11 @@ fn current_details_view(number: u32, details: &PartDetails) -> CurrentDetails {
     }
 }
 
-fn current_revision_view(number: u32, revision: &PartRevision) -> CurrentRevision {
+fn current_revision_view(
+    number: u32,
+    revision: &PartRevision,
+    marks: &[(CadReferenceRole, BomMark)],
+) -> CurrentRevision {
     CurrentRevision {
         number,
         cad_fields: fields_of(&revision.cad_fields),
@@ -1453,44 +1464,159 @@ fn current_revision_view(number: u32, revision: &PartRevision) -> CurrentRevisio
                 binding: binding(reference),
             })
             .collect(),
-        excluded_from_bom: excluded_from_bom_words(revision),
+        excluded_from_bom: excluded_from_bom_words(revision.excluded_from_bom, marks),
     }
 }
 
-/// Excluded from BOM in plain words. The server set it from the flags in
-/// the bound CAD's stored bytes; a symbol or footprint it could not read
-/// (KiCad's own library, or one the Catalog does not have) gave no
-/// evidence, so a revision that is not excluded but uses one is "not
-/// known".
-fn excluded_from_bom_words(revision: &PartRevision) -> String {
-    if revision.excluded_from_bom {
-        return "Yes: its symbol or every footprint choice says it is not in the BOM".to_owned();
-    }
-    let unread: Vec<String> = [CadReferenceRole::Symbol, CadReferenceRole::Footprint]
-        .into_iter()
-        .filter_map(|role| {
-            let reason = revision
-                .cad_references
-                .iter()
-                .filter(|reference| reference.role == role)
-                .find_map(|reference| match reference.target {
-                    CadReferenceTarget::CadItemRevision { .. } => None,
-                    CadReferenceTarget::External => {
-                        Some("comes from KiCad's own library, which this app does not read yet")
-                    }
-                    CadReferenceTarget::Unresolved { .. } => Some("is not in the Catalog"),
-                })?;
-            let what = match role {
-                CadReferenceRole::Symbol => "symbol",
-                CadReferenceRole::Footprint => "footprint",
+/// What one symbol or footprint reference of a revision says about the
+/// BOM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BomMark {
+    /// True if it says it is not in the BOM: read from its stored bytes, or
+    /// certain from the revision's own setting.
+    Says(bool),
+    /// From KiCad's own library, which the app does not read yet.
+    KiCadLibrary,
+    /// The Catalog does not have it.
+    Missing,
+    /// Stored, but its bytes could not be fetched or were not needed.
+    Unread,
+}
+
+/// What each symbol and footprint reference of `revision` says about the
+/// BOM. The server set the revision's setting from these same marks, so
+/// most follow from it without reading anything: a revision that is not
+/// excluded has no stored symbol that says so, nor a single stored
+/// footprint that does. Stored bytes are read only for the symbols of an
+/// excluded revision (to say which reason applies) and for footprint
+/// choices of a revision that is not (to tell disagreeing choices apart).
+fn bom_marks(
+    client: &PocketBaseClient,
+    revision: &PartRevision,
+) -> Vec<(CadReferenceRole, BomMark)> {
+    let footprints = revision
+        .cad_references
+        .iter()
+        .filter(|reference| reference.role == CadReferenceRole::Footprint)
+        .count();
+    revision
+        .cad_references
+        .iter()
+        .map(|reference| {
+            let read = |cad_item: &str, number: u32| {
+                stored_cad_bytes(client, cad_item, number).map_or(BomMark::Unread, |bytes| {
+                    BomMark::Says(match reference.role {
+                        CadReferenceRole::Symbol => symbol_entries_say_not_in_bom(&bytes),
+                        CadReferenceRole::Footprint => footprint_says_excluded_from_bom(&bytes),
+                    })
+                })
             };
+            let mark = match (
+                &reference.target,
+                reference.role,
+                revision.excluded_from_bom,
+            ) {
+                (CadReferenceTarget::External, ..) => BomMark::KiCadLibrary,
+                (CadReferenceTarget::Unresolved { .. }, ..) => BomMark::Missing,
+                (
+                    CadReferenceTarget::CadItemRevision {
+                        cad_item, number, ..
+                    },
+                    role,
+                    excluded,
+                ) => match (role, excluded) {
+                    (CadReferenceRole::Symbol, true) => read(cad_item, *number),
+                    (CadReferenceRole::Symbol, false) => BomMark::Says(false),
+                    (CadReferenceRole::Footprint, true) => BomMark::Unread,
+                    (CadReferenceRole::Footprint, false) if footprints == 1 => BomMark::Says(false),
+                    (CadReferenceRole::Footprint, false) => read(cad_item, *number),
+                },
+            };
+            (reference.role, mark)
+        })
+        .collect()
+}
+
+/// The stored bytes of revision `number` of `cad_item`, if they can be
+/// fetched.
+fn stored_cad_bytes(client: &PocketBaseClient, cad_item: &str, number: u32) -> Option<Vec<u8>> {
+    let id = CadItemRevisionId::new(&CadItemId::from_stored(cad_item), number);
+    let revision: StoredCadItemRevision = client
+        .first_record(
+            "catalog_cad_item_revisions",
+            &format!("id = {}", serde_json::Value::from(id.as_str())),
+            "number",
+        )
+        .ok()??;
+    let blob: StoredBlob = client
+        .get(&format!(
+            "/api/collections/catalog_blobs/records/{}",
+            revision.blob
+        ))
+        .and_then(|reply| reply.json())
+        .ok()?;
+    let token = client.file_token().ok()?;
+    client
+        .download_file("catalog_blobs", &blob.id, &blob.file, Some(&token))
+        .ok()
+}
+
+/// Excluded from BOM in plain words, from the revision's setting and what
+/// each reference says. A symbol or footprint the server could not read
+/// gave no evidence, so the words say "Not known" unless the rules decide
+/// without it.
+fn excluded_from_bom_words(excluded: bool, marks: &[(CadReferenceRole, BomMark)]) -> String {
+    let of = |role: CadReferenceRole| -> Vec<BomMark> {
+        marks
+            .iter()
+            .filter(|(of_role, _)| *of_role == role)
+            .map(|(_, mark)| *mark)
+            .collect()
+    };
+    let (symbols, footprints) = (
+        of(CadReferenceRole::Symbol),
+        of(CadReferenceRole::Footprint),
+    );
+    if excluded {
+        return if symbols.contains(&BomMark::Says(true)) {
+            "Yes: its symbol says it is not in the BOM"
+        } else {
+            "Yes: every footprint choice says it is not in the BOM"
+        }
+        .to_owned();
+    }
+    let known = |mark: &BomMark| matches!(mark, BomMark::Says(_));
+    // An unknown symbol could say it is not in the BOM. Unknown footprint
+    // choices matter only while no known choice is in the BOM: then all of
+    // them could say it is not.
+    let symbol_unknown = !symbols.iter().all(known);
+    let footprint_unknown =
+        !footprints.iter().all(known) && !footprints.contains(&BomMark::Says(false));
+    if symbol_unknown || footprint_unknown {
+        let reasons: Vec<String> = [
+            (&symbols, "symbol", symbol_unknown),
+            (&footprints, "footprint", footprint_unknown),
+        ]
+        .into_iter()
+        .filter(|(_, _, unknown)| *unknown)
+        .filter_map(|(marks, what, _)| {
+            let reason = marks.iter().find_map(|mark| match mark {
+                BomMark::KiCadLibrary => {
+                    Some("comes from KiCad's own library, which this app does not read yet")
+                }
+                BomMark::Missing => Some("is not in the Catalog"),
+                BomMark::Unread => Some("could not be read"),
+                BomMark::Says(_) => None,
+            })?;
             Some(format!("the {what} {reason}"))
         })
         .collect();
-    if unread.is_empty() {
-        "No".to_owned()
+        return format!("Not known: {}", reasons.join(", and "));
+    }
+    if footprints.contains(&BomMark::Says(true)) {
+        "No: only some footprint choices say it is not in the BOM".to_owned()
     } else {
-        format!("Not known: {}", unread.join(", and "))
+        "No".to_owned()
     }
 }
 
@@ -1767,44 +1893,48 @@ mod tests {
 
     #[test]
     fn excluded_from_bom_is_said_plainly_and_honestly() {
-        let revision = |excluded: bool, symbol: serde_json::Value, footprint: serde_json::Value| {
-            serde_json::from_value::<PartRevision>(serde_json::json!({
-                "schema": catalog::PART_REVISION_SCHEMA,
-                "ipn": "RES-0000-0470",
-                "cad_fields": [
-                    { "name": "Symbol", "value": "S" },
-                    { "name": "Footprint", "value": "F" },
-                ],
-                "cad_references": [
-                    { "role": "symbol", "ordinal": 0, "reference": "S", "target": symbol },
-                    { "role": "footprint", "ordinal": 0, "reference": "F", "target": footprint },
-                ],
-                "excluded_from_bom": excluded,
-            }))
-            .unwrap()
-        };
-        let stored = serde_json::json!({
-            "kind": "cad-item-revision",
-            "cad_item": "aaaaaaaaaaaaaaa",
-            "number": 1,
-            "snapshot_sha256": "0".repeat(64),
-        });
-        let kicad = serde_json::json!({ "kind": "external" });
-        let missing = serde_json::json!({ "kind": "unresolved", "status": "missing-member" });
+        use BomMark::*;
+        use CadReferenceRole::{Footprint as F, Symbol as S};
+        let words = excluded_from_bom_words;
         assert_eq!(
-            excluded_from_bom_words(&revision(true, kicad.clone(), stored.clone())),
-            "Yes: its symbol or every footprint choice says it is not in the BOM"
+            words(true, &[(S, Says(true)), (F, Unread)]),
+            "Yes: its symbol says it is not in the BOM"
         );
         assert_eq!(
-            excluded_from_bom_words(&revision(false, stored.clone(), stored.clone())),
+            words(true, &[(S, KiCadLibrary), (F, Unread), (F, Unread)]),
+            "Yes: every footprint choice says it is not in the BOM"
+        );
+        assert_eq!(words(false, &[(S, Says(false)), (F, Says(false))]), "No");
+        assert_eq!(words(false, &[]), "No");
+        assert_eq!(
+            words(
+                false,
+                &[(S, Says(false)), (F, Says(true)), (F, Says(false))]
+            ),
+            "No: only some footprint choices say it is not in the BOM"
+        );
+        // A KiCad-library footprint beside a stored one that is in the BOM
+        // cannot make it excluded.
+        assert_eq!(
+            words(
+                false,
+                &[(S, Says(false)), (F, Says(false)), (F, KiCadLibrary)]
+            ),
             "No"
         );
         assert_eq!(
-            excluded_from_bom_words(&revision(false, kicad.clone(), stored.clone())),
+            words(false, &[(S, KiCadLibrary), (F, Says(false))]),
             "Not known: the symbol comes from KiCad's own library, which this app does not read yet"
         );
         assert_eq!(
-            excluded_from_bom_words(&revision(false, missing, kicad)),
+            words(
+                false,
+                &[(S, Says(false)), (F, Says(true)), (F, KiCadLibrary)]
+            ),
+            "Not known: the footprint comes from KiCad's own library, which this app does not read yet"
+        );
+        assert_eq!(
+            words(false, &[(S, Missing), (F, KiCadLibrary)]),
             "Not known: the symbol is not in the Catalog, and the footprint comes from KiCad's own library, which this app does not read yet"
         );
     }
