@@ -129,12 +129,12 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
     await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();
     await waitForText(browser, BADGE, `Team catalog · ${account.name}`);
     await waitForLiveUpdates(browser);
-    await browser.waitUntil(async () => (await sourceFact()) === 'Team catalog, revision 1', {
+    await browser.waitUntil(async () => (await sourceFact()) === 'Team catalog, revision 1 of this part', {
       timeout: 20_000,
       timeoutMsg: 'the part never showed the team catalog revision',
     });
     for (const [name, section] of [['symbol', SYMBOL], ['footprint', FOOTPRINT]]) {
-      await waitForText(browser, `${section} .provenance`, /^team catalog, revision 1 · kicad-cli 10\./, 60_000);
+      await waitForText(browser, `${section} .provenance`, /^team catalog, (symbol|footprint) revision 1 · kicad-cli 10\./, 60_000);
       await waitForPreview(browser, section);
       const shown = await preview(section);
       record({ event: 'team-preview', name, provenance: shown.provenance, title: shown.title });
@@ -142,7 +142,7 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
       assert.equal(shown.note, null, name);
       assert.notEqual(drawing(shown.src), local[name], `the ${name} is not the changed local file`);
     }
-    assert.match(await textOf(browser, '.part-fields'), /g-pas:R_US, revision 1/);
+    assert.match(await textOf(browser, '.part-fields'), /g-pas:R_US, symbol revision 1/);
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 0);
     await assertAccessible(browser, '51-team-preview-stored-revision');
     await screenshot(browser, '51-team-preview-stored-revision');
@@ -161,11 +161,14 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
         break;
       }
     }
-    for (const [section, reference] of [[SYMBOL, 'g-pas:R_US'], [FOOTPRINT, 'g-res:R_0603_1608Metric']]) {
+    for (const [section, what, reference] of [
+      [SYMBOL, 'Symbol', 'g-pas:R_US'],
+      [FOOTPRINT, 'Footprint', 'g-res:R_0603_1608Metric'],
+    ]) {
       await waitForText(
         browser,
         `${section} .preview-note`,
-        `Revision 1 of ${reference} could not be fetched because the team server could not be reached. ` +
+        `${what} revision 1 of ${reference} could not be fetched because the team server could not be reached. ` +
           'This drawing is from your local library, which differs from that revision.',
         60_000,
       );

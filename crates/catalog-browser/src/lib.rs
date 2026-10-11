@@ -412,9 +412,13 @@ impl CatalogBrowser {
             Some(_) => "which differs from that revision",
             None => "which may differ from that revision",
         };
+        let what = match kind {
+            PreviewKind::Symbol => "Symbol",
+            PreviewKind::Footprint => "Footprint",
+        };
         format!(
-            "Revision {} of {reference} could not be fetched because {why}. This drawing is \
-             from your local library, {comparison}.",
+            "{what} revision {} of {reference} could not be fetched because {why}. This \
+             drawing is from your local library, {comparison}.",
             stored.number
         )
     }

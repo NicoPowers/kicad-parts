@@ -47,7 +47,7 @@ The accounts are:
    target/debug/kicad-parts-desktop.exe --team-server=<address> --data-dir=<an empty folder>
    ```
 
-   Sign in there as `second.editor@example.test`. In the first app, choose **Edit part** on the part and change something, but do not save yet. In the second app, save a change to the same part. Now save in the first app: it shows where you started, their version and yours, and lets you save your changes on top of theirs. Changes saved in one app appear in the other by themselves.
+   Sign in there as `second.editor@example.test`. In the first app, choose **Edit part** on the part and change something, but do not save yet. In the second app, save a change to the same part. Now save in the first app: it shows where you started, what they saved and your changes, and lets you save your changes on top of theirs. Changes saved in one app appear in the other by themselves.
 5. Open **History**. Each entry is one saved change: a change to the part details, or a new revision. Select one to see what changed, who changed it, when and why. Nothing is ever deleted or changed afterwards, and there is no way to copy an older revision back.
 
 ## Stop it

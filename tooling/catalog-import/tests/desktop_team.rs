@@ -95,7 +95,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         part.revision
             .cad_items
             .iter()
-            .any(|item| item.binding == "revision 1")
+            .any(|item| item.binding == "symbol revision 1")
     );
     // Symbol and Footprint belong to the revision, not the details.
     assert!(part.details.field("Symbol").is_none());

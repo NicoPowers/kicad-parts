@@ -2,7 +2,8 @@
 // part's details and current revision from the team catalog, edit its
 // details (which adds no revision), watch someone else's change arrive by
 // itself, resolve a conflict, read the history with what changed, and view
-// as a read-only member. There is no Restore: an earlier revision is never
+// as a read-only member. Changing the symbol adds a revision. There is no
+// Restore: an earlier revision is never
 // copied back (kicad-parts-9296).
 
 import assert from 'node:assert/strict';
@@ -134,7 +135,7 @@ describe('team catalog: history, edits and conflicts', () => {
   }
 
   async function waitForRevision(number) {
-    await browser.waitUntil(async () => (await sourceFact()) === `Team catalog, revision ${number}`, {
+    await browser.waitUntil(async () => (await sourceFact()) === `Team catalog, revision ${number} of this part`, {
       timeout: 20_000,
       interval: 100,
       timeoutMsg: `the part never showed revision ${number}; last: ${JSON.stringify(await sourceFact())}`,
@@ -199,8 +200,11 @@ describe('team catalog: history, edits and conflicts', () => {
     assert.equal(await textOf(browser, '#fields-heading'), 'Part details (4)');
     assert.equal(await fieldValue('Value'), '47');
     assert.match(await textOf(browser, '.manufacturer-parts'), /Yageo RC0603FR-0747RL \(main\)/);
-    assert.equal(await textOf(browser, '#cad-items-heading'), 'Symbol and footprint (revision 1)');
-    assert.match(await textOf(browser, COLUMN), /g-pas:R_US, revision 1/);
+    assert.equal(await textOf(browser, '#cad-items-heading'), 'Symbol and footprint (revision 1 of this part)');
+    // The symbol's and footprint's own revisions say which they are.
+    assert.match(await textOf(browser, COLUMN), /g-pas:R_US, symbol revision 1/);
+    assert.match(await textOf(browser, COLUMN), /g-res:R_0603_1608Metric, footprint revision 1/);
+    await waitForText(browser, `${SYMBOL} .provenance`, /^team catalog, symbol revision 1 · /);
     const layout = await windowFits();
     record({ event: 'layout', state: 'team-details', ...layout });
     assert.deepEqual(layout, { windowFits: true, fieldsOnTheRight: true });
@@ -221,17 +225,21 @@ describe('team catalog: history, edits and conflicts', () => {
     assert.deepEqual(legends, ['Part details', 'Manufacturer parts (the first is the main one)', 'Symbol and footprint']);
     assert.match(
       await textOf(browser, '.edit-form fieldset:last-of-type .hint'),
-      /^Changing these adds a revision after revision 1\. Designs that use an earlier revision keep it\.$/,
+      /^Changing these adds a new revision of this part\. Designs that use revision 1 keep it\.$/,
     );
     await (await fieldInput('Value')).setValue('47R');
     await (await browser.$('#edit-reason')).setValue('Write the value the way the BOM does');
+    // Show the top of the form, with the new-IPN hint, in the screenshot.
+    await browser.execute(() => {
+      document.querySelector('.part-fields').scrollTop = 0;
+    });
     await assertAccessible(browser, '43-team-edit');
     await screenshot(browser, '43-team-edit');
     await clickButton('.edit-form', 'Save');
     await waitForText(browser, NOTICE, 'Saved. The part details changed; no revision was added.');
     await columnAtTop();
     await waitForHistory(2);
-    assert.equal(await sourceFact(), 'Team catalog, revision 1');
+    assert.equal(await sourceFact(), 'Team catalog, revision 1 of this part');
     assert.equal(await fieldValue('Value'), '47R');
   });
 
@@ -239,7 +247,7 @@ describe('team catalog: history, edits and conflicts', () => {
     await editAsSomeoneElse(server.url, otherToken, IPN, { Description: 'Thick film resistor, 47 ohm, 1%' }, 'Clearer description');
     await waitForHistory(3);
     await waitForText(browser, '.part-description', 'Thick film resistor, 47 ohm, 1%');
-    assert.equal(await sourceFact(), 'Team catalog, revision 1');
+    assert.equal(await sourceFact(), 'Team catalog, revision 1 of this part');
     // The results list shows the team catalog's description too.
     await waitForText(browser, '.results li .result-description', 'Thick film resistor, 47 ohm, 1%');
     // The earlier "saved" message would now be out of date.
@@ -261,7 +269,7 @@ describe('team catalog: history, edits and conflicts', () => {
     await searchFor(browser, MPN, '1 matching part');
   });
 
-  it('shows both versions when someone else saved first, and saves on top', async () => {
+  it('shows both sets of changes when someone else saved first, and saves on top', async () => {
     await clickButton(COLUMN, 'Edit part');
     await waitForText(browser, '#edit-heading', 'Edit part');
     await (await fieldInput('Tolerance')).setValue('0.5%');
@@ -357,21 +365,63 @@ describe('team catalog: history, edits and conflicts', () => {
     await screenshot(browser, '46-team-history');
   });
 
+  it('changes the symbol, which adds a revision', async () => {
+    await clickButton(COLUMN, 'Details');
+    await clickButton(COLUMN, 'Edit part');
+    await waitForText(browser, '#edit-heading', 'Edit part');
+    // KiCad's own resistor symbol draws the same two-pin resistor, so the
+    // part can still replace the old one: a new revision, not a new IPN.
+    await (await fieldInput('Symbol')).setValue('Device:R');
+    await (await browser.$('#edit-reason')).setValue("Use KiCad's resistor symbol");
+    await clickButton('.edit-form', 'Save');
+    await waitForText(browser, NOTICE, 'Saved as revision 2.');
+    await columnAtTop();
+    await waitForRevision(2);
+    await waitForHistory(6);
+    assert.equal(await textOf(browser, '#cad-items-heading'), 'Symbol and footprint (revision 2 of this part)');
+    assert.match(await textOf(browser, COLUMN), /Device:R, KiCad library/);
+    await waitForPreview(browser, SYMBOL);
+    await clickButton(COLUMN, 'History (6)');
+    await browser.waitUntil(async () => (await browser.$$('.history li')).length === 6, { timeout: 5_000 });
+    const titles = await browser.execute(() =>
+      [...document.querySelectorAll('.history .history-title')].map((t) => t.textContent.trim()),
+    );
+    assert.deepEqual(titles, [
+      `Revision 2 · Edited by ${editor.name} (current)`,
+      `Part details · Edited by ${editor.name}`,
+      `Part details · Edited by ${other.name}`,
+      `Part details · Edited by ${other.name}`,
+      `Part details · Edited by ${editor.name}`,
+      'Revision 1 · Imported by an administrator',
+    ]);
+    await waitForText(browser, '#revision-heading', 'What changed in revision 2');
+    const rows = await browser.execute(() =>
+      [...document.querySelectorAll('.revision .changes tbody tr')].map((tr) =>
+        [...tr.children].map((cell) => cell.textContent.trim()),
+      ),
+    );
+    assert.deepEqual(rows, [['Symbol', 'g-pas:R_US', 'Device:R']]);
+    // The notice that a revision was added stays above the history.
+    assert.equal(await textOf(browser, NOTICE), 'Saved as revision 2.');
+    await assertAccessible(browser, '47-team-new-revision');
+    await screenshot(browser, '47-team-new-revision');
+  });
+
   it('lets a read-only member see everything but not edit', async () => {
     await signOut();
     await signIn(viewer);
     await waitForText(browser, BADGE, `Team catalog · ${viewer.name}`);
     await waitForLiveUpdates(browser);
-    await waitForRevision(1);
-    await waitForHistory(5);
+    await waitForRevision(2);
+    await waitForHistory(6);
     await waitForText(browser, '.read-only', 'You can view this part but not edit it.');
     assert.equal((await browser.$$(NOTICE)).length, 0, "no message left from the editor's session");
     const buttons = await browser.execute(() =>
       [...document.querySelectorAll('.part-fields button')].map((b) => b.textContent.trim()),
     );
     assert.ok(!buttons.includes('Edit part'), `no edit button: ${buttons}`);
-    await clickButton(COLUMN, 'History (5)');
-    await browser.waitUntil(async () => (await browser.$$('.history li')).length === 5, { timeout: 5_000 });
+    await clickButton(COLUMN, 'History (6)');
+    await browser.waitUntil(async () => (await browser.$$('.history li')).length === 6, { timeout: 5_000 });
     const second = await browser.$('.history li:nth-child(2) button');
     await second.click();
     await waitForText(browser, '#revision-heading', 'What changed in the part details');

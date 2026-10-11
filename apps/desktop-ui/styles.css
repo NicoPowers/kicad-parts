@@ -745,6 +745,12 @@ a {
   margin: 0;
 }
 
+/* "footprint revision 1" stays on one line, so a long reference breaks
+   after its comma instead. */
+.binding {
+  white-space: nowrap;
+}
+
 /* The line right under a section's heading, such as "Every revision of the
    part shares these details." */
 .team-toolbar + .hint {

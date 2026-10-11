@@ -766,7 +766,10 @@ fn PartView(
             .map(|(prefix, _)| prefix.to_owned())
             .unwrap_or_default();
         let source = match &team {
-            Some(part) => format!("Team catalog, revision {}", part.revision.number),
+            Some(part) => format!(
+                "Team catalog, revision {} of this part",
+                part.revision.number
+            ),
             None => summary.csv_file.clone(),
         };
         let facts: Vec<(&str, String)> = [
@@ -911,7 +914,11 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
         units.len()
     };
     let source = match set.cad_item_revision {
-        Some(number) => format!("team catalog, revision {number}"),
+        // The CAD item's own revision, not the part's.
+        Some(number) => match set.kind {
+            PreviewKind::Symbol => format!("team catalog, symbol revision {number}"),
+            PreviewKind::Footprint => format!("team catalog, footprint revision {number}"),
+        },
         None if set.from_kicad_bundle => "KiCad library".to_owned(),
         None => "project library".to_owned(),
     };

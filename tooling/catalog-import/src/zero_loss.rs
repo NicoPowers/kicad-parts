@@ -45,32 +45,32 @@
 //! - `LCSC`, `DigiKey_PN`, `Mouser_PN`, `DigiKey_Price`, `Mouser_Price`,
 //!   `Price_Range`, `Price_LastSynced_UTC`: `supplier-data`.
 //!
+//! `Symbol` and `Footprint` go to `part-revision` in every file but g-pcb,
+//! so the table leaves them out.
+//!
 //! | CSV file | `part-details` besides `IPN` | manufacturer parts | `import-problem` |
 //! |----------|------------------------------|--------------------|------------------|
-//! Symbol and Footprint go to `part-revision` in every file that has them
-//! (all but g-pcb); the table lists them where they appear.
-//!
-//! | g-ana | Description, Symbol, Footprint, Datasheet, Sim_Library, Sim_Name, Sim_Device, Sim_Pins | MPN, Manufacturer | |
-//! | g-art | Description, Symbol, Footprint, Comments | | |
-//! | g-cap | Description, Symbol, Footprint, Value, Voltage, Material, Tolerance, Datasheet | MPN, Manufacturer | |
-//! | g-con | Value, Description, Symbol, Footprint, Pins, Datasheet | MPN, Manufacturer | |
-//! | g-cpd | Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
-//! | g-dio | Value, Description, Symbol, Footprint, Current, Voltage, Datasheet | MPN, Manufacturer | |
-//! | g-ics | Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
-//! | g-ind | Description, Symbol, Footprint, Value, Current, Datasheet | MPN, Manufacturer | |
-//! | g-mcu | Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
-//! | g-mec | Description, Symbol, Footprint, Type, Datasheet | MPN, Manufacturer | |
-//! | g-mpu | Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
-//! | g-opt | Description, Symbol, Footprint, Color, I-forward-max, V-forward, Wavelength, Datasheet | MPN, Manufacturer | |
-//! | g-osc | Description, Symbol, Footprint, Frequency, Stability, Load, Datasheet | MPN, Manufacturer | |
+//! | g-ana | Description, Datasheet, Sim_Library, Sim_Name, Sim_Device, Sim_Pins | MPN, Manufacturer | |
+//! | g-art | Description, Comments | | |
+//! | g-cap | Description, Value, Voltage, Material, Tolerance, Datasheet | MPN, Manufacturer | |
+//! | g-con | Value, Description, Pins, Datasheet | MPN, Manufacturer | |
+//! | g-cpd | Description, Datasheet | MPN, Manufacturer | |
+//! | g-dio | Value, Description, Current, Voltage, Datasheet | MPN, Manufacturer | |
+//! | g-ics | Description, Datasheet | MPN, Manufacturer | |
+//! | g-ind | Description, Value, Current, Datasheet | MPN, Manufacturer | |
+//! | g-mcu | Description, Datasheet | MPN, Manufacturer | |
+//! | g-mec | Description, Type, Datasheet | MPN, Manufacturer | |
+//! | g-mpu | Description, Datasheet | MPN, Manufacturer | |
+//! | g-opt | Description, Color, I-forward-max, V-forward, Wavelength, Datasheet | MPN, Manufacturer | |
+//! | g-osc | Description, Frequency, Stability, Load, Datasheet | MPN, Manufacturer | |
 //! | g-pcb | Description, Project link | | |
-//! | g-pwr | Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
-//! | g-reg | Description, Voltage, Current, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
-//! | g-res | Description, Value, Symbol, Footprint, Tolerance, Datasheet | MPN, Manufacturer | |
-//! | g-rfm | Value, Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | MPN2 |
-//! | g-rvr | Description, Resistance, Symbol, Footprint, Tolerance, Turns, Datasheet | MPN, Manufacturer | MPN TBC |
-//! | g-swi | Description, Form, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
-//! | g-trs | Value, Type, max(Vce), max(Ic), Description, Symbol, Footprint, Datasheet | MPN, Manufacturer | |
+//! | g-pwr | Description, Datasheet | MPN, Manufacturer | |
+//! | g-reg | Description, Voltage, Current, Datasheet | MPN, Manufacturer | |
+//! | g-res | Description, Value, Tolerance, Datasheet | MPN, Manufacturer | |
+//! | g-rfm | Value, Description, Datasheet | MPN, Manufacturer | MPN2 |
+//! | g-rvr | Description, Resistance, Tolerance, Turns, Datasheet | MPN, Manufacturer | MPN TBC |
+//! | g-swi | Description, Form, Datasheet | MPN, Manufacturer | |
+//! | g-trs | Value, Type, max(Vce), max(Ic), Description, Datasheet | MPN, Manufacturer | |
 //!
 //! All 21 files also have the 7 supplier data columns.
 //!

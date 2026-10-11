@@ -385,7 +385,7 @@ pub struct HistoryEntry {
     pub changes: Vec<DetailChange>,
 }
 
-/// One difference between two versions of a part's details or CAD.
+/// One difference between a part's details or CAD before and after a change.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DetailChange {
     pub label: String,
@@ -441,7 +441,7 @@ pub struct TeamConflict {
     pub theirs: HistoryEntry,
     /// Every field or list that either side changed.
     pub rows: Vec<ConflictRow>,
-    /// Their version with only your changes applied on top: what "save my
+    /// What they saved with only your changes applied on top: what "save my
     /// changes on top of theirs" publishes.
     pub merged: TeamEditRequest,
     /// The part as it is now.

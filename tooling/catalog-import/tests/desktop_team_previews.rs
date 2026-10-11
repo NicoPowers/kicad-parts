@@ -258,7 +258,7 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     let note = fallback.note.unwrap();
     assert_eq!(
         note,
-        "Revision 1 of g-pas:R_US could not be fetched because the team server could not be \
+        "Symbol revision 1 of g-pas:R_US could not be fetched because the team server could not be \
          reached. This drawing is from your local library, which differs from that revision."
     );
     // With an unchanged local library, the note says the bytes match.

@@ -605,7 +605,7 @@ fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                 }
                 .into_any()
             }}
-            <h3 id="cad-items-heading">{format!("Symbol and footprint (revision {})", revision.number)}</h3>
+            <h3 id="cad-items-heading">{format!("Symbol and footprint (revision {} of this part)", revision.number)}</h3>
             {if revision.cad_items.is_empty() {
                 view! { <p class="hint">"This part uses no symbol or footprint."</p> }.into_any()
             } else {
@@ -618,7 +618,7 @@ fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                                 .map(|item| view! {
                                     <tr>
                                         <th scope="row">{item.role.clone()}</th>
-                                        <td><code>{item.reference.clone()}</code>{format!(", {}", item.binding)}</td>
+                                        <td><code>{item.reference.clone()}</code>", "<span class="binding">{item.binding.clone()}</span></td>
                                     </tr>
                                 })
                                 .collect_view()}
@@ -707,7 +707,7 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
                         })
                         .map(|_| view! {
                             <p class="hint">
-                                "Someone else saved a change to this part while you were editing. When you save, you can compare both versions."
+                                "Someone else saved a change to this part while you were editing. When you save, you can compare your changes with theirs."
                             </p>
                         })
                 })
@@ -786,7 +786,7 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
                 <fieldset>
                     <legend>"Symbol and footprint"</legend>
                     <p class="hint">
-                        {format!("Changing these adds a revision after revision {base_revision}. Designs that use an earlier revision keep it.")}
+                        {format!("Changing these adds a new revision of this part. Designs that use revision {base_revision} keep it.")}
                     </p>
                     {cad_fields}
                 </fieldset>
@@ -1005,7 +1005,7 @@ fn ConflictView(
         <section class="conflict" role="alert" aria-labelledby="conflict-heading">
             <h3 id="conflict-heading">"Someone else changed this part first"</h3>
             <p>{summary_start}{saved_at_view(theirs.saved_at.clone())}{summary_end}</p>
-            <table class="changes" aria-label="Your version and theirs">
+            <table class="changes" aria-label="Your changes and theirs">
                 <thead>
                     <tr>
                         <th scope="col">"Field"</th>

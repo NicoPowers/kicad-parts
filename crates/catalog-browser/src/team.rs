@@ -844,10 +844,15 @@ fn load_part(client: &PocketBaseClient, part: &StoredPart) -> Result<TeamPart, S
     load(client, part).map(|loaded| loaded.view)
 }
 
-/// How a CAD reference is bound, in plain words.
+/// How a CAD reference is bound, in plain words, naming the CAD item's own
+/// revision (`symbol revision 1`) so it is never mistaken for the part's.
 fn binding(reference: &CadReference) -> String {
+    let role = match reference.role {
+        CadReferenceRole::Symbol => "symbol",
+        CadReferenceRole::Footprint => "footprint",
+    };
     match &reference.target {
-        CadReferenceTarget::CadItemRevision { number, .. } => format!("revision {number}"),
+        CadReferenceTarget::CadItemRevision { number, .. } => format!("{role} revision {number}"),
         CadReferenceTarget::External => "KiCad library".to_owned(),
         CadReferenceTarget::Unresolved { status } => format!("not found ({status})"),
     }
@@ -1134,8 +1139,8 @@ fn field_rows(
 }
 
 /// Every field or list that the edit or the other person changed since the
-/// details and revision the edit started from, and their version with only
-/// the edit's changes applied on top. `details` and `revision` are the
+/// details and revision the edit started from, and what they saved with
+/// only the edit's changes applied on top. `details` and `revision` are the
 /// current ones the server gave for whatever moved.
 fn edit_conflict(
     request: &TeamEditRequest,
