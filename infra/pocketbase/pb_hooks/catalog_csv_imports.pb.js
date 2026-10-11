@@ -611,7 +611,9 @@ routerAdd(
       // A hash of a CAD item revision's content: its snapshot with the
       // numbers of its 3D model bindings left out (crates/catalog
       // CadItemDetails::content_sha256 does the same in Rust). Revisions with
-      // the same content differ at most in which numbers they name.
+      // the same content differ at most in which numbers they name. Keys
+      // are sorted first, so the order a client wrote them in cannot hide
+      // equal content.
       const contentOf = (snapshot) => {
         const parsed = JSON.parse(snapshot);
         for (const model of parsed.model_references || []) {
@@ -619,7 +621,7 @@ routerAdd(
             model.target.number = 0;
           }
         }
-        return $security.sha256(JSON.stringify(parsed));
+        return $security.sha256(lib.canonicalJson(parsed));
       };
       // Each CAD item's current revision as it is after this request.
       const currentAfter = {};
@@ -640,7 +642,8 @@ routerAdd(
         }
         const current = currentStored(revision.cadItemId);
         const currentNumber = current ? current.getInt("number") : 0;
-        if (current && !lib.isCadItemRevision(current, revision.cadItemId, currentNumber)) {
+        const consistent = !current || lib.isCadItemRevision(current, revision.cadItemId, currentNumber);
+        if (!consistent) {
           collisions.push(`catalog_cad_item_revisions/${current.id}: the stored record is not revision ${currentNumber} of ${revision.key}`);
         }
         if (current && current.getString("snapshot_sha256") === revision.snapshotSha256) {
@@ -648,6 +651,13 @@ routerAdd(
             fail(`the ${revision.kind} ${revision.key} has the content of its current revision ${currentNumber}, so its revision number must be ${currentNumber}`);
           }
         } else {
+          // The same content under other numbers is not a change, so it
+          // cannot be a new revision.
+          if (current && consistent && contentOf(current.getString("snapshot")) === contentOf(revision.snapshot)) {
+            fail(
+              `the ${revision.kind} ${revision.key} has the same content as its current revision ${currentNumber} and differs only in the revision numbers it names; send revision ${currentNumber} as it is`,
+            );
+          }
           if (revision.number !== currentNumber + 1) {
             fail(`the ${revision.kind} ${revision.key} differs from its current revision ${currentNumber}, so its revision number must be ${currentNumber + 1}`);
           }
@@ -700,36 +710,41 @@ routerAdd(
         }
         return bound;
       };
-      // A binding must name the CAD item's current revision after this
-      // request, or keep exactly the revision it binds now (`kept`, from
-      // the stored current revision of the part or footprint) if that has
-      // the same content: the same content under a newer number is not a
-      // change.
+      // A binding must keep exactly the revision it binds now (`kept`, from
+      // the stored current revision of the part or footprint) while that
+      // has the same content as the CAD item's current revision after this
+      // request: the same content under another number is not a change.
+      // Any other binding must name that current revision.
       const checkBinding = (target, kept) => {
         const current = currentOf(target.cadItem);
         if (!current) {
           fail(`${target.who} names CAD item ${target.cadItem}, which is neither stored nor sent`);
-        }
-        if (current.number === target.number && current.snapshotSha256 === target.snapshotSha256) {
-          return;
         }
         // A stored record that is not what its ID says is answered as an ID
         // collision, below; its bindings cannot be checked against it.
         if (collisions.length > 0) {
           return;
         }
+        // What the stored part or footprint binds now, if that revision has
+        // the same content as the current one: then the binding must keep it.
         const now = kept[target.cadItem];
-        const keptRecord = now && now.number === target.number && now.snapshotSha256 === target.snapshotSha256
-          ? byId("catalog_cad_item_revisions", target.id)
-          : null;
-        const keeps =
-          !!keptRecord &&
-          lib.isCadItemRevision(keptRecord, target.cadItem, target.number) &&
-          keptRecord.getString("snapshot_sha256") === target.snapshotSha256 &&
-          contentOf(keptRecord.getString("snapshot")) === current.content;
-        if (!keeps) {
+        const nowRecord = now ? byId("catalog_cad_item_revisions", lib.deriveId("cad-item-revision", target.cadItem + "\n" + now.number)) : null;
+        const nowHasCurrentContent =
+          !!nowRecord &&
+          lib.isCadItemRevision(nowRecord, target.cadItem, now.number) &&
+          nowRecord.getString("snapshot_sha256") === now.snapshotSha256 &&
+          contentOf(nowRecord.getString("snapshot")) === current.content;
+        if (nowHasCurrentContent) {
+          if (target.number !== now.number || target.snapshotSha256 !== now.snapshotSha256) {
+            fail(
+              `${target.who} must keep revision ${now.number} of its CAD item, which it binds now: the current revision, ${current.number}, has the same content, and the same content under another number is not a change`,
+            );
+          }
+          return;
+        }
+        if (current.number !== target.number || current.snapshotSha256 !== target.snapshotSha256) {
           fail(
-            `${target.who} names revision ${target.number} of its CAD item, but an import must name the current revision, ${current.number}, or keep the revision with the same content it binds now`,
+            `${target.who} names revision ${target.number} of its CAD item, but its content changed, so an import must name the current revision, ${current.number}`,
           );
         }
       };

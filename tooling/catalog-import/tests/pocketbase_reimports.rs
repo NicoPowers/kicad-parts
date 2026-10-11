@@ -871,6 +871,46 @@ fn numbered_and_current<'a>(
     revisions
 }
 
+/// Sends the importer's own request for `root`, except that `ipn`'s
+/// footprint binding names `(now, number, snapshot_sha256)`: it binds
+/// revision `now` and is changed to `number` with that hash. The route must
+/// refuse it with a message containing `says`.
+fn refuse_footprint_binding(
+    admin: &PocketBaseClient,
+    root: &Path,
+    ipn: &str,
+    (now, number, snapshot_sha256): (u32, u32, &str),
+    says: &str,
+) {
+    let mut body = ImportCommand::new(&plan(root), REASON)
+        .expecting(&read_import_state(admin).unwrap())
+        .body();
+    body["correlationId"] = format!("rebind-{ipn}-to-{number}").into();
+    let index = body["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|part| part["ipn"] == ipn)
+        .unwrap();
+    let mut snapshot: serde_json::Value =
+        serde_json::from_str(body["parts"][index]["snapshot"].as_str().unwrap()).unwrap();
+    for reference in snapshot["cad_references"].as_array_mut().unwrap() {
+        if reference["role"] == "footprint" {
+            assert_eq!(reference["target"]["number"], now, "{ipn}");
+            reference["target"]["number"] = number.into();
+            reference["target"]["snapshot_sha256"] = snapshot_sha256.into();
+        }
+    }
+    let snapshot = snapshot.to_string();
+    body["parts"][index]["snapshotSha256"] = sha256_hex(&snapshot).into();
+    body["parts"][index]["snapshot"] = snapshot.into();
+    let reply = admin
+        .post_json(catalog::pocketbase::CSV_IMPORT_ROUTE, &body)
+        .unwrap();
+    assert_eq!(reply.status, 400, "{ipn}: {}", reply.body);
+    assert!(reply.body.contains(says), "{ipn}: {}", reply.body);
+}
+
 /// A resistor kept by an edit in the test below.
 const EDITED: &str = "RES-0000-1000";
 
@@ -1010,41 +1050,24 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
     let replay = import_reading_first(&admin, &plan(root), "");
     assert_eq!((replay.status, replay.replayed), (422, true));
     assert_eq!(read_back(&admin).unwrap(), stored);
-    // A part may keep the older number it binds, but not switch to one it
-    // does not bind, even with the same content: RES-0000-0470 binds
-    // footprint revision 3, so naming revision 1 is refused.
-    let mut body = ImportCommand::new(&plan(root), REASON)
-        .expecting(&read_import_state(&admin).unwrap())
-        .body();
-    body["correlationId"] = "switch-to-an-older-number".into();
-    let index = body["parts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .position(|part| part["ipn"] == "RES-0000-0470")
-        .unwrap();
-    let mut snapshot: serde_json::Value =
-        serde_json::from_str(body["parts"][index]["snapshot"].as_str().unwrap()).unwrap();
-    for reference in snapshot["cad_references"].as_array_mut().unwrap() {
-        if reference["role"] == "footprint" {
-            assert_eq!(reference["target"]["number"], 3);
-            reference["target"]["number"] = 1.into();
-            reference["target"]["snapshot_sha256"] = revisions[0].snapshot_sha256.clone().into();
-        }
-    }
-    let snapshot = snapshot.to_string();
-    body["parts"][index]["snapshotSha256"] = sha256_hex(&snapshot).into();
-    body["parts"][index]["snapshot"] = snapshot.into();
-    let reply = admin
-        .post_json(catalog::pocketbase::CSV_IMPORT_ROUTE, &body)
-        .unwrap();
-    assert_eq!(reply.status, 400, "{}", reply.body);
-    assert!(
-        reply
-            .body
-            .contains("keep the revision with the same content it binds now"),
-        "{}",
-        reply.body
+    // The server holds parts to the same rule as the importer, whatever a
+    // hand-made request says. RES-0000-0470 binds footprint revision 3, so
+    // naming revision 1 (same content) is refused; the edited part binds
+    // revision 1, so naming the current revision 3 (same content) is
+    // refused too.
+    refuse_footprint_binding(
+        &admin,
+        root,
+        "RES-0000-0470",
+        (3, 1, &revisions[0].snapshot_sha256),
+        "must keep revision 3 of its CAD item",
+    );
+    refuse_footprint_binding(
+        &admin,
+        root,
+        EDITED,
+        (1, 3, &revisions[2].snapshot_sha256),
+        "must keep revision 1 of its CAD item",
     );
     assert_eq!(read_back(&admin).unwrap(), stored);
 
@@ -1127,6 +1150,50 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
     let noop = import_reading_first(&admin, &plan(root), "");
     assert_eq!(outcome(&noop), "noop", "{}", noop.body);
     let cad_item_revisions = stored.cad_item_revisions.len();
+
+    // A hand-made request cannot add a footprint revision that differs from
+    // the current one (revision 5, naming model revision 3) only by naming
+    // model revision 1, which has the same content.
+    let mut body = ImportCommand::new(&plan(root), REASON)
+        .expecting(&read_import_state(&admin).unwrap())
+        .body();
+    body["correlationId"] = "footprint-differs-only-in-numbers".into();
+    let entry = body["cadItemRevisions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["kind"] == "footprint")
+        .unwrap();
+    assert_eq!(
+        (entry["expectedRevision"].as_u64(), entry["number"].as_u64()),
+        (Some(5), Some(5))
+    );
+    let mut snapshot: serde_json::Value =
+        serde_json::from_str(entry["snapshot"].as_str().unwrap()).unwrap();
+    for model in snapshot["model_references"].as_array_mut().unwrap() {
+        if model["target"]["kind"] == "cad-item-revision" {
+            assert_eq!(model["target"]["number"], 3);
+            model["target"]["number"] = 1.into();
+        }
+    }
+    let snapshot = snapshot.to_string();
+    let cad_item = CadItemId::from_stored(entry["cadItemId"].as_str().unwrap());
+    entry["snapshotSha256"] = sha256_hex(&snapshot).into();
+    entry["snapshot"] = snapshot.into();
+    entry["number"] = 6.into();
+    entry["id"] = CadItemRevisionId::new(&cad_item, 6).as_str().into();
+    let reply = admin
+        .post_json(catalog::pocketbase::CSV_IMPORT_ROUTE, &body)
+        .unwrap();
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert!(
+        reply
+            .body
+            .contains("differs only in the revision numbers it names"),
+        "{}",
+        reply.body
+    );
+    assert_eq!(read_back(&admin).unwrap(), stored);
 
     // An edit of the part that kept the older numbers keeps them too: the
     // binding moves only when the CAD content or the reference changes.

@@ -724,7 +724,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     refused_current(
         "older-binding",
         &|body| rebind(body, &|target| target["number"] = 7.into()),
-        "an import must name the current revision, 1",
+        "must keep revision 1 of its CAD item",
     );
     // ...nor a record ID or anything else besides the three names.
     refused_current(

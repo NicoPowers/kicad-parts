@@ -832,6 +832,7 @@ module.exports = {
   hasInvisible: hasInvisible,
   guardedCollection: guardedCollection,
   collectionChangeProblem: collectionChangeProblem,
+  canonicalJson: canonicalJson,
   deriveId: deriveId,
   sha256Bytes: sha256Bytes,
   base64Decode: base64Decode,
