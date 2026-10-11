@@ -1874,6 +1874,9 @@ fn an_edit_never_saves_a_field_in_the_wrong_document() {
         value: "g-pas:R_US".into(),
     });
     let snapshot = wrong.canonical_json();
+    // Stop the server before touching data.db, then start it again on the
+    // same data (mx-404964).
+    server.stop();
     tamper(
         state.path(),
         "catalog_part_details",
@@ -1888,7 +1891,7 @@ fn an_edit_never_saves_a_field_in_the_wrong_document() {
         &saved.id,
         &sha256_hex(&snapshot),
     );
-    let (server, admin) = restart(&root, state.path(), server);
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
     let before = read_back(&admin).unwrap();
     let mut edit = EditCommand::new("RES-0000-0470", "Move the symbol into the details")
         .editing_details(&wrong, saved.number);
