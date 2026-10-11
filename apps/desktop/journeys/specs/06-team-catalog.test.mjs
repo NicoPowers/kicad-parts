@@ -3,8 +3,8 @@
 // details (which adds no revision), watch someone else's change arrive by
 // itself, resolve a conflict, read the history with what changed, and view
 // as a read-only member. Changing the symbol adds a revision, and archiving
-// it makes the earlier revision current again. There is no Restore: an earlier revision is never
-// copied back (kicad-parts-9296).
+// it makes the earlier revision current again. There is no Restore: an
+// earlier revision is never copied back (kicad-parts-9296).
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -342,7 +342,7 @@ describe('team catalog: history, edits and conflicts', () => {
       `Part details · Edited by ${other.name}`,
       `Part details · Edited by ${other.name}`,
       `Part details · Edited by ${editor.name}`,
-      'Revision 1 · Imported by an administrator (current)',
+      'Revision 1 (current) · Imported by an administrator',
     ]);
     assert.match(await textOf(browser, '.history li:nth-child(4) .history-reason'), /^“Write the value the way the BOM does”$/);
     await (await browser.$('.history li:nth-child(4) button')).click();
@@ -387,7 +387,7 @@ describe('team catalog: history, edits and conflicts', () => {
       [...document.querySelectorAll('.history .history-title')].map((t) => t.textContent.trim()),
     );
     assert.deepEqual(titles, [
-      `Revision 2 · Edited by ${editor.name} (current)`,
+      `Revision 2 (current) · Edited by ${editor.name}`,
       `Part details · Edited by ${editor.name}`,
       `Part details · Edited by ${other.name}`,
       `Part details · Edited by ${other.name}`,
@@ -411,6 +411,11 @@ describe('team catalog: history, edits and conflicts', () => {
     // The newest entry, revision 2, is selected.
     await clickButton('.revision', 'Archive revision 2…');
     await waitForText(browser, '#archive-heading', 'Archive revision 2');
+    // Keyboard focus moves to the reason box.
+    await browser.waitUntil(async () => (await browser.execute(() => document.activeElement?.id)) === 'archive-reason', {
+      timeout: 5_000,
+      timeoutMsg: 'focus did not move to the reason box',
+    });
     assert.equal(
       await textOf(browser, '.archive-form p'),
       'KiCad and this app stop offering revision 2, so nobody new picks it. Designs that already use it keep it. Nothing is deleted. The current revision becomes revision 1.',
@@ -428,17 +433,22 @@ describe('team catalog: history, edits and conflicts', () => {
     );
     assert.deepEqual(titles, [
       `Revision 2 · Archived by ${editor.name}`,
-      `Revision 2 · Edited by ${editor.name} (archived)`,
+      `Revision 2 (archived) · Edited by ${editor.name}`,
       `Part details · Edited by ${editor.name}`,
       `Part details · Edited by ${other.name}`,
       `Part details · Edited by ${other.name}`,
       `Part details · Edited by ${editor.name}`,
-      'Revision 1 · Imported by an administrator (current)',
+      'Revision 1 (current) · Imported by an administrator',
     ]);
     await waitForText(browser, '#revision-heading', 'Revision 2 archived');
     assert.equal(
       await textOf(browser, '.revision .hint'),
       'Revision 2 was archived. The current revision became revision 1.',
+    );
+    // Undo is right there, on the entry just made.
+    assert.equal(
+      await browser.execute(() => [...document.querySelectorAll('.revision button')].map((b) => b.textContent.trim()).join()),
+      'Unarchive revision 2…',
     );
     await assertAccessible(browser, '53-team-archived');
     await screenshot(browser, '53-team-archived');
@@ -463,6 +473,11 @@ describe('team catalog: history, edits and conflicts', () => {
       'KiCad and this app offer revision 2 again. The current revision becomes revision 2.',
     );
     await clickButton('.archive-form', 'Cancel');
+    // Focus goes back to the button that opened the form.
+    await browser.waitUntil(async () => (await browser.execute(() => document.activeElement?.id)) === 'archive-open-2', {
+      timeout: 5_000,
+      timeoutMsg: 'focus did not return to the button',
+    });
     // The Details tab shows revision 1 again and names the archived one.
     await clickButton(COLUMN, 'Details');
     assert.equal(await textOf(browser, '#cad-items-heading'), 'Symbol and footprint (revision 1 of this part)');

@@ -239,8 +239,9 @@ pub struct TeamUi {
     pub notice: RwSignal<Option<Notice>>,
     /// The history entry selected, by its Change's number.
     pub selected: RwSignal<Option<u64>>,
-    /// The revision whose archive (or unarchive) form is open.
-    pub archiving: RwSignal<Option<u32>>,
+    /// The open archive form: the revision, and true to archive it or false
+    /// to unarchive it.
+    pub archiving: RwSignal<Option<(u32, bool)>>,
     pub archive_reason: RwSignal<String>,
     pub busy: RwSignal<bool>,
     /// The last save sent and its correlation ID: sending the same save
@@ -370,18 +371,20 @@ fn published(ui: TeamUi, part: RwSignal<Option<TeamPart>>, result: Result<Publis
             current,
             part: saved,
         }) => {
+            let before = part.with_untracked(|shown| shown.as_ref().map(|p| p.revision.number));
             part.set(Some(saved));
             ui.archiving.set(None);
             ui.archive_reason.set(String::new());
             ui.selected.set(None);
-            let message = if archived {
-                format!(
-                    "Revision {revision} is archived. The current revision is now revision {current}."
-                )
+            let then = if before == Some(current) {
+                format!("The current revision stays revision {current}.")
             } else {
-                format!(
-                    "Revision {revision} is no longer archived. The current revision is now revision {current}."
-                )
+                format!("The current revision is now revision {current}.")
+            };
+            let message = if archived {
+                format!("Revision {revision} is archived. {then}")
+            } else {
+                format!("Revision {revision} is no longer archived. {then}")
             };
             ui.notice.set(Some(Notice::Done(message)));
             scroll_column_to_top();
@@ -494,6 +497,26 @@ pub fn TeamColumn(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) 
             </button>
         }
     };
+    // If someone else archives or unarchives the revision whose form is
+    // open, close the form and say so plainly, rather than turning it into
+    // the opposite action with the reason still in it.
+    Effect::new(move |_| {
+        let Some((number, wanted)) = ui.archiving.get() else {
+            return;
+        };
+        let done = part.with(|part| {
+            part.as_ref()
+                .is_some_and(|part| is_archived(part, number) == wanted)
+        });
+        if done {
+            ui.archiving.set(None);
+            ui.archive_reason.set(String::new());
+            let what = if wanted { "archived" } else { "unarchived" };
+            ui.notice.set(Some(Notice::Problem(format!(
+                "Someone else already {what} revision {number}, so nothing was saved."
+            ))));
+        }
+    });
     view! {
         <div class="team-column">
             {move || {
@@ -916,11 +939,16 @@ fn machine_time(shown: &str) -> Option<String> {
     Some(format!("{date}T{time}Z"))
 }
 
-/// `Revision 2 · Imported by an administrator` for an entry that added a
-/// revision, `Revision 2 · Archived by Ada` for an archive, `Part details ·
-/// Edited by Ada` for one that only saved the details.
-fn entry_title(entry: &HistoryEntry) -> String {
+/// `Revision 1 (current) · Imported by an administrator` for an entry that
+/// added a revision (with the revision's state, `current` or `archived`,
+/// next to it), `Revision 2 · Archived by Ada` for an archive, and `Part
+/// details · Edited by Ada` for one that only saved the details.
+fn entry_title(entry: &HistoryEntry, part: &TeamPart) -> String {
     let what = match (entry.revision, &entry.archive) {
+        (Some(number), _) if number == part.revision.number => {
+            format!("Revision {number} (current)")
+        }
+        (Some(number), _) if is_archived(part, number) => format!("Revision {number} (archived)"),
         (Some(number), _) => format!("Revision {number}"),
         (None, Some(archive)) => format!("Revision {}", archive.revision),
         (None, None) => "Part details".to_owned(),
@@ -940,7 +968,6 @@ fn HistoryView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
         let Some(team_part) = part.get() else {
             return ().into_any();
         };
-        let current = team_part.revision.number;
         let newest = team_part.history.first().map(|entry| entry.seq);
         let chosen = ui.selected.get().or(newest);
         let selected = team_part
@@ -963,11 +990,6 @@ fn HistoryView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                         } else {
                             format!("“{}”", entry.reason)
                         };
-                        let label = match entry.revision {
-                            Some(number) if number == current => " (current)",
-                            Some(number) if is_archived(&team_part, number) => " (archived)",
-                            _ => "",
-                        };
                         view! {
                             <li>
                                 <button
@@ -979,7 +1001,7 @@ fn HistoryView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                                         ui.archiving.set(None);
                                     }
                                 >
-                                    <span class="history-title">{entry_title(entry)}{label}</span>
+                                    <span class="history-title">{entry_title(entry, &team_part)}</span>
                                     <span class="history-when">{saved_at_view(entry.saved_at.clone())}</span>
                                     <span class="history-reason">{reason}</span>
                                 </button>
@@ -1032,8 +1054,16 @@ fn EntryView(
     } else {
         changes_table(heading.clone(), "Before", "After", entry.changes.clone()).into_any()
     };
-    let archive_section = entry
-        .revision
+    // A revision entry offers to archive or unarchive its revision; an
+    // archive entry offers to undo it while the revision is still archived.
+    let offered = entry.revision.or_else(|| {
+        entry
+            .archive
+            .as_ref()
+            .filter(|archive| archive.archived && is_archived(&part, archive.revision))
+            .map(|archive| archive.revision)
+    });
+    let archive_section = offered
         .filter(|_| can_edit)
         .map(|number| view! { <ArchiveSection number=number part=part.clone() team=team ui=ui /> });
     view! {
@@ -1087,15 +1117,18 @@ fn ArchiveSection(
             .into_any();
         };
         let verb = if archived { "Unarchive" } else { "Archive" };
-        if ui.archiving.get() != Some(number) {
+        let opener = format!("archive-open-{number}");
+        if ui.archiving.get() != Some((number, !archived)) {
             return view! {
                 <button
                     type="button"
                     class="archive-open"
+                    id=opener
                     on:click=move |_| {
                         ui.notice.set(None);
                         ui.archive_reason.set(String::new());
-                        ui.archiving.set(Some(number));
+                        ui.archiving.set(Some((number, !archived)));
+                        focus_later("archive-reason");
                     }
                 >
                     {format!("{verb} revision {number}…")}
@@ -1103,16 +1136,14 @@ fn ArchiveSection(
             }
             .into_any();
         }
-        let explanation = if archived {
-            format!(
-                "KiCad and this app offer revision {number} again. The current revision becomes revision {after}."
-            )
+        let then = if after == current {
+            format!("The current revision stays revision {after}.")
         } else {
-            let then = if after == current {
-                format!("The current revision stays revision {after}.")
-            } else {
-                format!("The current revision becomes revision {after}.")
-            };
+            format!("The current revision becomes revision {after}.")
+        };
+        let explanation = if archived {
+            format!("KiCad and this app offer revision {number} again. {then}")
+        } else {
             format!(
                 "KiCad and this app stop offering revision {number}, so nobody new picks it. Designs that already use it keep it. Nothing is deleted. {then}"
             )
@@ -1155,12 +1186,35 @@ fn ArchiveSection(
                     <button type="submit" class="primary" disabled=move || ui.busy.get()>
                         {format!("{verb} revision {number}")}
                     </button>
-                    <button type="button" on:click=move |_| ui.archiving.set(None)>"Cancel"</button>
+                    <button
+                        type="button"
+                        on:click=move |_| {
+                            ui.archiving.set(None);
+                            focus_later(&format!("archive-open-{number}"));
+                        }
+                    >
+                        "Cancel"
+                    </button>
                 </div>
             </form>
         }
         .into_any()
     }
+}
+
+/// Moves keyboard focus to the element with `id` once the view has been
+/// redrawn.
+fn focus_later(id: &str) {
+    let id = id.to_owned();
+    request_animation_frame(move || {
+        use wasm_bindgen::JsCast;
+        if let Some(element) = document()
+            .get_element_by_id(&id)
+            .and_then(|element| element.dyn_into::<leptos::web_sys::HtmlElement>().ok())
+        {
+            let _ = element.focus();
+        }
+    });
 }
 
 fn save_archive(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamArchiveRequest) {
