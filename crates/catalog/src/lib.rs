@@ -27,17 +27,15 @@
 //!   with the same bytes share one stored blob. A symbol's blob
 //!   is the exact bytes of that one symbol in its library file, so editing
 //!   a neighbouring symbol does not revise it.
-//! - A **Change** groups the revisions one import, edit or restore
-//!   published, with its reason. A Change always has at least one revision.
-//!   A restore adds a new revision that copies an older one's details; it
-//!   never changes the older revision.
+//! - A **Change** groups the revisions one import or edit published, with
+//!   its reason. A Change always has at least one revision.
 //! - **Supplier data** (supplier part numbers and prices) is kept in a
 //!   revision's [`Source`], never in its part details, so it never creates
 //!   a revision.
 //!
 //! [`csv_import`] turns the read-only CSV catalog into a [`CsvImport`]
-//! without touching any store; [`pocketbase`] submits imports, edits and
-//! restores to the protected routes and reads the stored records back;
+//! without touching any store; [`pocketbase`] submits imports and edits to
+//! the protected routes and reads the stored records back;
 //! [`replica`] keeps a local copy of every part's current revision in step
 //! with the server; [`compare_details`] lists what differs between two
 //! revisions.

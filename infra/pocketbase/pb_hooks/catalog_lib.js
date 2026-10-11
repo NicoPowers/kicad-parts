@@ -6,7 +6,9 @@
 
 // The closed set of catalog_changes.kind values, shared with the
 // migration (1791500000_catalog_init.js) and crates/catalog (ChangeKind);
-// a test in crates/catalog keeps the three in step.
+// a test in crates/catalog keeps the three in step. Nothing publishes
+// "restore" any more; it stays only so Changes saved before restores were
+// removed can still be read, until kicad-parts-7556 replaces the kinds.
 const CHANGE_KINDS = Object.freeze({
   csvImport: "csv-import",
   edit: "edit",
@@ -290,19 +292,17 @@ function base64Decode(text) {
   return out;
 }
 
-// ---- Edits and restores --------------------------------------------------
+// ---- Edits ---------------------------------------------------------------
 //
-// POST /api/catalog/edits and POST /api/catalog/restores (see
-// catalog_edits.pb.js) publish one new revision of one part. Both run
-// publishPartRevision in one transaction:
+// POST /api/catalog/edits (see catalog_edits.pb.js) publishes one new
+// revision of one part. It runs publishPartRevision in one transaction:
 //
 //   1. replay the stored answer if the correlation ID was used before for
 //      the same request (409 correlation_reused for a different one);
 //   2. answer 409 conflict, with the part's current revision, if the
 //      caller expected another current revision;
-//   3. build the new part details: for an edit, from the caller's fields
-//      and manufacturer parts; for a restore, an exact copy of the older
-//      revision's details, CAD item revisions included;
+//   3. build the new part details from the caller's fields and
+//      manufacturer parts;
 //   4. answer 422 noop if they equal the current revision's details;
 //   5. otherwise save one Change, the new revision, the part's move to it,
 //      and one audit entry.
@@ -310,7 +310,7 @@ function base64Decode(text) {
 // Applied and no-op answers are stored under the correlation ID; conflicts
 // are not, so a retry is checked again against the current revision.
 
-// Who may publish edits and restores: superusers, and team members whose
+// Who may publish edits: superusers, and team members whose
 // account is marked can_edit_catalog. Returns the actor or throws.
 function catalogEditor(e) {
   const auth = e.auth;
@@ -326,7 +326,7 @@ function catalogEditor(e) {
   return { id: collection + ":" + auth.id, name: name };
 }
 
-// Reads and checks the request fields both routes share.
+// Reads and checks the request fields every edit has.
 function commonRequest(body) {
   const fail = (message) => {
     throw new BadRequestError(message);
@@ -589,18 +589,12 @@ function describeRevision(txApp, revision) {
   };
 }
 
-// kind is CHANGE_KINDS.edit or CHANGE_KINDS.restore.
-function publishPartRevision(e, kind) {
+function publishPartRevision(e) {
+  const kind = CHANGE_KINDS.edit;
   const actor = catalogEditor(e);
   const body = e.requestInfo().body || {};
   const request = commonRequest(body);
-  let restoreRevision = 0;
-  if (kind === CHANGE_KINDS.restore) {
-    restoreRevision = body.restoreRevision;
-    if (typeof restoreRevision !== "number" || !Number.isInteger(restoreRevision) || restoreRevision < 1) {
-      throw new BadRequestError("restoreRevision must be the number of an earlier revision");
-    }
-  } else if (!Array.isArray(body.fields) || !Array.isArray(body.manufacturerParts)) {
+  if (!Array.isArray(body.fields) || !Array.isArray(body.manufacturerParts)) {
     throw new BadRequestError("an edit needs fields and manufacturerParts");
   }
   // The request's identity, from validated values in a fixed order (the
@@ -611,12 +605,10 @@ function publishPartRevision(e, kind) {
       request.ipn,
       request.expectedRevision,
       request.reason,
-      kind === CHANGE_KINDS.restore
-        ? restoreRevision
-        : [
-            body.fields.map((field) => [field && field.name, field && field.value]),
-            body.manufacturerParts.map((part) => [part && part.manufacturer, part && part.mpn]),
-          ],
+      [
+        body.fields.map((field) => [field && field.name, field && field.value]),
+        body.manufacturerParts.map((part) => [part && part.manufacturer, part && part.mpn]),
+      ],
     ]),
   );
 
@@ -679,49 +671,27 @@ function publishPartRevision(e, kind) {
       throw new Error(`the current revision of ${request.ipn} is not ${PART_DETAILS_SCHEMA} part details`);
     }
 
-    let snapshot;
-    let source;
-    let restored = null;
-    if (kind === CHANGE_KINDS.restore) {
-      restored = first("catalog_part_revisions", "part = {:part} && number = {:number}", {
-        part: partId,
-        number: restoreRevision,
-      });
-      if (!restored) {
-        throw new NotFoundError(`${request.ipn} has no revision ${restoreRevision}`);
-      }
-      // The exact stored bytes, so the restored revision has the same
-      // details and the same CAD item revisions.
-      snapshot = restored.getString("snapshot");
-      source = {
-        schema: SOURCE_SCHEMA,
-        source: CHANGE_KINDS.restore,
-        restored_revision: { id: restored.id, number: restored.getInt("number") },
-        previous_revision: { id: current.id, number: current.getInt("number") },
-      };
-    } else {
-      const edited = editedDetails(body, currentDetails);
-      // Serialized in the field order of crates/catalog PartDetails, so the
-      // stored bytes are its canonical JSON.
-      const details = {
-        schema: PART_DETAILS_SCHEMA,
-        ipn: request.ipn,
-        fields: edited.fields,
-        manufacturer_parts: edited.manufacturerParts,
-        cad_references: cadReferences(txApp, edited.fields, currentDetails),
-      };
-      // An edit keeps Excluded from BOM as it is. Like PartDetails, the
-      // snapshot names it only when it is set.
-      if (currentDetails.excluded_from_bom === true) {
-        details.excluded_from_bom = true;
-      }
-      snapshot = JSON.stringify(details);
-      source = {
-        schema: SOURCE_SCHEMA,
-        source: CHANGE_KINDS.edit,
-        previous_revision: { id: current.id, number: current.getInt("number") },
-      };
+    const edited = editedDetails(body, currentDetails);
+    // Serialized in the field order of crates/catalog PartDetails, so the
+    // stored bytes are its canonical JSON.
+    const details = {
+      schema: PART_DETAILS_SCHEMA,
+      ipn: request.ipn,
+      fields: edited.fields,
+      manufacturer_parts: edited.manufacturerParts,
+      cad_references: cadReferences(txApp, edited.fields, currentDetails),
+    };
+    // An edit keeps Excluded from BOM as it is. Like PartDetails, the
+    // snapshot names it only when it is set.
+    if (currentDetails.excluded_from_bom === true) {
+      details.excluded_from_bom = true;
     }
+    const snapshot = JSON.stringify(details);
+    const source = {
+      schema: SOURCE_SCHEMA,
+      source: CHANGE_KINDS.edit,
+      previous_revision: { id: current.id, number: current.getInt("number") },
+    };
     const snapshotSha256 = $security.sha256(snapshot);
 
     let status;
@@ -733,10 +703,7 @@ function publishPartRevision(e, kind) {
         correlationId: request.correlationId,
         ipn: request.ipn,
         revision: { id: current.id, number: current.getInt("number") },
-        message:
-          kind === CHANGE_KINDS.restore
-            ? `revision ${restoreRevision} has the same details as the current revision`
-            : "the edit changes nothing",
+        message: "the edit changes nothing",
       };
     } else {
       const record = (name, id) => {
@@ -750,7 +717,7 @@ function publishPartRevision(e, kind) {
       const changeId = deriveId("change", request.correlationId);
       const revisionId = deriveId("part-revision", partId + "\n" + number);
       const bound = boundCadItemRevisions(JSON.parse(snapshot));
-      const summary = JSON.stringify({ ipn: request.ipn, partRevisions: 1, revision: number, restoredRevision: restoreRevision || null });
+      const summary = JSON.stringify({ ipn: request.ipn, partRevisions: 1, revision: number });
 
       const change = record("catalog_changes", changeId);
       change.set("seq", seq);

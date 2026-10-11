@@ -1,4 +1,4 @@
-//! Edits and restores of one part through the protected Catalog routes,
+//! Edits of one part through the protected Catalog routes,
 //! records that never change once written, and a second client that
 //! converges through realtime notifications and catching up from its
 //! checkpoint. Each test starts its own disposable PocketBase on 127.0.0.1
@@ -6,7 +6,7 @@
 
 use catalog::pocketbase::{
     CatalogReadback, EditCommand, ImportCommand, ImportOutcome, PublishOutcome, PublishReply,
-    RestoreCommand, StoredChange, read_back, submit_edit, submit_import, submit_restore,
+    StoredChange, read_back, submit_edit, submit_import,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{CadReferenceTarget, DetailField, ManufacturerPart, PartDetails, sha256_hex};
@@ -120,7 +120,7 @@ fn edit(readback: &CatalogReadback, ipn: &str, field: &str, value: &str) -> Edit
 }
 
 #[test]
-fn an_editor_publishes_edits_and_restores_with_exact_cad_revisions() {
+fn an_editor_publishes_edits_with_exact_cad_revisions() {
     let team = Team::start();
     let initial = team.read();
     let editor = team.member("Ada Editor", true);
@@ -137,10 +137,6 @@ fn an_editor_publishes_edits_and_restores_with_exact_cad_revisions() {
     ));
     assert!(matches!(
         submit_edit(&viewer, &command),
-        Err(CollabError::Forbidden(_))
-    ));
-    assert!(matches!(
-        submit_restore(&viewer, &RestoreCommand::new(IPN, 1, 1, "x")),
         Err(CollabError::Forbidden(_))
     ));
     // A member cannot give themselves edit access.
@@ -373,45 +369,25 @@ fn an_editor_publishes_edits_and_restores_with_exact_cad_revisions() {
     assert_eq!(rebound.cad_item_revisions, initial.cad_item_revisions);
     assert_eq!(rebound.blobs.len(), initial.blobs.len());
 
-    // Restoring revision 1 adds revision 5 with exactly its details and
-    // CAD item revisions; revision 1 itself is untouched.
+    // There is no restore route any more (kicad-parts-9296): an earlier
+    // revision is never copied back, and asking for it writes nothing.
     let (number, _) = current(&rebound, IPN);
     assert_eq!(number, 4);
-    let restore = RestoreCommand::new(IPN, 4, 1, "Go back to the imported details");
-    let restored = submit_restore(&editor, &restore).unwrap();
-    let (seq, number, change_id) = applied(&restored);
-    assert_eq!((seq, number), (5, 5));
-    let last = team.read();
-    let revision = last
-        .part_revision(&last.part(IPN).unwrap().current_revision)
+    let restore = editor
+        .post_json(
+            "/api/catalog/restores",
+            &json!({
+                "correlationId": "restore-is-gone",
+                "reason": "Go back to the imported details",
+                "ipn": IPN,
+                "expectedRevision": 4,
+                "restoreRevision": 1,
+            }),
+        )
         .unwrap();
-    assert_eq!(revision.snapshot, first_revision.snapshot);
-    assert_eq!(revision.snapshot_sha256, first_revision.snapshot_sha256);
-    assert_eq!(
-        revision.cad_item_revisions,
-        first_revision.cad_item_revisions
-    );
-    let source: Value = serde_json::from_str(&revision.source).unwrap();
-    assert_eq!(
-        (
-            source["source"].as_str(),
-            source["restored_revision"]["number"].as_u64()
-        ),
-        (Some("restore"), Some(1))
-    );
-    let change = last.changes.iter().find(|c| c.id == change_id).unwrap();
-    assert_eq!(change.kind, "restore");
-    assert_eq!(last.part_revision(&first_revision.id), Some(first_revision));
-    // Restoring it again changes nothing; a missing revision is 404; a
-    // stale restore is a conflict.
-    let noop = submit_restore(&editor, &RestoreCommand::new(IPN, 5, 1, "again")).unwrap();
-    assert_eq!(noop.status, 422, "{}", noop.body);
-    assert!(matches!(
-        submit_restore(&editor, &RestoreCommand::new(IPN, 5, 99, "missing")),
-        Err(CollabError::Http { status: 404, .. })
-    ));
-    let conflict = submit_restore(&editor, &RestoreCommand::new(IPN, 4, 2, "stale")).unwrap();
-    assert!(matches!(conflict.outcome, PublishOutcome::Conflict { .. }));
+    assert_eq!(restore.status, 404, "{}", restore.body);
+    let last = team.read();
+    assert_eq!(last, rebound);
     assert!(matches!(
         submit_edit(
             &editor,
@@ -427,7 +403,7 @@ fn an_editor_publishes_edits_and_restores_with_exact_cad_revisions() {
     // a chain of predecessors.
     let last = team.read();
     let sequences: Vec<u64> = last.changes.iter().map(|change| change.seq).collect();
-    assert_eq!(sequences, [1, 2, 3, 4, 5]);
+    assert_eq!(sequences, [1, 2, 3, 4]);
     let part = last.part(IPN).unwrap();
     let mut cursor = part.current_revision.clone();
     let mut numbers = Vec::new();
@@ -435,7 +411,7 @@ fn an_editor_publishes_edits_and_restores_with_exact_cad_revisions() {
         numbers.push(revision.number);
         cursor = revision.predecessor.clone();
     }
-    assert_eq!(numbers, [5, 4, 3, 2, 1]);
+    assert_eq!(numbers, [4, 3, 2, 1]);
     team.server.stop();
 }
 
@@ -593,12 +569,12 @@ fn a_second_client_converges_through_realtime_and_its_checkpoint() {
     );
     assert_eq!(replica.parts()[&readback.part(IPN).unwrap().id].number, 2);
 
-    // While it is disconnected, two edits and a restore happen.
+    // While it is disconnected, three edits happen.
     connection.disconnect();
     let other_ipn = "RES-0000-1000";
     applied(&submit_edit(&editor, &edit(&team.read(), IPN, "Value", "47.0")).unwrap());
     applied(&submit_edit(&editor, &edit(&team.read(), other_ipn, "Value", "1k")).unwrap());
-    applied(&submit_restore(&editor, &RestoreCommand::new(IPN, 3, 1, "back")).unwrap());
+    applied(&submit_edit(&editor, &edit(&team.read(), IPN, "Value", "47")).unwrap());
 
     // It reconnects and catches up from its checkpoint: nothing missed...
     let mut connection = RealtimeConnection::connect(team.url(), wait).unwrap();
@@ -814,7 +790,7 @@ fn catalog_collections_cannot_lose_data_through_the_collection_api() {
         change_collection(
             admin,
             "catalog_changes",
-            set_option("kind", "values", json!(["csv-import", "restore"]))
+            set_option("kind", "values", json!(["csv-import"]))
         ),
         403
     );

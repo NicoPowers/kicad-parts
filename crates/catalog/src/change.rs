@@ -5,8 +5,8 @@
 /// `CHANGE_KINDS` names them; the test below keeps all three in step.
 ///
 /// The import route gives a changed row a new revision only when the
-/// part's current revision came from a CSV import, so an edit or a restore
-/// is never overwritten by one.
+/// part's current revision came from a CSV import, so an edit is never
+/// overwritten by one.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ChangeKind {
     /// Published by `POST /api/catalog/csv-imports`.
@@ -14,8 +14,10 @@ pub enum ChangeKind {
     /// A change to one part's details, published by
     /// `POST /api/catalog/edits`.
     Edit,
-    /// A new revision copying an earlier one's details, published by
-    /// `POST /api/catalog/restores`.
+    /// A new revision that copied an earlier one's details. Nothing
+    /// publishes these any more (the restore route was removed in
+    /// kicad-parts-9296); the kind stays so that Changes saved before then
+    /// can still be read, until kicad-parts-7556 replaces the kinds.
     Restore,
 }
 

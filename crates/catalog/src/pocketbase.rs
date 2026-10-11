@@ -1,6 +1,6 @@
 //! The Catalog's PocketBase contract: the protected routes
 //! (`infra/pocketbase/pb_hooks/catalog_csv_imports.pb.js` for CSV imports,
-//! `catalog_edits.pb.js` for edits and restores) and the `catalog_*`
+//! `catalog_edits.pb.js` for edits) and the `catalog_*`
 //! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`
 //! and `1791600000_catalog_edits.js`).
 
@@ -580,9 +580,6 @@ pub fn submit_import(
 /// The route that publishes a change to one part's details.
 pub const EDIT_ROUTE: &str = "/api/catalog/edits";
 
-/// The route that publishes a copy of an earlier revision as a new one.
-pub const RESTORE_ROUTE: &str = "/api/catalog/restores";
-
 /// A change to one part's details: every field of the current revision (the
 /// same names in the same order, with new values) and the full list of
 /// manufacturer parts. The server reads the new CAD references from the
@@ -643,41 +640,7 @@ impl EditCommand {
     }
 }
 
-/// A new revision of one part whose details are an exact copy of revision
-/// `restore_revision`, CAD item revisions included. A restore never adds a
-/// CAD item revision.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RestoreCommand {
-    pub correlation_id: CorrelationId,
-    pub reason: String,
-    pub ipn: String,
-    pub expected_revision: u32,
-    pub restore_revision: u32,
-}
-
-impl RestoreCommand {
-    pub fn new(ipn: &str, expected_revision: u32, restore_revision: u32, reason: &str) -> Self {
-        Self {
-            correlation_id: CorrelationId::generate(),
-            reason: reason.to_owned(),
-            ipn: ipn.to_owned(),
-            expected_revision,
-            restore_revision,
-        }
-    }
-
-    pub fn body(&self) -> Value {
-        json!({
-            "correlationId": self.correlation_id,
-            "reason": self.reason,
-            "ipn": self.ipn,
-            "expectedRevision": self.expected_revision,
-            "restoreRevision": self.restore_revision,
-        })
-    }
-}
-
-/// What the edit or restore route answered.
+/// What the edit route answered.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PublishReply {
     pub status: u16,
@@ -771,14 +734,6 @@ impl ConflictingRevision {
 /// errors.
 pub fn submit_edit(client: &PocketBaseClient, command: &EditCommand) -> CollabResult<PublishReply> {
     publish(client, EDIT_ROUTE, &command.body())
-}
-
-/// Submits a restore; answers as [`submit_edit`].
-pub fn submit_restore(
-    client: &PocketBaseClient,
-    command: &RestoreCommand,
-) -> CollabResult<PublishReply> {
-    publish(client, RESTORE_ROUTE, &command.body())
 }
 
 fn publish(client: &PocketBaseClient, route: &str, body: &Value) -> CollabResult<PublishReply> {
@@ -996,7 +951,7 @@ pub struct StoredAuditEntry {
     #[serde(default)]
     pub csv_file: String,
     /// For a CSV import run: its number among all CSV import runs, counting
-    /// from 1. 0 for edits and restores.
+    /// from 1. 0 for edits.
     #[serde(default)]
     pub csv_import_number: u64,
     /// For a CSV import run: the commit its files were read at.
@@ -1017,7 +972,7 @@ pub struct StoredAuditEntry {
 
 impl StoredAuditEntry {
     /// What this CSV import run read, or `None` if the entry records no
-    /// readable import run (edits, restores, or a damaged record).
+    /// readable import run (edits, or a damaged record).
     pub fn import_run(&self) -> Option<ImportRun> {
         serde_json::from_str(&self.sources).ok()
     }

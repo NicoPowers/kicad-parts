@@ -7,7 +7,7 @@
 
 use catalog::pocketbase::{
     CSV_IMPORT_ROUTE, CatalogReadback, EditCommand, ImportCommand, ImportOutcome, ImportReply,
-    RestoreCommand, read_back, read_import_state, submit_edit, submit_import, submit_restore,
+    read_back, read_import_state, submit_edit, submit_import,
 };
 use catalog::{CsvCatalog, PartDetails, sha256_hex};
 use catalog_import::services;
@@ -929,18 +929,19 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     assert_eq!(relabel.status, 403, "{}", relabel.body);
 
     // A current revision whose details match the row but whose source is
-    // not a CSV row (here a restore of revision 1 after an edit) is answered
-    // with an import problem that keeps the row, not a server error.
-    let edit = {
-        let (number, details) = current_revision(&last, "RES-0000-1001");
-        let mut command = EditCommand::starting_from(&details, number, "Try another value");
-        command.set_field("Value", "1.0k");
-        command
-    };
+    // not a CSV row (here an edit that puts back the imported value after
+    // another edit) is answered with an import problem that keeps the row,
+    // not a server error.
+    let (number, details) = current_revision(&last, "RES-0000-1001");
+    let imported_value = details.field("Value").unwrap().to_owned();
+    let mut edit = EditCommand::starting_from(&details, number, "Try another value");
+    edit.set_field("Value", "1.0k");
     assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
-    let restore = RestoreCommand::new("RES-0000-1001", 2, 1, "Back to the imported details");
-    let restored = submit_restore(&admin, &restore).unwrap();
-    assert_eq!(restored.status, 200, "{}", restored.body);
+    let (number, details) = current_revision(&read_back(&admin).unwrap(), "RES-0000-1001");
+    let mut back = EditCommand::starting_from(&details, number, "Back to the imported value");
+    back.set_field("Value", &imported_value);
+    let put_back = submit_edit(&admin, &back).unwrap();
+    assert_eq!(put_back.status, 200, "{}", put_back.body);
     let reply = import_reading_first(&admin, &conflicting, "-source");
     assert_eq!(nothing_changed(&reply).1, 1, "{}", reply.body);
     let kept = read_back(&admin).unwrap();
@@ -1401,15 +1402,13 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
         .import("g-res", None)
         .unwrap();
     applied(&submit_import(&admin, &ImportCommand::new(&import, REASON)).unwrap());
-    // Edits and a restore populate the edit migration's fields too.
+    // An edit populates the edit migration's fields too.
     let stored = read_back(&admin).unwrap();
     assert!(stored.cad_item_revisions.is_empty());
     let (number, details) = current_revision(&stored, "RES-0000-0470");
     let mut edit = EditCommand::starting_from(&details, number, "Before the rollback");
     edit.set_field("Value", "47R");
     assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
-    let restore = RestoreCommand::new("RES-0000-0470", 2, 1, "Before the rollback");
-    assert_eq!(submit_restore(&admin, &restore).unwrap().status, 200);
     let users_rule = |data_dir: &Path| -> (String, String) {
         let database = rusqlite::Connection::open_with_flags(
             data_dir.join("data.db"),

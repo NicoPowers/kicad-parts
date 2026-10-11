@@ -8,8 +8,7 @@
 // - Nobody creates, updates or deletes a Catalog record through the record
 //   API (`/api/collections/catalog_*/records`, the batch API or the
 //   dashboard). The protected routes are the only way in:
-//   POST /api/catalog/csv-imports, /api/catalog/edits and
-//   /api/catalog/restores.
+//   POST /api/catalog/csv-imports and /api/catalog/edits.
 // - Revisions, CAD items, blobs, Changes, audit entries, import problems
 //   and the command ledger refuse every update and delete, whoever saves
 //   them.
@@ -44,7 +43,7 @@ onRecordCreateRequest(
 onRecordUpdateRequest(
   (e) => {
     throw new ForbiddenError(
-      "Catalog records never change; publish an edit or a restore through the Catalog routes instead",
+      "Catalog records never change; publish an edit through the Catalog routes instead",
     );
   },
   "catalog_changes",

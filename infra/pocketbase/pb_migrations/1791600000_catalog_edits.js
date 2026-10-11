@@ -2,10 +2,10 @@
 
 // Editing parts in the Catalog (seed kicad-parts-2254).
 //
-// - Team members marked `can_edit_catalog` may publish edits and restores
-//   through POST /api/catalog/edits and POST /api/catalog/restores
-//   (pb_hooks/catalog_edits.pb.js). Everyone else who is signed in can only
-//   read. Members may still update their own account, but neither their
+// - Team members marked `can_edit_catalog` may publish edits through
+//   POST /api/catalog/edits (pb_hooks/catalog_edits.pb.js; the restore
+//   route this seed also added was removed in kicad-parts-9296). Everyone
+//   else who is signed in can only read. Members may still update their own account, but neither their
 //   edit access nor their name: the name is shown as the author of every
 //   Change, so only a superuser may set it (pb_hooks/catalog_write_guards
 //   also refuses names that look like the app's own words).

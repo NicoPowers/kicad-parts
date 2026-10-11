@@ -7,9 +7,8 @@
 //! read; every changed input is a temp copy.
 
 use catalog::pocketbase::{
-    CatalogReadback, EditCommand, ImportCommand, ImportOutcome, ImportReply, RestoreCommand,
-    StoredCadItemRevision, read_back, read_import_state, submit_edit, submit_import,
-    submit_restore,
+    CatalogReadback, EditCommand, ImportCommand, ImportOutcome, ImportReply, StoredCadItemRevision,
+    read_back, read_import_state, submit_edit, submit_import,
 };
 use catalog::{
     CadItemDetails, CadItemId, CadItemKind, CadItemRevisionId, CadReferenceRole,
@@ -1216,52 +1215,6 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
     assert_eq!(bound_number(&details, CadReferenceRole::Symbol), 3);
     assert_eq!(edited.cad_item_revisions.len(), cad_item_revisions);
     lossless_report(root, &edited, "edit after the imports");
-
-    // Restoring revision 1 copies it exactly, CAD bindings included: symbol
-    // revision 1 and footprint revision 1. A restore never moves a binding
-    // and adds no CAD item revision.
-    let restore = RestoreCommand::new(ipn, 8, 1, "Go back to the first import");
-    let reply = submit_restore(&admin, &restore).unwrap();
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    let restored = read_back(&admin).unwrap();
-    let (number, details) = current_revision(&restored, ipn);
-    assert_eq!(number, 9);
-    assert_eq!(bound_number(&details, CadReferenceRole::Symbol), 1);
-    assert_eq!(bound_number(&details, CadReferenceRole::Footprint), 1);
-    assert_eq!(
-        restored
-            .part_revision(&restored.part(ipn).unwrap().current_revision)
-            .unwrap()
-            .snapshot,
-        restored
-            .part_revisions
-            .iter()
-            .find(|revision| revision.part == restored.part(ipn).unwrap().id && revision.number == 1)
-            .unwrap()
-            .snapshot
-    );
-    let first = restored
-        .part_revisions
-        .iter()
-        .find(|revision| revision.part == restored.part(ipn).unwrap().id && revision.number == 1)
-        .unwrap();
-    let first_details: PartDetails = serde_json::from_str(&first.snapshot).unwrap();
-    assert_eq!(details.fields, first_details.fields);
-    assert_eq!(details.manufacturer_parts, first_details.manufacturer_parts);
-    let current = restored
-        .part_revision(&restored.part(ipn).unwrap().current_revision)
-        .unwrap();
-    assert_eq!(details.canonical_json(), current.snapshot);
-    let mut bound = current.cad_item_revisions.clone();
-    bound.sort();
-    let mut expected = vec![
-        CadItemRevisionId::new(&CadItemId::new(CadItemKind::Symbol, symbol), 1).to_string(),
-        CadItemRevisionId::new(&CadItemId::new(CadItemKind::Footprint, footprint), 1).to_string(),
-    ];
-    expected.sort();
-    assert_eq!(bound, expected);
-    assert_eq!(restored.cad_item_revisions, edited.cad_item_revisions);
-    lossless_report(root, &restored, "restore after the imports");
 
     server.stop();
     assert_eq!(

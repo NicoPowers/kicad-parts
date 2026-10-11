@@ -40,7 +40,9 @@ migrate((app) => {
       { name: "seq", type: "number", required: true, min: 1, onlyInt: true },
       // A closed set shared with catalog_lib.js (CHANGE_KINDS) and
       // crates/catalog (ChangeKind). Only csv-import is published
-      // today; edit and restore are reserved for kicad-parts-2254.
+      // today; edit and restore are reserved for kicad-parts-2254. (Restores
+      // were removed again in kicad-parts-9296; old restore Changes keep
+      // the value until kicad-parts-7556 replaces the kinds.)
       { name: "kind", type: "select", required: true, maxSelect: 1, values: ["csv-import", "edit", "restore"] },
       { name: "reason", type: "text", required: true, max: 2000 },
       { name: "correlation_id", type: "text", required: true, max: 100 },
@@ -188,7 +190,7 @@ migrate((app) => {
       { name: "correlation_id", type: "text", required: true, max: 100 },
       // JSON counts of what the run created.
       { name: "summary", type: "text", required: true, max: 10000 },
-      // CSV import runs only (empty or 0 for edits and restores):
+      // CSV import runs only (empty or 0 for edits):
       // the CSV file imported, such as g-res;
       { name: "csv_file", type: "text", max: 100 },
       // the run's number among all CSV import runs, from 1, without gaps;
