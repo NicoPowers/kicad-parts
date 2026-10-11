@@ -84,11 +84,12 @@
 //! stops the app from asking about the same CSV values twice.
 //!
 //! Excluded from BOM belongs to the revision but is no column: the report
-//! checks that a part has it exactly when a symbol revision it binds says
+//! checks that every stored part revision (from an import, an edit or a CSV
+//! review) has it exactly when a symbol revision it binds says
 //! `(in_bom no)`
 //! in its stored bytes, or every footprint choice has `exclude_from_bom` in
-//! its `(attr ...)`; footprint choices that disagree need a
-//! `footprint-choices-disagree-on-bom` import problem.
+//! its `(attr ...)`; for a row of the latest run, footprint choices that
+//! disagree need a `footprint-choices-disagree-on-bom` import problem.
 
 use catalog::csv_import::{
     CadItemSource, ColumnRoute, CsvRecord, EMPTY_3D_MODEL, SubstitutesCsvColumn, parse_csv,
@@ -457,6 +458,7 @@ impl<'a> Reporter<'a> {
 
         let changes = self.changes();
         self.check_import_runs_record_their_files();
+        self.check_every_revision_excluded_from_bom();
         self.check_current_revisions();
         let Some((entry, run)) = self.latest_import_run() else {
             self.problem(format!(
@@ -949,47 +951,7 @@ impl<'a> Reporter<'a> {
         revision: &PartRevision,
         explained: &mut BTreeSet<String>,
     ) {
-        let readback = self.readback;
-        let marked = |reference: &CadReference| {
-            let CadReferenceTarget::CadItemRevision {
-                cad_item, number, ..
-            } = &reference.target
-            else {
-                return false;
-            };
-            let id = CadItemRevisionId::new(&CadItemId::from_stored(cad_item), *number);
-            let Some(blob) = readback
-                .cad_item_revision(id.as_str())
-                .and_then(|revision| readback.blob(&revision.blob))
-            else {
-                return false;
-            };
-            match reference.role {
-                CadReferenceRole::Symbol => {
-                    let mut library = b"(kicad_symbol_lib ".to_vec();
-                    library.extend_from_slice(&blob.bytes);
-                    library.push(b')');
-                    SymbolLibrary::parse(&library).is_ok_and(|library| {
-                        library
-                            .entries
-                            .iter()
-                            .any(|entry| entry.in_bom == Some(false))
-                    })
-                }
-                CadReferenceRole::Footprint => FootprintFile::parse(&blob.bytes)
-                    .is_ok_and(|footprint| footprint.exclude_from_bom),
-            }
-        };
-        let of_role = |role: CadReferenceRole| -> Vec<bool> {
-            revision
-                .cad_references
-                .iter()
-                .filter(|reference| reference.role == role)
-                .map(marked)
-                .collect()
-        };
-        let symbol_marked = of_role(CadReferenceRole::Symbol).contains(&true);
-        let footprints = of_role(CadReferenceRole::Footprint);
+        let (symbol_marked, footprints) = bom_marks(self.readback, revision);
         let all_footprints = !footprints.is_empty() && !footprints.contains(&false);
         let expected = symbol_marked || all_footprints;
         if expected != revision.excluded_from_bom {
@@ -1008,6 +970,26 @@ impl<'a> Reporter<'a> {
                 None => self.problem(format!(
                     "row {row_number} ({ipn}): only some footprint choices are excluded from the BOM, and no import problem says so"
                 )),
+            }
+        }
+    }
+
+    /// Every stored part revision, whoever added it, is Excluded from BOM
+    /// exactly when the CAD it binds says so (kicad-parts-ccc0).
+    fn check_every_revision_excluded_from_bom(&mut self) {
+        let readback = self.readback;
+        for stored in &readback.part_revisions {
+            let Ok(revision) = serde_json::from_str::<PartRevision>(&stored.snapshot) else {
+                continue;
+            };
+            let (symbol_marked, footprints) = bom_marks(readback, &revision);
+            let expected =
+                symbol_marked || (!footprints.is_empty() && !footprints.contains(&false));
+            if expected != revision.excluded_from_bom {
+                self.problem(format!(
+                    "{} revision {}: Excluded from BOM is {}, but its symbols and footprints say {expected}",
+                    revision.ipn, stored.number, revision.excluded_from_bom
+                ));
             }
         }
     }
@@ -2028,4 +2010,54 @@ impl<'a> Reporter<'a> {
         }
         accounts
     }
+}
+
+/// Whether a symbol the revision binds says `(in_bom no)` in its stored
+/// bytes, and for each footprint choice whether its `(attr ...)` has
+/// `exclude_from_bom`. A reference not bound to a stored CAD item revision
+/// gives no evidence (false).
+fn bom_marks(readback: &CatalogReadback, revision: &PartRevision) -> (bool, Vec<bool>) {
+    let marked = |reference: &CadReference| {
+        let CadReferenceTarget::CadItemRevision {
+            cad_item, number, ..
+        } = &reference.target
+        else {
+            return false;
+        };
+        let id = CadItemRevisionId::new(&CadItemId::from_stored(cad_item), *number);
+        let Some(blob) = readback
+            .cad_item_revision(id.as_str())
+            .and_then(|revision| readback.blob(&revision.blob))
+        else {
+            return false;
+        };
+        match reference.role {
+            CadReferenceRole::Symbol => {
+                let mut library = b"(kicad_symbol_lib ".to_vec();
+                library.extend_from_slice(&blob.bytes);
+                library.push(b')');
+                SymbolLibrary::parse(&library).is_ok_and(|library| {
+                    library
+                        .entries
+                        .iter()
+                        .any(|entry| entry.in_bom == Some(false))
+                })
+            }
+            CadReferenceRole::Footprint => {
+                FootprintFile::parse(&blob.bytes).is_ok_and(|footprint| footprint.exclude_from_bom)
+            }
+        }
+    };
+    let of_role = |role: CadReferenceRole| -> Vec<bool> {
+        revision
+            .cad_references
+            .iter()
+            .filter(|reference| reference.role == role)
+            .map(marked)
+            .collect()
+    };
+    (
+        of_role(CadReferenceRole::Symbol).contains(&true),
+        of_role(CadReferenceRole::Footprint),
+    )
 }
