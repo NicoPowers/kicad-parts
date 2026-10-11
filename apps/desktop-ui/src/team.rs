@@ -1592,7 +1592,9 @@ fn save_csv_review(
             request
         })
         .collect();
-    let took = !picks.is_empty();
+    // From the requests actually sent, so a tick left on a group that is no
+    // longer open counts for nothing.
+    let took = requests.iter().any(|request| !request.accept.is_empty());
     let kinds: Vec<bool> = changes.iter().map(|changes| changes.cad).collect();
     ui.busy.set(true);
     spawn_local(async move {
@@ -1603,12 +1605,15 @@ fn save_csv_review(
         for (request, cad) in requests.into_iter().zip(kinds) {
             let problem = request.problem.clone();
             let result = backend::team_csv_review(request).await;
+            // The group leaves the form, with its ticks.
             let done = |ui: TeamUi| {
                 ui.reviewing.update(|open| {
                     if let Some(open) = open {
                         open.retain(|changes| changes.problem != problem);
                     }
                 });
+                ui.review_picks
+                    .update(|picks| picks.retain(|(picked, _)| *picked != problem));
             };
             match result {
                 Ok(PublishResult::CsvReviewed {
