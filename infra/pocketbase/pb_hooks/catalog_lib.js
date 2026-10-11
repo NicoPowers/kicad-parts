@@ -12,6 +12,7 @@ const CHANGE_KINDS = Object.freeze({
   edit: "edit",
   archive: "archive",
   unarchive: "unarchive",
+  csvReview: "csv-review",
 });
 
 // The `source` value of rows read from the CSV catalog.
@@ -1278,6 +1279,398 @@ function publishArchive(e) {
   return e.json(reply.status, reply.body);
 }
 
+// ---- Reviewing CSV changes that were not applied ------------------------------
+//
+// POST /api/catalog/csv-reviews (see catalog_csv_reviews.pb.js): a person
+// reviews one csv-details-differ-from-edited-details or
+// csv-cad-differs-from-edited-revision import problem, taking the CSV's
+// values for the fields they name and keeping theirs for the rest. What is
+// saved is built from the problem's recorded CSV document, never from the
+// client: the client sends only field names, the number it expects, a
+// reason and a correlation ID. Taking details saves the part's next details
+// (no revision); taking Symbol or Footprint adds a revision; taking nothing
+// records that the person kept their values. Each review is one Change of
+// kind csv-review with one catalog_csv_reviews record.
+
+// The kind of each import problem a person can review.
+const CSV_REVIEW_KINDS = Object.freeze({
+  "csv-details-differ-from-edited-details": "details",
+  "csv-cad-differs-from-edited-revision": "cad",
+});
+
+// The field name a person picks to take the CSV's manufacturer parts.
+const MANUFACTURER_PARTS = "Manufacturer parts";
+
+// The CSV file an import problem's path names, such as g-res for
+// database/g-res.csv.
+function csvFileOf(path) {
+  const match = /^database\/([^/]+)\.csv$/.exec(path);
+  return match ? match[1] : "";
+}
+
+function publishCsvReview(e) {
+  const kind = CHANGE_KINDS.csvReview;
+  const actor = catalogEditor(e);
+  const body = e.requestInfo().body || {};
+  const request = commonRequest(body);
+  const problemId = body.problem;
+  if (typeof problemId !== "string" || !/^[0-9a-z]{15}$/.test(problemId)) {
+    fail("problem must be the ID of an import problem");
+  }
+  const accept = body.accept;
+  if (
+    !Array.isArray(accept) ||
+    accept.length > 200 ||
+    !accept.every((name) => typeof name === "string" && name.length > 0 && name.length <= 500)
+  ) {
+    fail("accept must be a list of field names");
+  }
+  if (new Set(accept).size !== accept.length) {
+    fail("accept names a field twice");
+  }
+  const expected = body.expected;
+  if (typeof expected !== "number" || !Number.isInteger(expected) || expected < 1) {
+    fail("expected must be the number of the part's current details or revision");
+  }
+  const requestHash = $security.sha256(
+    JSON.stringify([kind, request.ipn, request.reason, problemId, accept, expected]),
+  );
+
+  let reply = null;
+  $app.runInTransaction((txApp) => {
+    const first = (collection, filter, params, sort) => {
+      const found = txApp.findRecordsByFilter(collection, filter, sort || "", 1, 0, params);
+      return found.length > 0 ? found[0] : null;
+    };
+    const prior = first("catalog_commands", "correlation_id = {:id}", { id: request.correlationId });
+    if (prior) {
+      if (prior.getString("actor") !== actor.id || prior.getString("request_hash") !== requestHash) {
+        reply = {
+          status: 409,
+          body: {
+            outcome: "correlation_reused",
+            correlationId: request.correlationId,
+            message: "this correlation ID was already used for a different command",
+          },
+        };
+        return;
+      }
+      reply = { status: prior.getInt("status"), body: JSON.parse(prior.getString("result")), replayed: true };
+      return;
+    }
+
+    const partId = deriveId("part", request.ipn);
+    const part = recordById(txApp, "catalog_parts", partId);
+    if (!part || part.getString("ipn") !== request.ipn) {
+      throw new NotFoundError(`${request.ipn} is not a part in the Catalog`);
+    }
+    const problem = recordById(txApp, "catalog_import_problems", problemId);
+    const reviewKind = problem ? CSV_REVIEW_KINDS[problem.getString("code")] : undefined;
+    if (!problem || !reviewKind || problem.getString("subject") !== request.ipn) {
+      throw new NotFoundError(`${request.ipn} has no such CSV change to review`);
+    }
+    const detail = JSON.parse(problem.getString("detail"));
+    const csvSnapshot = reviewKind === "details" ? detail.details : detail.revision;
+    if (typeof csvSnapshot !== "string") {
+      throw new Error(`import problem ${problemId} records no CSV document`);
+    }
+    const csvSha = $security.sha256(csvSnapshot);
+    const currentDetails = recordById(txApp, "catalog_part_details", part.getString("current_details"));
+    const currentRevision = recordById(txApp, "catalog_part_revisions", part.getString("current_revision"));
+
+    // The latest import run of the problem's CSV file must have found it,
+    // or the CSV has moved on since.
+    const csvFile = csvFileOf(problem.getString("path"));
+    const latest = first(
+      "catalog_audit_entries",
+      "csv_file = {:csv_file} && csv_import_number > 0",
+      { csv_file: csvFile },
+      "-csv_import_number",
+    );
+    const run = latest ? JSON.parse(latest.getString("sources")) : null;
+    if (!run || !Array.isArray(run.problems) || run.problems.indexOf(problemId) < 0) {
+      reply = {
+        status: 409,
+        body: {
+          outcome: "out_of_date",
+          correlationId: request.correlationId,
+          ipn: request.ipn,
+          message: `the CSV catalog changed after this difference was found; import ${csvFile}.csv again to see what differs now`,
+        },
+      };
+      return;
+    }
+    // The part must still be what the person read. (It may have been
+    // edited since the import found the problem: the CSV's values are
+    // still compared with what the part has now.)
+    const current = reviewKind === "details" ? currentDetails : currentRevision;
+    if (expected !== current.getInt("number")) {
+      const conflict = {
+        outcome: "conflict",
+        correlationId: request.correlationId,
+        ipn: request.ipn,
+        message: `someone else changed ${request.ipn} after you read it; read it again`,
+      };
+      if (reviewKind === "details") {
+        conflict.currentDetails = describeRecord(txApp, currentDetails);
+      } else {
+        conflict.currentRevision = describeRecord(txApp, currentRevision);
+      }
+      reply = { status: 409, body: conflict };
+      return;
+    }
+    let status;
+    let result;
+    if (first("catalog_csv_reviews", "part = {:part} && code = {:code} && csv_sha256 = {:sha}", {
+      part: partId,
+      code: problem.getString("code"),
+      sha: csvSha,
+    })) {
+      status = 422;
+      result = {
+        outcome: "noop",
+        correlationId: request.correlationId,
+        ipn: request.ipn,
+        message: "these CSV changes were already reviewed",
+      };
+    } else {
+      // Build the new document from the stored one and the CSV's recorded
+      // values for each accepted field.
+      const csv = JSON.parse(csvSnapshot);
+      let details = null;
+      let revision = null;
+      if (reviewKind === "details" && accept.length > 0) {
+        const stored = JSON.parse(currentDetails.getString("snapshot"));
+        const fields = stored.fields.map((field) => ({ name: field.name, value: field.value }));
+        let manufacturerParts = stored.manufacturer_parts;
+        for (const name of accept) {
+          if (name === MANUFACTURER_PARTS) {
+            if (JSON.stringify(csv.manufacturer_parts) === JSON.stringify(stored.manufacturer_parts)) {
+              fail(`the CSV's ${MANUFACTURER_PARTS} are the same as the part's`);
+            }
+            manufacturerParts = csv.manufacturer_parts;
+            continue;
+          }
+          const index = fields.findIndex((field) => field.name === name);
+          const fromCsv = (csv.fields || []).find((field) => field.name === name);
+          if (index < 0 || !fromCsv) {
+            fail(`${name} is not a field of both the part and the CSV`);
+          }
+          if (fields[index].value === fromCsv.value) {
+            fail(`the CSV's ${name} is the same as the part's`);
+          }
+          fields[index] = { name: name, value: fromCsv.value };
+        }
+        const document = {
+          schema: PART_DETAILS_SCHEMA,
+          ipn: request.ipn,
+          fields: fields,
+          manufacturer_parts: manufacturerParts,
+        };
+        const problemText = detailsProblem(document);
+        if (problemText) {
+          fail(`the new details of ${request.ipn} cannot be saved: ${problemText}`);
+        }
+        const snapshot = JSON.stringify(document);
+        details = { snapshot: snapshot, sha: $security.sha256(snapshot) };
+      }
+      if (reviewKind === "cad" && accept.length > 0) {
+        const stored = JSON.parse(currentRevision.getString("snapshot"));
+        let cadFields = stored.cad_fields.map((field) => ({ name: field.name, value: field.value }));
+        let references = stored.cad_references.slice();
+        for (const name of accept) {
+          if (name !== "Symbol" && name !== "Footprint") {
+            fail(`${name} is not the Symbol or the Footprint`);
+          }
+          const role = name === "Symbol" ? "symbol" : "footprint";
+          const fromCsv = (csv.cad_fields || []).find((field) => field.name === name);
+          const index = cadFields.findIndex((field) => field.name === name);
+          if (index < 0 || !fromCsv) {
+            fail(`${name} is not a field of both the part and the CSV`);
+          }
+          const csvReferences = (csv.cad_references || []).filter((reference) => reference.role === role);
+          const storedReferences = references.filter((reference) => reference.role === role);
+          if (
+            cadFields[index].value === fromCsv.value &&
+            canonicalJson(csvReferences) === canonicalJson(storedReferences)
+          ) {
+            fail(`the CSV's ${name} is the same as the part's`);
+          }
+          // Each CAD item revision the CSV named must be stored and be what
+          // the problem recorded.
+          for (const reference of csvReferences) {
+            const target = reference.target;
+            if (target && target.kind === "cad-item-revision") {
+              const record = recordById(
+                txApp,
+                "catalog_cad_item_revisions",
+                deriveId("cad-item-revision", target.cad_item + "\n" + target.number),
+              );
+              if (
+                !record ||
+                !isCadItemRevision(record, target.cad_item, target.number) ||
+                record.getString("snapshot_sha256") !== target.snapshot_sha256
+              ) {
+                fail(`the CSV's ${name} names a CAD item revision the Catalog does not have`);
+              }
+            }
+          }
+          cadFields[index] = { name: name, value: fromCsv.value };
+          references = references.filter((reference) => reference.role !== role).concat(csvReferences);
+        }
+        // References in the order the fields name them: symbol, then
+        // footprint.
+        references.sort((a, b) => (a.role === b.role ? a.ordinal - b.ordinal : a.role === "symbol" ? -1 : 1));
+        const document = {
+          schema: PART_REVISION_SCHEMA,
+          ipn: request.ipn,
+          cad_fields: cadFields,
+          cad_references: references,
+        };
+        if (stored.excluded_from_bom === true) {
+          document.excluded_from_bom = true;
+        }
+        const problemText = revisionProblem(document);
+        if (problemText) {
+          fail(`the new revision of ${request.ipn} cannot be saved: ${problemText}`);
+        }
+        const archived = archivedRevisionWithContent(
+          txApp,
+          partId,
+          partRevisionContent(document, storedCadContent(txApp)),
+        );
+        if (archived > 0) {
+          fail(
+            `this symbol and footprint are those of archived revision ${archived} of ${request.ipn}; unarchive revision ${archived} instead of saving them again`,
+          );
+        }
+        const snapshot = JSON.stringify(document);
+        revision = { snapshot: snapshot, sha: $security.sha256(snapshot) };
+      }
+
+      const record = (name, id) => {
+        const made = new Record(txApp.findCollectionByNameOrId(name));
+        made.set("id", id);
+        return made;
+      };
+      const last = first("catalog_changes", "seq > 0", {}, "-seq");
+      const seq = last ? last.getInt("seq") + 1 : 1;
+      const changeId = deriveId("change", request.correlationId);
+      const source = (previous) =>
+        JSON.stringify({
+          schema: SOURCE_SCHEMA,
+          source: kind,
+          problem: problemId,
+          previous: { id: previous.id, number: previous.getInt("number") },
+        });
+      const detailsNumber = details ? currentDetails.getInt("number") + 1 : null;
+      const newest = newestRevision(txApp, partId);
+      const revisionNumber = revision ? newest.getInt("number") + 1 : null;
+      const summary = JSON.stringify({
+        ipn: request.ipn,
+        problem: problemId,
+        accepted: accept,
+        details: detailsNumber,
+        revision: revisionNumber,
+      });
+      const change = record("catalog_changes", changeId);
+      change.set("seq", seq);
+      change.set("kind", kind);
+      change.set("reason", request.reason);
+      change.set("correlation_id", request.correlationId);
+      change.set("actor", actor.id);
+      change.set("actor_name", actor.name);
+      change.set("sources", JSON.stringify({ parts: [request.ipn] }));
+      change.set("summary", summary);
+      txApp.save(change);
+
+      let savedDetails = null;
+      if (details) {
+        const id = deriveId("part-details", partId + "\n" + detailsNumber);
+        const made = record("catalog_part_details", id);
+        made.set("part", partId);
+        made.set("number", detailsNumber);
+        made.set("predecessor", currentDetails.id);
+        made.set("change", changeId);
+        made.set("snapshot", details.snapshot);
+        made.set("snapshot_sha256", details.sha);
+        made.set("source", source(currentDetails));
+        txApp.save(made);
+        part.set("current_details", id);
+        part.set("current_details_number", detailsNumber);
+        savedDetails = { id: id, number: detailsNumber, snapshotSha256: details.sha };
+      }
+      let savedRevision = null;
+      if (revision) {
+        const id = deriveId("part-revision", partId + "\n" + revisionNumber);
+        const made = record("catalog_part_revisions", id);
+        made.set("part", partId);
+        made.set("number", revisionNumber);
+        made.set("predecessor", newest.id);
+        made.set("change", changeId);
+        made.set("snapshot", revision.snapshot);
+        made.set("snapshot_sha256", revision.sha);
+        made.set("source", source(currentRevision));
+        made.set("cad_item_revisions", boundCadItemRevisions(JSON.parse(revision.snapshot)));
+        txApp.save(made);
+        part.set("current_revision", id);
+        part.set("current_revision_number", revisionNumber);
+        savedRevision = { id: id, number: revisionNumber, snapshotSha256: revision.sha };
+      }
+      if (details || revision) {
+        txApp.save(part);
+      }
+
+      const review = record("catalog_csv_reviews", deriveId("csv-review", request.correlationId));
+      review.set("part", partId);
+      review.set("problem", problemId);
+      review.set("code", problem.getString("code"));
+      review.set("csv_sha256", csvSha);
+      review.set("accepted", JSON.stringify(accept));
+      review.set("change", changeId);
+      review.set("seq", seq);
+      txApp.save(review);
+
+      const auditEntryId = deriveId("audit-entry", request.correlationId);
+      const audit = record("catalog_audit_entries", auditEntryId);
+      audit.set("action", "catalog." + kind);
+      audit.set("actor", actor.id);
+      audit.set("actor_name", actor.name);
+      audit.set("change", changeId);
+      audit.set("reason", request.reason);
+      audit.set("correlation_id", request.correlationId);
+      audit.set("summary", summary);
+      txApp.save(audit);
+
+      status = 200;
+      result = {
+        outcome: "applied",
+        correlationId: request.correlationId,
+        ipn: request.ipn,
+        changeId: changeId,
+        seq: seq,
+        auditEntryId: auditEntryId,
+        accepted: accept,
+        details: savedDetails,
+        revision: savedRevision,
+      };
+    }
+    const ledger = new Record(txApp.findCollectionByNameOrId("catalog_commands"));
+    ledger.set("correlation_id", request.correlationId);
+    ledger.set("actor", actor.id);
+    ledger.set("request_hash", requestHash);
+    ledger.set("status", status);
+    ledger.set("result", JSON.stringify(result));
+    txApp.save(ledger);
+    reply = { status: status, body: result };
+  });
+
+  if (reply.replayed) {
+    e.response.header().set("X-Collab-Replayed", "true");
+  }
+  return e.json(reply.status, reply.body);
+}
+
 module.exports = {
   CHANGE_KINDS: CHANGE_KINDS,
   CSV_CATALOG_SOURCE: CSV_CATALOG_SOURCE,
@@ -1286,6 +1679,8 @@ module.exports = {
   SOURCE_SCHEMA: SOURCE_SCHEMA,
   publishEdit: publishEdit,
   publishArchive: publishArchive,
+  publishCsvReview: publishCsvReview,
+  CSV_REVIEW_KINDS: CSV_REVIEW_KINDS,
   archiveState: archiveState,
   newestRevision: newestRevision,
   newestNotArchived: newestNotArchived,

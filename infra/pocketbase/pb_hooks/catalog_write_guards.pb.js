@@ -8,9 +8,9 @@
 // - Nobody creates, updates or deletes a Catalog record through the record
 //   API (`/api/collections/catalog_*/records`, the batch API or the
 //   dashboard). The protected routes are the only way in:
-//   POST /api/catalog/csv-imports, /api/catalog/edits and
-//   /api/catalog/archives.
-// - Revisions, saved part details, archive entries, CAD items, blobs,
+//   POST /api/catalog/csv-imports, /api/catalog/edits,
+//   /api/catalog/archives and /api/catalog/csv-reviews.
+// - Revisions, saved part details, archive entries, CSV reviews, CAD items, blobs,
 //   Changes, audit entries, import problems and the command ledger refuse
 //   every update and delete, whoever saves them.
 // - A part refuses every delete. Its current details may only move to its
@@ -41,6 +41,7 @@ onRecordCreateRequest(
   "catalog_part_details",
   "catalog_part_revisions",
   "catalog_archive_entries",
+  "catalog_csv_reviews",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -60,6 +61,7 @@ onRecordUpdateRequest(
   "catalog_part_details",
   "catalog_part_revisions",
   "catalog_archive_entries",
+  "catalog_csv_reviews",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -77,6 +79,7 @@ onRecordDeleteRequest(
   "catalog_part_details",
   "catalog_part_revisions",
   "catalog_archive_entries",
+  "catalog_csv_reviews",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -94,6 +97,7 @@ onRecordDelete(
   "catalog_part_details",
   "catalog_part_revisions",
   "catalog_archive_entries",
+  "catalog_csv_reviews",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -110,6 +114,7 @@ onRecordUpdate(
   "catalog_part_details",
   "catalog_part_revisions",
   "catalog_archive_entries",
+  "catalog_csv_reviews",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -253,6 +258,60 @@ onRecordCreate((e) => {
   }
   return saved;
 }, "catalog_archive_entries");
+
+// A CSV review must be exactly what the review route saves: for one of the
+// part's own csv-details-differ-from-edited-details or
+// csv-cad-differs-from-edited-revision import problems, copying its code and
+// the SHA-256 of the CSV document it recorded, in a Change of kind
+// csv-review whose seq it copies, under the ID derived from that Change's
+// correlation ID, with a list of field names.
+onRecordCreate((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  const review = e.record;
+  const find = (collection, id) => {
+    try {
+      return e.app.findRecordById(collection, id);
+    } catch (_) {
+      return null;
+    }
+  };
+  const part = find("catalog_parts", review.getString("part"));
+  const problem = find("catalog_import_problems", review.getString("problem"));
+  const kind = problem ? lib.CSV_REVIEW_KINDS[problem.getString("code")] : undefined;
+  if (!part || !problem || !kind || problem.getString("subject") !== part.getString("ipn")) {
+    throw new Error("a CSV review must name a CSV difference of its own part");
+  }
+  if (review.getString("code") !== problem.getString("code")) {
+    throw new Error("a CSV review must copy its problem's code");
+  }
+  let recorded = null;
+  try {
+    const detail = JSON.parse(problem.getString("detail"));
+    recorded = kind === "details" ? detail.details : detail.revision;
+  } catch (_) {
+    recorded = null;
+  }
+  if (typeof recorded !== "string" || review.getString("csv_sha256") !== $security.sha256(recorded)) {
+    throw new Error("a CSV review must name the SHA-256 of the CSV document its problem recorded");
+  }
+  const change = find("catalog_changes", review.getString("change"));
+  if (!change || change.getString("kind") !== "csv-review" || change.getInt("seq") !== review.getInt("seq")) {
+    throw new Error("a CSV review must belong to a Change of kind csv-review and copy its seq");
+  }
+  if (review.id !== lib.deriveId("csv-review", change.getString("correlation_id"))) {
+    throw new Error("a CSV review must have the ID derived from its Change's correlation ID");
+  }
+  let accepted = null;
+  try {
+    accepted = JSON.parse(review.getString("accepted"));
+  } catch (_) {
+    accepted = null;
+  }
+  if (!Array.isArray(accepted) || !accepted.every((name) => typeof name === "string" && name.length > 0)) {
+    throw new Error("a CSV review must list the field names it took, as JSON");
+  }
+  return e.next();
+}, "catalog_csv_reviews");
 
 // Saved part details are numbered from 1 per part: new ones must be the
 // newest number + 1, name the newest as their predecessor, and have the ID
