@@ -873,3 +873,32 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
     assert_eq!(number, 3);
     assert_eq!(kept.parts[0].revision_json, third.parts[0].revision_json);
 }
+
+#[test]
+fn a_revision_keeps_symbol_before_footprint_whatever_the_column_order() {
+    let csv = "IPN,Footprint,Value,Symbol\nRES-0000-0470,g-res:R_0603,47,g-pas:R_US\n";
+    let root = fixture(csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
+    let import = CsvCatalog::new(root.path()).import("g-res", None).unwrap();
+    let revision = &import.parts[0].revision;
+    let fields: Vec<(&str, &str)> = revision
+        .cad_fields
+        .iter()
+        .map(|field| (field.name.as_str(), field.value.as_str()))
+        .collect();
+    assert_eq!(
+        fields,
+        [("Symbol", "g-pas:R_US"), ("Footprint", "g-res:R_0603")]
+    );
+    // The references follow the same order: symbol, then footprint.
+    let roles: Vec<CadReferenceRole> = revision
+        .cad_references
+        .iter()
+        .map(|reference| reference.role)
+        .collect();
+    assert_eq!(
+        roles,
+        [CadReferenceRole::Symbol, CadReferenceRole::Footprint]
+    );
+    // The details keep their own columns in source order.
+    assert_eq!(import.parts[0].details.field("Value"), Some("47"));
+}

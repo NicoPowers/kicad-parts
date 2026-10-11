@@ -41,7 +41,7 @@ use crate::hash::sha256_hex;
 use crate::ids::{CadItemRevisionId, ImportProblemId, PartId};
 use crate::ipn::Ipn;
 use crate::part::{
-    CadReference, CadReferenceRole, CadReferenceTarget, DetailField, ManufacturerPart,
+    CAD_COLUMNS, CadReference, CadReferenceRole, CadReferenceTarget, DetailField, ManufacturerPart,
     PART_DETAILS_SCHEMA, PART_REVISION_SCHEMA, PartDetails, PartRevision,
 };
 use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
@@ -865,6 +865,9 @@ impl<'a> Planner<'a> {
                 }),
             }
         }
+        // A revision keeps Symbol, then Footprint, whatever the CSV column
+        // order, as the server requires.
+        cad_fields.sort_by_key(|field| CAD_COLUMNS.iter().position(|name| *name == field.name));
         for (route, column, value) in unplaced_mpns {
             let location = format!("rows[IPN={ipn}].{column}");
             let problem = match route {
