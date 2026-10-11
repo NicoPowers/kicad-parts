@@ -10,17 +10,22 @@
 //     blobs: [{ sha256, size, text | base64 }],
 //     cadItemRevisions: [{ id, cadItemId, kind, key, expectedRevision,
 //                          number, snapshotSha256, snapshot, source }],
-//     parts: [{ id, ipn, expectedRevision, snapshot, snapshotSha256,
-//               source }],
+//     parts: [{ id, ipn, expectedRevision, expectedDetails,
+//               details: { snapshot, snapshotSha256 },
+//               revision: { snapshot, snapshotSha256 }, source }],
 //     problems: [{ id, code, subject, path, location, message, detail }] }
 //
 // Every run sends exactly one catalog-csv source (database/<csvFile>.csv)
 // and one substitutes-csv source (database/substitutes.csv). `rows` is
 // given for these two only: every row's exact bytes, in file order, none
 // empty. `expectedCsvImport` is the number of the latest import run of this
-// CSV file that the importer checked its checkout against, or 0. `expectedRevision` is the
-// number of the part's current revision when the importer read the team
-// catalog, or 0 for a part it expects to be new. `allowOlderCheckout` says
+// CSV file that the importer checked its checkout against, or 0.
+// `expectedRevision` and `expectedDetails` are the numbers of the part's
+// current revision and current details when the importer read the team
+// catalog, or 0 for a part it expects to be new. A part's `details` are its
+// part details (describing fields and manufacturer parts) and its
+// `revision` is the CAD it uses (Symbol and Footprint fields, bindings and
+// Excluded from BOM); `source` is the CSV row both came from. `allowOlderCheckout` says
 // the importer was told to import from a checkout older than the team
 // catalog's latest imports (the importer checks git ancestry; the server
 // cannot), and is recorded on the audit entry.
@@ -49,31 +54,37 @@
 // - if the latest import run of this CSV file is not the one the importer
 //   checked against, another import landed in between: 409
 //   newer_import_run and nothing is written;
-// - if any part's or CAD item's current revision is not the one the
-//   importer expected, someone changed it in between: 409 conflict and
-//   nothing is written;
+// - if any part's current revision or details, or any CAD item's current
+//   revision, is not the one the importer expected, someone changed it in
+//   between: 409 conflict and nothing is written;
 // - blobs, CAD items and import problems that already exist are reused
 //   (they are content-addressed), after checking that the stored record's
 //   hash or key really matches, so an ID collision is refused, not merged;
 // - a CAD item revision whose content is the current revision's is that
 //   revision; any other content is a new revision numbered after it;
-// - a new IPN becomes a part with revision 1;
-// - a part whose current revision has the same snapshot is unchanged. If its
-//   source row changed anyway (for example its supplier data), or the
-//   current revision has no CSV source to compare with, an import problem
-//   keeps the new row;
-// - a part whose part details changed gets a new revision if its current
-//   revision came from a CSV import, and otherwise an import problem, so a
-//   re-import never overwrites an edit made in the Catalog;
+// - a new IPN becomes a part with details 1 and revision 1;
+// - an existing part's details and CAD are compared separately. Details
+//   that differ are saved as the part's next details only if its current
+//   details came from a CSV import; CAD that differs is saved as its next
+//   revision only if its current revision came from a CSV import.
+//   Otherwise an import problem keeps the row, so a re-import never
+//   overwrites an edit made in the Catalog, while an edit of one kind does
+//   not stop the CSV from changing the other;
+// - a part whose details and CAD are both unchanged stays as it is. If its
+//   source row changed anyway (for example its supplier data), or the part
+//   was last saved by an edit, so there is no CSV row to compare with, an
+//   import problem keeps the new row;
 // - a part that an earlier import run of this CSV file made, but no row
 //   makes now, gets an import problem, found again by every later run;
 //   nothing is deleted.
 //
-// A Change is created only when there is at least one new revision. Every
+// A Change is created only when there is at least one new revision or
+// saved part details. Every
 // run that writes anything gets an audit entry, and new import problems
 // point to it. A CSV import run's audit entry also records exactly what the
 // CSV said (the files read, their byte hashes, each CSV file's header line
-// and rows), the current revision it left each part at, and the IDs of
+// and rows), the current revision and details it left each part at, and
+// the IDs of
 // every import problem it found, new or already stored. A run is
 // recorded whenever it read other files than the previous run of the same
 // CSV file, even if it adds nothing else, so the latest run always holds
@@ -89,8 +100,9 @@
 //                                          the previous run read the same
 //                                          files; nothing is written
 //   409 { outcome: "conflict", conflicts: [{ ipn, expectedRevision,
-//         currentRevision }], cadItemConflicts: [{ kind, key,
-//         expectedRevision, currentRevision }], message }
+//         expectedDetails, currentRevision, currentDetails }],
+//         cadItemConflicts: [{ kind, key, expectedRevision,
+//         currentRevision }], message }
 //                                          someone changed these parts or
 //                                          CAD items after the importer read
 //                                          them; nothing is written
@@ -360,6 +372,24 @@ routerAdd(
       }
     }
 
+    // A part's details or revision document: its exact text, hashed here,
+    // checked for its schema and IPN.
+    const document = (part, name, schema, ipn) => {
+      const entry = part[name];
+      if (!entry || typeof entry !== "object") {
+        fail(`${ipn} needs ${name}`);
+      }
+      const snapshot = text(entry, "snapshot", DOCUMENT, true);
+      const snapshotSha256 = $security.sha256(snapshot);
+      if (entry.snapshotSha256 !== snapshotSha256) {
+        fail(`the snapshotSha256 of ${ipn}'s ${name} does not match its snapshot`);
+      }
+      const parsed = parse(snapshot, `${ipn}'s ${name}`);
+      if (parsed.schema !== schema || parsed.ipn !== ipn) {
+        fail(`the ${name} of ${ipn} must be ${schema} for ${ipn}`);
+      }
+      return { snapshot: snapshot, sha: snapshotSha256, parsed: parsed };
+    };
     const parts = list("parts").map((part) => {
       const ipn = text(part, "ipn", 13, true);
       if (!/^[A-Z]{3}-[0-9]{4}-[0-9A-Z]{4}$/.test(ipn)) {
@@ -369,18 +399,11 @@ routerAdd(
       if (part.id !== id) {
         fail(`part ID for ${ipn} must be ${id}`);
       }
-      const snapshot = text(part, "snapshot", DOCUMENT, true);
-      const snapshotSha256 = $security.sha256(snapshot);
-      if (part.snapshotSha256 !== snapshotSha256) {
-        fail(`snapshotSha256 of ${ipn} does not match its snapshot`);
-      }
-      const parsed = parse(snapshot, "snapshot");
-      if (parsed.ipn !== ipn) {
-        fail(`the snapshot of ${ipn} names ${parsed.ipn}`);
-      }
+      const details = document(part, "details", lib.PART_DETAILS_SCHEMA, ipn);
+      const revision = document(part, "revision", lib.PART_REVISION_SCHEMA, ipn);
       const source = text(part, "source", DOCUMENT, true);
       const targets = [];
-      for (const binding of parsed.cad_references || []) {
+      for (const binding of revision.parsed.cad_references || []) {
         if (binding && binding.target && binding.target.kind === "cad-item-revision") {
           targets.push(lib.cadItemRevisionTarget(binding.target, `${ipn}'s ${binding.reference}`));
         }
@@ -405,16 +428,20 @@ routerAdd(
           fail(`a substitutes.csv row in the source of ${ipn} is not a row of the substitutes-csv file this request sends`);
         }
       }
-      const expectedRevision = part.expectedRevision;
-      if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
-        fail(`the expected revision of ${ipn} must be the number of its current revision, or 0 for a new part`);
-      }
+      const expected = (name) => {
+        const value = part[name];
+        if (!Number.isInteger(value) || value < 0) {
+          fail(`the ${name === "expectedRevision" ? "expected revision" : "expected details"} of ${ipn} must be the number of its current one, or 0 for a new part`);
+        }
+        return value;
+      };
       return {
         id: id,
         ipn: ipn,
-        expectedRevision: expectedRevision,
-        snapshot: snapshot,
-        snapshotSha256: snapshotSha256,
+        expectedRevision: expected("expectedRevision"),
+        expectedDetails: expected("expectedDetails"),
+        details: details,
+        revision: revision,
         source: source,
         parsedSource: parsedSource,
         targets: targets,
@@ -466,7 +493,7 @@ routerAdd(
         sources.map((source) => [source.role, source.path, source.byte_sha256, source.size, source.header_raw]),
         blobs.map((blob) => blob.sha256),
         cadItemRevisions.map((revision) => [revision.id, revision.expectedRevision, revision.snapshotSha256, revision.source]),
-        parts.map((part) => [part.id, part.expectedRevision, part.snapshotSha256, part.source]),
+        parts.map((part) => [part.id, part.expectedRevision, part.expectedDetails, part.details.sha, part.revision.sha, part.source]),
         problems.map((item) => [item.id, item.path, item.message]),
       ]),
     );
@@ -567,13 +594,17 @@ routerAdd(
       }
       for (const part of parts) {
         const stored = byId("catalog_parts", part.id);
-        const currentNumber = stored ? stored.getInt("current_revision_number") : 0;
-        if (currentNumber !== part.expectedRevision) {
-          const current = stored ? byId("catalog_part_revisions", stored.getString("current_revision")) : null;
+        const currentRevisionNumber = stored ? stored.getInt("current_revision_number") : 0;
+        const currentDetailsNumber = stored ? stored.getInt("current_details_number") : 0;
+        if (currentRevisionNumber !== part.expectedRevision || currentDetailsNumber !== part.expectedDetails) {
+          const revision = stored ? byId("catalog_part_revisions", stored.getString("current_revision")) : null;
+          const details = stored ? byId("catalog_part_details", stored.getString("current_details")) : null;
           conflicts.push({
             ipn: part.ipn,
             expectedRevision: part.expectedRevision,
-            currentRevision: current ? lib.describeRevision(txApp, current) : null,
+            expectedDetails: part.expectedDetails,
+            currentRevision: revision ? lib.describeRecord(txApp, revision) : null,
+            currentDetails: details ? lib.describeRecord(txApp, details) : null,
           });
         }
       }
@@ -764,122 +795,156 @@ routerAdd(
       // The exact bytes of the substitutes.csv rows a source records.
       const substitutesCsvRows = (source) =>
         (Array.isArray(source.substitutes_csv_rows) ? source.substitutes_csv_rows : []).map((row) => row.raw_record);
+      // The Change that saved a record: its kind and seq.
+      const savedBy = (record) => {
+        const change = byId("catalog_changes", record.getString("change"));
+        return { kind: change ? change.getString("kind") : "", seq: change ? change.getInt("seq") : 0 };
+      };
       for (const part of parts) {
         const stored = byId("catalog_parts", part.id);
-        const storedRevision = stored ? byId("catalog_part_revisions", stored.getString("current_revision")) : null;
-        const kept = boundBy(storedRevision ? storedRevision.getString("snapshot") : "");
+        const currentRevision = stored ? byId("catalog_part_revisions", stored.getString("current_revision")) : null;
+        const kept = boundBy(currentRevision ? currentRevision.getString("snapshot") : "");
         for (const target of part.targets) {
           checkBinding(target, kept);
         }
         if (!stored) {
           part.revisionAfter = 1;
+          part.detailsAfter = 1;
           newParts.push(part);
           continue;
         }
         if (stored.getString("ipn") !== part.ipn) {
           fail(`part ${part.id} has IPN ${stored.getString("ipn")}, not ${part.ipn}`);
         }
-        const currentRevision = byId("catalog_part_revisions", stored.getString("current_revision"));
-        if (!currentRevision) {
-          fail(`part ${part.ipn} has no current revision`);
+        const currentDetails = byId("catalog_part_details", stored.getString("current_details"));
+        if (!currentRevision || !currentDetails) {
+          fail(`part ${part.ipn} has no current revision or details`);
         }
         const location = `rows[IPN=${part.ipn}]`;
-        part.revisionAfter = currentRevision.getInt("number");
-        if (currentRevision.getString("snapshot_sha256") === part.snapshotSha256) {
+        const row = part.parsedSource;
+        const revisionNumber = currentRevision.getInt("number");
+        const detailsNumber = currentDetails.getInt("number");
+        part.revisionAfter = revisionNumber;
+        part.detailsAfter = detailsNumber;
+        const sameDetails = currentDetails.getString("snapshot_sha256") === part.details.sha;
+        const sameRevision = currentRevision.getString("snapshot_sha256") === part.revision.sha;
+        const detailsSavedBy = savedBy(currentDetails);
+        const revisionSavedBy = savedBy(currentRevision);
+
+        if (sameDetails && sameRevision) {
           unchangedParts++;
+          // The row the part was last saved from: the source of whichever of
+          // its current details and revision was saved later.
+          const newer = detailsSavedBy.seq >= revisionSavedBy.seq ? currentDetails : currentRevision;
           let previousSource = null;
           try {
-            previousSource = JSON.parse(currentRevision.getString("source"));
+            previousSource = JSON.parse(newer.getString("source"));
           } catch (_) {
             previousSource = null;
           }
-          const newSource = part.parsedSource;
           if (!previousSource || previousSource.source !== lib.CSV_CATALOG_SOURCE || typeof previousSource.raw_record !== "string") {
             serverProblems.push(
               problem(
-                "current-revision-without-csv-source",
+                "part-last-saved-without-csv-source",
                 part.ipn,
-                newSource.path || "",
+                row.path || "",
                 location,
-                `the current revision ${currentRevision.getInt("number")} of ${part.ipn} has no CSV source to compare the row with; the row is kept here and no revision is created`,
+                `${part.ipn} was last saved by an edit, so there is no CSV row to compare the row with; the row is kept here and nothing is saved`,
                 JSON.stringify({
-                  current_revision_number: currentRevision.getInt("number"),
-                  path: newSource.path,
-                  row_number: newSource.row_number,
-                  raw_record: newSource.raw_record,
-                  substitutes_csv_rows: substitutesCsvRows(newSource),
+                  current_revision_number: revisionNumber,
+                  current_details_number: detailsNumber,
+                  path: row.path,
+                  row_number: row.row_number,
+                  raw_record: row.raw_record,
+                  substitutes_csv_rows: substitutesCsvRows(row),
                 }),
               ),
             );
           } else if (
-            previousSource.raw_record !== newSource.raw_record ||
-            JSON.stringify(substitutesCsvRows(previousSource)) !== JSON.stringify(substitutesCsvRows(newSource))
+            previousSource.raw_record !== row.raw_record ||
+            JSON.stringify(substitutesCsvRows(previousSource)) !== JSON.stringify(substitutesCsvRows(row))
           ) {
             // The part's row or one of its substitutes.csv rows changed while
-            // its part details did not, so only supplier data changed (such
-            // as an LCSC code or a SupplierPN).
+            // neither its details nor its CAD did, so only supplier data
+            // changed (such as an LCSC code or a SupplierPN).
             serverProblems.push(
               problem(
                 "csv-row-changed-without-part-details-change",
                 part.ipn,
-                newSource.path || "",
+                row.path || "",
                 location,
-                `the CSV rows of ${part.ipn} changed but its part details did not (for example only its supplier data); the new rows are kept here and no revision is created`,
+                `the CSV rows of ${part.ipn} changed but neither its part details nor its symbols, footprints and 3D models did (for example only its supplier data); the new rows are kept here and nothing is saved`,
                 // Only the rows identify it, so a later file version with
                 // the same rows adds nothing.
                 JSON.stringify({
-                  current_revision_number: currentRevision.getInt("number"),
-                  path: newSource.path,
-                  row_number: newSource.row_number,
+                  current_revision_number: revisionNumber,
+                  current_details_number: detailsNumber,
+                  path: row.path,
+                  row_number: row.row_number,
                   previous_raw_record: previousSource.raw_record,
-                  raw_record: newSource.raw_record,
+                  raw_record: row.raw_record,
                   previous_substitutes_csv_rows: substitutesCsvRows(previousSource),
-                  substitutes_csv_rows: substitutesCsvRows(newSource),
+                  substitutes_csv_rows: substitutesCsvRows(row),
                 }),
               ),
             );
           }
           continue;
         }
-        const currentChange = byId("catalog_changes", currentRevision.getString("change"));
-        if (currentChange && currentChange.getString("kind") === lib.CHANGE_KINDS.csvImport) {
-          part.number = currentRevision.getInt("number") + 1;
-          part.revisionAfter = part.number;
-          part.predecessor = currentRevision.id;
+
+        if (!sameDetails) {
+          if (detailsSavedBy.kind === lib.CHANGE_KINDS.csvImport) {
+            part.newDetails = { number: detailsNumber + 1, predecessor: currentDetails.id };
+            part.detailsAfter = detailsNumber + 1;
+          } else {
+            serverProblems.push(
+              problem(
+                "csv-details-differ-from-edited-details",
+                part.ipn,
+                row.path || "",
+                location,
+                `the part details in the row of ${part.ipn} differ from its current details, which were saved by an edit, not a CSV import; the row is kept here and the details are left as they are`,
+                JSON.stringify({
+                  current_details_number: detailsNumber,
+                  current_details_change_kind: detailsSavedBy.kind,
+                  path: row.path,
+                  row_number: row.row_number,
+                  raw_record: row.raw_record,
+                  substitutes_csv_rows: substitutesCsvRows(row),
+                  details: part.details.snapshot,
+                }),
+              ),
+            );
+          }
+        }
+        if (!sameRevision) {
+          if (revisionSavedBy.kind === lib.CHANGE_KINDS.csvImport) {
+            part.newRevision = { number: revisionNumber + 1, predecessor: currentRevision.id };
+            part.revisionAfter = revisionNumber + 1;
+          } else {
+            serverProblems.push(
+              problem(
+                "csv-cad-differs-from-edited-revision",
+                part.ipn,
+                row.path || "",
+                location,
+                `the symbols, footprints or 3D models that the row of ${part.ipn} uses differ from its current revision ${revisionNumber}, which was saved by an edit, not a CSV import; the row is kept here and the current revision is left as it is`,
+                JSON.stringify({
+                  current_revision_number: revisionNumber,
+                  current_revision_change_kind: revisionSavedBy.kind,
+                  path: row.path,
+                  row_number: row.row_number,
+                  raw_record: row.raw_record,
+                  substitutes_csv_rows: substitutesCsvRows(row),
+                  revision: part.revision.snapshot,
+                }),
+              ),
+            );
+          }
+        }
+        if (part.newDetails || part.newRevision) {
           part.stored = stored;
           updatedParts.push(part);
-        } else {
-          // Part details without their CAD targets, to tell a change of the
-          // CAD a part uses from a change of its other details.
-          const withoutCadTargets = (snapshot) => {
-            const details = JSON.parse(snapshot);
-            for (const reference of details.cad_references || []) {
-              delete reference.target;
-            }
-            return JSON.stringify(details);
-          };
-          const what =
-            withoutCadTargets(currentRevision.getString("snapshot")) === withoutCadTargets(part.snapshot)
-              ? `the symbols, footprints or 3D models that the row of ${part.ipn} uses changed`
-              : `the source row of ${part.ipn} changed`;
-          serverProblems.push(
-            problem(
-              "csv-row-conflicts-with-current-revision",
-              part.ipn,
-              part.parsedSource.path || "",
-              location,
-              `${what}, but its current revision ${currentRevision.getInt("number")} was not published by a CSV import; the row is kept here and the current revision is left as it is`,
-              JSON.stringify({
-                current_revision_number: currentRevision.getInt("number"),
-                current_revision_change_kind: currentChange ? currentChange.getString("kind") : "",
-                path: part.parsedSource.path,
-                row_number: part.parsedSource.row_number,
-                raw_record: part.parsedSource.raw_record,
-                substitutes_csv_rows: substitutesCsvRows(part.parsedSource),
-                snapshot: part.snapshot,
-              }),
-            ),
-          );
         }
       }
 
@@ -954,17 +1019,21 @@ routerAdd(
         parts: unchangedParts,
         problems: Object.keys(seenProblems).length - newProblems.length,
       };
+      const withNewRevision = updatedParts.filter((part) => part.newRevision).length;
+      const withNewDetails = updatedParts.filter((part) => part.newDetails).length;
       const created = {
         blobs: newBlobs.length,
         cadItems: newCadItems.length,
         cadItemRevisions: newCadItemRevisions.length,
         parts: newParts.length,
-        partRevisions: newParts.length + updatedParts.length,
-        updatedParts: updatedParts.length,
+        partRevisions: newParts.length + withNewRevision,
+        updatedParts: withNewRevision,
+        partDetails: newParts.length + withNewDetails,
+        updatedDetails: withNewDetails,
         problems: newProblems.length,
       };
       // New blobs and CAD items only ever arrive with a new CAD item revision.
-      const revisionCount = created.partRevisions + created.cadItemRevisions;
+      const revisionCount = created.partRevisions + created.partDetails + created.cadItemRevisions;
 
       // Whether the previous import run of this CSV file read exactly these
       // files. If not, this run is recorded even when it adds nothing else,
@@ -990,7 +1059,8 @@ routerAdd(
           return made;
         };
 
-        // A Change only when there is a revision to put in it.
+        // A Change only when there is a revision or saved details to put in
+        // it.
         let changeId = "";
         let seq = 0;
         if (revisionCount > 0) {
@@ -1055,7 +1125,7 @@ routerAdd(
               }
               return file;
             }),
-            parts: parts.map((part) => ({ ipn: part.ipn, revision: part.revisionAfter })),
+            parts: parts.map((part) => ({ ipn: part.ipn, revision: part.revisionAfter, details: part.detailsAfter })),
             // Parts earlier runs made that no row makes now.
             removed_parts: removedParts,
             // Problems are shared by content, so a report may count only the
@@ -1100,12 +1170,25 @@ routerAdd(
           made.set("number", number);
           made.set("predecessor", predecessor);
           made.set("change", changeId);
-          made.set("snapshot", part.snapshot);
-          made.set("snapshot_sha256", part.snapshotSha256);
+          made.set("snapshot", part.revision.snapshot);
+          made.set("snapshot_sha256", part.revision.sha);
           made.set("source", part.source);
           made.set("cad_item_revisions", part.bound);
           txApp.save(made);
           return revisionId;
+        };
+        const savePartDetails = (part, number, predecessor) => {
+          const detailsId = lib.deriveId("part-details", part.id + "\n" + number);
+          const made = record("catalog_part_details", detailsId);
+          made.set("part", part.id);
+          made.set("number", number);
+          made.set("predecessor", predecessor);
+          made.set("change", changeId);
+          made.set("snapshot", part.details.snapshot);
+          made.set("snapshot_sha256", part.details.sha);
+          made.set("source", part.source);
+          txApp.save(made);
+          return detailsId;
         };
         for (const part of newParts) {
           const made = record("catalog_parts", part.id);
@@ -1113,14 +1196,22 @@ routerAdd(
           made.set("ipn_prefix", part.ipn.substring(0, 3));
           made.set("variant", part.ipn.substring(9));
           made.set("current_revision_number", 1);
+          made.set("current_details_number", 1);
           made.set("first_change", changeId);
           txApp.save(made);
+          made.set("current_details", savePartDetails(part, 1, ""));
           made.set("current_revision", savePartRevision(part, 1, ""));
           txApp.save(made);
         }
         for (const part of updatedParts) {
-          part.stored.set("current_revision", savePartRevision(part, part.number, part.predecessor));
-          part.stored.set("current_revision_number", part.number);
+          if (part.newDetails) {
+            part.stored.set("current_details", savePartDetails(part, part.newDetails.number, part.newDetails.predecessor));
+            part.stored.set("current_details_number", part.newDetails.number);
+          }
+          if (part.newRevision) {
+            part.stored.set("current_revision", savePartRevision(part, part.newRevision.number, part.newRevision.predecessor));
+            part.stored.set("current_revision_number", part.newRevision.number);
+          }
           txApp.save(part.stored);
         }
         for (const item of newProblems) {

@@ -5,22 +5,20 @@
 // load this file by itself (only *.pb.js files are hooks).
 
 // The closed set of catalog_changes.kind values, shared with the
-// migration (1791500000_catalog_init.js) and crates/catalog (ChangeKind);
-// a test in crates/catalog keeps the three in step. Nothing publishes
-// "restore" any more; it stays only so Changes saved before restores were
-// removed can still be read, until kicad-parts-7556 replaces the kinds.
+// migration (1791800000_shared_part_details.js) and crates/catalog
+// (ChangeKind); a test in crates/catalog keeps the three in step.
 const CHANGE_KINDS = Object.freeze({
   csvImport: "csv-import",
   edit: "edit",
-  restore: "restore",
 });
 
 // The `source` value of rows read from the CSV catalog.
 const CSV_CATALOG_SOURCE = "csv-catalog";
 
-// Schema tags shared with crates/catalog (PART_DETAILS_SCHEMA and
-// SOURCE_SCHEMA); a test there keeps them in step.
-const PART_DETAILS_SCHEMA = "kicad-parts/part-details/1";
+// Schema tags shared with crates/catalog (PART_DETAILS_SCHEMA,
+// PART_REVISION_SCHEMA and SOURCE_SCHEMA); a test there keeps them in step.
+const PART_DETAILS_SCHEMA = "kicad-parts/part-details/2";
+const PART_REVISION_SCHEMA = "kicad-parts/part-revision/1";
 const SOURCE_SCHEMA = "kicad-parts/source/1";
 
 // Trims the characters Rust's str::trim removes (Unicode White_Space), so
@@ -294,24 +292,26 @@ function base64Decode(text) {
 
 // ---- Edits ---------------------------------------------------------------
 //
-// POST /api/catalog/edits (see catalog_edits.pb.js) publishes one new
-// revision of one part. It runs publishPartRevision in one transaction:
+// POST /api/catalog/edits (see catalog_edits.pb.js) changes one part's
+// details, its Symbol and Footprint, or both. It runs publishEdit in one
+// transaction:
 //
 //   1. replay the stored answer if the correlation ID was used before for
 //      the same request (409 correlation_reused for a different one);
-//   2. answer 409 conflict, with the part's current revision, if the
-//      caller expected another current revision;
-//   3. build the new part details from the caller's fields and
-//      manufacturer parts;
-//   4. answer 422 noop if they equal the current revision's details;
-//   5. otherwise save one Change, the new revision, the part's move to it,
-//      and one audit entry.
+//   2. answer 409 conflict if the part details or the revision a section
+//      started from are no longer the current ones, giving the ones that
+//      moved;
+//   3. build the new part details from the details section, and the new
+//      revision from the CAD section, binding exact CAD item revisions;
+//   4. answer 422 noop if neither would change;
+//   5. otherwise save one Change, the next part details and/or the next
+//      revision, the part's move to them, and one audit entry.
 //
 // Applied and no-op answers are stored under the correlation ID; conflicts
-// are not, so a retry is checked again against the current revision.
+// are not, so a retry is checked again against the current records.
 
-// Who may publish edits: superusers, and team members whose
-// account is marked can_edit_catalog. Returns the actor or throws.
+// Who may publish edits: superusers, and team members whose account is
+// marked can_edit_catalog. Returns the actor or throws.
 function catalogEditor(e) {
   const auth = e.auth;
   const collection = auth.collection().name;
@@ -326,11 +326,13 @@ function catalogEditor(e) {
   return { id: collection + ":" + auth.id, name: name };
 }
 
-// Reads and checks the request fields every edit has.
-function commonRequest(body) {
-  const fail = (message) => {
-    throw new BadRequestError(message);
-  };
+function fail(message) {
+  throw new BadRequestError(message);
+}
+
+// The checked request: correlation ID, reason, IPN, and the sections sent,
+// each { expected, fields[, manufacturerParts] } or null.
+function editRequest(body) {
   const text = (name, max) => {
     const value = body[name];
     if (typeof value !== "string" || value.length === 0) {
@@ -353,30 +355,55 @@ function commonRequest(body) {
   if (!/^[A-Z]{3}-[0-9]{4}-[0-9A-Z]{4}$/.test(ipn)) {
     fail(`${ipn} is not an IPN`);
   }
-  const expectedRevision = body.expectedRevision;
-  if (typeof expectedRevision !== "number" || !Number.isInteger(expectedRevision) || expectedRevision < 1) {
-    fail("expectedRevision must be the number of the part's current revision");
+  const number = (section, name, what) => {
+    const value = section[name];
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+      fail(`${name} must be the number of the part's current ${what}`);
+    }
+    return value;
+  };
+  const sent = (name) => {
+    const section = body[name];
+    if (section === undefined || section === null) {
+      return null;
+    }
+    if (typeof section !== "object" || Array.isArray(section)) {
+      fail(`${name} must be an object`);
+    }
+    return section;
+  };
+  let details = sent("details");
+  let cad = sent("cad");
+  if (!details && !cad) {
+    fail("an edit needs details, cad or both");
   }
-  return { correlationId: correlationId, reason: reason, ipn: ipn, expectedRevision: expectedRevision };
+  if (details) {
+    if (!Array.isArray(details.fields) || !Array.isArray(details.manufacturerParts)) {
+      fail("details need fields and manufacturerParts");
+    }
+    details = {
+      expected: number(details, "expectedDetails", "details"),
+      fields: details.fields,
+      manufacturerParts: details.manufacturerParts,
+    };
+  }
+  if (cad) {
+    if (!Array.isArray(cad.fields)) {
+      fail("cad needs fields");
+    }
+    cad = { expected: number(cad, "expectedRevision", "revision"), fields: cad.fields };
+  }
+  return { correlationId: correlationId, reason: reason, ipn: ipn, details: details, cad: cad };
 }
 
-// The new fields and manufacturer parts of an edit, checked against the
-// current revision: an edit may change field values, but never add, drop,
-// rename or reorder fields, so supplier data (which is never a field)
-// cannot enter the part details.
-function editedDetails(body, currentDetails) {
-  const fail = (message) => {
-    throw new BadRequestError(message);
-  };
-  const fields = body.fields;
-  if (!Array.isArray(fields)) {
-    fail("fields must be a list");
-  }
-  const currentFields = currentDetails.fields || [];
+// New field values checked against the current ones: an edit may change
+// values, but never add, drop, rename or reorder fields, so supplier data
+// (never a field) cannot enter part details, and neither can CAD.
+function editedFields(fields, currentFields) {
   if (fields.length !== currentFields.length) {
-    fail(`fields must list the same ${currentFields.length} fields as the current revision, in the same order`);
+    fail(`fields must list the same ${currentFields.length} fields as now, in the same order`);
   }
-  const checkedFields = fields.map((field, index) => {
+  return fields.map((field, index) => {
     if (!field || field.name !== currentFields[index].name) {
       fail(`field ${index + 1} must be ${currentFields[index].name}; an edit cannot add, remove, rename or reorder fields`);
     }
@@ -385,12 +412,15 @@ function editedDetails(body, currentDetails) {
     }
     return { name: field.name, value: field.value };
   });
-  const parts = body.manufacturerParts;
-  if (!Array.isArray(parts) || parts.length > 100) {
+}
+
+// The checked manufacturer parts of a details section.
+function editedManufacturerParts(parts) {
+  if (parts.length > 100) {
     fail("manufacturerParts must be a list of at most 100");
   }
   const seen = {};
-  const checkedParts = parts.map((part) => {
+  return parts.map((part) => {
     const manufacturer = part && typeof part.manufacturer === "string" ? part.manufacturer : "";
     const mpn = part && typeof part.mpn === "string" ? part.mpn : "";
     if (trimSpace(manufacturer).length === 0 || trimSpace(mpn).length === 0) {
@@ -406,7 +436,6 @@ function editedDetails(body, currentDetails) {
     seen[key] = true;
     return { manufacturer: manufacturer, mpn: mpn };
   });
-  return { fields: checkedFields, manufacturerParts: checkedParts };
 }
 
 // ---- CAD item revisions ----------------------------------------------------
@@ -484,9 +513,9 @@ function bindingTo(cadItemId, revision) {
   };
 }
 
-// The CAD references of new part details, read from their Symbol and
-// Footprint fields the way the CSV import reads them (`;` separates
-// footprint choices). Each reference to the CSV catalog's own libraries
+// The CAD references of a new revision, read from its Symbol and Footprint
+// fields the way the CSV import reads them (`;` separates footprint
+// choices). Each reference to the CSV catalog's own libraries
 // (`g-*`) is bound to one exact CAD item revision:
 // - a reference the current revision already binds keeps its exact
 //   revision, so editing another field never moves a CAD binding (the same
@@ -497,12 +526,12 @@ function bindingTo(cadItemId, revision) {
 // - anything else is refused: an edit can only use CAD items the Catalog
 //   already has.
 // Other libraries (such as KiCad's own) are external, as in the import.
-function cadReferences(txApp, fields, currentDetails) {
+function cadReferences(txApp, fields, currentRevision) {
   const value = (name) => {
     const field = fields.find((item) => item.name === name);
     return field ? field.value : null;
   };
-  const previous = currentDetails.cad_references || [];
+  const previous = currentRevision.cad_references || [];
   const references = [];
   for (const [role, column] of [["symbol", "Symbol"], ["footprint", "Footprint"]]) {
     const text = value(column);
@@ -557,7 +586,7 @@ function cadReferences(txApp, fields, currentDetails) {
   return references;
 }
 
-// The CAD item revision IDs a snapshot binds, for the relation field.
+// The CAD item revision IDs a revision binds, for the relation field.
 function boundCadItemRevisions(details) {
   const bound = [];
   for (const reference of details.cad_references || []) {
@@ -568,8 +597,9 @@ function boundCadItemRevisions(details) {
   return bound;
 }
 
-// What a client needs to show a revision someone else published.
-function describeRevision(txApp, revision) {
+// What a client needs to show part details or a revision someone else
+// saved.
+function describeRecord(txApp, revision) {
   let change = null;
   try {
     change = txApp.findRecordById("catalog_changes", revision.getString("change"));
@@ -589,26 +619,26 @@ function describeRevision(txApp, revision) {
   };
 }
 
-function publishPartRevision(e) {
+function publishEdit(e) {
   const kind = CHANGE_KINDS.edit;
   const actor = catalogEditor(e);
-  const body = e.requestInfo().body || {};
-  const request = commonRequest(body);
-  if (!Array.isArray(body.fields) || !Array.isArray(body.manufacturerParts)) {
-    throw new BadRequestError("an edit needs fields and manufacturerParts");
-  }
+  const request = editRequest(e.requestInfo().body || {});
   // The request's identity, from validated values in a fixed order (the
   // parsed body is a Go map, whose key order varies).
+  const pairs = (fields) => fields.map((field) => [field && field.name, field && field.value]);
   const requestHash = $security.sha256(
     JSON.stringify([
       kind,
       request.ipn,
-      request.expectedRevision,
       request.reason,
-      [
-        body.fields.map((field) => [field && field.name, field && field.value]),
-        body.manufacturerParts.map((part) => [part && part.manufacturer, part && part.mpn]),
-      ],
+      request.details
+        ? [
+            request.details.expected,
+            pairs(request.details.fields),
+            request.details.manufacturerParts.map((part) => [part && part.manufacturer, part && part.mpn]),
+          ]
+        : null,
+      request.cad ? [request.cad.expected, pairs(request.cad.fields)] : null,
     ]),
   );
 
@@ -648,61 +678,91 @@ function publishPartRevision(e) {
     if (!part || part.getString("ipn") !== request.ipn) {
       throw new NotFoundError(`${request.ipn} is not a part in the Catalog`);
     }
-    const current = byId("catalog_part_revisions", part.getString("current_revision"));
-    if (!current) {
-      throw new Error(`${request.ipn} has no current revision`);
+    const currentDetails = byId("catalog_part_details", part.getString("current_details"));
+    const currentRevision = byId("catalog_part_revisions", part.getString("current_revision"));
+    if (!currentDetails || !currentRevision) {
+      throw new Error(`${request.ipn} has no current details or revision`);
     }
-    if (request.expectedRevision !== current.getInt("number")) {
-      reply = {
-        status: 409,
-        body: {
-          outcome: "conflict",
-          correlationId: request.correlationId,
-          ipn: request.ipn,
-          expectedRevision: request.expectedRevision,
-          currentRevision: describeRevision(txApp, current),
-          message: `someone else changed ${request.ipn} first: its current revision is ${current.getInt("number")}, not ${request.expectedRevision}`,
-        },
+    const detailsMoved = request.details && request.details.expected !== currentDetails.getInt("number");
+    const revisionMoved = request.cad && request.cad.expected !== currentRevision.getInt("number");
+    if (detailsMoved || revisionMoved) {
+      const what = [];
+      if (detailsMoved) {
+        what.push(`its part details are now number ${currentDetails.getInt("number")}, not ${request.details.expected}`);
+      }
+      if (revisionMoved) {
+        what.push(`its current revision is ${currentRevision.getInt("number")}, not ${request.cad.expected}`);
+      }
+      const body = {
+        outcome: "conflict",
+        correlationId: request.correlationId,
+        ipn: request.ipn,
+        message: `someone else changed ${request.ipn} first: ${what.join(", and ")}`,
       };
+      if (detailsMoved) {
+        body.currentDetails = describeRecord(txApp, currentDetails);
+      }
+      if (revisionMoved) {
+        body.currentRevision = describeRecord(txApp, currentRevision);
+      }
+      reply = { status: 409, body: body };
       return;
     }
-    const currentDetails = JSON.parse(current.getString("snapshot"));
-    if (currentDetails.schema !== PART_DETAILS_SCHEMA || currentDetails.ipn !== request.ipn) {
-      throw new Error(`the current revision of ${request.ipn} is not ${PART_DETAILS_SCHEMA} part details`);
+    const storedDetails = JSON.parse(currentDetails.getString("snapshot"));
+    if (storedDetails.schema !== PART_DETAILS_SCHEMA || storedDetails.ipn !== request.ipn) {
+      throw new Error(`the current details of ${request.ipn} are not ${PART_DETAILS_SCHEMA} part details`);
+    }
+    const storedRevision = JSON.parse(currentRevision.getString("snapshot"));
+    if (storedRevision.schema !== PART_REVISION_SCHEMA || storedRevision.ipn !== request.ipn) {
+      throw new Error(`the current revision of ${request.ipn} is not a ${PART_REVISION_SCHEMA} part revision`);
     }
 
-    const edited = editedDetails(body, currentDetails);
-    // Serialized in the field order of crates/catalog PartDetails, so the
-    // stored bytes are its canonical JSON.
-    const details = {
-      schema: PART_DETAILS_SCHEMA,
-      ipn: request.ipn,
-      fields: edited.fields,
-      manufacturer_parts: edited.manufacturerParts,
-      cad_references: cadReferences(txApp, edited.fields, currentDetails),
-    };
-    // An edit keeps Excluded from BOM as it is. Like PartDetails, the
-    // snapshot names it only when it is set.
-    if (currentDetails.excluded_from_bom === true) {
-      details.excluded_from_bom = true;
+    // The new documents, serialized in the field order of crates/catalog
+    // PartDetails and PartRevision, so the stored bytes are their
+    // canonical JSON.
+    let details = null;
+    if (request.details) {
+      const snapshot = JSON.stringify({
+        schema: PART_DETAILS_SCHEMA,
+        ipn: request.ipn,
+        fields: editedFields(request.details.fields, storedDetails.fields || []),
+        manufacturer_parts: editedManufacturerParts(request.details.manufacturerParts),
+      });
+      const sha = $security.sha256(snapshot);
+      if (sha !== currentDetails.getString("snapshot_sha256")) {
+        details = { snapshot: snapshot, sha: sha };
+      }
     }
-    const snapshot = JSON.stringify(details);
-    const source = {
-      schema: SOURCE_SCHEMA,
-      source: CHANGE_KINDS.edit,
-      previous_revision: { id: current.id, number: current.getInt("number") },
-    };
-    const snapshotSha256 = $security.sha256(snapshot);
+    let revision = null;
+    if (request.cad) {
+      const fields = editedFields(request.cad.fields, storedRevision.cad_fields || []);
+      const document = {
+        schema: PART_REVISION_SCHEMA,
+        ipn: request.ipn,
+        cad_fields: fields,
+        cad_references: cadReferences(txApp, fields, storedRevision),
+      };
+      // An edit keeps Excluded from BOM as it is (kicad-parts-ccc0 decides
+      // how it follows new CAD). Like PartRevision, the snapshot names it
+      // only when it is set.
+      if (storedRevision.excluded_from_bom === true) {
+        document.excluded_from_bom = true;
+      }
+      const snapshot = JSON.stringify(document);
+      const sha = $security.sha256(snapshot);
+      if (sha !== currentRevision.getString("snapshot_sha256")) {
+        revision = { snapshot: snapshot, sha: sha };
+      }
+    }
 
     let status;
     let result;
-    if (snapshotSha256 === current.getString("snapshot_sha256")) {
+    if (!details && !revision) {
       status = 422;
       result = {
         outcome: "noop",
         correlationId: request.correlationId,
         ipn: request.ipn,
-        revision: { id: current.id, number: current.getInt("number") },
         message: "the edit changes nothing",
       };
     } else {
@@ -713,11 +773,22 @@ function publishPartRevision(e) {
       };
       const last = first("catalog_changes", "seq > 0", {}, "-seq");
       const seq = last ? last.getInt("seq") + 1 : 1;
-      const number = current.getInt("number") + 1;
       const changeId = deriveId("change", request.correlationId);
-      const revisionId = deriveId("part-revision", partId + "\n" + number);
-      const bound = boundCadItemRevisions(JSON.parse(snapshot));
-      const summary = JSON.stringify({ ipn: request.ipn, partRevisions: 1, revision: number });
+      const source = (previous) =>
+        JSON.stringify({
+          schema: SOURCE_SCHEMA,
+          source: CHANGE_KINDS.edit,
+          previous: { id: previous.id, number: previous.getInt("number") },
+        });
+      const detailsNumber = details ? currentDetails.getInt("number") + 1 : null;
+      const revisionNumber = revision ? currentRevision.getInt("number") + 1 : null;
+      const summary = JSON.stringify({
+        ipn: request.ipn,
+        partDetails: details ? 1 : 0,
+        partRevisions: revision ? 1 : 0,
+        details: detailsNumber,
+        revision: revisionNumber,
+      });
 
       const change = record("catalog_changes", changeId);
       change.set("seq", seq);
@@ -730,19 +801,47 @@ function publishPartRevision(e) {
       change.set("summary", summary);
       txApp.save(change);
 
-      const revision = record("catalog_part_revisions", revisionId);
-      revision.set("part", partId);
-      revision.set("number", number);
-      revision.set("predecessor", current.id);
-      revision.set("change", changeId);
-      revision.set("snapshot", snapshot);
-      revision.set("snapshot_sha256", snapshotSha256);
-      revision.set("source", JSON.stringify(source));
-      revision.set("cad_item_revisions", bound);
-      txApp.save(revision);
-
-      part.set("current_revision", revisionId);
-      part.set("current_revision_number", number);
+      let savedDetails = null;
+      if (details) {
+        const id = deriveId("part-details", partId + "\n" + detailsNumber);
+        const made = record("catalog_part_details", id);
+        made.set("part", partId);
+        made.set("number", detailsNumber);
+        made.set("predecessor", currentDetails.id);
+        made.set("change", changeId);
+        made.set("snapshot", details.snapshot);
+        made.set("snapshot_sha256", details.sha);
+        made.set("source", source(currentDetails));
+        txApp.save(made);
+        part.set("current_details", id);
+        part.set("current_details_number", detailsNumber);
+        savedDetails = { id: id, number: detailsNumber, snapshotSha256: details.sha };
+      }
+      let savedRevision = null;
+      // The CAD item revisions the part's current revision binds, as plain
+      // JavaScript strings (the stored list is a Go slice).
+      const stored = currentRevision.getStringSlice("cad_item_revisions");
+      let bound = [];
+      for (let i = 0; i < stored.length; i++) {
+        bound.push(String(stored[i]));
+      }
+      if (revision) {
+        const id = deriveId("part-revision", partId + "\n" + revisionNumber);
+        bound = boundCadItemRevisions(JSON.parse(revision.snapshot));
+        const made = record("catalog_part_revisions", id);
+        made.set("part", partId);
+        made.set("number", revisionNumber);
+        made.set("predecessor", currentRevision.id);
+        made.set("change", changeId);
+        made.set("snapshot", revision.snapshot);
+        made.set("snapshot_sha256", revision.sha);
+        made.set("source", source(currentRevision));
+        made.set("cad_item_revisions", bound);
+        txApp.save(made);
+        part.set("current_revision", id);
+        part.set("current_revision_number", revisionNumber);
+        savedRevision = { id: id, number: revisionNumber, snapshotSha256: revision.sha };
+      }
       txApp.save(part);
 
       const auditEntryId = deriveId("audit-entry", request.correlationId);
@@ -764,7 +863,8 @@ function publishPartRevision(e) {
         changeId: changeId,
         seq: seq,
         auditEntryId: auditEntryId,
-        revision: { id: revisionId, number: number, snapshotSha256: snapshotSha256 },
+        details: savedDetails,
+        revision: savedRevision,
         cadItemRevisions: bound,
       };
     }
@@ -789,9 +889,10 @@ module.exports = {
   CHANGE_KINDS: CHANGE_KINDS,
   CSV_CATALOG_SOURCE: CSV_CATALOG_SOURCE,
   PART_DETAILS_SCHEMA: PART_DETAILS_SCHEMA,
+  PART_REVISION_SCHEMA: PART_REVISION_SCHEMA,
   SOURCE_SCHEMA: SOURCE_SCHEMA,
-  publishPartRevision: publishPartRevision,
-  describeRevision: describeRevision,
+  publishEdit: publishEdit,
+  describeRecord: describeRecord,
   cadItemRevisionTarget: cadItemRevisionTarget,
   isCadItemRevision: isCadItemRevision,
   trimSpace: trimSpace,
