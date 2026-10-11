@@ -474,17 +474,17 @@ impl TeamCatalog {
                     part: reload()?,
                 }),
                 CsvReviewOutcome::Noop { .. } => Ok(PublishResult::NothingToSave {
-                    message: "Someone already reviewed these CSV changes, so nothing was saved."
+                    message: "Someone already reviewed these CSV values, so nothing was saved."
                         .into(),
                 }),
                 CsvReviewOutcome::Conflict { .. } => Ok(PublishResult::Refused {
                     message: format!(
-                        "Someone else changed {} after you opened these CSV changes. Nothing was saved. Look at the part again, then review the CSV changes again.",
+                        "Someone else changed {} after you opened these CSV values. Nothing was saved. Look at the part again, then review the CSV values again.",
                         request.ipn
                     ),
                 }),
                 CsvReviewOutcome::OutOfDate { .. } => Ok(PublishResult::Refused {
-                    message: "The CSV catalog changed after these changes were found. Nothing was saved. Import the CSV file again to see what differs now.".into(),
+                    message: "A newer import has run since you opened these CSV values. Nothing was saved. Open the part again to see what differs now.".into(),
                 }),
                 CsvReviewOutcome::CorrelationReused { message, .. } => {
                     Ok(PublishResult::Refused { message })
@@ -1090,20 +1090,41 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
         if let Some(change) = change_records.get(&review.change) {
             let took = serde_json::from_str::<Vec<String>>(&review.accepted)
                 .is_ok_and(|accepted| !accepted.is_empty());
-            history_entry(&mut entries, change).action = if took {
-                "Took CSV changes"
-            } else {
-                "Kept own values"
+            history_entry(&mut entries, change).action = match (took, review.code.as_str()) {
+                (true, _) => ACCEPTED,
+                (false, CSV_CAD_DIFFERS) => "Kept current symbol and footprint",
+                (false, _) => "Kept current part details",
             }
             .to_owned();
         }
     }
+    // What the CSV said the last time an import applied to the part, for
+    // each kind: the newest details and the newest revision a CSV import
+    // saved.
+    let imported = |change: &str| {
+        change_records
+            .get(change)
+            .is_some_and(|change| change.kind == "csv-import")
+    };
+    let last_imported = LastImported {
+        details: saved_details
+            .iter()
+            .filter(|saved| imported(&saved.change))
+            .max_by_key(|saved| saved.number)
+            .map(|saved| saved.snapshot.as_str()),
+        revision: revisions
+            .iter()
+            .filter(|revision| imported(&revision.change))
+            .max_by_key(|revision| revision.number)
+            .map(|revision| revision.snapshot.as_str()),
+    };
     let csv_changes = open_csv_changes(
         client,
         part,
         current_details,
         current_revision,
         &reviews,
+        &last_imported,
         describe,
     )?;
     let archived = archived_numbers(&archive_entries.iter().collect::<Vec<_>>());
@@ -1128,16 +1149,35 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
     })
 }
 
-/// The CSV changes nobody has reviewed yet: each
-/// [`CSV_DETAILS_DIFFER`] or [`CSV_CAD_DIFFERS`] import problem of the part
-/// that the latest import run of its CSV file found, unless a review already
-/// covers what the CSV says, and only if a field still differs.
+/// The history action of a review that accepted CSV values.
+const ACCEPTED: &str = "Accepted CSV values";
+
+/// The snapshots of a part's newest details and newest revision that a CSV
+/// import saved: what the CSV said the last time an import applied to it.
+struct LastImported<'a> {
+    details: Option<&'a str>,
+    revision: Option<&'a str>,
+}
+
+/// The new CSV values nobody has reviewed yet: each [`CSV_DETAILS_DIFFER`]
+/// or [`CSV_CAD_DIFFERS`] import problem of the part that the latest import
+/// run of its CSV file found, unless a review already covers what the CSV
+/// says, and only if a field still differs.
+///
+/// A problem whose recorded CSV document is what the CSV said the last time
+/// an import applied to the part (for that kind) is left out: the CSV did not
+/// change, only the part was edited in this app, so there are no new values
+/// to offer. The problem itself stays recorded for the zero-loss report.
+///
+/// A recorded document that cannot be read is skipped, so the part still
+/// opens.
 fn open_csv_changes(
     client: &PocketBaseClient,
     part: &StoredPart,
     details: &PartDetails,
     revision: &PartRevision,
     reviews: &[StoredCsvReview],
+    last_imported: &LastImported,
     describe: impl Fn(&CadReference) -> String,
 ) -> Result<Vec<CsvChanges>, String> {
     let fail = |error: CollabError| error.to_string();
@@ -1149,6 +1189,15 @@ fn open_csv_changes(
         let Some(document) = recorded_csv_document(problem) else {
             continue;
         };
+        let cad = problem.code == CSV_CAD_DIFFERS;
+        let unchanged = if cad {
+            last_imported.revision
+        } else {
+            last_imported.details
+        };
+        if unchanged == Some(document.as_str()) {
+            continue;
+        }
         let csv_sha256 = catalog::sha256_hex(&document);
         if reviews
             .iter()
@@ -1174,14 +1223,15 @@ fn open_csv_changes(
         if !runs[csv_file].contains(&problem.id) {
             continue;
         }
-        let cad = problem.code == CSV_CAD_DIFFERS;
         let rows = if cad {
-            let csv: PartRevision = serde_json::from_str(&document)
-                .map_err(|error| format!("the CSV revision of {}: {error}", part.ipn))?;
+            let Ok(csv) = serde_json::from_str::<PartRevision>(&document) else {
+                continue;
+            };
             cad_rows(revision, &csv, &describe)
         } else {
-            let csv: PartDetails = serde_json::from_str(&document)
-                .map_err(|error| format!("the CSV details of {}: {error}", part.ipn))?;
+            let Ok(csv) = serde_json::from_str::<PartDetails>(&document) else {
+                continue;
+            };
             details_rows(details, &csv)
         };
         if rows.is_empty() {
@@ -1366,7 +1416,7 @@ fn action(kind: &str) -> &'static str {
         "edit" => "Edited",
         "archive" => "Archived",
         "unarchive" => "Unarchived",
-        "csv-review" => "Took CSV changes",
+        "csv-review" => ACCEPTED,
         _ => "Saved",
     }
 }

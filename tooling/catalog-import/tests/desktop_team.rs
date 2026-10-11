@@ -517,8 +517,25 @@ fn the_desktop_shows_csv_changes_live_and_takes_them_field_by_field() {
     submit_edit(&other_client, &theirs).unwrap();
     wait_until("their edit", || checkpoint(&team) == 2);
 
+    // Importing the unchanged CSV records that the part differs, but the
+    // CSV has no new values, so the app offers nothing: only the part was
+    // edited.
+    let before = imports(&team);
+    import_from(&admin, copy.path());
+    wait_until("the unchanged import run", || imports(&team) > before);
+    let part = team.part(IPN).unwrap().unwrap();
+    assert!(part.csv_changes.is_empty(), "{:?}", part.csv_changes);
+    let problems = read_back(&admin).unwrap().problems;
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.code == catalog::pocketbase::CSV_DETAILS_DIFFER),
+        "the import problem is still recorded"
+    );
+
     // The CSV changes the value; the import leaves the edited part alone
-    // and publishes no Change, yet the app hears about the run.
+    // and publishes no Change, yet the app hears about the run and offers
+    // the new values.
     let csv = copy.path().join("database/g-res.csv");
     let text = std::fs::read_to_string(&csv).unwrap();
     std::fs::write(&csv, text.replacen("\"47\",", "\"47R\",", 1)).unwrap();
@@ -577,7 +594,7 @@ fn the_desktop_shows_csv_changes_live_and_takes_them_field_by_field() {
     let latest = &part.history[0];
     assert_eq!(
         (latest.action.as_str(), latest.details, latest.revision),
-        ("Took CSV changes", Some(3), None)
+        ("Accepted CSV values", Some(3), None)
     );
     // Reviewing the same CSV values again saves nothing.
     assert!(matches!(
@@ -631,7 +648,7 @@ fn the_desktop_shows_csv_changes_live_and_takes_them_field_by_field() {
     };
     assert!(!details_saved);
     assert!(part.csv_changes.is_empty());
-    assert_eq!(part.history[0].action, "Kept own values");
+    assert_eq!(part.history[0].action, "Kept current part details");
     assert_eq!(part.details.number, 3);
 
     assert!(!team.sign_out().session.is_signed_in());

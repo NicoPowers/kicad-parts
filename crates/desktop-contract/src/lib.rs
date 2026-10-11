@@ -315,15 +315,16 @@ pub struct TeamPart {
     pub revisions: Vec<RevisionStatus>,
     /// One entry per Change that saved this part, newest first.
     pub history: Vec<HistoryEntry>,
-    /// CSV changes that were not applied because the part was edited in
-    /// this app, and nobody has reviewed yet. At most one for the details
-    /// and one for the symbol and footprint.
+    /// New CSV values that were not applied because the part was edited in
+    /// this app, and nobody has reviewed yet: the CSV changed after the
+    /// edit. At most one for the details and one for the symbol and
+    /// footprint.
     #[serde(default)]
     pub csv_changes: Vec<CsvChanges>,
 }
 
-/// CSV changes the latest import found for a part that was edited in this
-/// app, so the import left the part as it is.
+/// New CSV values the latest import found for a part that was edited in
+/// this app, so the import left the part as it is.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CsvChanges {
     /// The import problem that recorded them.
@@ -349,7 +350,7 @@ pub struct CsvChangeRow {
     pub csv: String,
 }
 
-/// Take the CSV's values for the fields in `accept` and keep the part's
+/// Accept the CSV's values for the fields in `accept` and keep the part's
 /// for the rest; an empty `accept` keeps all of them. The server takes the
 /// values from what the import recorded, not from this request.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -445,8 +446,9 @@ pub struct HistoryEntry {
     /// The revision this Change archived or unarchived, if it did.
     #[serde(default)]
     pub archive: Option<ArchiveNote>,
-    /// `Imported`, `Edited`, `Archived`, `Unarchived`, `Took CSV changes`
-    /// or `Kept own values`.
+    /// `Imported`, `Edited`, `Archived`, `Unarchived`, `Accepted CSV
+    /// values`, `Kept current part details` or `Kept current symbol and
+    /// footprint`.
     pub action: String,
     pub actor_name: String,
     /// When it was saved, as `2026-10-09 18:02 UTC`.
@@ -528,10 +530,10 @@ pub enum PublishResult {
         current: u32,
         part: TeamPart,
     },
-    /// CSV changes were reviewed: some taken (new details, a new
+    /// CSV values were reviewed: some accepted (new details, a new
     /// revision, or both) or none (the part's values kept).
     CsvReviewed {
-        /// The fields whose CSV values were taken; empty if none.
+        /// The fields whose CSV values were accepted; empty if none.
         accepted: Vec<String>,
         /// The part details were saved again.
         details_saved: bool,
