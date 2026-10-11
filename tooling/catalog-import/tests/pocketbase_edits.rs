@@ -542,10 +542,13 @@ fn catalog_records_never_change_even_for_superusers() {
     let editor = team.member("Ada Editor", true);
     let initial = team.read();
     applied(&submit_edit(&editor, &edit(&initial, IPN, "Value", "47R")).unwrap());
+    applied(&submit_edit(&editor, &edit(&team.read(), IPN, "Symbol", "Device:R")).unwrap());
     let stored = team.read();
     let part = stored.part(IPN).unwrap();
     let revision = stored.part_revision(&part.current_revision).unwrap();
     let first_revision = revision.predecessor.clone();
+    let details = stored.part_details(&part.current_details).unwrap();
+    let first_details = details.predecessor.clone();
 
     let targets: Vec<(&str, &str, Value)> = vec![
         ("catalog_parts", &part.id, json!({ "ipn": "RES-9999-9999" })),
@@ -555,9 +558,19 @@ fn catalog_records_never_change_even_for_superusers() {
             json!({ "current_revision": first_revision, "current_revision_number": 1 }),
         ),
         (
+            "catalog_parts",
+            &part.id,
+            json!({ "current_details": first_details, "current_details_number": 1 }),
+        ),
+        (
             "catalog_part_revisions",
             &revision.id,
             json!({ "source": "not a CSV catalog row" }),
+        ),
+        (
+            "catalog_part_details",
+            &details.id,
+            json!({ "snapshot": "{}", "source": "not a CSV catalog row" }),
         ),
         (
             "catalog_changes",
@@ -814,6 +827,29 @@ fn catalog_collections_cannot_lose_data_through_the_collection_api() {
     // Dropping a field would wipe it on every record.
     assert_eq!(
         change_collection(admin, "catalog_part_revisions", remove_field("source")),
+        403
+    );
+    assert_eq!(
+        change_collection(admin, "catalog_part_details", remove_field("snapshot")),
+        403
+    );
+    assert_eq!(
+        change_collection(admin, "catalog_parts", remove_field("current_details")),
+        403
+    );
+    assert_eq!(
+        change_collection(admin, "catalog_parts", |body| {
+            for item in body["fields"].as_array_mut().unwrap() {
+                if item["name"] == "current_details" {
+                    item["maxSelect"] = json!(5);
+                }
+            }
+        }),
+        403
+    );
+    assert_eq!(
+        change_collection(admin, "catalog_part_details", |body| body["listRule"] =
+            "".into()),
         403
     );
     // Renaming or retyping a field, renaming the collection, loosening a
@@ -1156,12 +1192,12 @@ routerAdd("POST", "/api/test/save-part", (e) => {
   if (body.createDetails) {
     const current = $app.findRecordById("catalog_part_details", part.getString("current_details"));
     const made = new Record($app.findCollectionByNameOrId("catalog_part_details"));
-    made.set("id", lib.deriveId("part-details", part.id + "\n" + body.createDetails));
+    made.set("id", body.detailsId || lib.deriveId("part-details", part.id + "\n" + body.createDetails));
     for (const name of ["part", "change", "snapshot", "snapshot_sha256", "source"]) {
       made.set(name, current.getString(name));
     }
     made.set("number", body.createDetails);
-    made.set("predecessor", current.id);
+    made.set("predecessor", body.noPredecessor ? "" : current.id);
     try {
       $app.save(made);
     } catch (error) {
@@ -1292,6 +1328,29 @@ fn server_code_cannot_move_a_part_backwards_or_skip_a_revision() {
     let skip = save(json!({ "ipn": IPN, "createDetails": 4 }));
     assert_eq!(skip.status, 409, "{}", skip.body);
     assert!(skip.body.contains("must be number 3"), "{}", skip.body);
+    let unlinked = save(json!({ "ipn": IPN, "createDetails": 3, "noPredecessor": true }));
+    assert_eq!(unlinked.status, 409, "{}", unlinked.body);
+    assert!(
+        unlinked.body.contains("must be number 3"),
+        "{}",
+        unlinked.body
+    );
+    let forged = save(json!({ "ipn": IPN, "createDetails": 3, "detailsId": "aaaaaaaaaaaaaaa" }));
+    assert_eq!(forged.status, 409, "{}", forged.body);
+    assert!(forged.body.contains("ID derived"), "{}", forged.body);
+    // Nor can a part point to another part's details.
+    let other = after_edit.part("RES-0000-1000").unwrap();
+    let borrowed = save(json!({ "ipn": IPN, "details": other.current_details }));
+    assert_eq!(borrowed.status, 409, "{}", borrowed.body);
+    assert!(
+        borrowed.body.contains("must be one of its own"),
+        "{}",
+        borrowed.body
+    );
+    assert_eq!(
+        read_back(&admin).unwrap().part_details,
+        after_edit.part_details
+    );
     let part = read_back(&admin).unwrap().part(IPN).unwrap().clone();
     assert_eq!(
         (part.current_details.as_str(), part.current_details_number),
