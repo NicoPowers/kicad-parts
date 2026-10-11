@@ -798,6 +798,10 @@ fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                                     </tr>
                                 })
                                 .collect_view()}
+                            <tr>
+                                <th scope="row">"Excluded from BOM"</th>
+                                <td>{revision.excluded_from_bom.clone()}</td>
+                            </tr>
                         </tbody>
                     </table>
                 }

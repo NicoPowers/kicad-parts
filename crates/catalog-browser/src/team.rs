@@ -1453,6 +1453,44 @@ fn current_revision_view(number: u32, revision: &PartRevision) -> CurrentRevisio
                 binding: binding(reference),
             })
             .collect(),
+        excluded_from_bom: excluded_from_bom_words(revision),
+    }
+}
+
+/// Excluded from BOM in plain words. The server set it from the flags in
+/// the bound CAD's stored bytes; a symbol or footprint it could not read
+/// (KiCad's own library, or one the Catalog does not have) gave no
+/// evidence, so a revision that is not excluded but uses one is "not
+/// known".
+fn excluded_from_bom_words(revision: &PartRevision) -> String {
+    if revision.excluded_from_bom {
+        return "Yes: its symbol or every footprint choice says it is not in the BOM".to_owned();
+    }
+    let unread: Vec<String> = [CadReferenceRole::Symbol, CadReferenceRole::Footprint]
+        .into_iter()
+        .filter_map(|role| {
+            let reason = revision
+                .cad_references
+                .iter()
+                .filter(|reference| reference.role == role)
+                .find_map(|reference| match reference.target {
+                    CadReferenceTarget::CadItemRevision { .. } => None,
+                    CadReferenceTarget::External => {
+                        Some("comes from KiCad's own library, which this app does not read yet")
+                    }
+                    CadReferenceTarget::Unresolved { .. } => Some("is not in the Catalog"),
+                })?;
+            let what = match role {
+                CadReferenceRole::Symbol => "symbol",
+                CadReferenceRole::Footprint => "footprint",
+            };
+            Some(format!("the {what} {reason}"))
+        })
+        .collect();
+    if unread.is_empty() {
+        "No".to_owned()
+    } else {
+        format!("Not known: {}", unread.join(", and "))
     }
 }
 
@@ -1726,6 +1764,50 @@ fn save_settings(path: &Path, settings: &TeamSettings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excluded_from_bom_is_said_plainly_and_honestly() {
+        let revision = |excluded: bool, symbol: serde_json::Value, footprint: serde_json::Value| {
+            serde_json::from_value::<PartRevision>(serde_json::json!({
+                "schema": catalog::PART_REVISION_SCHEMA,
+                "ipn": "RES-0000-0470",
+                "cad_fields": [
+                    { "name": "Symbol", "value": "S" },
+                    { "name": "Footprint", "value": "F" },
+                ],
+                "cad_references": [
+                    { "role": "symbol", "ordinal": 0, "reference": "S", "target": symbol },
+                    { "role": "footprint", "ordinal": 0, "reference": "F", "target": footprint },
+                ],
+                "excluded_from_bom": excluded,
+            }))
+            .unwrap()
+        };
+        let stored = serde_json::json!({
+            "kind": "cad-item-revision",
+            "cad_item": "aaaaaaaaaaaaaaa",
+            "number": 1,
+            "snapshot_sha256": "0".repeat(64),
+        });
+        let kicad = serde_json::json!({ "kind": "external" });
+        let missing = serde_json::json!({ "kind": "unresolved", "status": "missing-member" });
+        assert_eq!(
+            excluded_from_bom_words(&revision(true, kicad.clone(), stored.clone())),
+            "Yes: its symbol or every footprint choice says it is not in the BOM"
+        );
+        assert_eq!(
+            excluded_from_bom_words(&revision(false, stored.clone(), stored.clone())),
+            "No"
+        );
+        assert_eq!(
+            excluded_from_bom_words(&revision(false, kicad.clone(), stored.clone())),
+            "Not known: the symbol comes from KiCad's own library, which this app does not read yet"
+        );
+        assert_eq!(
+            excluded_from_bom_words(&revision(false, missing, kicad)),
+            "Not known: the symbol is not in the Catalog, and the footprint comes from KiCad's own library, which this app does not read yet"
+        );
+    }
 
     #[test]
     fn only_loopback_http_addresses_are_accepted() {

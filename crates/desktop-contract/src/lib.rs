@@ -408,6 +408,10 @@ pub struct CurrentRevision {
     pub cad_fields: Vec<Field>,
     /// The exact CAD item revision each symbol and footprint reference uses.
     pub cad_items: Vec<CadItemUse>,
+    /// Excluded from BOM, in plain words: set from the CAD's own flags
+    /// when the revision was added, and never changed afterwards.
+    #[serde(default)]
+    pub excluded_from_bom: String,
 }
 
 impl CurrentRevision {

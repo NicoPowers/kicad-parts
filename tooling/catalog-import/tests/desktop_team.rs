@@ -103,6 +103,8 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     );
     // Symbol and Footprint belong to the revision, not the details.
     assert!(part.details.field("Symbol").is_none());
+    // Its local symbol and footprint say nothing about the BOM.
+    assert_eq!(part.revision.excluded_from_bom, "No");
     assert!(part.revision.field("Symbol").is_some());
     assert!(team.part("CAP-0000-0001").unwrap().is_none());
 
@@ -263,6 +265,11 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     assert_eq!(revision, None);
     assert_eq!(part.revision.field("Symbol"), Some("Device:R"));
     assert_eq!(part.revision.number, 2);
+    // KiCad's own symbol is not read, so the app does not claim to know.
+    assert_eq!(
+        part.revision.excluded_from_bom,
+        "Not known: the symbol comes from KiCad's own library, which this app does not read yet"
+    );
     // Changing the symbol back from a stale start is a conflict about the
     // symbol only; saving on top adds revision 3.
     let mut stale = mine.clone();
