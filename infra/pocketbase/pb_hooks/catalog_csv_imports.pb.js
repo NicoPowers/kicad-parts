@@ -609,11 +609,12 @@ routerAdd(
       const blobExists = (sha) => !!requestBlobs[sha] || !!byId("catalog_blobs", lib.deriveId("blob", sha));
 
       // A hash of a CAD item revision's content: its snapshot with the
-      // numbers of its 3D model bindings left out (crates/catalog
-      // CadItemDetails::content_sha256 does the same in Rust). Revisions with
-      // the same content differ at most in which numbers they name. Keys
-      // are sorted first, so the order a client wrote them in cannot hide
-      // equal content.
+      // numbers of its 3D model bindings left out. Revisions with the same
+      // content differ at most in which numbers they name. Keys are sorted
+      // first, so the order a client wrote them in cannot hide equal
+      // content. crates/catalog CadItemDetails::content_sha256 makes the
+      // same comparison in Rust but hashes in its own key order, so the two
+      // hashes differ and must never be compared with each other.
       const contentOf = (snapshot) => {
         const parsed = JSON.parse(snapshot);
         for (const model of parsed.model_references || []) {
