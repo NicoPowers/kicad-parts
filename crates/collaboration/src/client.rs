@@ -168,6 +168,35 @@ impl PocketBaseClient {
         self.list_record_fields(collection, filter, sort, "")
     }
 
+    /// The first record of `collection` matching `filter` in `sort` order,
+    /// fetched alone (one page of one record).
+    pub fn first_record<T: DeserializeOwned>(
+        &self,
+        collection: &str,
+        filter: &str,
+        sort: &str,
+    ) -> CollabResult<Option<T>> {
+        let query = vec![
+            ("page", "1".to_owned()),
+            ("perPage", "1".to_owned()),
+            ("sort", sort.to_owned()),
+            ("filter", filter.to_owned()),
+            ("skipTotal", "1".to_owned()),
+        ];
+        let reply =
+            self.get_with_query(&format!("/api/collections/{collection}/records"), &query)?;
+        let mut list: Value = reply.json()?;
+        let item = list["items"]
+            .as_array_mut()
+            .ok_or_else(|| CollabError::Protocol("a list reply has no items".into()))?
+            .drain(..)
+            .next();
+        item.map(|item| {
+            serde_json::from_value(item).map_err(|error| CollabError::Protocol(error.to_string()))
+        })
+        .transpose()
+    }
+
     /// Like [`PocketBaseClient::list_records`], but each record carries only
     /// `fields` (comma-separated field names; empty means every field), so
     /// large fields are not downloaded.

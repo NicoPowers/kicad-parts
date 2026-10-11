@@ -2,8 +2,8 @@
 //! (`infra/pocketbase/pb_hooks/catalog_csv_imports.pb.js` for CSV imports,
 //! `catalog_edits.pb.js` for edits) and the `catalog_*`
 //! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`
-//! `1791600000_catalog_edits.js`, `1791800000_shared_part_details.js` and
-//! `1791900000_archived_revisions.js`).
+//! `1791600000_catalog_edits.js`, `1791800000_shared_part_details.js`,
+//! `1791900000_archived_revisions.js` and `1792000000_csv_reviews.js`).
 
 use crate::cad_item::Blob;
 use crate::cad_item::{CadItemDetails, ModelTarget};
@@ -26,7 +26,7 @@ pub const CSV_IMPORT_ROUTE: &str = "/api/catalog/csv-imports";
 pub const IMPORT_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Every Catalog collection, in dependency order.
-pub const COLLECTIONS: [&str; 11] = [
+pub const COLLECTIONS: [&str; 12] = [
     "catalog_changes",
     "catalog_blobs",
     "catalog_cad_items",
@@ -35,6 +35,7 @@ pub const COLLECTIONS: [&str; 11] = [
     "catalog_part_details",
     "catalog_part_revisions",
     "catalog_archive_entries",
+    "catalog_csv_reviews",
     "catalog_audit_entries",
     "catalog_import_problems",
     "catalog_commands",
@@ -918,6 +919,150 @@ pub fn submit_archive(
     }
 }
 
+/// The route that reviews CSV changes that were not applied to an edited
+/// part.
+pub const CSV_REVIEW_ROUTE: &str = "/api/catalog/csv-reviews";
+
+/// The import problem codes a person can review, and which part of the part
+/// each one is about.
+pub const CSV_DETAILS_DIFFER: &str = "csv-details-differ-from-edited-details";
+pub const CSV_CAD_DIFFERS: &str = "csv-cad-differs-from-edited-revision";
+
+/// The field name that takes the CSV's whole list of manufacturer parts.
+pub const MANUFACTURER_PARTS_FIELD: &str = "Manufacturer parts";
+
+/// Reviews one CSV difference of part `ipn` (an import problem with code
+/// [`CSV_DETAILS_DIFFER`] or [`CSV_CAD_DIFFERS`]): takes the CSV's values for
+/// the fields in `accept` and keeps the part's values for the rest. An empty
+/// `accept` keeps all of them. The route builds what it saves from the
+/// problem's recorded CSV document, so the command names only fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CsvReviewCommand {
+    pub correlation_id: CorrelationId,
+    pub reason: String,
+    pub ipn: String,
+    /// The import problem's ID.
+    pub problem: String,
+    /// Details field names and [`MANUFACTURER_PARTS_FIELD`], or `Symbol` and
+    /// `Footprint`.
+    pub accept: Vec<String>,
+    /// The part's current details number (details problem) or current
+    /// revision number (CAD problem) the reviewer read.
+    pub expected: u32,
+}
+
+impl CsvReviewCommand {
+    /// A command with a fresh correlation ID.
+    pub fn new(ipn: &str, problem: &str, accept: Vec<String>, expected: u32, reason: &str) -> Self {
+        Self {
+            correlation_id: CorrelationId::generate(),
+            reason: reason.to_owned(),
+            ipn: ipn.to_owned(),
+            problem: problem.to_owned(),
+            accept,
+            expected,
+        }
+    }
+
+    pub fn body(&self) -> Value {
+        json!({
+            "correlationId": self.correlation_id,
+            "reason": self.reason,
+            "ipn": self.ipn,
+            "problem": self.problem,
+            "accept": self.accept,
+            "expected": self.expected,
+        })
+    }
+}
+
+/// What the CSV review route answered.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CsvReviewReply {
+    pub status: u16,
+    pub outcome: CsvReviewOutcome,
+    /// The answer was replayed from the correlation-ID ledger.
+    pub replayed: bool,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum CsvReviewOutcome {
+    /// 200: one Change with one CSV review, plus the new part details or the
+    /// new revision when fields were taken, the part moved to them, and one
+    /// audit entry.
+    #[serde(rename_all = "camelCase")]
+    Applied {
+        correlation_id: String,
+        ipn: String,
+        change_id: String,
+        seq: u64,
+        audit_entry_id: String,
+        accepted: Vec<String>,
+        details: Option<PublishedRecord>,
+        revision: Option<PublishedRecord>,
+    },
+    /// 422: these CSV values were already reviewed; nothing was written.
+    #[serde(rename_all = "camelCase")]
+    Noop {
+        correlation_id: String,
+        ipn: String,
+        message: String,
+    },
+    /// 409: the part's details or revision moved since the difference was
+    /// found or read. Nothing was written.
+    #[serde(rename_all = "camelCase")]
+    Conflict {
+        correlation_id: String,
+        ipn: String,
+        #[serde(default)]
+        current_details: Option<Box<ConflictingRecord>>,
+        #[serde(default)]
+        current_revision: Option<Box<ConflictingRecord>>,
+        message: String,
+    },
+    /// 409: a later import run of the CSV file no longer finds this
+    /// difference. Nothing was written.
+    #[serde(rename_all = "camelCase")]
+    OutOfDate {
+        correlation_id: String,
+        ipn: String,
+        message: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    CorrelationReused {
+        correlation_id: String,
+        message: String,
+    },
+}
+
+/// Submits a CSV review. Applied, no-op, conflict, out-of-date and
+/// correlation-reuse answers are `Ok`; bad input (400, including a field the
+/// CSV did not change or CAD that matches an archived revision), 401, 403
+/// and 404 are errors.
+pub fn submit_csv_review(
+    client: &PocketBaseClient,
+    command: &CsvReviewCommand,
+) -> CollabResult<CsvReviewReply> {
+    let reply = client.post_json(CSV_REVIEW_ROUTE, &command.body())?;
+    match reply.status {
+        200 | 409 | 422 => {
+            let outcome: CsvReviewOutcome = serde_json::from_str(&reply.body)
+                .map_err(|parse| CollabError::Protocol(format!("{parse}: {}", reply.body)))?;
+            Ok(CsvReviewReply {
+                status: reply.status,
+                outcome,
+                replayed: reply.replayed,
+                body: reply.body,
+            })
+        }
+        _ => Err(reply.success().err().unwrap_or_else(|| {
+            CollabError::Protocol(format!("unexpected status {}", reply.status))
+        })),
+    }
+}
+
 /// A part's current details or revision when a command expected another
 /// one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -1062,6 +1207,43 @@ pub fn archive_entries_of(
     client.list_records("catalog_archive_entries", &filter, "seq")
 }
 
+/// The import problems with subject `ipn` and one of `codes`.
+pub fn problems_of(
+    client: &PocketBaseClient,
+    ipn: &str,
+    codes: &[&str],
+) -> CollabResult<Vec<StoredImportProblem>> {
+    let codes = codes
+        .iter()
+        .map(|code| format!("code = {}", Value::from(*code)))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    let filter = format!("subject = {} && ({codes})", Value::from(ipn));
+    client.list_records("catalog_import_problems", &filter, "id")
+}
+
+/// Every CSV review of the part with ID `part_id`, oldest first.
+pub fn csv_reviews_of(
+    client: &PocketBaseClient,
+    part_id: &str,
+) -> CollabResult<Vec<StoredCsvReview>> {
+    let filter = format!("part = {}", Value::from(part_id));
+    client.list_records("catalog_csv_reviews", &filter, "seq")
+}
+
+/// The audit entry of the latest import run of `csv_file` (such as
+/// `g-res`), if it was ever imported.
+pub fn latest_import_run(
+    client: &PocketBaseClient,
+    csv_file: &str,
+) -> CollabResult<Option<StoredAuditEntry>> {
+    let filter = format!(
+        "csv_file = {} && csv_import_number > 0",
+        Value::from(csv_file)
+    );
+    client.first_record("catalog_audit_entries", &filter, "-csv_import_number")
+}
+
 /// The archive entries one Change saved.
 pub fn archive_entries_in_change(
     client: &PocketBaseClient,
@@ -1154,6 +1336,38 @@ pub struct StoredArchiveEntry {
     /// The part's current revision once this entry was saved.
     pub current_revision_after: String,
     pub current_revision_number_after: u32,
+}
+
+/// One review of CSV changes that were not applied to an edited part. It
+/// covers what the CSV said (`csv_sha256`), so later imports that find the
+/// same CSV values need no new review.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct StoredCsvReview {
+    pub id: String,
+    pub part: String,
+    /// The import problem reviewed.
+    pub problem: String,
+    /// [`CSV_DETAILS_DIFFER`] or [`CSV_CAD_DIFFERS`].
+    pub code: String,
+    /// SHA-256 of the CSV document the problem recorded.
+    pub csv_sha256: String,
+    /// JSON list of the field names whose CSV values were taken.
+    pub accepted: String,
+    pub change: String,
+    /// The Change's seq.
+    pub seq: u64,
+}
+
+/// The CSV document an import problem recorded: the CSV's part details for
+/// [`CSV_DETAILS_DIFFER`], its part revision for [`CSV_CAD_DIFFERS`].
+pub fn recorded_csv_document(problem: &StoredImportProblem) -> Option<String> {
+    let key = match problem.code.as_str() {
+        CSV_DETAILS_DIFFER => "details",
+        CSV_CAD_DIFFERS => "revision",
+        _ => return None,
+    };
+    let detail: Value = serde_json::from_str(&problem.detail).ok()?;
+    detail.get(key)?.as_str().map(str::to_owned)
 }
 
 /// The revision numbers of a part that are archived now, from its archive
@@ -1345,6 +1559,7 @@ pub struct CatalogReadback {
     pub part_details: Vec<StoredPartDetails>,
     pub part_revisions: Vec<StoredPartRevision>,
     pub archive_entries: Vec<StoredArchiveEntry>,
+    pub csv_reviews: Vec<StoredCsvReview>,
     pub cad_items: Vec<StoredCadItem>,
     pub cad_item_revisions: Vec<StoredCadItemRevision>,
     pub blobs: Vec<StoredBlob>,
@@ -1393,13 +1608,14 @@ impl CatalogReadback {
 
     /// The number of records in each Catalog collection (blobs counted
     /// once each), for idempotency checks.
-    pub fn counts(&self) -> [usize; 10] {
+    pub fn counts(&self) -> [usize; 11] {
         [
             self.changes.len(),
             self.parts.len(),
             self.part_details.len(),
             self.part_revisions.len(),
             self.archive_entries.len(),
+            self.csv_reviews.len(),
             self.cad_items.len(),
             self.cad_item_revisions.len(),
             self.blobs.len(),
@@ -1418,6 +1634,7 @@ pub fn read_back(client: &PocketBaseClient) -> CollabResult<CatalogReadback> {
         part_details: client.list_records("catalog_part_details", "", "part,number")?,
         part_revisions: client.list_records("catalog_part_revisions", "", "part,number")?,
         archive_entries: client.list_records("catalog_archive_entries", "", "seq")?,
+        csv_reviews: client.list_records("catalog_csv_reviews", "", "seq")?,
         cad_items: client.list_records("catalog_cad_items", "", "kind,key")?,
         cad_item_revisions: client.list_records(
             "catalog_cad_item_revisions",

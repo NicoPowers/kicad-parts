@@ -18,10 +18,20 @@ pub enum ChangeKind {
     Archive,
     /// One part revision unarchived, published by `POST /api/catalog/archives`.
     Unarchive,
+    /// A person reviewed CSV changes that were not applied to an edited
+    /// part, taking some of the CSV's values or keeping theirs, published by
+    /// `POST /api/catalog/csv-reviews`.
+    CsvReview,
 }
 
 impl ChangeKind {
-    pub const ALL: [Self; 4] = [Self::CsvImport, Self::Edit, Self::Archive, Self::Unarchive];
+    pub const ALL: [Self; 5] = [
+        Self::CsvImport,
+        Self::Edit,
+        Self::Archive,
+        Self::Unarchive,
+        Self::CsvReview,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -29,6 +39,7 @@ impl ChangeKind {
             Self::Edit => "edit",
             Self::Archive => "archive",
             Self::Unarchive => "unarchive",
+            Self::CsvReview => "csv-review",
         }
     }
 
@@ -59,7 +70,7 @@ mod tests {
             .map(|kind| format!("\"{}\"", kind.as_str()))
             .collect();
         // The latest migration that sets the kinds.
-        let migration = infra("pb_migrations/1791900000_archived_revisions.js");
+        let migration = infra("pb_migrations/1792000000_csv_reviews.js");
         assert!(
             migration.contains(&format!("const KINDS = [{}];", values.join(", "))),
             "the migration's kind values differ from ChangeKind"
@@ -70,6 +81,7 @@ mod tests {
             ("edit", ChangeKind::Edit),
             ("archive", ChangeKind::Archive),
             ("unarchive", ChangeKind::Unarchive),
+            ("csvReview", ChangeKind::CsvReview),
         ] {
             assert!(
                 library.contains(&format!("  {name}: \"{}\",", kind.as_str())),

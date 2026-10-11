@@ -78,7 +78,10 @@
 //! import problem for that kind only (`csv-details-differ-from-edited-details`
 //! or `csv-cad-differs-from-edited-revision`); so is CAD whose content matches
 //! an archived revision (`csv-cad-matches-archived-revision`). Its other
-//! columns are checked as usual.
+//! columns are checked as usual. A CSV review (someone taking some of the
+//! CSV's values, or keeping theirs) does not change this: while the row
+//! still differs, each import records the problem again, and the review only
+//! stops the app from asking about the same CSV values twice.
 //!
 //! Excluded from BOM belongs to the revision but is no column: the report
 //! checks that a part has it exactly when a symbol revision it binds says
@@ -870,8 +873,8 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    /// Checks every Change: one audit entry, at least one revision or saved
-    /// part details, a reason.
+    /// Checks every Change: one audit entry, at least one revision, saved
+    /// part details, archive entry or CSV review, and a reason.
     fn changes(&mut self) -> Vec<ChangeAccount> {
         let readback = self.readback;
         let mut changes = Vec::new();
@@ -906,10 +909,15 @@ impl<'a> Reporter<'a> {
                     .archive_entries
                     .iter()
                     .filter(|entry| entry.change == change.id)
+                    .count()
+                + readback
+                    .csv_reviews
+                    .iter()
+                    .filter(|review| review.change == change.id)
                     .count();
             if revisions == 0 {
                 self.problem(format!(
-                    "Change {} has no revisions, no part details and no archive entry",
+                    "Change {} has no revisions, no part details, no archive entry and no CSV review",
                     change.seq
                 ));
             }
