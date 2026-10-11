@@ -1648,7 +1648,7 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
     // reviews refuses: the older version cannot read CSV reviews (nor,
     // further back, archive entries or part details kept apart from
     // revisions). An undo of several steps is refused as a whole, so
-    // nothing is changed, not even the newest step, which this data allows.
+    // nothing is changed, not even the newest steps, which this data allows.
     let populated = tempfile::tempdir().unwrap();
     let options = services::options(&root, populated.path());
     let (server, admin, _superuser) = services::start(&root, populated.path()).unwrap();
@@ -1721,7 +1721,7 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
         200
     );
     server.stop();
-    let said = migrate(&root, &options, &["down", "2"]);
+    let said = migrate(&root, &options, &["down", "3"]);
     assert!(
         said.contains("has CSV reviews")
             && said.contains("Nothing was changed")
@@ -1730,7 +1730,7 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
     );
     // Undoing further is refused at the first step too, so neither the
     // archive nor the details migration is undone.
-    let said = migrate(&root, &options, &["down", "4"]);
+    let said = migrate(&root, &options, &["down", "5"]);
     assert!(
         said.contains("has CSV reviews") && !said.contains("Reverted"),
         "{said}"
@@ -1760,8 +1760,9 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
         "(id = @request.auth.id) && @request.body.can_edit_catalog:isset = false && @request.body.name:isset = false"
     );
     assert!(fields.contains("can_edit_catalog"));
-    let said = migrate(&root, &options, &["down", "7"]);
+    let said = migrate(&root, &options, &["down", "8"]);
     for reverted in [
+        "1792200000_cad_item_revision_successor.js",
         "1792100000_uncommitted_changes.js",
         "1792000000_csv_reviews.js",
         "1791900000_archived_revisions.js",
@@ -1885,8 +1886,8 @@ fn an_import_allowed_from_uncommitted_changes_is_recorded_kept_and_not_undone() 
     server.stop();
 
     // The older version would lose that record, so the undo refuses and
-    // changes nothing.
-    let said = migrate(&root, &options, &["down", "1"]);
+    // changes nothing, not even the newer step, which this data allows.
+    let said = migrate(&root, &options, &["down", "2"]);
     assert!(
         said.contains("allowed from uncommitted changes")
             && said.contains("Nothing was changed")
@@ -1909,7 +1910,7 @@ fn team_server_data_from_before_numbered_cad_revisions_is_refused_not_changed() 
     // Undoing is refused while there is data: undoing the shared part
     // details refuses saved part details, and the undo stops there as a
     // whole, so the numbering is never undone either.
-    let said = migrate(&root, &options, &["down", "5"]);
+    let said = migrate(&root, &options, &["down", "6"]);
     assert!(
         said.contains("which the older version cannot read"),
         "{said}"
@@ -1966,6 +1967,76 @@ fn team_server_data_from_before_numbered_cad_revisions_is_refused_not_changed() 
         )
         .unwrap();
     assert_eq!(kept, 1);
+}
+
+#[test]
+fn a_cad_item_revision_has_at_most_one_successor() {
+    let root = repository();
+    let state = tempfile::tempdir().unwrap();
+    let options = services::options(&root, state.path());
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let import = CsvCatalog::new(&root).import("g-res", None).unwrap();
+    applied(&submit_import(&admin, &ImportCommand::new(&import, REASON)).unwrap());
+    let revision = read_back(&admin).unwrap().cad_item_revisions[0].clone();
+    server.stop();
+
+    // Adds a copy of `revision` that follows it, with this ID and number,
+    // straight into the database, past the routes and their guards.
+    let follow = |id: &str, number: u32| {
+        let database = rusqlite::Connection::open(options.data_dir.join("data.db")).unwrap();
+        database.execute_batch(&format!(
+            "DROP TABLE IF EXISTS temp.copy;
+             CREATE TEMP TABLE copy AS SELECT * FROM catalog_cad_item_revisions WHERE id = '{0}';
+             UPDATE copy SET id = '{id}', number = {number}, predecessor = '{0}';
+             INSERT INTO catalog_cad_item_revisions SELECT * FROM copy;",
+            revision.id
+        ))
+    };
+    // One successor fits; a second one, which would fork the CAD item's
+    // history, is refused by the unique index on predecessor.
+    follow("aaaaaaaaaaaaaa1", 2).unwrap();
+    let forked = follow("aaaaaaaaaaaaaa2", 3).unwrap_err().to_string();
+    assert!(
+        forked.contains("UNIQUE constraint failed: catalog_cad_item_revisions.predecessor"),
+        "{forked}"
+    );
+
+    // Undoing the index loses nothing and lets the fork in; starting again
+    // then refuses with a plain message and changes nothing.
+    let said = migrate(&root, &options, &["down", "1"]);
+    assert!(
+        said.contains("Reverted 1792200000_cad_item_revision_successor.js"),
+        "{said}"
+    );
+    follow("aaaaaaaaaaaaaa2", 3).unwrap();
+    let refused = services::start(&root, state.path()).err().unwrap();
+    assert!(
+        refused
+            .to_string()
+            .contains("history forks and it cannot be upgraded"),
+        "{refused}"
+    );
+    let database = rusqlite::Connection::open_with_flags(
+        options.data_dir.join("data.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let applied_migrations: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM _migrations WHERE file = '1792200000_cad_item_revision_successor.js'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(applied_migrations, 0);
+    let followers: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM catalog_cad_item_revisions WHERE predecessor = ?1",
+            [&revision.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(followers, 2);
 }
 
 #[test]

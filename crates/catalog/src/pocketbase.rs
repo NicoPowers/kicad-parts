@@ -3,8 +3,9 @@
 //! `catalog_edits.pb.js` for edits) and the `catalog_*`
 //! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`
 //! `1791600000_catalog_edits.js`, `1791800000_shared_part_details.js`,
-//! `1791900000_archived_revisions.js`, `1792000000_csv_reviews.js` and
-//! `1792100000_uncommitted_changes.js`).
+//! `1791900000_archived_revisions.js`, `1792000000_csv_reviews.js`,
+//! `1792100000_uncommitted_changes.js` and
+//! `1792200000_cad_item_revision_successor.js`).
 
 use crate::cad_item::Blob;
 use crate::cad_item::{CadItemDetails, ModelTarget};
@@ -356,7 +357,9 @@ struct PartRevisionBindings {
 /// and the latest import run of each CSV file. Downloads only these
 /// records, and only the fields it needs: never older revisions (unless a
 /// part's current revision binds one), earlier import runs, the recorded
-/// rows or the stored bytes, so it reads no more as history grows.
+/// rows or the stored bytes. So it downloads no more as history grows, and
+/// the unique index on a CAD item revision's predecessor keeps finding the
+/// newest revisions fast.
 pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState> {
     let parts: Vec<StoredPart> = client.list_record_fields(
         "catalog_parts",
@@ -380,32 +383,38 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
     })
 }
 
-/// The latest import run of each CSV file, oldest first. Asks for the
-/// newest run of a CSV file not found yet, one run at a time, so it reads
-/// one run per CSV file however many runs there were.
+/// The latest import run of each CSV file, oldest first. Goes through the
+/// CSV files in name order, asking each time for the newest run of the
+/// first file named after the one found last, so it reads one run per CSV
+/// file however many runs there were, with a filter that stays short. (The
+/// import route takes only plain CSV file names, letters, digits and
+/// `._-`, so the name compares and quotes safely.)
 fn read_latest_imports(client: &PocketBaseClient) -> CollabResult<Vec<LatestImport>> {
     let mut latest: Vec<LatestImport> = Vec::new();
     loop {
-        let mut filter = "csv_import_number > 0".to_owned();
-        for run in &latest {
-            filter.push_str(&format!(
-                " && csv_file != {}",
+        let filter = match latest.last() {
+            None => "csv_import_number > 0".to_owned(),
+            Some(run) => format!(
+                "csv_import_number > 0 && csv_file > {}",
                 Value::from(run.csv_file.as_str())
-            ));
-        }
+            ),
+        };
         let Some(entry) = client.first_record_fields::<LatestImportFields>(
             "catalog_audit_entries",
             &filter,
-            "-csv_import_number",
+            "csv_file,-csv_import_number",
             "id,csv_file,csv_import_number,source_commit",
         )?
         else {
             break;
         };
-        // A filter that did not leave this file out would loop forever.
-        if latest.iter().any(|run| run.csv_file == entry.csv_file) {
+        // A file not named after the last one would loop forever.
+        if latest
+            .last()
+            .is_some_and(|run| entry.csv_file <= run.csv_file)
+        {
             return Err(CollabError::Protocol(format!(
-                "the team server listed import run {} of {} again",
+                "the team server listed import run {} of {} out of order",
                 entry.csv_import_number, entry.csv_file
             )));
         }
