@@ -15,7 +15,7 @@ use collaboration::{CollabError, CollabResult, CorrelationId, PocketBaseClient};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The route that publishes a CSV catalog import.
 pub const CSV_IMPORT_ROUTE: &str = "/api/catalog/csv-imports";
@@ -340,19 +340,23 @@ struct CadItemRevisionFields {
     snapshot: String,
 }
 
+/// The fields of [`CadItemRevisionFields`], for `fields=`.
+const CAD_ITEM_REVISION_FIELDS: &str = "id,cad_item,number,snapshot_sha256,snapshot";
+
 /// The few fields of a part revision that [`read_import_state`] downloads.
 #[derive(Deserialize)]
 struct PartRevisionBindings {
     part: String,
-    number: u32,
     #[serde(default)]
     cad_item_revisions: Vec<String>,
 }
 
 /// Reads each part's current revision and details numbers and the CAD item
 /// revisions its current revision binds, each CAD item's current revision,
-/// and the latest import run of each CSV file. Downloads only the fields it needs, never the recorded
-/// rows or the stored bytes.
+/// and the latest import run of each CSV file. Downloads only these
+/// records, and only the fields it needs: never older revisions (unless a
+/// part's current revision binds one), earlier import runs, the recorded
+/// rows or the stored bytes, so it reads no more as history grows.
 pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState> {
     let parts: Vec<StoredPart> = client.list_record_fields(
         "catalog_parts",
@@ -360,27 +364,8 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
         "ipn",
         "id,ipn,ipn_prefix,variant,current_revision,current_revision_number,current_details,current_details_number,first_change",
     )?;
-    let entries: Vec<LatestImportFields> = client.list_record_fields(
-        "catalog_audit_entries",
-        "csv_import_number > 0",
-        "csv_import_number",
-        "id,csv_file,csv_import_number,source_commit",
-    )?;
     let current_cad = read_current_cad(client, &parts)?;
-    let mut latest: BTreeMap<String, LatestImport> = BTreeMap::new();
-    for entry in entries {
-        latest.insert(
-            entry.csv_file.clone(),
-            LatestImport {
-                csv_file: entry.csv_file,
-                csv_import_number: entry.csv_import_number,
-                source_commit: entry.source_commit,
-                audit_entry: entry.id,
-            },
-        );
-    }
-    let mut latest_imports: Vec<LatestImport> = latest.into_values().collect();
-    latest_imports.sort_by_key(|run| run.csv_import_number);
+    let latest_imports = read_latest_imports(client)?;
     Ok(ImportState {
         current_revisions: parts
             .iter()
@@ -395,92 +380,162 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
     })
 }
 
+/// The latest import run of each CSV file, oldest first. Asks for the
+/// newest run of a CSV file not found yet, one run at a time, so it reads
+/// one run per CSV file however many runs there were.
+fn read_latest_imports(client: &PocketBaseClient) -> CollabResult<Vec<LatestImport>> {
+    let mut latest: Vec<LatestImport> = Vec::new();
+    loop {
+        let mut filter = "csv_import_number > 0".to_owned();
+        for run in &latest {
+            filter.push_str(&format!(
+                " && csv_file != {}",
+                Value::from(run.csv_file.as_str())
+            ));
+        }
+        let Some(entry) = client.first_record_fields::<LatestImportFields>(
+            "catalog_audit_entries",
+            &filter,
+            "-csv_import_number",
+            "id,csv_file,csv_import_number,source_commit",
+        )?
+        else {
+            break;
+        };
+        // A filter that did not leave this file out would loop forever.
+        if latest.iter().any(|run| run.csv_file == entry.csv_file) {
+            return Err(CollabError::Protocol(format!(
+                "the team server listed import run {} of {} again",
+                entry.csv_import_number, entry.csv_file
+            )));
+        }
+        latest.push(LatestImport {
+            csv_file: entry.csv_file,
+            csv_import_number: entry.csv_import_number,
+            source_commit: entry.source_commit,
+            audit_entry: entry.id,
+        });
+    }
+    latest.sort_by_key(|run| run.csv_import_number);
+    Ok(latest)
+}
+
 /// Each CAD item's current revision, with a footprint's 3D model bindings,
 /// and the CAD item revisions each part's current revision binds.
+///
+/// Reads three sets of records:
+/// - each CAD item's current revision: its newest, the one that no other
+///   revision names as its predecessor;
+/// - each part's current revision, the one its part points to, for the IDs
+///   of the CAD item revisions it binds;
+/// - the bound CAD item revisions that are not current, by ID.
+///
+/// A footprint's snapshot names the 3D model revisions it binds, so they
+/// need no read of their own.
 fn read_current_cad(client: &PocketBaseClient, parts: &[StoredPart]) -> CollabResult<CurrentCad> {
-    let revisions: Vec<CadItemRevisionFields> = client.list_record_fields(
-        "catalog_cad_item_revisions",
-        "",
-        "cad_item,number",
-        "id,cad_item,number,snapshot_sha256,snapshot",
-    )?;
     let mut current = CurrentCad::default();
     let mut by_id: BTreeMap<String, (String, Binding)> = BTreeMap::new();
-    // Sorted by number, so the newest revision of each CAD item comes last.
-    for revision in revisions {
-        let details: CadItemDetails =
-            serde_json::from_str(&revision.snapshot).map_err(|error| {
-                CollabError::Protocol(format!(
-                    "CAD item revision {} cannot be read: {error}",
-                    revision.id
-                ))
-            })?;
-        let binding = Binding {
-            number: revision.number,
-            snapshot_sha256: revision.snapshot_sha256,
-            content_sha256: details.content_sha256(),
-        };
-        let models = details
-            .model_references
-            .into_iter()
-            .filter_map(|model| match model.target {
-                ModelTarget::CadItemRevision {
-                    cad_item,
-                    number,
-                    snapshot_sha256,
-                } => Some((
-                    cad_item,
-                    Binding {
-                        number,
-                        // A 3D model names no other CAD item, so its
-                        // content is its whole snapshot.
-                        content_sha256: snapshot_sha256.clone(),
-                        snapshot_sha256,
-                    },
-                )),
-                ModelTarget::Unresolved { .. } => None,
-            })
-            .collect();
+    let newest: Vec<CadItemRevisionFields> = client.list_record_fields(
+        "catalog_cad_item_revisions",
+        "catalog_cad_item_revisions_via_predecessor.id = \"\"",
+        "cad_item,number",
+        CAD_ITEM_REVISION_FIELDS,
+    )?;
+    for revision in newest {
+        let (cad_item, binding, models) = read_cad_item_revision(revision, &mut by_id)?;
         current.cad_items.insert(
-            revision.cad_item.clone(),
+            cad_item,
             CurrentCadItemRevision {
                 number: binding.number,
-                snapshot_sha256: binding.snapshot_sha256.clone(),
+                snapshot_sha256: binding.snapshot_sha256,
                 models,
             },
         );
-        by_id.insert(revision.id, (revision.cad_item, binding));
     }
+
     let part_revisions: Vec<PartRevisionBindings> = client.list_record_fields(
         "catalog_part_revisions",
-        "",
+        "part.current_revision = id",
         "part,number",
-        "part,number,cad_item_revisions",
+        "part,cad_item_revisions",
     )?;
-    let current_numbers: BTreeMap<&str, (&str, u32)> = parts
+    let older: BTreeSet<&str> = part_revisions
         .iter()
-        .map(|part| {
-            (
-                part.id.as_str(),
-                (part.ipn.as_str(), part.current_revision_number),
-            )
-        })
+        .flat_map(|revision| &revision.cad_item_revisions)
+        .map(String::as_str)
+        .filter(|id| !by_id.contains_key(*id))
         .collect();
-    for revision in part_revisions {
-        let Some(&(ipn, number)) = current_numbers.get(revision.part.as_str()) else {
+    for filter in id_filters(&older.into_iter().collect::<Vec<_>>()) {
+        let bound: Vec<CadItemRevisionFields> = client.list_record_fields(
+            "catalog_cad_item_revisions",
+            &filter,
+            "cad_item,number",
+            CAD_ITEM_REVISION_FIELDS,
+        )?;
+        for revision in bound {
+            read_cad_item_revision(revision, &mut by_id)?;
+        }
+    }
+
+    let ipns: BTreeMap<&str, &str> = parts
+        .iter()
+        .map(|part| (part.id.as_str(), part.ipn.as_str()))
+        .collect();
+    for revision in &part_revisions {
+        let Some(ipn) = ipns.get(revision.part.as_str()) else {
             continue;
         };
-        if number != revision.number {
-            continue;
-        }
         let bindings = revision
             .cad_item_revisions
             .iter()
             .filter_map(|id| by_id.get(id).cloned())
             .collect();
-        current.parts.insert(ipn.to_owned(), bindings);
+        current.parts.insert((*ipn).to_owned(), bindings);
     }
     Ok(current)
+}
+
+/// Reads one CAD item revision's snapshot. Gives its CAD item, its binding
+/// (also kept in `by_id` under its ID) and, for a footprint, the 3D model
+/// revisions it binds, by CAD item ID.
+fn read_cad_item_revision(
+    revision: CadItemRevisionFields,
+    by_id: &mut BTreeMap<String, (String, Binding)>,
+) -> CollabResult<(String, Binding, BTreeMap<String, Binding>)> {
+    let details: CadItemDetails = serde_json::from_str(&revision.snapshot).map_err(|error| {
+        CollabError::Protocol(format!(
+            "CAD item revision {} cannot be read: {error}",
+            revision.id
+        ))
+    })?;
+    let binding = Binding {
+        number: revision.number,
+        snapshot_sha256: revision.snapshot_sha256,
+        content_sha256: details.content_sha256(),
+    };
+    let models = details
+        .model_references
+        .into_iter()
+        .filter_map(|model| match model.target {
+            ModelTarget::CadItemRevision {
+                cad_item,
+                number,
+                snapshot_sha256,
+            } => Some((
+                cad_item,
+                Binding {
+                    number,
+                    // A 3D model names no other CAD item, so its content is
+                    // its whole snapshot.
+                    content_sha256: snapshot_sha256.clone(),
+                    snapshot_sha256,
+                },
+            )),
+            ModelTarget::Unresolved { .. } => None,
+        })
+        .collect();
+    by_id.insert(revision.id, (revision.cad_item.clone(), binding.clone()));
+    Ok((revision.cad_item, binding, models))
 }
 
 /// What the import route answered.

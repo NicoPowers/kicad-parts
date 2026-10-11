@@ -176,13 +176,28 @@ impl PocketBaseClient {
         filter: &str,
         sort: &str,
     ) -> CollabResult<Option<T>> {
-        let query = vec![
+        self.first_record_fields(collection, filter, sort, "")
+    }
+
+    /// Like [`PocketBaseClient::first_record`], but the record carries only
+    /// `fields` (comma-separated field names; empty means every field).
+    pub fn first_record_fields<T: DeserializeOwned>(
+        &self,
+        collection: &str,
+        filter: &str,
+        sort: &str,
+        fields: &str,
+    ) -> CollabResult<Option<T>> {
+        let mut query = vec![
             ("page", "1".to_owned()),
             ("perPage", "1".to_owned()),
             ("sort", sort.to_owned()),
             ("filter", filter.to_owned()),
             ("skipTotal", "1".to_owned()),
         ];
+        if !fields.is_empty() {
+            query.push(("fields", fields.to_owned()));
+        }
         let reply =
             self.get_with_query(&format!("/api/collections/{collection}/records"), &query)?;
         let mut list: Value = reply.json()?;
