@@ -80,8 +80,14 @@ fn App() -> impl IntoView {
     // menu from re-rendering whenever someone saves a Change.
     let team_badge = Memo::new(move |_| {
         team.get().map(|mut status| {
-            if let TeamSession::SignedIn { checkpoint, .. } = &mut status.session {
+            if let TeamSession::SignedIn {
+                checkpoint,
+                imports,
+                ..
+            } = &mut status.session
+            {
                 *checkpoint = 0;
+                *imports = 0;
             }
             status
         })
@@ -524,11 +530,16 @@ fn PartPanel(
     let team_checked = RwSignal::new(false);
     let team_seq = StoredValue::new(0u64);
     let ui = TeamUi::new();
-    // Changes whenever someone saves a Change, or on sign-in and sign-out.
+    // Changes whenever someone saves a Change, a CSV import run finishes
+    // (it may find CSV changes to review), or on sign-in and sign-out.
     let team_checkpoint = Memo::new(move |_| {
         team.with(
             |status| match status.as_ref().map(|status| &status.session) {
-                Some(TeamSession::SignedIn { checkpoint, .. }) => Some(*checkpoint),
+                Some(TeamSession::SignedIn {
+                    checkpoint,
+                    imports,
+                    ..
+                }) => Some((*checkpoint, *imports)),
                 _ => None,
             },
         )

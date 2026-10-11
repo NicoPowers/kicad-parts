@@ -1,6 +1,7 @@
 //! The team catalog use cases behind the desktop: sign in to the team's
 //! PocketBase server, read one part's details and history, publish edits,
-//! archive and unarchive revisions, and follow changes others make.
+//! archive and unarchive revisions, review CSV changes that were not
+//! applied, and follow changes others make.
 //!
 //! The session (the auth token) lives only in memory: the app saves the
 //! server address and email, never the password or the token, so signing in
@@ -10,14 +11,18 @@
 //! with the server: it subscribes to realtime notifications of new Changes
 //! and, after any disconnect, reconnects and catches up from the last
 //! Change `seq` it applied. The UI polls [`TeamCatalog::status`], whose
-//! `checkpoint` grows whenever anyone publishes a Change.
+//! `checkpoint` grows whenever anyone publishes a Change and whose `imports`
+//! grows when a CSV import run finishes (a run may find CSV changes without
+//! publishing a Change) or after catching up.
 
 use crate::PartValues;
 use catalog::pocketbase::{
-    ArchiveCommand, ArchiveOutcome, ConflictingRecord, EditCommand, PublishOutcome, PublishReply,
-    StoredArchiveEntry, StoredBlob, StoredCadItemRevision, StoredChange, StoredPart,
-    StoredPartRevision, archive_entries_of, archived_numbers, changes_by_id, part_by_ipn,
-    part_details_of, part_revisions, submit_archive, submit_edit,
+    ArchiveCommand, ArchiveOutcome, CSV_CAD_DIFFERS, CSV_DETAILS_DIFFER, ConflictingRecord,
+    CsvReviewCommand, CsvReviewOutcome, EditCommand, MANUFACTURER_PARTS_FIELD, PublishOutcome,
+    PublishReply, StoredArchiveEntry, StoredBlob, StoredCadItemRevision, StoredChange,
+    StoredCsvReview, StoredPart, StoredPartRevision, archive_entries_of, archived_numbers,
+    changes_by_id, csv_reviews_of, latest_import_run, part_by_ipn, part_details_of, part_revisions,
+    problems_of, recorded_csv_document, submit_archive, submit_csv_review, submit_edit,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
@@ -26,10 +31,10 @@ use catalog::{
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
-    ArchiveNote, CadItemUse, ConflictRow, CurrentDetails, CurrentRevision, DetailChange, Field,
-    HistoryEntry, LiveUpdates, ManufacturerPart, PreviewKind, PublishResult, RevisionStatus,
-    SignInRequest, TeamArchiveRequest, TeamConflict, TeamEditRequest, TeamPart, TeamSession,
-    TeamStatus,
+    ArchiveNote, CadItemUse, ConflictRow, CsvChangeRow, CsvChanges, CurrentDetails,
+    CurrentRevision, DetailChange, Field, HistoryEntry, LiveUpdates, ManufacturerPart, PreviewKind,
+    PublishResult, RevisionStatus, SignInRequest, TeamArchiveRequest, TeamConflict,
+    TeamCsvReviewRequest, TeamEditRequest, TeamPart, TeamSession, TeamStatus,
 };
 use kicad_integration::{LibRef, StoredItem, footprint_choices};
 use serde::{Deserialize, Serialize};
@@ -43,6 +48,9 @@ use std::time::Duration;
 
 /// The realtime topic of new Changes.
 const CHANGES_TOPIC: &str = "catalog_changes";
+/// The realtime topic of new audit entries, which tell when a CSV import run
+/// finishes even if it published no Change.
+const AUDIT_TOPIC: &str = "catalog_audit_entries";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the follower waits for an event before checking whether it
 /// should stop.
@@ -70,6 +78,8 @@ struct Session {
 struct Live {
     updates: LiveUpdates,
     replica: CatalogReplica,
+    /// Counts finished CSV import runs and catch-ups.
+    imports: u64,
 }
 
 /// The background thread that follows new Changes.
@@ -84,6 +94,7 @@ impl Follower {
         let live = Arc::new(Mutex::new(Live {
             updates: LiveUpdates::Connecting,
             replica: CatalogReplica::new(),
+            imports: 0,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -97,9 +108,13 @@ impl Follower {
         }
     }
 
-    fn snapshot(&self) -> (LiveUpdates, u64) {
+    fn snapshot(&self) -> (LiveUpdates, u64, u64) {
         let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-        (live.updates.clone(), live.replica.checkpoint())
+        (
+            live.updates.clone(),
+            live.replica.checkpoint(),
+            live.imports,
+        )
     }
 }
 
@@ -220,13 +235,14 @@ impl TeamCatalog {
         };
         let session = match &state.session {
             Some(session) => {
-                let (live, checkpoint) = session.follower.snapshot();
+                let (live, checkpoint, imports) = session.follower.snapshot();
                 TeamSession::SignedIn {
                     name: session.name.clone(),
                     email: session.email.clone(),
                     can_edit: session.can_edit,
                     live,
                     checkpoint,
+                    imports,
                 }
             }
             None => TeamSession::SignedOut {
@@ -411,6 +427,66 @@ impl TeamCatalog {
                     },
                 }),
                 ArchiveOutcome::CorrelationReused { message, .. } => {
+                    Ok(PublishResult::Refused { message })
+                }
+            },
+            Err(CollabError::Http {
+                status: 400 | 404,
+                message,
+            }) => Ok(PublishResult::Refused { message }),
+            Err(CollabError::Forbidden(message)) => Ok(PublishResult::Refused { message }),
+            Err(CollabError::Unauthorized(_)) => Ok(PublishResult::Refused {
+                message: "Your sign-in has ended. Sign in again, then save.".into(),
+            }),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Reviews CSV changes that were not applied to an edited part: takes
+    /// the CSV's values for the fields named, keeps the part's for the rest.
+    pub fn csv_review(&self, request: TeamCsvReviewRequest) -> Result<PublishResult, String> {
+        let client = self.client()?;
+        let mut command = CsvReviewCommand::new(
+            &request.ipn,
+            &request.problem,
+            request.accept.clone(),
+            request.expected,
+            &request.reason,
+        );
+        command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
+        let reload = || -> Result<TeamPart, String> {
+            let part = part_by_ipn(&client, &request.ipn)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("{} is no longer in the team catalog", request.ipn))?;
+            load_part(&client, &part)
+        };
+        match submit_csv_review(&client, &command) {
+            Ok(reply) => match reply.outcome {
+                CsvReviewOutcome::Applied {
+                    accepted,
+                    details,
+                    revision,
+                    ..
+                } => Ok(PublishResult::CsvReviewed {
+                    accepted,
+                    details_saved: details.is_some(),
+                    revision: revision.map(|revision| revision.number),
+                    part: reload()?,
+                }),
+                CsvReviewOutcome::Noop { .. } => Ok(PublishResult::NothingToSave {
+                    message: "Someone already reviewed these CSV changes, so nothing was saved."
+                        .into(),
+                }),
+                CsvReviewOutcome::Conflict { .. } => Ok(PublishResult::Refused {
+                    message: format!(
+                        "Someone else changed {} after you opened these CSV changes. Nothing was saved. Look at the part again, then review the CSV changes again.",
+                        request.ipn
+                    ),
+                }),
+                CsvReviewOutcome::OutOfDate { .. } => Ok(PublishResult::Refused {
+                    message: "The CSV catalog changed after these changes were found. Nothing was saved. Import the CSV file again to see what differs now.".into(),
+                }),
+                CsvReviewOutcome::CorrelationReused { message, .. } => {
                     Ok(PublishResult::Refused { message })
                 }
             },
@@ -808,6 +884,9 @@ fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBo
     let set = |updates: LiveUpdates| {
         live.lock().unwrap_or_else(|e| e.into_inner()).updates = updates;
     };
+    let imported = || {
+        live.lock().unwrap_or_else(|e| e.into_inner()).imports += 1;
+    };
     // Network calls run on a copy so `status` never waits for them.
     let update_replica = |work: &dyn Fn(&mut CatalogReplica) -> Result<(), CollabError>| {
         let mut replica = live
@@ -824,15 +903,26 @@ fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBo
         let went_live = std::cell::Cell::new(false);
         let result = (|| -> Result<(), CollabError> {
             let mut connection = RealtimeConnection::connect(client.base_url(), CONNECT_TIMEOUT)?;
-            connection.subscribe(client, &[CHANGES_TOPIC])?;
+            connection.subscribe(client, &[CHANGES_TOPIC, AUDIT_TOPIC])?;
             update_replica(&|replica| replica.catch_up(client).map(|_| ()))?;
+            // An import run may have finished while disconnected.
+            imported();
             set(LiveUpdates::Live);
             went_live.set(true);
             while !stop.load(Ordering::SeqCst) {
                 let Some(event) = connection.next_event(POLL)? else {
                     continue;
                 };
-                if event.topic != CHANGES_TOPIC || event.data["action"] != "create" {
+                if event.data["action"] != "create" {
+                    continue;
+                }
+                if event.topic == AUDIT_TOPIC {
+                    if event.data["record"]["csv_import_number"].as_u64() > Some(0) {
+                        imported();
+                    }
+                    continue;
+                }
+                if event.topic != CHANGES_TOPIC {
                     continue;
                 }
                 let change: StoredChange = serde_json::from_value(event.data["record"].clone())
@@ -917,11 +1007,13 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
     let saved_details = part_details_of(client, &part.id).map_err(fail)?;
     let revisions = part_revisions(client, &part.id).map_err(fail)?;
     let archive_entries = archive_entries_of(client, &part.id).map_err(fail)?;
+    let reviews = csv_reviews_of(client, &part.id).map_err(fail)?;
     let change_ids: Vec<&str> = saved_details
         .iter()
         .map(|d| d.change.as_str())
         .chain(revisions.iter().map(|r| r.change.as_str()))
         .chain(archive_entries.iter().map(|a| a.change.as_str()))
+        .chain(reviews.iter().map(|r| r.change.as_str()))
         .collect();
     let change_records: BTreeMap<String, StoredChange> = changes_by_id(client, &change_ids)
         .map_err(fail)?
@@ -994,6 +1086,26 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
             history_entry(&mut entries, change).archive = Some(archive_note(entry));
         }
     }
+    for review in &reviews {
+        if let Some(change) = change_records.get(&review.change) {
+            let took = serde_json::from_str::<Vec<String>>(&review.accepted)
+                .is_ok_and(|accepted| !accepted.is_empty());
+            history_entry(&mut entries, change).action = if took {
+                "Took CSV changes"
+            } else {
+                "Kept own values"
+            }
+            .to_owned();
+        }
+    }
+    let csv_changes = open_csv_changes(
+        client,
+        part,
+        current_details,
+        current_revision,
+        &reviews,
+        describe,
+    )?;
     let archived = archived_numbers(&archive_entries.iter().collect::<Vec<_>>());
     let view = TeamPart {
         ipn: part.ipn.clone(),
@@ -1007,12 +1119,163 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
             })
             .collect(),
         history: entries.into_values().rev().collect(),
+        csv_changes,
     };
     Ok(LoadedPart {
         view,
         details,
         revisions: cad,
     })
+}
+
+/// The CSV changes nobody has reviewed yet: each
+/// [`CSV_DETAILS_DIFFER`] or [`CSV_CAD_DIFFERS`] import problem of the part
+/// that the latest import run of its CSV file found, unless a review already
+/// covers what the CSV says, and only if a field still differs.
+fn open_csv_changes(
+    client: &PocketBaseClient,
+    part: &StoredPart,
+    details: &PartDetails,
+    revision: &PartRevision,
+    reviews: &[StoredCsvReview],
+    describe: impl Fn(&CadReference) -> String,
+) -> Result<Vec<CsvChanges>, String> {
+    let fail = |error: CollabError| error.to_string();
+    let problems =
+        problems_of(client, &part.ipn, &[CSV_DETAILS_DIFFER, CSV_CAD_DIFFERS]).map_err(fail)?;
+    let mut runs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut open: Vec<CsvChanges> = Vec::new();
+    for problem in &problems {
+        let Some(document) = recorded_csv_document(problem) else {
+            continue;
+        };
+        let csv_sha256 = catalog::sha256_hex(&document);
+        if reviews
+            .iter()
+            .any(|review| review.code == problem.code && review.csv_sha256 == csv_sha256)
+        {
+            continue;
+        }
+        let Some(csv_file) = problem
+            .path
+            .strip_prefix("database/")
+            .and_then(|name| name.strip_suffix(".csv"))
+        else {
+            continue;
+        };
+        if !runs.contains_key(csv_file) {
+            let found = latest_import_run(client, csv_file)
+                .map_err(fail)?
+                .and_then(|entry| entry.import_run())
+                .map(|run| run.problems)
+                .unwrap_or_default();
+            runs.insert(csv_file.to_owned(), found);
+        }
+        if !runs[csv_file].contains(&problem.id) {
+            continue;
+        }
+        let cad = problem.code == CSV_CAD_DIFFERS;
+        let rows = if cad {
+            let csv: PartRevision = serde_json::from_str(&document)
+                .map_err(|error| format!("the CSV revision of {}: {error}", part.ipn))?;
+            cad_rows(revision, &csv, &describe)
+        } else {
+            let csv: PartDetails = serde_json::from_str(&document)
+                .map_err(|error| format!("the CSV details of {}: {error}", part.ipn))?;
+            details_rows(details, &csv)
+        };
+        if rows.is_empty() {
+            continue;
+        }
+        open.push(CsvChanges {
+            problem: problem.id.clone(),
+            csv_file: format!("{csv_file}.csv"),
+            cad,
+            expected: if cad {
+                part.current_revision_number
+            } else {
+                part.current_details_number
+            },
+            rows,
+        });
+    }
+    // Details first; one import run finds at most one of each kind.
+    open.sort_by_key(|changes| changes.cad);
+    open.dedup_by_key(|changes| changes.cad);
+    Ok(open)
+}
+
+/// The details fields both have whose values differ, in the part's order,
+/// then the manufacturer parts if they differ.
+fn details_rows(now: &PartDetails, csv: &PartDetails) -> Vec<CsvChangeRow> {
+    let mut rows: Vec<CsvChangeRow> = now
+        .fields
+        .iter()
+        .filter_map(|field| {
+            let theirs = csv.field(&field.name)?;
+            (theirs != field.value).then(|| CsvChangeRow {
+                field: field.name.clone(),
+                now: field.value.clone(),
+                csv: theirs.to_owned(),
+            })
+        })
+        .collect();
+    if now.manufacturer_parts != csv.manufacturer_parts {
+        rows.push(CsvChangeRow {
+            field: MANUFACTURER_PARTS_FIELD.to_owned(),
+            now: stored_lines(now),
+            csv: stored_lines(csv),
+        });
+    }
+    rows
+}
+
+/// Symbol and Footprint, where the field or the exact CAD it uses differs.
+/// When only the exact CAD differs, each side lists its references.
+fn cad_rows(
+    now: &PartRevision,
+    csv: &PartRevision,
+    describe: &impl Fn(&CadReference) -> String,
+) -> Vec<CsvChangeRow> {
+    let mut rows = Vec::new();
+    for (name, role) in [
+        ("Symbol", CadReferenceRole::Symbol),
+        ("Footprint", CadReferenceRole::Footprint),
+    ] {
+        let (Some(ours), Some(theirs)) = (now.field(name), csv.field(name)) else {
+            continue;
+        };
+        let references = |revision: &PartRevision| -> Vec<CadReference> {
+            revision
+                .cad_references
+                .iter()
+                .filter(|reference| reference.role == role)
+                .cloned()
+                .collect()
+        };
+        let (our_references, their_references) = (references(now), references(csv));
+        if ours == theirs && our_references == their_references {
+            continue;
+        }
+        let lines = |references: &[CadReference]| {
+            references
+                .iter()
+                .map(describe)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let (now_text, csv_text) = if ours == theirs {
+            (lines(&our_references), lines(&their_references))
+        } else {
+            (ours.to_owned(), theirs.to_owned())
+        };
+        rows.push(CsvChangeRow {
+            field: name.to_owned(),
+            now: now_text,
+            csv: csv_text,
+        });
+    }
+    rows
 }
 
 /// The history entry of `change`, made when first needed.
@@ -1103,6 +1366,7 @@ fn action(kind: &str) -> &'static str {
         "edit" => "Edited",
         "archive" => "Archived",
         "unarchive" => "Unarchived",
+        "csv-review" => "Took CSV changes",
         _ => "Saved",
     }
 }

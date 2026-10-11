@@ -8,7 +8,8 @@ use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
     AppStatus, PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
-    SearchResponse, SignInRequest, TeamArchiveRequest, TeamEditRequest, TeamPart, TeamStatus,
+    SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest, TeamEditRequest,
+    TeamPart, TeamStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -316,6 +317,15 @@ async fn team_archive(
     blocking(move || team.archive(request)).await?
 }
 
+#[tauri::command]
+async fn team_csv_review(
+    team: State<'_, Team>,
+    request: TeamCsvReviewRequest,
+) -> Result<PublishResult, String> {
+    let team = team.inner().clone();
+    blocking(move || team.csv_review(request)).await?
+}
+
 fn main() {
     let options = match LaunchOptions::parse(std::env::args_os().skip(1)) {
         Ok(options) => options,
@@ -388,6 +398,7 @@ fn main() {
             team_part,
             team_edit,
             team_archive,
+            team_csv_review,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -490,6 +501,7 @@ mod tests {
             command::TEAM_PART,
             command::TEAM_EDIT,
             command::TEAM_ARCHIVE,
+            command::TEAM_CSV_REVIEW,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

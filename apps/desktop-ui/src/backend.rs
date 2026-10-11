@@ -2,8 +2,8 @@
 
 use desktop_contract::{
     AppStatus, PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
-    SearchResponse, SignInRequest, TeamArchiveRequest, TeamEditRequest, TeamPart, TeamStatus,
-    command,
+    SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest, TeamEditRequest,
+    TeamPart, TeamStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -97,6 +97,11 @@ struct ArchiveArgs {
     request: TeamArchiveRequest,
 }
 
+#[derive(Serialize)]
+struct CsvReviewArgs {
+    request: TeamCsvReviewRequest,
+}
+
 pub async fn team_status() -> Result<TeamStatus, String> {
     call(command::TEAM_STATUS, &NoArgs {}).await
 }
@@ -119,4 +124,8 @@ pub async fn team_edit(request: TeamEditRequest) -> Result<PublishResult, String
 
 pub async fn team_archive(request: TeamArchiveRequest) -> Result<PublishResult, String> {
     call(command::TEAM_ARCHIVE, &ArchiveArgs { request }).await
+}
+
+pub async fn team_csv_review(request: TeamCsvReviewRequest) -> Result<PublishResult, String> {
+    call(command::TEAM_CSV_REVIEW, &CsvReviewArgs { request }).await
 }

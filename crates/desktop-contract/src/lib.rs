@@ -19,6 +19,7 @@ pub mod command {
     pub const TEAM_PART: &str = "team_part";
     pub const TEAM_EDIT: &str = "team_edit";
     pub const TEAM_ARCHIVE: &str = "team_archive";
+    pub const TEAM_CSV_REVIEW: &str = "team_csv_review";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -251,6 +252,11 @@ pub enum TeamSession {
         /// The `seq` of the last Change this app has seen. It grows when
         /// anyone publishes a Change, which tells the UI to reload.
         checkpoint: u64,
+        /// Grows when a CSV import run finishes (which may find CSV changes
+        /// without publishing a Change) and after catching up, which also
+        /// tells the UI to reload.
+        #[serde(default)]
+        imports: u64,
     },
 }
 
@@ -309,6 +315,55 @@ pub struct TeamPart {
     pub revisions: Vec<RevisionStatus>,
     /// One entry per Change that saved this part, newest first.
     pub history: Vec<HistoryEntry>,
+    /// CSV changes that were not applied because the part was edited in
+    /// this app, and nobody has reviewed yet. At most one for the details
+    /// and one for the symbol and footprint.
+    #[serde(default)]
+    pub csv_changes: Vec<CsvChanges>,
+}
+
+/// CSV changes the latest import found for a part that was edited in this
+/// app, so the import left the part as it is.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CsvChanges {
+    /// The import problem that recorded them.
+    pub problem: String,
+    /// The CSV file, such as `g-res.csv`.
+    pub csv_file: String,
+    /// True for the symbol and footprint (taking them adds a revision),
+    /// false for the part details.
+    pub cad: bool,
+    /// The current details number (`cad` false) or revision number (`cad`
+    /// true) the rows compare with.
+    pub expected: u32,
+    /// Each field whose CSV value differs from the part's.
+    pub rows: Vec<CsvChangeRow>,
+}
+
+/// One field whose value in the CSV differs from the part's.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CsvChangeRow {
+    /// A details field name, `Manufacturer parts`, `Symbol` or `Footprint`.
+    pub field: String,
+    pub now: String,
+    pub csv: String,
+}
+
+/// Take the CSV's values for the fields in `accept` and keep the part's
+/// for the rest; an empty `accept` keeps all of them. The server takes the
+/// values from what the import recorded, not from this request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamCsvReviewRequest {
+    /// As in [`TeamEditRequest`].
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    pub ipn: String,
+    /// [`CsvChanges::problem`].
+    pub problem: String,
+    pub accept: Vec<String>,
+    /// [`CsvChanges::expected`].
+    pub expected: u32,
+    pub reason: String,
 }
 
 /// One revision of a part and whether it is archived. An archived revision
@@ -390,7 +445,8 @@ pub struct HistoryEntry {
     /// The revision this Change archived or unarchived, if it did.
     #[serde(default)]
     pub archive: Option<ArchiveNote>,
-    /// `Imported`, `Edited`, `Archived` or `Unarchived`.
+    /// `Imported`, `Edited`, `Archived`, `Unarchived`, `Took CSV changes`
+    /// or `Kept own values`.
     pub action: String,
     pub actor_name: String,
     /// When it was saved, as `2026-10-09 18:02 UTC`.
@@ -454,7 +510,7 @@ pub struct TeamEditRequest {
     pub cad_fields: Vec<Field>,
 }
 
-/// What publishing an edit, archive or unarchive did.
+/// What publishing an edit, archive, unarchive or CSV review did.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum PublishResult {
@@ -470,6 +526,17 @@ pub enum PublishResult {
         archived: bool,
         /// The part's current revision afterwards.
         current: u32,
+        part: TeamPart,
+    },
+    /// CSV changes were reviewed: some taken (new details, a new
+    /// revision, or both) or none (the part's values kept).
+    CsvReviewed {
+        /// The fields whose CSV values were taken; empty if none.
+        accepted: Vec<String>,
+        /// The part details were saved again.
+        details_saved: bool,
+        /// The revision added, if a symbol or footprint was taken.
+        revision: Option<u32>,
         part: TeamPart,
     },
     /// Nothing would change, so nothing was saved.

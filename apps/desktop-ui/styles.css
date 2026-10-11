@@ -1012,3 +1012,49 @@ a {
   background: var(--panel);
   border-top: 1px solid var(--line);
 }
+
+/* CSV changes an import did not apply because the part was edited here. */
+.csv-notice {
+  margin-bottom: 0.9rem;
+  padding: 0.6rem 0.9rem;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-line);
+  border-left-width: 6px;
+  border-radius: var(--radius);
+}
+
+.csv-notice h3 {
+  margin: 0 0 0.25rem;
+}
+
+.csv-notice p {
+  margin: 0 0 0.5rem;
+}
+
+.csv-review-form > p {
+  margin: 0 0 0.6rem;
+}
+
+/* Headings that take focus after a form closes show no focus ring. */
+.csv-review-form h3:focus,
+#fields-heading:focus {
+  outline: none;
+}
+
+.csv-review-form textarea {
+  width: 100%;
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+}
+
+.part-fields .changes .pick {
+  width: 3.2rem;
+  text-align: center;
+}
+
+.part-fields .changes td.pick input {
+  width: 1.1rem;
+  height: 1.1rem;
+}
