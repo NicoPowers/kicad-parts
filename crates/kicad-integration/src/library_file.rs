@@ -139,6 +139,30 @@ impl FootprintFile {
     }
 }
 
+/// Whether the bytes of a symbol CAD item revision (one or more top-level
+/// `(symbol ...)` entries) have an entry that says `(in_bom no)`. Bytes that
+/// do not read as symbol entries say nothing. The team server's
+/// catalog_lib.js symbolSaysNotInBom reads them the same way.
+pub fn symbol_entries_say_not_in_bom(bytes: &[u8]) -> bool {
+    let mut library = b"(kicad_symbol_lib ".to_vec();
+    library.extend_from_slice(bytes);
+    library.push(b')');
+    SymbolLibrary::parse(&library).is_ok_and(|library| {
+        library
+            .entries
+            .iter()
+            .any(|entry| entry.in_bom == Some(false))
+    })
+}
+
+/// Whether the bytes of a footprint (a whole `.kicad_mod`) have
+/// `exclude_from_bom` in an `(attr ...)`. Bytes that do not read as a
+/// footprint say nothing. catalog_lib.js footprintExcludedFromBom reads them
+/// the same way.
+pub fn footprint_says_excluded_from_bom(bytes: &[u8]) -> bool {
+    FootprintFile::parse(bytes).is_ok_and(|footprint| footprint.exclude_from_bom)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Token {
     Open(usize),

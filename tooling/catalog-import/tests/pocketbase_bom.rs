@@ -21,6 +21,8 @@ use std::path::Path;
 const EDITED: &str = "RES-0000-0470";
 /// A resistor only the CSV changes.
 const IMPORTED: &str = "RES-0000-1000";
+/// Another resistor only the CSV changes.
+const OTHER: &str = "RES-0000-1500";
 /// The test point, whose symbol g-art:TestPoint says (in_bom no).
 const TEST_POINT: &str = "ART-0000-0001";
 /// A footprint whose (attr ...) has exclude_from_bom.
@@ -36,22 +38,44 @@ struct Team {
 impl Team {
     /// A team server with the test points and the resistors imported.
     fn start() -> Self {
+        let team = Self::empty(None);
+        assert_eq!(team.import("g-art"), "applied");
+        assert_eq!(team.import("g-res"), "applied");
+        team
+    }
+
+    /// A team server with nothing imported yet and a copy of the CSV
+    /// catalog. With `extra_hook`, the server also loads that hook file.
+    fn empty(extra_hook: Option<&str>) -> Self {
         let root = services::repository_root();
         let state = tempfile::tempdir().unwrap();
-        let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+        let mut options = services::options(&root, state.path());
+        if let Some(hook) = extra_hook {
+            let hooks = state.path().join("hooks");
+            fs::create_dir_all(&hooks).unwrap();
+            for entry in fs::read_dir(root.join("infra/pocketbase/pb_hooks")).unwrap() {
+                let entry = entry.unwrap();
+                fs::copy(entry.path(), hooks.join(entry.file_name())).unwrap();
+            }
+            fs::write(hooks.join("test_bom.pb.js"), hook).unwrap();
+            options.hooks_dir = hooks;
+        }
+        let superuser = native_services::Superuser::generate();
+        let binary = native_services::pocketbase_binary(&root).unwrap();
+        let server = PocketBaseServer::start(&binary, &options, &superuser).unwrap();
+        let admin = PocketBaseClient::new(server.url())
+            .authenticate("_superusers", &superuser.email, &superuser.password)
+            .unwrap();
         let copy = tempfile::tempdir().unwrap();
         for tree in ["database", "symbols", "footprints", "3d-models"] {
             copy_tree(&root.join(tree), &copy.path().join(tree));
         }
-        let team = Self {
+        Self {
             server,
             admin,
             copy,
             _state: state,
-        };
-        assert_eq!(team.import("g-art"), "applied");
-        assert_eq!(team.import("g-res"), "applied");
-        team
+        }
     }
 
     fn plan(&self, csv_file: &str) -> CsvImport {
@@ -63,6 +87,20 @@ impl Team {
     /// Imports `csv_file` from the copy as an importer does; the zero-loss
     /// report must hold.
     fn import(&self, csv_file: &str) -> &'static str {
+        let outcome = self.import_only(csv_file);
+        let oracle = csv_catalog_fixture::build_manifest(self.copy.path()).unwrap();
+        let report = catalog_import::report(&oracle, csv_file, &self.read(), self.copy.path());
+        assert!(
+            report.is_lossless(),
+            "{}",
+            serde_json::to_string_pretty(&report.summary()).unwrap()
+        );
+        outcome
+    }
+
+    /// Imports `csv_file` from the copy without the zero-loss report (whose
+    /// oracle reads only UTF-8 CAD files).
+    fn import_only(&self, csv_file: &str) -> &'static str {
         let import = self.plan(csv_file);
         let state = read_import_state(&self.admin).unwrap();
         let command = ImportCommand::new(&import, "Import").expecting(&state);
@@ -73,13 +111,6 @@ impl Team {
             ImportOutcome::Noop { .. } => "noop",
             _ => panic!("the import did not go through: {}", reply.body),
         };
-        let oracle = csv_catalog_fixture::build_manifest(self.copy.path()).unwrap();
-        let report = catalog_import::report(&oracle, csv_file, &self.read(), self.copy.path());
-        assert!(
-            report.is_lossless(),
-            "{}",
-            serde_json::to_string_pretty(&report.summary()).unwrap()
-        );
         outcome
     }
 
@@ -318,6 +349,232 @@ fn an_import_cannot_claim_a_different_setting_than_its_cad_says() {
             }) => assert!(message.contains(says), "{ipn}: {message}"),
             other => panic!("{ipn}: expected 400, got {other:?}"),
         }
+    }
+    assert_eq!(team.read(), before, "nothing was written");
+    team.server.stop();
+}
+
+/// A route that answers what the server's reader says about some bytes.
+const BOM_MARK_HOOK: &str = r#"
+routerAdd("POST", "/api/test/bom-mark", (e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  const body = e.requestInfo().body;
+  return e.json(200, { mark: lib.bomMark(body.role, lib.base64Decode(body.base64)) });
+}, $apis.requireSuperuserAuth());
+"#;
+
+#[test]
+fn the_server_reads_bom_flags_exactly_as_the_importer_does() {
+    use kicad_integration::library_file::{
+        footprint_says_excluded_from_bom, symbol_entries_say_not_in_bom,
+    };
+    let team = Team::empty(Some(BOM_MARK_HOOK));
+    let footprint = |attr: &[u8]| -> Vec<u8> {
+        let mut bytes = b"(footprint \"F\"\n\t(version 20241229)\n\t(descr \"plain\")\n\t".to_vec();
+        bytes.extend_from_slice(attr);
+        bytes.extend_from_slice(b"\n)\n");
+        bytes
+    };
+    let symbol = |inner: &[u8]| -> Vec<u8> {
+        let mut bytes = b"(symbol \"TP\"\n\t\t".to_vec();
+        bytes.extend_from_slice(inner);
+        bytes.extend_from_slice(b"\n\t)");
+        bytes
+    };
+    let latin1 = b"(footprint \"F\" (descr \"caf\xe9\") (attr smd exclude_from_bom))".to_vec();
+    let cases: Vec<(&str, &str, Vec<u8>)> = vec![
+        (
+            "footprint",
+            "flagged",
+            footprint(b"(attr smd exclude_from_bom)"),
+        ),
+        ("footprint", "not flagged", footprint(b"(attr smd)")),
+        ("footprint", "a Latin-1 byte", latin1),
+        (
+            "footprint",
+            "NBSP",
+            footprint(b"(attr smd\xc2\xa0exclude_from_bom)"),
+        ),
+        (
+            "footprint",
+            "VT",
+            footprint(b"(attr smd\x0bexclude_from_bom)"),
+        ),
+        (
+            "footprint",
+            "FF",
+            footprint(b"(attr smd\x0cexclude_from_bom)"),
+        ),
+        (
+            "footprint",
+            "CR",
+            footprint(b"(attr smd\rexclude_from_bom)"),
+        ),
+        (
+            "footprint",
+            "U+FEFF",
+            footprint(b"(attr smd\xef\xbb\xbfexclude_from_bom)"),
+        ),
+        (
+            "footprint",
+            "U+2028",
+            footprint(b"(attr smd\xe2\x80\xa8exclude_from_bom)"),
+        ),
+        (
+            "footprint",
+            "a string",
+            footprint(b"(attr smd \"exclude_from_bom\")"),
+        ),
+        (
+            "footprint",
+            "nested",
+            footprint(b"(attr (smd exclude_from_bom))"),
+        ),
+        (
+            "footprint",
+            "elsewhere",
+            footprint(b"(fp_text value \"x\" exclude_from_bom)"),
+        ),
+        (
+            "footprint",
+            "module",
+            b"(module F (attr exclude_from_bom))".to_vec(),
+        ),
+        (
+            "footprint",
+            "unbalanced",
+            b"(footprint F (attr exclude_from_bom)".to_vec(),
+        ),
+        (
+            "footprint",
+            "a byte order mark",
+            b"\xef\xbb\xbf(footprint F (attr exclude_from_bom))".to_vec(),
+        ),
+        (
+            "footprint",
+            "a trailing backslash",
+            b"(footprint F (attr exclude_from_bom) \"\\".to_vec(),
+        ),
+        ("symbol", "in_bom no", symbol(b"(in_bom no)")),
+        ("symbol", "in_bom yes", symbol(b"(in_bom yes)")),
+        ("symbol", "VT", symbol(b"(in_bom\x0bno)")),
+        ("symbol", "FF", symbol(b"(in_bom\x0cno)")),
+        ("symbol", "NBSP", symbol(b"(in_bom\xc2\xa0no)")),
+        ("symbol", "a quoted head", symbol(b"(\"in_bom\" \"no\")")),
+        (
+            "symbol",
+            "a Latin-1 byte",
+            symbol(b"(property \"x\" \"caf\xe9\") (in_bom no)"),
+        ),
+        (
+            "symbol",
+            "only a unit",
+            symbol(b"(symbol \"TP_0_1\" (in_bom no))"),
+        ),
+        ("symbol", "unnamed", b"(symbol (in_bom no))".to_vec()),
+        (
+            "symbol",
+            "an unnamed entry beside a marked one",
+            b"(symbol \"TP\" (in_bom no)) (symbol (in_bom yes))".to_vec(),
+        ),
+        (
+            "symbol",
+            "a parenthesis in a string",
+            symbol(b"(property \"x\" \"a ) b\") (in_bom no)"),
+        ),
+    ];
+    for (role, what, bytes) in cases {
+        let rust = if role == "symbol" {
+            symbol_entries_say_not_in_bom(&bytes)
+        } else {
+            footprint_says_excluded_from_bom(&bytes)
+        };
+        let reply = team
+            .admin
+            .post_json(
+                "/api/test/bom-mark",
+                &serde_json::json!({ "role": role, "base64": catalog::pocketbase::base64(&bytes) }),
+            )
+            .unwrap();
+        assert_eq!(reply.status, 200, "{role} {what}: {}", reply.body);
+        let server: serde_json::Value = serde_json::from_str(&reply.body).unwrap();
+        assert_eq!(server["mark"], rust, "{role} with {what}");
+    }
+    team.server.stop();
+}
+
+#[test]
+fn non_utf8_and_unusual_whitespace_import_and_edit_as_the_importer_reads_them() {
+    let team = Team::empty(None);
+    let pretty = team.copy.path().join("footprints/g-res.pretty");
+    // Flagged, with a Latin-1 byte in its description.
+    fs::write(
+        pretty.join("NonUtf8.kicad_mod"),
+        b"(footprint \"NonUtf8\"\n\t(version 20241229)\n\t(descr \"r\xe9sistance\")\n\t(attr smd exclude_from_bom)\n)\n",
+    )
+    .unwrap();
+    // A no-break space is not a separator, so this is not flagged.
+    fs::write(
+        pretty.join("Nbsp.kicad_mod"),
+        "(footprint \"Nbsp\"\n\t(version 20241229)\n\t(attr smd\u{a0}exclude_from_bom)\n)\n",
+    )
+    .unwrap();
+    team.change_row(IMPORTED, "\"g-res:R_0603_1608Metric\"", "\"g-res:NonUtf8\"");
+    team.change_row(OTHER, "\"g-res:R_0603_1608Metric\"", "\"g-res:Nbsp\"");
+    // The CSV catalog fixture's oracle reads only UTF-8 CAD, so the
+    // zero-loss report is left out here.
+    assert_eq!(team.import_only("g-art"), "applied");
+    assert_eq!(team.import_only("g-res"), "applied");
+    let stored = team.read();
+    assert!(current(&stored, IMPORTED).1.excluded_from_bom);
+    assert!(!current(&stored, OTHER).1.excluded_from_bom);
+    // An edit reads the same stored bytes the same way.
+    let (_, revision) = edit_cad(&team, EDITED, "Footprint", "g-res:NonUtf8");
+    assert!(revision.excluded_from_bom);
+    let (_, revision) = edit_cad(&team, EDITED, "Footprint", "g-res:Nbsp");
+    assert!(!revision.excluded_from_bom);
+    team.server.stop();
+}
+
+#[test]
+fn an_import_cannot_bind_a_reference_to_another_cad_item() {
+    let team = Team::start();
+    let before = team.read();
+    let mut import = team.plan("g-res");
+    let part = import
+        .parts
+        .iter_mut()
+        .find(|part| part.ipn.as_str() == IMPORTED)
+        .unwrap();
+    // Point the symbol reference at the footprint's CAD item revision.
+    let footprint = part
+        .revision
+        .cad_references
+        .iter()
+        .find(|reference| reference.role == catalog::CadReferenceRole::Footprint)
+        .unwrap()
+        .target
+        .clone();
+    let symbol = part
+        .revision
+        .cad_references
+        .iter_mut()
+        .find(|reference| reference.role == catalog::CadReferenceRole::Symbol)
+        .unwrap();
+    symbol.target = footprint;
+    part.revision_json = part.revision.canonical_json();
+    part.revision_sha256 = sha256_hex(&part.revision_json);
+    let state = read_import_state(&team.admin).unwrap();
+    let command = ImportCommand::new(&import, "Import").expecting(&state);
+    match submit_import(&team.admin, &command) {
+        Err(CollabError::Http {
+            status: 400,
+            message,
+        }) => assert!(
+            message.contains("must bind the CAD item of that symbol"),
+            "{message}"
+        ),
+        other => panic!("expected 400, got {other:?}"),
     }
     assert_eq!(team.read(), before, "nothing was written");
     team.server.stop();

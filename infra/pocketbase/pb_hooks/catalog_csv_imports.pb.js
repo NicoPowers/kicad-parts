@@ -293,12 +293,7 @@ routerAdd(
         // PocketBase cannot store an empty file.
         fail(`blob ${blob.sha256} is empty; blobs must have at least one byte`);
       }
-      return {
-        id: lib.deriveId("blob", blob.sha256),
-        sha256: blob.sha256,
-        bytes: bytes,
-        text: hasText ? blob.text : null,
-      };
+      return { id: lib.deriveId("blob", blob.sha256), sha256: blob.sha256, bytes: bytes };
     });
     const requestBlobs = {};
     for (const blob of blobs) {
@@ -423,7 +418,17 @@ routerAdd(
       const targets = [];
       for (const binding of revision.parsed.cad_references || []) {
         if (binding && binding.target && binding.target.kind === "cad-item-revision") {
-          targets.push(lib.cadItemRevisionTarget(binding.target, `${ipn}'s ${binding.reference}`));
+          const target = lib.cadItemRevisionTarget(binding.target, `${ipn}'s ${binding.reference}`);
+          // A symbol or footprint reference binds only its own CAD item, as
+          // edits do, so no reference can point at other bytes.
+          if (
+            (binding.role !== "symbol" && binding.role !== "footprint") ||
+            typeof binding.reference !== "string" ||
+            target.cadItem !== lib.deriveId("cad-item", binding.role + "\n" + binding.reference)
+          ) {
+            fail(`${ipn}'s ${binding.role} ${binding.reference} must bind the CAD item of that ${binding.role}`);
+          }
+          targets.push(target);
         }
       }
       const parsedSource = parse(source, "source");
@@ -810,20 +815,31 @@ routerAdd(
         const change = byId("catalog_changes", record.getString("change"));
         return { kind: change ? change.getString("kind") : "", seq: change ? change.getInt("seq") : 0 };
       };
-      // The bytes of a CAD item revision a part binds, as text: from this
-      // request when it sends that revision, otherwise as stored.
-      const storedText = lib.storedCadText(txApp);
-      const cadText = (target) => {
+      // Whether a symbol or footprint CAD item revision a part binds says
+      // it is not in the BOM: from this request's bytes when it sends that
+      // revision, otherwise as stored. Each blob is judged at most once.
+      const storedMarks = lib.storedBomMarks(txApp);
+      const sentMarks = {};
+      const markOf = (target, role) => {
         const sent = requestRevisions[target.cad_item];
-        if (sent && sent.number === target.number) {
-          const blob = requestBlobs[sent.parsed.blob_sha256];
-          if (blob) {
-            return blob.text !== null ? blob.text : toString(blob.bytes);
-          }
-          const stored = byId("catalog_blobs", lib.deriveId("blob", sent.parsed.blob_sha256));
-          return stored ? lib.blobText(stored) : null;
+        if (!sent || sent.number !== target.number) {
+          return storedMarks(target, role);
         }
-        return storedText(target);
+        if (sent.kind !== role) {
+          return null;
+        }
+        const sha = sent.parsed.blob_sha256;
+        const key = role + "\n" + sha;
+        if (sentMarks[key] === undefined) {
+          const blob = requestBlobs[sha];
+          const stored = blob ? null : byId("catalog_blobs", lib.deriveId("blob", sha));
+          sentMarks[key] = blob
+            ? lib.bomMark(role, blob.bytes)
+            : stored
+              ? lib.bomMark(role, lib.blobBytes(stored))
+              : null;
+        }
+        return sentMarks[key];
       };
       for (const part of parts) {
         const stored = byId("catalog_parts", part.id);
@@ -836,7 +852,7 @@ routerAdd(
         // the server reads them (kicad-parts-ccc0). A stored record that is
         // not what its ID says is answered as an ID collision instead.
         if (collisions.length === 0) {
-          const excluded = lib.excludedFromBom(part.revision.parsed, cadText);
+          const excluded = lib.excludedFromBom(part.revision.parsed, markOf);
           if ((part.revision.parsed.excluded_from_bom === true) !== excluded) {
             fail(
               excluded

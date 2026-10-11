@@ -810,7 +810,10 @@ function cadReferences(txApp, fields, currentRevision) {
 // zero-loss report read the flags the same way.
 
 // The tokens of KiCad s-expression text: "(" and ")", { text } for a
-// quoted string, and { atom } for anything else.
+// quoted string, and { atom } for anything else. The text holds one
+// character per byte (bytesText), and only ASCII space, tab, LF, FF and CR
+// separate tokens, exactly as crates/kicad-integration library_file.rs reads
+// bytes; null if a string is not closed.
 function sexpTokens(text) {
   const tokens = [];
   let index = 0;
@@ -836,11 +839,11 @@ function sexpTokens(text) {
       }
       index++;
       tokens.push({ text: value });
-    } else if (/\s/.test(char)) {
+    } else if (/[ \t\n\f\r]/.test(char)) {
       index++;
     } else {
       const start = index;
-      while (index < text.length && !/[\s()"]/.test(text[index])) {
+      while (index < text.length && !/[ \t\n\f\r()"]/.test(text[index])) {
         index++;
       }
       tokens.push({ atom: text.substring(start, index) });
@@ -891,16 +894,19 @@ function sexpChildren(tokens) {
 }
 
 // Whether a symbol CAD item revision's bytes (one or more top-level
-// (symbol ...) entries) have an entry that says (in_bom no).
+// (symbol ...) entries, as text from bytesText) have an entry that says
+// (in_bom no). Like SymbolLibrary::parse, any entry without a name makes
+// the whole text unreadable, so false.
 function symbolSaysNotInBom(text) {
-  const entries = sexpChildren(sexpTokens("(kicad_symbol_lib " + text + ")"));
-  if (!entries) {
+  const children = sexpChildren(sexpTokens("(kicad_symbol_lib " + text + ")"));
+  if (!children) {
+    return false;
+  }
+  const entries = children.filter((child) => sexpWord(child[1]) === "symbol");
+  if (entries.some((entry) => sexpWord(entry[2]) === null)) {
     return false;
   }
   return entries.some((entry) => {
-    if (sexpWord(entry[1]) !== "symbol") {
-      return false;
-    }
     const inner = sexpChildren(entry);
     if (!inner) {
       return false;
@@ -910,8 +916,8 @@ function symbolSaysNotInBom(text) {
   });
 }
 
-// Whether a footprint CAD item revision's bytes (a whole .kicad_mod) have
-// exclude_from_bom in an (attr ...).
+// Whether a footprint CAD item revision's bytes (a whole .kicad_mod, as text
+// from bytesText) have exclude_from_bom in an (attr ...).
 function footprintExcludedFromBom(text) {
   const tokens = sexpTokens(text);
   const head = tokens && sexpWord(tokens[1]);
@@ -926,32 +932,59 @@ function footprintExcludedFromBom(text) {
   );
 }
 
-// Excluded from BOM for a part revision document, from the bytes of the CAD
-// item revisions it binds. `textOf(target)` gives a bound CAD item
-// revision's bytes as text, or null if they cannot be read.
-function excludedFromBom(document, textOf) {
+// Bytes (a JS array of numbers or a Go byte slice) as text with one
+// character per byte, so a byte that is not UTF-8 stays one character, as
+// the Rust reader sees it.
+function bytesText(bytes) {
+  const parts = [];
+  const length = bytes.length;
+  for (let start = 0; start < length; start += 8192) {
+    const chunk = [];
+    const end = Math.min(start + 8192, length);
+    for (let i = start; i < end; i++) {
+      chunk.push(bytes[i] & 0xff);
+    }
+    parts.push(String.fromCharCode.apply(null, chunk));
+  }
+  return parts.join("");
+}
+
+// Whether `bytes` of a symbol or footprint say it is not in the BOM.
+function bomMark(role, bytes) {
+  const text = bytesText(bytes);
+  return role === "symbol" ? symbolSaysNotInBom(text) : footprintExcludedFromBom(text);
+}
+
+// Excluded from BOM for a part revision document. `markOf(target, role)`
+// says whether a bound symbol or footprint CAD item revision says it is not
+// in the BOM: true, false, or null when it cannot be read.
+function excludedFromBom(document, markOf) {
   let symbolMarked = false;
   const footprints = [];
   for (const reference of document.cad_references || []) {
     const target = reference && reference.target;
-    const text = target && target.kind === "cad-item-revision" ? textOf(target) : null;
-    if (reference.role === "symbol") {
-      symbolMarked = symbolMarked || (text !== null && symbolSaysNotInBom(text));
-    } else if (reference.role === "footprint") {
-      footprints.push(text !== null && footprintExcludedFromBom(text));
+    const role = reference && reference.role;
+    if (role !== "symbol" && role !== "footprint") {
+      continue;
+    }
+    const mark = target && target.kind === "cad-item-revision" ? markOf(target, role) === true : false;
+    if (role === "symbol") {
+      symbolMarked = symbolMarked || mark;
+    } else {
+      footprints.push(mark);
     }
   }
   const marked = footprints.filter((choice) => choice).length;
   return symbolMarked || (marked > 0 && marked === footprints.length);
 }
 
-// The stored bytes of a blob record, as text.
-function blobText(record) {
+// The stored bytes of a blob record.
+function blobBytes(record) {
   const fsys = $app.newFilesystem();
   try {
     const reader = fsys.getReader(record.baseFilesPath() + "/" + record.getString("file"));
     try {
-      return toString(reader);
+      return toBytes(reader);
     } finally {
       reader.close();
     }
@@ -960,11 +993,12 @@ function blobText(record) {
   }
 }
 
-// textOf for excludedFromBom over the stored CAD item revisions, reading
-// each blob at most once.
-function storedCadText(txApp) {
-  const texts = {};
-  return (target) => {
+// markOf for excludedFromBom over stored CAD item revisions: only a symbol
+// or footprint CAD item revision of the bound role is read, and each blob is
+// read and judged at most once.
+function storedBomMarks(txApp) {
+  const marks = {};
+  return (target, role) => {
     const revision = recordById(
       txApp,
       "catalog_cad_item_revisions",
@@ -973,12 +1007,21 @@ function storedCadText(txApp) {
     if (!revision || !isCadItemRevision(revision, target.cad_item, target.number)) {
       return null;
     }
-    const blobId = revision.getString("blob");
-    if (texts[blobId] === undefined) {
-      const blob = recordById(txApp, "catalog_blobs", blobId);
-      texts[blobId] = blob ? blobText(blob) : null;
+    let kind = null;
+    try {
+      kind = JSON.parse(revision.getString("snapshot")).kind;
+    } catch (_) {
+      kind = null;
     }
-    return texts[blobId];
+    if (kind !== role) {
+      return null;
+    }
+    const key = role + "\n" + revision.getString("blob");
+    if (marks[key] === undefined) {
+      const blob = recordById(txApp, "catalog_blobs", revision.getString("blob"));
+      marks[key] = blob ? bomMark(role, blobBytes(blob)) : null;
+    }
+    return marks[key];
   };
 }
 
@@ -1151,7 +1194,7 @@ function publishEdit(e) {
       // Excluded from BOM follows the CAD the new revision binds, read by
       // the server from the stored bytes (kicad-parts-ccc0). Like
       // PartRevision, the snapshot names it only when it is set.
-      if (excludedFromBom(document, storedCadText(txApp))) {
+      if (excludedFromBom(document, storedBomMarks(txApp))) {
         document.excluded_from_bom = true;
       }
       refuse("revision", revisionProblem(document));
@@ -1714,7 +1757,7 @@ function publishCsvReview(e) {
         };
         // Excluded from BOM follows the CAD the new revision binds, read by
         // the server from the stored bytes (kicad-parts-ccc0).
-        if (excludedFromBom(document, storedCadText(txApp))) {
+        if (excludedFromBom(document, storedBomMarks(txApp))) {
           document.excluded_from_bom = true;
         }
         const problemText = revisionProblem(document);
@@ -1868,8 +1911,12 @@ module.exports = {
   publishArchive: publishArchive,
   publishCsvReview: publishCsvReview,
   excludedFromBom: excludedFromBom,
-  storedCadText: storedCadText,
-  blobText: blobText,
+  storedBomMarks: storedBomMarks,
+  bomMark: bomMark,
+  blobBytes: blobBytes,
+  bytesText: bytesText,
+  symbolSaysNotInBom: symbolSaysNotInBom,
+  footprintExcludedFromBom: footprintExcludedFromBom,
   CSV_REVIEW_KINDS: CSV_REVIEW_KINDS,
   archiveState: archiveState,
   newestRevision: newestRevision,
