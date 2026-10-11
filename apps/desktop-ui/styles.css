@@ -1050,11 +1050,17 @@ a {
 }
 
 .part-fields .changes .pick {
-  width: 3.2rem;
+  width: 4.6rem;
   text-align: center;
+  white-space: nowrap;
 }
 
 .part-fields .changes td.pick input {
   width: 1.1rem;
   height: 1.1rem;
+}
+
+/* Field names in the review table read as easily as the values. */
+.part-fields .csv-review-form .changes tbody th {
+  color: var(--ink);
 }

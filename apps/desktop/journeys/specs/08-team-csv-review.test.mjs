@@ -1,10 +1,12 @@
-// CSV changes that an import did not apply: someone edits a part in the
-// app, the next import of the CSV catalog leaves the edited part alone, and
-// the app shows a notice by itself. Reviewing lists each field whose CSV
-// value differs; taking only the value saves the part details (no
-// revision) and leaves the rest. The taken change never shows again; when
-// the CSV changes, the notice comes back, and keeping the current values is
-// a choice the app records (kicad-parts-75a5).
+// New CSV values that an import did not apply: someone edits a part in the
+// app, and an import of the unchanged CSV shows nothing (the CSV has no new
+// values; only the part was edited). When the CSV then changes, the next
+// import leaves the edited part alone and the app shows a notice by itself.
+// Reviewing lists each field whose CSV value differs; accepting only the
+// value saves the part details (no revision) and leaves the rest. The
+// accepted values never show again; when the CSV changes again, the notice
+// comes back, and keeping the current values is a choice the app records
+// (kicad-parts-75a5).
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -35,21 +37,24 @@ const NOTICE = '.team-notice';
 const CSV_NOTICE = '.csv-notice';
 const FORM = '.csv-review-form';
 
-/** A copy of the CSV catalog whose row for IPN has a tighter tolerance. */
-function changedCatalog() {
+/**
+ * A copy of the CSV catalog whose row for IPN has this value and tolerance
+ * instead of 47 and 1%.
+ */
+function changedCatalog(value, tolerance) {
   const root = tempDir('changed-csv');
   for (const folder of ['database', 'symbols', 'footprints']) {
     fs.cpSync(path.join(repoRoot, folder), path.join(root, folder), { recursive: true });
   }
   const file = path.join(root, 'database', 'g-res.csv');
   const text = fs.readFileSync(file, 'utf8');
-  const from = '"47","g-pas:R_US","g-res:R_0603_1608Metric","1%"';
-  assert.equal(text.split(from).length, 2, 'the row of the part is found once');
-  fs.writeFileSync(file, text.replace(from, '"47","g-pas:R_US","g-res:R_0603_1608Metric","0.5%"'));
+  const row = (v, t) => `"${v}","g-pas:R_US","g-res:R_0603_1608Metric","${t}"`;
+  assert.equal(text.split(row('47', '1%')).length, 2, 'the row of the part is found once');
+  fs.writeFileSync(file, text.replace(row('47', '1%'), row(value, tolerance)));
   return root;
 }
 
-describe('team catalog: reviewing CSV changes that were not applied', () => {
+describe('team catalog: reviewing new CSV values that were not applied', () => {
   let server;
   let browser;
   let editor;
@@ -133,7 +138,7 @@ describe('team catalog: reviewing CSV changes that were not applied', () => {
     return (await browser.$$(CSV_NOTICE)).length === 0;
   }
 
-  it('shows by itself that the CSV has changes the import did not apply', async () => {
+  it('shows by itself when the CSV has new values the import did not apply', async () => {
     await waitForText(browser, '#result-count', '178 matching parts');
     await browser.execute(() => (document.querySelector('.team-settings').open = true));
     await (await browser.$('aria/Password')).setValue(editor.password);
@@ -157,23 +162,34 @@ describe('team catalog: reviewing CSV changes that were not applied', () => {
       'Plainer words',
     );
     await waitForField('Value', '47 ohm');
-    // The next import of the CSV catalog leaves the edited details alone.
+    // Importing the unchanged CSV leaves the edited details alone and
+    // offers nothing: the CSV has no new values.
     assert.equal(await server.reimport(), 'nothing_changed');
+    await browser.pause(1_500);
+    assert.ok(await noCsvNotice(), 'no notice while the CSV is unchanged');
+    // The CSV now says 47R: the import still leaves the edited details
+    // alone, and the app shows the new values by itself.
+    assert.equal(await server.reimport(changedCatalog('47R', '1%')), 'nothing_changed');
     await waitForText(
       browser,
       CSV_NOTICE,
-      /The CSV catalog has changes for this part that were not applied, because the part was edited in this app\./,
+      /g-res\.csv has new values for this part\. They were not applied, because the part was edited in this app\./,
     );
-    assert.equal(await textOf(browser, '#csv-notice-heading'), 'CSV changes not applied');
+    assert.equal(await textOf(browser, '#csv-notice-heading'), 'New values in the CSV');
+    assert.equal(
+      await browser.execute(() => document.querySelector('.csv-notice').getAttribute('role')),
+      'status',
+      'screen readers hear the notice when it appears',
+    );
     assert.equal(await fieldValue('Value'), '47 ohm', 'nothing was applied');
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 0);
     await assertAccessible(browser, '54-team-csv-changes');
     await screenshot(browser, '54-team-csv-changes');
   });
 
-  it('lists each differing field and takes only the ticked ones', async () => {
-    await clickButton(CSV_NOTICE, 'Review CSV changes');
-    await waitForText(browser, '#csv-review-heading', 'Review CSV changes');
+  it('lists each differing field and accepts only the ticked ones', async () => {
+    await clickButton(CSV_NOTICE, 'Review CSV values');
+    await waitForText(browser, '#csv-review-heading', 'Review CSV values');
     assert.equal(
       await browser.execute(() => document.activeElement?.id),
       'csv-review-heading',
@@ -181,12 +197,13 @@ describe('team catalog: reviewing CSV changes that were not applied', () => {
     );
     assert.deepEqual(await reviewRows(), [
       { field: 'Description', now: 'Thick film resistor, 47 ohm', csv: 'RES 47 OHM 1% 1/10W 0603', ticked: false },
-      { field: 'Value', now: '47 ohm', csv: '47', ticked: false },
+      { field: 'Value', now: '47 ohm', csv: '47R', ticked: false },
     ]);
-    assert.match(await textOf(browser, FORM), /g-res\.csv has these values for this part\. Tick the ones to take\./);
-    assert.equal(await (await browser.$('#csv-review-reason')).getValue(), 'Accept CSV changes from g-res.csv');
+    assert.match(await textOf(browser, FORM), /g-res\.csv has new values for this part\. Tick the ones to accept\./);
+    assert.equal(await textOf(browser, `label[for="csv-review-reason"]`), 'Reason (shown in the history)');
+    assert.equal(await (await browser.$('#csv-review-reason')).getValue(), 'Accept CSV values from g-res.csv');
     const take = await browser.$(`${FORM} button[type="submit"]`);
-    assert.equal(await take.getText(), 'Take the ticked values');
+    assert.equal(await take.getText(), 'Accept the ticked values');
     assert.equal(await take.isEnabled(), false, 'nothing is ticked yet');
     await tick('Value');
     assert.equal(await take.isEnabled(), true);
@@ -195,7 +212,7 @@ describe('team catalog: reviewing CSV changes that were not applied', () => {
 
     await take.click();
     await waitForText(browser, NOTICE, 'Saved. The part details changed; no revision was added.');
-    await waitForField('Value', '47');
+    await waitForField('Value', '47R');
     assert.equal(await fieldValue('Description'), 'Thick film resistor, 47 ohm', 'not ticked, so it stays');
     assert.equal(await sourceFact(), 'Team catalog, revision 1 of this part', 'no revision was added');
     assert.ok(await noCsvNotice(), 'the notice is gone');
@@ -210,20 +227,20 @@ describe('team catalog: reviewing CSV changes that were not applied', () => {
     );
   });
 
-  it('never shows a taken change again, and records keeping the current values', async () => {
-    // The same CSV again: the description still differs, but it was
-    // reviewed, so nothing shows.
-    const outcome = await server.reimport();
+  it('never shows reviewed values again, and records keeping the current values', async () => {
+    // The same CSV again: the description still differs, but those values
+    // were reviewed, so nothing shows.
+    const outcome = await server.reimport(changedCatalog('47R', '1%'));
     record({ event: 'reimport-after-review', outcome });
     await browser.pause(1_500);
-    assert.ok(await noCsvNotice(), 'the reviewed change does not come back');
+    assert.ok(await noCsvNotice(), 'the reviewed values do not come back');
 
-    // When the CSV changes, the notice comes back; keeping the current
-    // values closes it and says so.
-    assert.equal(await server.reimport(changedCatalog()), 'nothing_changed');
-    await waitForText(browser, CSV_NOTICE, /were not applied/);
-    await clickButton(CSV_NOTICE, 'Review CSV changes');
-    await waitForText(browser, '#csv-review-heading', 'Review CSV changes');
+    // When the CSV changes again, the notice comes back; keeping the
+    // current values closes it and says so.
+    assert.equal(await server.reimport(changedCatalog('47R', '0.5%')), 'nothing_changed');
+    await waitForText(browser, CSV_NOTICE, /has new values for this part/);
+    await clickButton(CSV_NOTICE, 'Review CSV values');
+    await waitForText(browser, '#csv-review-heading', 'Review CSV values');
     assert.deepEqual(
       (await reviewRows()).map((row) => row.field),
       ['Description', 'Tolerance'],
@@ -232,12 +249,12 @@ describe('team catalog: reviewing CSV changes that were not applied', () => {
     await waitForText(
       browser,
       NOTICE,
-      'Kept the current values. These CSV changes show again only if the CSV changes.',
+      'Kept the current values. You are asked about these CSV values again only if the CSV changes.',
     );
     assert.ok(await noCsvNotice());
     assert.equal(await fieldValue('Tolerance'), '1%');
     assert.equal(await fieldValue('Description'), 'Thick film resistor, 47 ohm');
     await clickButton(COLUMN, 'History (4)');
-    assert.match(await textOf(browser, '.history li:first-child .history-title'), /^CSV changes · Kept own values by /);
+    assert.match(await textOf(browser, '.history li:first-child .history-title'), /^CSV values · Kept current part details by /);
   });
 });
