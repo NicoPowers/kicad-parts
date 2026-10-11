@@ -105,13 +105,12 @@ impl Team {
         let state = read_import_state(&self.admin).unwrap();
         let command = ImportCommand::new(&import, "Import").expecting(&state);
         let reply = submit_import(&self.admin, &command).unwrap();
-        let outcome = match reply.outcome {
+        match reply.outcome {
             ImportOutcome::Applied { .. } => "applied",
             ImportOutcome::NothingChanged { .. } => "nothing_changed",
             ImportOutcome::Noop { .. } => "noop",
             _ => panic!("the import did not go through: {}", reply.body),
-        };
-        outcome
+        }
     }
 
     /// Replaces exactly one `from` in the row of `ipn` in the copy's
