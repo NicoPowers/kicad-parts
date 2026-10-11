@@ -550,16 +550,30 @@ fn the_desktop_shows_csv_changes_live_and_takes_them_field_by_field() {
         (changes.csv_file.as_str(), changes.cad, changes.expected),
         ("g-res.csv", false, 2)
     );
-    let rows: Vec<(&str, &str, &str)> = changes
+    // The value the CSV changed comes first; the description is listed
+    // too, marked as not changed in the CSV (accepting it undoes the edit).
+    let rows: Vec<(&str, &str, &str, bool)> = changes
         .rows
         .iter()
-        .map(|row| (row.field.as_str(), row.now.as_str(), row.csv.as_str()))
+        .map(|row| {
+            (
+                row.field.as_str(),
+                row.now.as_str(),
+                row.csv.as_str(),
+                row.changed_in_csv,
+            )
+        })
         .collect();
     assert_eq!(
         rows,
         [
-            ("Description", "Resistor 47 ohm", "RES 47 OHM 1% 1/10W 0603"),
-            ("Value", "47 ohm", "47R"),
+            ("Value", "47 ohm", "47R", true),
+            (
+                "Description",
+                "Resistor 47 ohm",
+                "RES 47 OHM 1% 1/10W 0603",
+                false
+            ),
         ]
     );
 
@@ -627,8 +641,12 @@ fn the_desktop_shows_csv_changes_live_and_takes_them_field_by_field() {
     wait_until("the second import run", || imports(&team) > before);
     let part = team.part(IPN).unwrap().unwrap();
     let changes = part.csv_changes[0].clone();
-    let fields: Vec<&str> = changes.rows.iter().map(|row| row.field.as_str()).collect();
-    assert_eq!(fields, ["Description", "Tolerance"]);
+    let fields: Vec<(&str, bool)> = changes
+        .rows
+        .iter()
+        .map(|row| (row.field.as_str(), row.changed_in_csv))
+        .collect();
+    assert_eq!(fields, [("Tolerance", true), ("Description", false)]);
     let PublishResult::CsvReviewed {
         details_saved,
         part,
@@ -650,6 +668,43 @@ fn the_desktop_shows_csv_changes_live_and_takes_them_field_by_field() {
     assert!(part.csv_changes.is_empty());
     assert_eq!(part.history[0].action, "Kept current part details");
     assert_eq!(part.details.number, 3);
+
+    // The CSV goes back to what it said at the first import. That is a real
+    // change since the last review (the part keeps 47R from the CSV's
+    // earlier values), so the app asks again, though the first import saved
+    // exactly this.
+    std::fs::copy(services::repository_root().join("database/g-res.csv"), &csv).unwrap();
+    let before = imports(&team);
+    import_from(&admin, copy.path());
+    wait_until("the import of the first CSV again", || {
+        imports(&team) > before
+    });
+    let part = team.part(IPN).unwrap().unwrap();
+    assert_eq!(part.csv_changes.len(), 1, "{:?}", part.csv_changes);
+    let rows: Vec<(&str, &str, &str, bool)> = part.csv_changes[0]
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.field.as_str(),
+                row.now.as_str(),
+                row.csv.as_str(),
+                row.changed_in_csv,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("Value", "47R", "47", true),
+            (
+                "Description",
+                "Resistor 47 ohm",
+                "RES 47 OHM 1% 1/10W 0603",
+                false
+            ),
+        ]
+    );
 
     assert!(!team.sign_out().session.is_signed_in());
     server.stop();

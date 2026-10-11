@@ -348,6 +348,11 @@ pub struct CsvChangeRow {
     pub field: String,
     pub now: String,
     pub csv: String,
+    /// The CSV changed this value since it was last applied or reviewed.
+    /// False for a value the CSV already had (the part was edited away from
+    /// it): accepting it undoes that edit.
+    #[serde(default)]
+    pub changed_in_csv: bool,
 }
 
 /// Accept the CSV's values for the fields in `accept` and keep the part's

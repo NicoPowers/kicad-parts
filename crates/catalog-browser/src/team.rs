@@ -1100,23 +1100,22 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
     }
     // What the CSV said the last time an import applied to the part, for
     // each kind: the newest details and the newest revision a CSV import
-    // saved.
+    // saved, with the seq of the Change that saved them.
     let imported = |change: &str| {
         change_records
             .get(change)
-            .is_some_and(|change| change.kind == "csv-import")
+            .filter(|change| change.kind == "csv-import")
+            .map(|change| change.seq)
     };
     let last_imported = LastImported {
         details: saved_details
             .iter()
-            .filter(|saved| imported(&saved.change))
-            .max_by_key(|saved| saved.number)
-            .map(|saved| saved.snapshot.as_str()),
+            .filter_map(|saved| Some((imported(&saved.change)?, saved.snapshot.as_str())))
+            .max_by_key(|(seq, _)| *seq),
         revision: revisions
             .iter()
-            .filter(|revision| imported(&revision.change))
-            .max_by_key(|revision| revision.number)
-            .map(|revision| revision.snapshot.as_str()),
+            .filter_map(|revision| Some((imported(&revision.change)?, revision.snapshot.as_str())))
+            .max_by_key(|(seq, _)| *seq),
     };
     let csv_changes = open_csv_changes(
         client,
@@ -1153,21 +1152,32 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
 const ACCEPTED: &str = "Accepted CSV values";
 
 /// The snapshots of a part's newest details and newest revision that a CSV
-/// import saved: what the CSV said the last time an import applied to it.
+/// import saved, with the seq of the Change that saved each: what the CSV
+/// said the last time an import applied to it.
 struct LastImported<'a> {
-    details: Option<&'a str>,
-    revision: Option<&'a str>,
+    details: Option<(u64, &'a str)>,
+    revision: Option<(u64, &'a str)>,
+}
+
+/// What the CSV said the last time the app applied or reviewed it, for one
+/// kind: the SHA-256 of that CSV document, and the document if it can be
+/// read.
+struct LastSeen {
+    sha256: String,
+    document: Option<String>,
 }
 
 /// The new CSV values nobody has reviewed yet: each [`CSV_DETAILS_DIFFER`]
 /// or [`CSV_CAD_DIFFERS`] import problem of the part that the latest import
 /// run of its CSV file found, unless a review already covers what the CSV
-/// says, and only if a field still differs.
+/// says (as the server's no-op does), and only if a field still differs.
 ///
-/// A problem whose recorded CSV document is what the CSV said the last time
-/// an import applied to the part (for that kind) is left out: the CSV did not
-/// change, only the part was edited in this app, so there are no new values
-/// to offer. The problem itself stays recorded for the zero-loss report.
+/// The app asks only when the CSV changed since it was last applied or
+/// reviewed: for each kind, a problem whose recorded CSV document is the
+/// newer (by seq) of what the last import saved and what the last review
+/// covered is left out, because only the part was edited in this app. The
+/// problem itself stays recorded for the zero-loss report. Each row says
+/// whether the CSV changed that field since then.
 ///
 /// A recorded document that cannot be read is skipped, so the part still
 /// opens.
@@ -1183,6 +1193,44 @@ fn open_csv_changes(
     let fail = |error: CollabError| error.to_string();
     let problems =
         problems_of(client, &part.ipn, &[CSV_DETAILS_DIFFER, CSV_CAD_DIFFERS]).map_err(fail)?;
+    let last_seen = |cad: bool| -> Option<LastSeen> {
+        let code = if cad {
+            CSV_CAD_DIFFERS
+        } else {
+            CSV_DETAILS_DIFFER
+        };
+        let imported = if cad {
+            last_imported.revision
+        } else {
+            last_imported.details
+        };
+        let reviewed = reviews
+            .iter()
+            .filter(|review| review.code == code)
+            .max_by_key(|review| review.seq);
+        match (imported, reviewed) {
+            (Some((seq, _)), Some(review)) if review.seq > seq => Some(LastSeen {
+                sha256: review.csv_sha256.clone(),
+                document: problems
+                    .iter()
+                    .find(|problem| problem.id == review.problem)
+                    .and_then(recorded_csv_document),
+            }),
+            (None, Some(review)) => Some(LastSeen {
+                sha256: review.csv_sha256.clone(),
+                document: problems
+                    .iter()
+                    .find(|problem| problem.id == review.problem)
+                    .and_then(recorded_csv_document),
+            }),
+            (Some((_, snapshot)), _) => Some(LastSeen {
+                sha256: catalog::sha256_hex(snapshot),
+                document: Some(snapshot.to_owned()),
+            }),
+            (None, None) => None,
+        }
+    };
+    let seen = [last_seen(false), last_seen(true)];
     let mut runs: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut open: Vec<CsvChanges> = Vec::new();
     for problem in &problems {
@@ -1190,15 +1238,12 @@ fn open_csv_changes(
             continue;
         };
         let cad = problem.code == CSV_CAD_DIFFERS;
-        let unchanged = if cad {
-            last_imported.revision
-        } else {
-            last_imported.details
-        };
-        if unchanged == Some(document.as_str()) {
+        let csv_sha256 = catalog::sha256_hex(&document);
+        let last = seen[usize::from(cad)].as_ref();
+        if last.is_some_and(|last| last.sha256 == csv_sha256) {
             continue;
         }
-        let csv_sha256 = catalog::sha256_hex(&document);
+        let last_document = last.and_then(|last| last.document.as_deref());
         if reviews
             .iter()
             .any(|review| review.code == problem.code && review.csv_sha256 == csv_sha256)
@@ -1223,17 +1268,21 @@ fn open_csv_changes(
         if !runs[csv_file].contains(&problem.id) {
             continue;
         }
-        let rows = if cad {
+        let mut rows = if cad {
             let Ok(csv) = serde_json::from_str::<PartRevision>(&document) else {
                 continue;
             };
-            cad_rows(revision, &csv, &describe)
+            let before = last_document.and_then(|text| serde_json::from_str(text).ok());
+            cad_rows(revision, &csv, before.as_ref(), &describe)
         } else {
             let Ok(csv) = serde_json::from_str::<PartDetails>(&document) else {
                 continue;
             };
-            details_rows(details, &csv)
+            let before = last_document.and_then(|text| serde_json::from_str(text).ok());
+            details_rows(details, &csv, before.as_ref())
         };
+        // Values the CSV changed first; the rest keep their order.
+        rows.sort_by_key(|row| !row.changed_in_csv);
         if rows.is_empty() {
             continue;
         }
@@ -1256,8 +1305,14 @@ fn open_csv_changes(
 }
 
 /// The details fields both have whose values differ, in the part's order,
-/// then the manufacturer parts if they differ.
-fn details_rows(now: &PartDetails, csv: &PartDetails) -> Vec<CsvChangeRow> {
+/// then the manufacturer parts if they differ. A row is changed in the CSV
+/// unless `before` (what the CSV said when last applied or reviewed) has the
+/// same value; with no `before`, every row counts as changed.
+fn details_rows(
+    now: &PartDetails,
+    csv: &PartDetails,
+    before: Option<&PartDetails>,
+) -> Vec<CsvChangeRow> {
     let mut rows: Vec<CsvChangeRow> = now
         .fields
         .iter()
@@ -1267,6 +1322,8 @@ fn details_rows(now: &PartDetails, csv: &PartDetails) -> Vec<CsvChangeRow> {
                 field: field.name.clone(),
                 now: field.value.clone(),
                 csv: theirs.to_owned(),
+                changed_in_csv: before
+                    .is_none_or(|before| before.field(&field.name) != Some(theirs)),
             })
         })
         .collect();
@@ -1275,6 +1332,8 @@ fn details_rows(now: &PartDetails, csv: &PartDetails) -> Vec<CsvChangeRow> {
             field: MANUFACTURER_PARTS_FIELD.to_owned(),
             now: stored_lines(now),
             csv: stored_lines(csv),
+            changed_in_csv: before
+                .is_none_or(|before| before.manufacturer_parts != csv.manufacturer_parts),
         });
     }
     rows
@@ -1285,6 +1344,7 @@ fn details_rows(now: &PartDetails, csv: &PartDetails) -> Vec<CsvChangeRow> {
 fn cad_rows(
     now: &PartRevision,
     csv: &PartRevision,
+    before: Option<&PartRevision>,
     describe: &impl Fn(&CadReference) -> String,
 ) -> Vec<CsvChangeRow> {
     let mut rows = Vec::new();
@@ -1319,10 +1379,14 @@ fn cad_rows(
         } else {
             (ours.to_owned(), theirs.to_owned())
         };
+        let changed_in_csv = before.is_none_or(|before| {
+            before.field(name) != Some(theirs) || references(before) != their_references
+        });
         rows.push(CsvChangeRow {
             field: name.to_owned(),
             now: now_text,
             csv: csv_text,
+            changed_in_csv,
         });
     }
     rows
