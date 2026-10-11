@@ -48,7 +48,9 @@
 // source row is one of those rows, checks every CAD item revision number
 // against what is stored, and checks that every CAD reference names the
 // current revision of its CAD item, or the revision with the same content
-// that it binds now.
+// that it binds now. Each part revision's Excluded from BOM must be what the
+// bound CAD's own flags say in the bytes the server has (catalog_lib.js
+// excludedFromBom, kicad-parts-ccc0); otherwise 400.
 //
 // Then, in one transaction, it compares the request with what is stored:
 // - if the latest import run of this CSV file is not the one the importer
@@ -291,7 +293,12 @@ routerAdd(
         // PocketBase cannot store an empty file.
         fail(`blob ${blob.sha256} is empty; blobs must have at least one byte`);
       }
-      return { id: lib.deriveId("blob", blob.sha256), sha256: blob.sha256, bytes: bytes };
+      return {
+        id: lib.deriveId("blob", blob.sha256),
+        sha256: blob.sha256,
+        bytes: bytes,
+        text: hasText ? blob.text : null,
+      };
     });
     const requestBlobs = {};
     for (const blob of blobs) {
@@ -803,12 +810,40 @@ routerAdd(
         const change = byId("catalog_changes", record.getString("change"));
         return { kind: change ? change.getString("kind") : "", seq: change ? change.getInt("seq") : 0 };
       };
+      // The bytes of a CAD item revision a part binds, as text: from this
+      // request when it sends that revision, otherwise as stored.
+      const storedText = lib.storedCadText(txApp);
+      const cadText = (target) => {
+        const sent = requestRevisions[target.cad_item];
+        if (sent && sent.number === target.number) {
+          const blob = requestBlobs[sent.parsed.blob_sha256];
+          if (blob) {
+            return blob.text !== null ? blob.text : toString(blob.bytes);
+          }
+          const stored = byId("catalog_blobs", lib.deriveId("blob", sent.parsed.blob_sha256));
+          return stored ? lib.blobText(stored) : null;
+        }
+        return storedText(target);
+      };
       for (const part of parts) {
         const stored = byId("catalog_parts", part.id);
         const currentRevision = stored ? byId("catalog_part_revisions", stored.getString("current_revision")) : null;
         const kept = boundBy(currentRevision ? currentRevision.getString("snapshot") : "");
         for (const target of part.targets) {
           checkBinding(target, kept);
+        }
+        // Excluded from BOM must be what the bound CAD's own flags say, as
+        // the server reads them (kicad-parts-ccc0). A stored record that is
+        // not what its ID says is answered as an ID collision instead.
+        if (collisions.length === 0) {
+          const excluded = lib.excludedFromBom(part.revision.parsed, cadText);
+          if ((part.revision.parsed.excluded_from_bom === true) !== excluded) {
+            fail(
+              excluded
+                ? `the revision of ${part.ipn} must be Excluded from BOM: a symbol it uses says (in_bom no), or every footprint choice has exclude_from_bom`
+                : `the revision of ${part.ipn} cannot be Excluded from BOM: no symbol it uses says (in_bom no), and not every footprint choice has exclude_from_bom`,
+            );
+          }
         }
         if (!stored) {
           part.revisionAfter = 1;

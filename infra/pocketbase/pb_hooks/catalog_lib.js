@@ -797,6 +797,191 @@ function cadReferences(txApp, fields, currentRevision) {
   return references;
 }
 
+// ---- Excluded from BOM ---------------------------------------------------------
+//
+// Excluded from BOM comes only from KiCad's own flags in the bound CAD's
+// stored bytes (kicad-parts-ccc0, mx-9a51aa): a part is excluded when a
+// symbol it binds says (in_bom no), or when every footprint choice is a
+// footprint whose (attr ...) has exclude_from_bom. A reference that is not
+// bound to a stored CAD item revision (KiCad's own library, or a missing
+// symbol or footprint) gives no evidence. The server works it out itself for
+// every new part revision, by import, edit or CSV review; it never takes the
+// value from a client. crates/kicad-integration library_file.rs and the
+// zero-loss report read the flags the same way.
+
+// The tokens of KiCad s-expression text: "(" and ")", { text } for a
+// quoted string, and { atom } for anything else.
+function sexpTokens(text) {
+  const tokens = [];
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === "(" || char === ")") {
+      tokens.push(char);
+      index++;
+    } else if (char === '"') {
+      let value = "";
+      index++;
+      while (index < text.length && text[index] !== '"') {
+        if (text[index] === "\\") {
+          value += text[index + 1] || "";
+          index += 2;
+        } else {
+          value += text[index];
+          index++;
+        }
+      }
+      if (index >= text.length) {
+        return null;
+      }
+      index++;
+      tokens.push({ text: value });
+    } else if (/\s/.test(char)) {
+      index++;
+    } else {
+      const start = index;
+      while (index < text.length && !/[\s()"]/.test(text[index])) {
+        index++;
+      }
+      tokens.push({ atom: text.substring(start, index) });
+    }
+  }
+  return tokens;
+}
+
+// The word a token stands for (an atom or a string), or null.
+function sexpWord(token) {
+  if (token && typeof token === "object") {
+    return token.atom !== undefined ? token.atom : token.text;
+  }
+  return null;
+}
+
+// The direct child lists of the root list of `tokens`, each as the tokens
+// it holds (its own parentheses included), or null if the text is not one
+// balanced list.
+function sexpChildren(tokens) {
+  if (!tokens || tokens[0] !== "(") {
+    return null;
+  }
+  const children = [];
+  let depth = 0;
+  let start = -1;
+  for (let position = 0; position < tokens.length; position++) {
+    const token = tokens[position];
+    if (token === "(") {
+      depth++;
+      if (depth === 2) {
+        start = position;
+      }
+    } else if (token === ")") {
+      if (depth === 0) {
+        return null;
+      }
+      if (depth === 2) {
+        children.push(tokens.slice(start, position + 1));
+      }
+      depth--;
+      if (depth === 0 && position + 1 !== tokens.length) {
+        return null;
+      }
+    }
+  }
+  return depth === 0 ? children : null;
+}
+
+// Whether a symbol CAD item revision's bytes (one or more top-level
+// (symbol ...) entries) have an entry that says (in_bom no).
+function symbolSaysNotInBom(text) {
+  const entries = sexpChildren(sexpTokens("(kicad_symbol_lib " + text + ")"));
+  if (!entries) {
+    return false;
+  }
+  return entries.some((entry) => {
+    if (sexpWord(entry[1]) !== "symbol") {
+      return false;
+    }
+    const inner = sexpChildren(entry);
+    if (!inner) {
+      return false;
+    }
+    const inBom = inner.find((item) => sexpWord(item[1]) === "in_bom");
+    return !!inBom && sexpWord(inBom[2]) === "no";
+  });
+}
+
+// Whether a footprint CAD item revision's bytes (a whole .kicad_mod) have
+// exclude_from_bom in an (attr ...).
+function footprintExcludedFromBom(text) {
+  const tokens = sexpTokens(text);
+  const head = tokens && sexpWord(tokens[1]);
+  const children = sexpChildren(tokens);
+  if (!children || (head !== "footprint" && head !== "module")) {
+    return false;
+  }
+  return children.some(
+    (child) =>
+      sexpWord(child[1]) === "attr" &&
+      child.some((token) => token && typeof token === "object" && token.atom === "exclude_from_bom"),
+  );
+}
+
+// Excluded from BOM for a part revision document, from the bytes of the CAD
+// item revisions it binds. `textOf(target)` gives a bound CAD item
+// revision's bytes as text, or null if they cannot be read.
+function excludedFromBom(document, textOf) {
+  let symbolMarked = false;
+  const footprints = [];
+  for (const reference of document.cad_references || []) {
+    const target = reference && reference.target;
+    const text = target && target.kind === "cad-item-revision" ? textOf(target) : null;
+    if (reference.role === "symbol") {
+      symbolMarked = symbolMarked || (text !== null && symbolSaysNotInBom(text));
+    } else if (reference.role === "footprint") {
+      footprints.push(text !== null && footprintExcludedFromBom(text));
+    }
+  }
+  const marked = footprints.filter((choice) => choice).length;
+  return symbolMarked || (marked > 0 && marked === footprints.length);
+}
+
+// The stored bytes of a blob record, as text.
+function blobText(record) {
+  const fsys = $app.newFilesystem();
+  try {
+    const reader = fsys.getReader(record.baseFilesPath() + "/" + record.getString("file"));
+    try {
+      return toString(reader);
+    } finally {
+      reader.close();
+    }
+  } finally {
+    fsys.close();
+  }
+}
+
+// textOf for excludedFromBom over the stored CAD item revisions, reading
+// each blob at most once.
+function storedCadText(txApp) {
+  const texts = {};
+  return (target) => {
+    const revision = recordById(
+      txApp,
+      "catalog_cad_item_revisions",
+      deriveId("cad-item-revision", target.cad_item + "\n" + target.number),
+    );
+    if (!revision || !isCadItemRevision(revision, target.cad_item, target.number)) {
+      return null;
+    }
+    const blobId = revision.getString("blob");
+    if (texts[blobId] === undefined) {
+      const blob = recordById(txApp, "catalog_blobs", blobId);
+      texts[blobId] = blob ? blobText(blob) : null;
+    }
+    return texts[blobId];
+  };
+}
+
 // The CAD item revision IDs a revision binds, for the relation field.
 function boundCadItemRevisions(details) {
   const bound = [];
@@ -963,10 +1148,10 @@ function publishEdit(e) {
         cad_fields: fields,
         cad_references: cadReferences(txApp, fields, storedRevision),
       };
-      // An edit keeps Excluded from BOM as it is (kicad-parts-ccc0 decides
-      // how it follows new CAD). Like PartRevision, the snapshot names it
-      // only when it is set.
-      if (storedRevision.excluded_from_bom === true) {
+      // Excluded from BOM follows the CAD the new revision binds, read by
+      // the server from the stored bytes (kicad-parts-ccc0). Like
+      // PartRevision, the snapshot names it only when it is set.
+      if (excludedFromBom(document, storedCadText(txApp))) {
         document.excluded_from_bom = true;
       }
       refuse("revision", revisionProblem(document));
@@ -1527,7 +1712,9 @@ function publishCsvReview(e) {
           cad_fields: cadFields,
           cad_references: references,
         };
-        if (stored.excluded_from_bom === true) {
+        // Excluded from BOM follows the CAD the new revision binds, read by
+        // the server from the stored bytes (kicad-parts-ccc0).
+        if (excludedFromBom(document, storedCadText(txApp))) {
           document.excluded_from_bom = true;
         }
         const problemText = revisionProblem(document);
@@ -1680,6 +1867,9 @@ module.exports = {
   publishEdit: publishEdit,
   publishArchive: publishArchive,
   publishCsvReview: publishCsvReview,
+  excludedFromBom: excludedFromBom,
+  storedCadText: storedCadText,
+  blobText: blobText,
   CSV_REVIEW_KINDS: CSV_REVIEW_KINDS,
   archiveState: archiveState,
   newestRevision: newestRevision,
