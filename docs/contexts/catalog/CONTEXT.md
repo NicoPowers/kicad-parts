@@ -45,7 +45,7 @@ A revision hidden from KiCad's part chooser and from the app, so nobody new pick
 _Avoid_: withdrawn, deleted, retired, obsolete, restore
 
 **Change**:
-One saved update with a reason, such as an import, an edit or an archive. It can change part details and add or archive revisions of several parts and CAD items at once.
+One saved update with a reason, such as an import, an edit, an archive or a CSV review. It can change part details and add or archive revisions of several parts and CAD items at once.
 _Avoid_: Change Set, commit, batch, transaction
 
 **Audit entry**:
@@ -95,3 +95,7 @@ _Avoid_: Legacy Catalog, old database, source of truth
 **Import problem**:
 Something an import could not handle, such as a missing symbol. The import records it instead of dropping it.
 _Avoid_: Import Diagnostic, warning, error
+
+**CSV review**:
+A person's answer to CSV changes that an import did not apply because the part was edited in this app: they take some of the CSV's values and keep the rest, or keep all of theirs. It covers what the CSV said, so the same CSV values never ask again; new CSV values do.
+_Avoid_: merge, sync, override

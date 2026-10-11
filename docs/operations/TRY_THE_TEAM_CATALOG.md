@@ -1,6 +1,6 @@
 # Try the team catalog by hand
 
-This starts a throwaway team server on your computer and opens the desktop app connected to it. You can then edit a resistor, see its history, and archive a revision. Nothing you do changes the CSV catalog or anything else in the repository.
+This starts a throwaway team server on your computer and opens the desktop app connected to it. You can then edit a resistor, see its history, archive a revision, and review CSV changes that an import did not apply. Nothing you do changes the CSV catalog or anything else in the repository.
 
 ## Build once
 
@@ -50,6 +50,7 @@ The accounts are:
    Sign in there as `second.editor@example.test`. In the first app, choose **Edit part** on the part and change something, but do not save yet. In the second app, save a change to the same part. Now save in the first app: it shows where you started, what they saved and your changes, and lets you save your changes on top of theirs. Changes saved in one app appear in the other by themselves.
 5. Open **History**. Each entry is one saved change: a change to the part details, a new revision, or an archived revision. Select one to see what changed, who changed it, when and why. Nothing is ever deleted or changed afterwards, and there is no way to copy an older revision back.
 6. To take a bad revision out of use, select it in **History** and choose **Archive revision N…**, then give a reason. KiCad and the app stop offering it, so nobody new picks it; designs that already use it keep it. The current revision becomes the newest one that is not archived. **Unarchive revision N…** undoes it. The only revision that is not archived cannot be archived: add a corrected revision first.
+7. To see what an import does to a part edited in the app, edit the part's **Description** and **Value**, then type `reimport` in the console and press Enter. The import leaves the edited part as it is. The app shows by itself: "The CSV catalog has changes for this part that were not applied, because the part was edited in this app." Choose **Review CSV changes**. Each field whose CSV value differs is listed with its value now and in the CSV. Tick the ones to take and choose **Take the ticked values**: taking part details adds no revision, and taking the Symbol or Footprint adds one. The fields you do not tick stay as they are. **Keep current values** takes none. Either way the notice goes away, and it comes back only if the CSV changes again.
 
 ## Stop it
 
@@ -65,4 +66,4 @@ Without `--desktop`, the command prints the address and accounts and waits for y
 
 - The app saves only the server address and your email (in `team.json` in its settings folder). It never saves your password or the sign-in session; after a restart you sign in again.
 - For now the app only connects to a team server on this computer (`http://127.0.0.1`, `localhost` or `[::1]`). Live updates use plain HTTP, and a password must not cross a network unencrypted. Connecting to a shared server needs HTTPS first.
-- Members marked "can edit catalog" in PocketBase can edit and archive. Everyone else who signs in can only view. Only an administrator can change that mark, or a member's name, which the history shows as the author of each change.
+- Members marked "can edit catalog" in PocketBase can edit, archive and review CSV changes. Everyone else who signs in can only view. Only an administrator can change that mark, or a member's name, which the history shows as the author of each change.
