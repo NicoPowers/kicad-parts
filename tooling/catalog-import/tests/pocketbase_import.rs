@@ -736,6 +736,104 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         },
         "expected details of RES-0000-0000",
     );
+    // What a document holds is checked too, so a field can never move
+    // between the part details and the revision.
+    let rewrite =
+        |body: &mut serde_json::Value, name: &str, change: &dyn Fn(&mut serde_json::Value)| {
+            let entry = &mut body["parts"][0][name];
+            let mut snapshot: serde_json::Value =
+                serde_json::from_str(entry["snapshot"].as_str().unwrap()).unwrap();
+            change(&mut snapshot);
+            let snapshot = snapshot.to_string();
+            entry["snapshotSha256"] = sha256_hex(&snapshot).into();
+            entry["snapshot"] = snapshot.into();
+        };
+    refused(
+        "symbol-in-details",
+        &|body| {
+            rewrite(body, "details", &|details| {
+                details["fields"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({ "name": "Symbol", "value": "g-pas:R_US" }))
+            })
+        },
+        "it lists Symbol, which belongs to the part's revision",
+    );
+    refused(
+        "description-in-revision",
+        &|body| {
+            rewrite(body, "revision", &|revision| {
+                revision["cad_fields"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({ "name": "Description", "value": "x" }))
+            })
+        },
+        "it lists Description, which is part details",
+    );
+    refused(
+        "footprint-before-symbol",
+        &|body| {
+            rewrite(body, "revision", &|revision| {
+                revision["cad_fields"].as_array_mut().unwrap().reverse()
+            })
+        },
+        "Symbol, then Footprint, each at most once",
+    );
+    refused(
+        "symbol-twice",
+        &|body| {
+            rewrite(body, "revision", &|revision| {
+                let first = revision["cad_fields"][0].clone();
+                revision["cad_fields"]
+                    .as_array_mut()
+                    .unwrap()
+                    .insert(0, first)
+            })
+        },
+        "Symbol, then Footprint, each at most once",
+    );
+    refused(
+        "field-value-not-text",
+        &|body| {
+            rewrite(body, "details", &|details| {
+                details["fields"][0]["value"] = 47.into()
+            })
+        },
+        "a name and a value, both text",
+    );
+    refused(
+        "manufacturer-part-without-mpn",
+        &|body| {
+            rewrite(body, "details", &|details| {
+                details["manufacturer_parts"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("mpn");
+            })
+        },
+        "a manufacturer and an MPN, both text",
+    );
+    refused(
+        "references-not-the-fields",
+        &|body| {
+            rewrite(body, "revision", &|revision| {
+                revision["cad_references"][0]["reference"] = "g-pas:OTHER".into()
+            })
+        },
+        "not the ones its Symbol and Footprint fields name",
+    );
+    refused(
+        "reference-dropped",
+        &|body| {
+            rewrite(body, "revision", &|revision| {
+                revision["cad_references"].as_array_mut().unwrap().pop();
+            })
+        },
+        "not the ones its Symbol and Footprint fields name",
+    );
+    assert_eq!(read_back(&admin).unwrap(), initial);
     refused(
         "allow-as-text",
         &|body| body["allowOlderCheckout"] = "yes".into(),
@@ -1755,4 +1853,56 @@ fn team_server_data_from_before_shared_part_details_is_refused_not_changed() {
         })
         .unwrap();
     assert_eq!(kept, revisions as i64);
+}
+
+#[test]
+fn an_edit_never_saves_a_field_in_the_wrong_document() {
+    // Stored details that wrongly list Symbol (here written straight into
+    // data.db) cannot be saved again through an edit: the route checks each
+    // new document like an imported one, and writes nothing.
+    let root = repository();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let import = CsvCatalog::new(&root).import("g-res", None).unwrap();
+    applied(&submit_import(&admin, &ImportCommand::new(&import, REASON)).unwrap());
+    let stored = read_back(&admin).unwrap();
+    let part = stored.part("RES-0000-0470").unwrap();
+    let saved = stored.part_details(&part.current_details).unwrap();
+    let mut wrong: PartDetails = serde_json::from_str(&saved.snapshot).unwrap();
+    wrong.fields.push(catalog::DetailField {
+        name: "Symbol".into(),
+        value: "g-pas:R_US".into(),
+    });
+    let snapshot = wrong.canonical_json();
+    tamper(
+        state.path(),
+        "catalog_part_details",
+        "snapshot",
+        &saved.id,
+        &snapshot,
+    );
+    tamper(
+        state.path(),
+        "catalog_part_details",
+        "snapshot_sha256",
+        &saved.id,
+        &sha256_hex(&snapshot),
+    );
+    let (server, admin) = restart(&root, state.path(), server);
+    let before = read_back(&admin).unwrap();
+    let mut edit = EditCommand::new("RES-0000-0470", "Move the symbol into the details")
+        .editing_details(&wrong, saved.number);
+    assert!(edit.set_field("Symbol", "Device:R"));
+    match submit_edit(&admin, &edit) {
+        Err(CollabError::Http {
+            status: 400,
+            message,
+        }) => assert!(
+            message.contains("which belongs to the part's revision"),
+            "{message}"
+        ),
+        other => panic!("expected 400, got {other:?}"),
+    }
+    assert_eq!(read_back(&admin).unwrap(), before);
+    server.stop();
 }

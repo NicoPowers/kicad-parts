@@ -438,6 +438,103 @@ function editedManufacturerParts(parts) {
   });
 }
 
+// ---- What part details and part revisions may hold -------------------------
+//
+// The import route and the edit route both check every details and
+// revision document they save, so a field can never move between the two
+// kinds: Symbol and Footprint are CAD, everything else describes the part.
+
+// The fields of a part revision, in the order it keeps them.
+const CAD_FIELDS = ["Symbol", "Footprint"];
+
+function isPair(value, keys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const names = Object.keys(value).sort();
+  const wanted = keys.slice().sort();
+  return (
+    names.length === wanted.length &&
+    names.every((name, index) => name === wanted[index] && typeof value[name] === "string")
+  );
+}
+
+// Why `details` (parsed part details) cannot be saved, or "": its fields
+// and manufacturer parts must be pairs of text, and no field may be
+// Symbol or Footprint.
+function detailsProblem(details) {
+  const fields = details.fields;
+  if (!Array.isArray(fields) || !fields.every((field) => isPair(field, ["name", "value"]))) {
+    return "its fields must each be a name and a value, both text";
+  }
+  const cad = fields.find((field) => CAD_FIELDS.indexOf(field.name) >= 0);
+  if (cad) {
+    return `it lists ${cad.name}, which belongs to the part's revision, not its details`;
+  }
+  const parts = details.manufacturer_parts;
+  if (!Array.isArray(parts) || !parts.every((part) => isPair(part, ["manufacturer", "mpn"]))) {
+    return "its manufacturer parts must each be a manufacturer and an MPN, both text";
+  }
+  return "";
+}
+
+// The references a CAD field names, read the way the CSV import reads them:
+// `;` separates them, each is trimmed like Rust's str::trim, blanks drop.
+function namedReferences(text) {
+  return text
+    .split(";")
+    .map((name) => trimSpace(name))
+    .filter((name) => name.length > 0);
+}
+
+// Why `revision` (a parsed part revision) cannot be saved, or "": its CAD
+// fields must be Symbol and Footprint only, each at most once and in that
+// order, as pairs of text, and its CAD references must be exactly the ones
+// those fields name, in order.
+function revisionProblem(revision) {
+  const fields = revision.cad_fields;
+  if (!Array.isArray(fields) || !fields.every((field) => isPair(field, ["name", "value"]))) {
+    return "its CAD fields must each be a name and a value, both text";
+  }
+  let position = -1;
+  for (const field of fields) {
+    const at = CAD_FIELDS.indexOf(field.name);
+    if (at < 0) {
+      return `it lists ${field.name}, which is part details, not CAD; a revision holds only Symbol and Footprint`;
+    }
+    if (at <= position) {
+      return "its CAD fields must be Symbol, then Footprint, each at most once";
+    }
+    position = at;
+  }
+  const references = revision.cad_references;
+  if (!Array.isArray(references)) {
+    return "its CAD references must be a list";
+  }
+  const expected = [];
+  for (const field of fields) {
+    const role = field.name === "Symbol" ? "symbol" : "footprint";
+    namedReferences(field.value).forEach((reference, ordinal) => {
+      expected.push({ role: role, ordinal: ordinal, reference: reference });
+    });
+  }
+  const matches =
+    references.length === expected.length &&
+    references.every(
+      (item, index) =>
+        item &&
+        item.role === expected[index].role &&
+        item.ordinal === expected[index].ordinal &&
+        item.reference === expected[index].reference &&
+        item.target &&
+        typeof item.target === "object",
+    );
+  if (!matches) {
+    return "its CAD references are not the ones its Symbol and Footprint fields name";
+  }
+  return "";
+}
+
 // ---- CAD item revisions ----------------------------------------------------
 //
 // CAD item revisions are numbered from 1 per CAD item, like part revisions,
@@ -538,10 +635,7 @@ function cadReferences(txApp, fields, currentRevision) {
     if (text === null) {
       continue;
     }
-    const names = text
-      .split(";")
-      .map((name) => trimSpace(name))
-      .filter((name) => name.length > 0);
+    const names = namedReferences(text);
     names.forEach((reference, ordinal) => {
       const library = reference.indexOf(":") >= 0 ? reference.substring(0, reference.indexOf(":")) : reference;
       let target;
@@ -720,14 +814,24 @@ function publishEdit(e) {
     // The new documents, serialized in the field order of crates/catalog
     // PartDetails and PartRevision, so the stored bytes are their
     // canonical JSON.
+    // Each new document is checked like an imported one, so a field can
+    // never move between the details and the revision, even if a stored
+    // document were wrong.
+    const refuse = (what, problem) => {
+      if (problem) {
+        throw new BadRequestError(`the new ${what} of ${request.ipn} cannot be saved: ${problem}`);
+      }
+    };
     let details = null;
     if (request.details) {
-      const snapshot = JSON.stringify({
+      const document = {
         schema: PART_DETAILS_SCHEMA,
         ipn: request.ipn,
         fields: editedFields(request.details.fields, storedDetails.fields || []),
         manufacturer_parts: editedManufacturerParts(request.details.manufacturerParts),
-      });
+      };
+      refuse("details", detailsProblem(document));
+      const snapshot = JSON.stringify(document);
       const sha = $security.sha256(snapshot);
       if (sha !== currentDetails.getString("snapshot_sha256")) {
         details = { snapshot: snapshot, sha: sha };
@@ -748,6 +852,7 @@ function publishEdit(e) {
       if (storedRevision.excluded_from_bom === true) {
         document.excluded_from_bom = true;
       }
+      refuse("revision", revisionProblem(document));
       const snapshot = JSON.stringify(document);
       const sha = $security.sha256(snapshot);
       if (sha !== currentRevision.getString("snapshot_sha256")) {
@@ -892,6 +997,8 @@ module.exports = {
   PART_REVISION_SCHEMA: PART_REVISION_SCHEMA,
   SOURCE_SCHEMA: SOURCE_SCHEMA,
   publishEdit: publishEdit,
+  detailsProblem: detailsProblem,
+  revisionProblem: revisionProblem,
   describeRecord: describeRecord,
   cadItemRevisionTarget: cadItemRevisionTarget,
   isCadItemRevision: isCadItemRevision,

@@ -373,7 +373,10 @@ routerAdd(
     }
 
     // A part's details or revision document: its exact text, hashed here,
-    // checked for its schema and IPN.
+    // checked for its schema, its IPN and what it may hold (catalog_lib.js
+    // detailsProblem and revisionProblem: Symbol and Footprint only in the
+    // revision, matching its CAD references; every other field only in the
+    // details).
     const document = (part, name, schema, ipn) => {
       const entry = part[name];
       if (!entry || typeof entry !== "object") {
@@ -387,6 +390,10 @@ routerAdd(
       const parsed = parse(snapshot, `${ipn}'s ${name}`);
       if (parsed.schema !== schema || parsed.ipn !== ipn) {
         fail(`the ${name} of ${ipn} must be ${schema} for ${ipn}`);
+      }
+      const problem = name === "details" ? lib.detailsProblem(parsed) : lib.revisionProblem(parsed);
+      if (problem) {
+        fail(`the ${name} of ${ipn} cannot be saved: ${problem}`);
       }
       return { snapshot: snapshot, sha: snapshotSha256, parsed: parsed };
     };
