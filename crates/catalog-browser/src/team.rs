@@ -1,6 +1,6 @@
 //! The team catalog use cases behind the desktop: sign in to the team's
-//! PocketBase server, read one part's details and history, publish edits
-//! and restores, and follow changes others make.
+//! PocketBase server, read one part's details and history, publish edits,
+//! and follow changes others make.
 //!
 //! The session (the auth token) lives only in memory: the app saves the
 //! server address and email, never the password or the token, so signing in
@@ -14,9 +14,9 @@
 
 use crate::PartValues;
 use catalog::pocketbase::{
-    ConflictingRevision, EditCommand, PublishOutcome, PublishReply, RestoreCommand, StoredBlob,
+    ConflictingRevision, EditCommand, PublishOutcome, PublishReply, StoredBlob,
     StoredCadItemRevision, StoredChange, StoredPart, StoredPartRevision, changes_by_id,
-    part_by_ipn, part_revisions, submit_edit, submit_restore,
+    part_by_ipn, part_revisions, submit_edit,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
@@ -27,7 +27,7 @@ use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnec
 use desktop_contract::{
     CadItemUse, ConflictRow, DetailChange, Field, LiveUpdates, ManufacturerPart, PreviewKind,
     PublishResult, RevisionDetails, RevisionSummary, SignInRequest, TeamConflict, TeamEditRequest,
-    TeamPart, TeamRestoreRequest, TeamSession, TeamStatus,
+    TeamPart, TeamSession, TeamStatus,
 };
 use kicad_integration::{LibRef, StoredItem, footprint_choices};
 use serde::{Deserialize, Serialize};
@@ -351,24 +351,6 @@ impl TeamCatalog {
         let reply = submit_edit(&client, &command);
         self.published(&client, &request.ipn, reply, |current, part| {
             edit_conflict(&request, current, part)
-        })
-    }
-
-    pub fn restore(&self, request: TeamRestoreRequest) -> Result<PublishResult, String> {
-        let client = self.client()?;
-        let command = RestoreCommand::new(
-            &request.ipn,
-            request.expected_revision,
-            request.restore_revision,
-            &request.reason,
-        );
-        let command = RestoreCommand {
-            correlation_id: attempt_id(request.correlation_id.as_deref())?,
-            ..command
-        };
-        let reply = submit_restore(&client, &command);
-        self.published(&client, &request.ipn, reply, |current, part| {
-            restore_conflict(&request, current, part)
         })
     }
 
@@ -881,17 +863,7 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Stri
                 Some(previous) => to_changes(previous, this),
                 None => Vec::new(),
             };
-            let restore_changes = if revision.number == current_number {
-                Vec::new()
-            } else {
-                to_changes(current, this)
-            };
-            summary(
-                revision,
-                change_records.get(&revision.change),
-                changes,
-                restore_changes,
-            )
+            summary(revision, change_records.get(&revision.change), changes)
         })
         .collect();
     let view = TeamPart {
@@ -944,15 +916,10 @@ fn summary(
     revision: &StoredPartRevision,
     change: Option<&StoredChange>,
     changes: Vec<DetailChange>,
-    restore_changes: Vec<DetailChange>,
 ) -> RevisionSummary {
     let kind = change
         .map(|change| change.kind.as_str())
         .unwrap_or_default();
-    let restored_from = serde_json::from_str::<serde_json::Value>(&revision.source)
-        .ok()
-        .and_then(|source| source["restored_revision"]["number"].as_u64())
-        .and_then(|number| u32::try_from(number).ok());
     RevisionSummary {
         number: revision.number,
         action: action(kind).to_owned(),
@@ -963,9 +930,7 @@ fn summary(
         reason: change
             .map(|change| change.reason.clone())
             .unwrap_or_default(),
-        restored_from,
         changes,
-        restore_changes,
     }
 }
 
@@ -982,7 +947,8 @@ fn actor_name(change: &StoredChange) -> String {
     }
 }
 
-/// The plain word for a Change kind.
+/// The plain word for a Change kind. Nothing publishes restores any more,
+/// but revisions saved before they were removed still say so.
 fn action(kind: &str) -> &'static str {
     match kind {
         "csv-import" => "Imported",
@@ -1024,17 +990,6 @@ fn manufacturer_parts_of(details: &PartDetails) -> Vec<ManufacturerPart> {
         .map(|part| ManufacturerPart {
             manufacturer: part.manufacturer.clone(),
             mpn: part.mpn.clone(),
-        })
-        .collect()
-}
-
-fn fields_of(details: &PartDetails) -> Vec<Field> {
-    details
-        .fields
-        .iter()
-        .map(|field| Field {
-            name: field.name.clone(),
-            value: field.value.clone(),
         })
         .collect()
 }
@@ -1122,57 +1077,6 @@ fn edit_conflict(
         theirs: their_summary(current, part),
         rows,
         merged,
-        restore_revision: None,
-        part: part.view.clone(),
-    })
-}
-
-/// A restore that someone else beat: what the restore would bring back
-/// next to what they saved.
-fn restore_conflict(
-    request: &TeamRestoreRequest,
-    current: &ConflictingRevision,
-    part: &LoadedPart,
-) -> Result<TeamConflict, String> {
-    let missing = |number: u32| format!("revision {number} is missing");
-    let base = part
-        .details
-        .get(&request.expected_revision)
-        .ok_or_else(|| missing(request.expected_revision))?;
-    let restored = part
-        .details
-        .get(&request.restore_revision)
-        .ok_or_else(|| missing(request.restore_revision))?;
-    let theirs = current.details().map_err(|error| error.to_string())?;
-    let mut rows = Vec::new();
-    for field in &theirs.fields {
-        let started = base.field(&field.name).unwrap_or_default();
-        let mine = restored.field(&field.name).unwrap_or_default();
-        if mine != started || field.value != started {
-            rows.push(ConflictRow {
-                label: field.name.clone(),
-                started_from: started.to_owned(),
-                theirs: field.value.clone(),
-                yours: mine.to_owned(),
-                both_changed: mine != started && field.value != started && field.value != mine,
-                you_changed: mine != started,
-            });
-        }
-    }
-    let merged = TeamEditRequest {
-        correlation_id: None,
-        ipn: request.ipn.clone(),
-        expected_revision: current.number,
-        reason: request.reason.clone(),
-        fields: fields_of(&theirs),
-        manufacturer_parts: manufacturer_parts_of(&theirs),
-    };
-    Ok(TeamConflict {
-        started_from: request.expected_revision,
-        theirs: their_summary(current, part),
-        rows,
-        merged,
-        restore_revision: Some(request.restore_revision),
         part: part.view.clone(),
     })
 }
@@ -1195,9 +1099,7 @@ fn their_summary(current: &ConflictingRevision, part: &LoadedPart) -> RevisionSu
             },
             saved_at: saved_at(&current.created),
             reason: current.reason.clone(),
-            restored_from: None,
             changes: Vec::new(),
-            restore_changes: Vec::new(),
         })
 }
 

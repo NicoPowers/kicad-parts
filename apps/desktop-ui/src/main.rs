@@ -1,7 +1,7 @@
 //! KiCad Parts desktop UI: search the catalog, select a part, and see the
 //! exact KiCad symbol (every unit) and footprint exported by kicad-cli.
 //! Signed in to the team catalog, a part it has also shows its history and
-//! can be edited and restored there.
+//! can be edited there.
 
 mod backend;
 mod team;

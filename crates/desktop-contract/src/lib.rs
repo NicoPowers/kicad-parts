@@ -18,7 +18,6 @@ pub mod command {
     pub const TEAM_SIGN_OUT: &str = "team_sign_out";
     pub const TEAM_PART: &str = "team_part";
     pub const TEAM_EDIT: &str = "team_edit";
-    pub const TEAM_RESTORE: &str = "team_restore";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -343,19 +342,15 @@ pub struct CadItemUse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RevisionSummary {
     pub number: u32,
-    /// `Imported`, `Edited` or `Restored`.
+    /// `Imported` or `Edited` (`Restored` for revisions saved before
+    /// restores were removed).
     pub action: String,
     pub actor_name: String,
     /// When it was saved, as `2026-10-09 18:02 UTC`.
     pub saved_at: String,
     pub reason: String,
-    /// For a restore, the revision whose details it copied.
-    pub restored_from: Option<u32>,
     /// What changed compared with the revision before it.
     pub changes: Vec<DetailChange>,
-    /// What restoring this revision would change in the current one; empty
-    /// for the current revision.
-    pub restore_changes: Vec<DetailChange>,
 }
 
 /// One difference between two versions of a part's details.
@@ -383,18 +378,7 @@ pub struct TeamEditRequest {
     pub manufacturer_parts: Vec<ManufacturerPart>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TeamRestoreRequest {
-    /// As in [`TeamEditRequest`].
-    #[serde(default)]
-    pub correlation_id: Option<String>,
-    pub ipn: String,
-    pub expected_revision: u32,
-    pub restore_revision: u32,
-    pub reason: String,
-}
-
-/// What publishing an edit or a restore did.
+/// What publishing an edit did.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum PublishResult {
@@ -427,9 +411,6 @@ pub struct TeamConflict {
     /// Their revision with only your changes applied on top: what "save my
     /// changes on top of theirs" publishes.
     pub merged: TeamEditRequest,
-    /// For a restore, the revision it would have copied; "restore anyway"
-    /// tries again from their revision.
-    pub restore_revision: Option<u32>,
     /// The part as it is now.
     pub part: TeamPart,
 }

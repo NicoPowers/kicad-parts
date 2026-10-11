@@ -1,5 +1,5 @@
 //! The "browse the catalog with exact KiCad previews" use cases, and the
-//! team catalog ([`team`]): sign in, history, edits and restores.
+//! team catalog ([`team`]): sign in, history and edits.
 //!
 //! The desktop shell wraps each method in a Tauri command and does nothing
 //! else, so everything here is testable without a window.

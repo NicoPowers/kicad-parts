@@ -1,16 +1,13 @@
 //! The desktop's team catalog use cases (catalog-browser's TeamCatalog)
 //! against a disposable PocketBase with the resistors imported: sign-in,
 //! history and differences, edits, a conflict resolved by saving on top,
-//! restore, read-only members, and changes by others arriving by
-//! themselves.
+//! read-only members, and changes by others arriving by themselves.
 
 use catalog::pocketbase::{EditCommand, ImportCommand, read_back, submit_edit, submit_import};
 use catalog_browser::team::TeamCatalog;
 use catalog_import::services;
 use collaboration::PocketBaseClient;
-use desktop_contract::{
-    LiveUpdates, PublishResult, SignInRequest, TeamEditRequest, TeamRestoreRequest, TeamSession,
-};
+use desktop_contract::{LiveUpdates, PublishResult, SignInRequest, TeamEditRequest, TeamSession};
 use std::time::{Duration, Instant};
 
 const IPN: &str = "RES-0000-0470";
@@ -31,7 +28,7 @@ fn checkpoint(team: &TeamCatalog) -> u64 {
 }
 
 #[test]
-fn the_desktop_edits_resolves_a_conflict_and_restores() {
+fn the_desktop_edits_and_resolves_a_conflict() {
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
@@ -243,45 +240,6 @@ fn the_desktop_edits_resolves_a_conflict_and_restores() {
             .all(|hit| hit.ipn != IPN)
     );
 
-    // Restoring revision 1 adds revision 5 with its details.
-    let first = part.history.iter().find(|r| r.number == 1).unwrap();
-    assert!(
-        first
-            .restore_changes
-            .iter()
-            .any(|change| change.label == "Value")
-    );
-    let restored = team
-        .restore(TeamRestoreRequest {
-            correlation_id: None,
-            ipn: IPN.into(),
-            expected_revision: 4,
-            restore_revision: 1,
-            reason: "Back to the import".into(),
-        })
-        .unwrap();
-    let PublishResult::Saved { revision, part } = restored else {
-        panic!("not restored");
-    };
-    assert_eq!(revision, 5);
-    assert_eq!(part.history[0].action, "Restored");
-    assert_eq!(part.history[0].restored_from, Some(1));
-    assert_eq!(part.current.field("Value"), Some("47"));
-    // A stale restore is a conflict that names the restore.
-    let PublishResult::Conflict(conflict) = team
-        .restore(TeamRestoreRequest {
-            correlation_id: None,
-            ipn: IPN.into(),
-            expected_revision: 4,
-            restore_revision: 2,
-            reason: "stale".into(),
-        })
-        .unwrap()
-    else {
-        panic!("no conflict");
-    };
-    assert_eq!(conflict.restore_revision, Some(2));
-
     // A read-only member sees everything but cannot save.
     let reader = TeamCatalog::open(state.path().join("reader.json"), None, None);
     let status = reader.sign_in(SignInRequest {
@@ -297,10 +255,10 @@ fn the_desktop_edits_resolves_a_conflict_and_restores() {
         }
     ));
     let part = reader.part(IPN).unwrap().unwrap();
-    assert_eq!(part.history.len(), 5);
+    assert_eq!(part.history.len(), 4);
     let PublishResult::Refused { message } = reader
         .edit(TeamEditRequest {
-            expected_revision: 5,
+            expected_revision: 4,
             ..request
         })
         .unwrap()

@@ -8,7 +8,7 @@ use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
     AppStatus, PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
-    SearchResponse, SignInRequest, TeamEditRequest, TeamPart, TeamRestoreRequest, TeamStatus,
+    SearchResponse, SignInRequest, TeamEditRequest, TeamPart, TeamStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -307,15 +307,6 @@ async fn team_edit(
     blocking(move || team.edit(request)).await?
 }
 
-#[tauri::command]
-async fn team_restore(
-    team: State<'_, Team>,
-    request: TeamRestoreRequest,
-) -> Result<PublishResult, String> {
-    let team = team.inner().clone();
-    blocking(move || team.restore(request)).await?
-}
-
 fn main() {
     let options = match LaunchOptions::parse(std::env::args_os().skip(1)) {
         Ok(options) => options,
@@ -387,7 +378,6 @@ fn main() {
             team_sign_out,
             team_part,
             team_edit,
-            team_restore,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -489,7 +479,6 @@ mod tests {
             command::TEAM_SIGN_OUT,
             command::TEAM_PART,
             command::TEAM_EDIT,
-            command::TEAM_RESTORE,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

@@ -689,8 +689,7 @@ a {
 
 .team-sign-in input,
 .edit-form input,
-.edit-form textarea,
-.restore-form textarea {
+.edit-form textarea {
   width: 100%;
   font: inherit;
   padding: 0.4rem 0.6rem;
@@ -903,22 +902,6 @@ a {
 }
 
 .revision > p {
-  margin: 0 0 0.5rem;
-}
-
-.restore-open {
-  margin-top: 0.2rem;
-}
-
-.restore-form {
-  margin-top: 0.6rem;
-  padding: 0.75rem;
-  background: #f5f7fa;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-}
-
-.restore-form p {
   margin: 0 0 0.5rem;
 }
 

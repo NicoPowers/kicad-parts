@@ -1,12 +1,11 @@
 //! The team catalog in the desktop UI: the sign-in badge in the header,
-//! and, for a part the team catalog has, its details, history, edits,
-//! conflicts and restores in the right-hand column of the part panel.
+//! and, for a part the team catalog has, its details, history, edits and
+//! conflicts in the right-hand column of the part panel.
 
 use crate::backend;
 use desktop_contract::{
     DetailChange, Field, LiveUpdates, ManufacturerPart, PublishResult, RevisionSummary,
-    SignInRequest, TeamConflict, TeamEditRequest, TeamPart, TeamRestoreRequest, TeamSession,
-    TeamStatus,
+    SignInRequest, TeamConflict, TeamEditRequest, TeamPart, TeamSession, TeamStatus,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -230,9 +229,6 @@ pub struct TeamUi {
     pub notice: RwSignal<Option<Notice>>,
     /// The revision selected in the history.
     pub selected: RwSignal<Option<u32>>,
-    /// The revision whose restore form is open.
-    pub restoring: RwSignal<Option<u32>>,
-    pub restore_reason: RwSignal<String>,
     pub busy: RwSignal<bool>,
     /// The last save sent and its correlation ID: sending the same save
     /// again (after a lost answer) reuses the ID, so the server replays its
@@ -258,8 +254,6 @@ impl TeamUi {
             conflict: RwSignal::new(None),
             notice: RwSignal::new(None),
             selected: RwSignal::new(None),
-            restoring: RwSignal::new(None),
-            restore_reason: RwSignal::new(String::new()),
             busy: RwSignal::new(false),
             attempt: StoredValue::new(None),
             opened_id: StoredValue::new(new_correlation_id()),
@@ -274,8 +268,6 @@ impl TeamUi {
         self.conflict.set(None);
         self.notice.set(None);
         self.selected.set(None);
-        self.restoring.set(None);
-        self.restore_reason.set(String::new());
         self.busy.set(false);
     }
 
@@ -319,7 +311,7 @@ fn scroll_column_to_top() {
     }
 }
 
-/// Applies what the server answered to an edit or a restore.
+/// Applies what the server answered to an edit.
 fn published(
     ui: TeamUi,
     part: RwSignal<Option<TeamPart>>,
@@ -335,8 +327,6 @@ fn published(
             part.set(Some(saved));
             ui.editing.set(None);
             ui.conflict.set(None);
-            ui.restoring.set(None);
-            ui.restore_reason.set(String::new());
             ui.selected.set(None);
             ui.notice.set(Some(Notice::Done(done(revision))));
             scroll_column_to_top();
@@ -345,7 +335,6 @@ fn published(
         Ok(PublishResult::Conflict(conflict)) => {
             part.set(Some(conflict.part.clone()));
             ui.editing.set(None);
-            ui.restoring.set(None);
             ui.notice.set(None);
             ui.conflict.set(Some(*conflict));
             scroll_column_to_top();
@@ -359,7 +348,6 @@ fn published(
 #[derive(Clone, Debug, PartialEq)]
 pub enum Attempt {
     Edit(TeamEditRequest),
-    Restore(TeamRestoreRequest),
 }
 
 /// A new correlation ID: letters, digits and dashes, as the server needs.
@@ -403,26 +391,6 @@ fn save_edit(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamEditRequ
         let result = backend::team_edit(request).await;
         published(ui, part, result, |revision| {
             format!("Saved as revision {revision}.")
-        });
-    });
-}
-
-fn restore(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamRestoreRequest) {
-    if request.reason.trim().is_empty() {
-        ui.notice.set(Some(Notice::Problem(
-            "Say why you are restoring this revision.".into(),
-        )));
-        return;
-    }
-    let mut request = request;
-    request.correlation_id = None;
-    request.correlation_id = Some(attempt_id(ui, Attempt::Restore(request.clone())));
-    ui.busy.set(true);
-    let restored = request.restore_revision;
-    spawn_local(async move {
-        let result = backend::team_restore(request).await;
-        published(ui, part, result, |revision| {
-            format!("Restored revision {restored} as revision {revision}.")
         });
     });
 }
@@ -506,7 +474,7 @@ pub fn TeamColumn(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) 
                 aria-labelledby="team-tab-history"
                 hidden=move || ui.tab.get() != Tab::History || ui.conflict.with(Option::is_some)
             >
-                <HistoryView part=part can_edit=can_edit ui=ui />
+                <HistoryView part=part ui=ui />
             </div>
         </div>
     }
@@ -848,7 +816,7 @@ fn revision_title(revision: &RevisionSummary) -> String {
 }
 
 #[component]
-fn HistoryView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> impl IntoView {
+fn HistoryView(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
     move || {
         let Some(team_part) = part.get() else {
             return ().into_any();
@@ -881,10 +849,7 @@ fn HistoryView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                                     type="button"
                                     class="history-entry"
                                     aria-pressed=if is_selected { "true" } else { "false" }
-                                    on:click=move |_| {
-                                        ui.selected.set(Some(number));
-                                        ui.restoring.set(None);
-                                    }
+                                    on:click=move |_| ui.selected.set(Some(number))
                                 >
                                     <span class="history-title">
                                         {revision_title(revision)}
@@ -899,7 +864,7 @@ fn HistoryView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                     .collect_view()}
             </ol>
             {selected.map(|revision| view! {
-                <RevisionView revision=revision current=current can_edit=can_edit part=part ui=ui />
+                <RevisionView revision=revision />
             })}
         }
         .into_any()
@@ -907,115 +872,21 @@ fn HistoryView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
 }
 
 #[component]
-fn RevisionView(
-    revision: RevisionSummary,
-    current: u32,
-    can_edit: bool,
-    part: RwSignal<Option<TeamPart>>,
-    ui: TeamUi,
-) -> impl IntoView {
+fn RevisionView(revision: RevisionSummary) -> impl IntoView {
     let number = revision.number;
-    let ipn = part.with_untracked(|part| {
-        part.as_ref()
-            .map(|part| part.ipn.clone())
-            .unwrap_or_default()
-    });
-    let what_changed =
-        if number == 1 || (revision.changes.is_empty() && revision.restored_from.is_none()) {
-            view! { <p class="hint">"The first revision of this part."</p> }.into_any()
-        } else if revision.changes.is_empty() {
-            view! { <p class="hint">"Nothing changed in this revision."</p> }.into_any()
-        } else {
-            changes_table(
-                format!("What changed in revision {number}"),
-                "Before",
-                "After",
-                revision.changes.clone(),
-            )
-            .into_any()
-        };
-    let copies = revision.restored_from.map(
-        |from| view! { <p class="hint">{format!("It copies the details of revision {from}.")}</p> },
-    );
-    let restore_changes = revision.restore_changes.clone();
-    let restore_section = (number != current && can_edit).then(|| {
-        let restore_changes = restore_changes.clone();
-        let ipn = ipn.clone();
-        move || {
-            if ui.restoring.get() != Some(number) {
-                return view! {
-                    <button
-                        type="button"
-                        class="restore-open"
-                        on:click=move |_| {
-                            ui.notice.set(None);
-                            ui.restoring.set(Some(number));
-                        }
-                    >
-                        {format!("Restore revision {number}…")}
-                    </button>
-                }
-                .into_any();
-            }
-            if restore_changes.is_empty() {
-                return view! {
-                    <p class="hint">
-                        {format!("Revision {number} has the same details as the current revision, so there is nothing to restore.")}
-                    </p>
-                }
-                .into_any();
-            }
-            let ipn = ipn.clone();
-            view! {
-                <form
-                    class="restore-form"
-                    aria-labelledby="restore-heading"
-                    on:submit=move |event| {
-                        event.prevent_default();
-                        restore(
-                            ui,
-                            part,
-                            TeamRestoreRequest {
-                                correlation_id: None,
-                                ipn: ipn.clone(),
-                                expected_revision: current,
-                                restore_revision: number,
-                                reason: ui.restore_reason.get_untracked(),
-                            },
-                        );
-                    }
-                >
-                    <h4 id="restore-heading">{format!("Restore revision {number}")}</h4>
-                    <p>
-                        {format!(
-                            "Restoring adds revision {} with the details of revision {number}. No revision is deleted or changed.",
-                            current + 1,
-                        )}
-                    </p>
-                    {changes_table(
-                        format!("What restoring revision {number} changes"),
-                        "Now",
-                        "After restoring",
-                        restore_changes.clone(),
-                    )}
-                    <label for="restore-reason" class="reason-label">"Why are you restoring it?"</label>
-                    <textarea
-                        id="restore-reason"
-                        rows="2"
-                        prop:value=move || ui.restore_reason.get()
-                        on:input:target=move |event| ui.restore_reason.set(event.target().value())
-                    ></textarea>
-                    <div class="form-actions">
-                        <button type="submit" class="primary" disabled=move || ui.busy.get()>
-                            {format!("Restore revision {number}")}
-                        </button>
-                        <button type="button" on:click=move |_| ui.restoring.set(None)>"Cancel"</button>
-                    </div>
-                </form>
-            }
-            .into_any()
-        }
-    });
+    let what_changed = if number == 1 {
+        view! { <p class="hint">"The first revision of this part."</p> }.into_any()
+    } else if revision.changes.is_empty() {
+        view! { <p class="hint">"Nothing changed in this revision."</p> }.into_any()
+    } else {
+        changes_table(
+            format!("What changed in revision {number}"),
+            "Before",
+            "After",
+            revision.changes.clone(),
+        )
+        .into_any()
+    };
     view! {
         <section class="revision" aria-labelledby="revision-heading">
             <h4 id="revision-heading">{format!("What changed in revision {number}")}</h4>
@@ -1023,9 +894,7 @@ fn RevisionView(
                 {format!("{} by {} on ", revision.action, revision.actor_name)}
                 {saved_at_view(revision.saved_at.clone())}
             </p>
-            {copies}
             {what_changed}
-            {restore_section}
         </section>
     }
 }
@@ -1044,86 +913,39 @@ fn ConflictView(
     };
     // The sentence is split around the save time, which is a <time>.
     let summary_start = format!("{} saved revision {} on ", theirs.actor_name, theirs.number);
-    let summary_end = match conflict.restore_revision {
-        None => format!(
-            "{reason} after you started editing revision {}. Your changes are not saved yet.",
-            conflict.started_from,
-        ),
-        Some(restore) => {
-            format!("{reason} before your restore of revision {restore}. Nothing was restored.")
-        }
-    };
-    let yours_heading = if conflict.restore_revision.is_some() {
-        "Restore would give"
-    } else {
-        "Yours"
-    };
-    let merged = conflict.merged.clone();
+    let summary_end = format!(
+        "{reason} after you started editing revision {}. Your changes are not saved yet.",
+        conflict.started_from,
+    );
     let rows = conflict.rows.clone();
-    let actions = match conflict.restore_revision {
-        None => {
-            let save_merged = merged.clone();
-            let edit_merged = merged.clone();
-            view! {
-                <div class="form-actions">
-                    <button
-                        type="button"
-                        class="primary"
-                        disabled=move || ui.busy.get()
-                        on:click=move |_| save_edit(ui, part, save_merged.clone())
-                    >
-                        "Save my changes on top of theirs"
-                    </button>
-                    <button
-                        type="button"
-                        on:click=move |_| ui.start_editing(draft_from_request(&edit_merged))
-                    >
-                        "Edit again"
-                    </button>
-                    <button
-                        type="button"
-                        on:click=move |_| {
-                            ui.conflict.set(None);
-                            ui.notice.set(Some(Notice::Done("Your changes were discarded.".into())));
-                        }
-                    >
-                        "Discard my changes"
-                    </button>
-                </div>
-            }
-            .into_any()
-        }
-        Some(restore_revision) => {
-            let ipn = merged.ipn.clone();
-            let reason = merged.reason.clone();
-            let expected = theirs.number;
-            view! {
-                <div class="form-actions">
-                    <button
-                        type="button"
-                        class="primary"
-                        disabled=move || ui.busy.get()
-                        on:click=move |_| {
-                            restore(
-                                ui,
-                                part,
-                                TeamRestoreRequest {
-                                    correlation_id: None,
-                                    ipn: ipn.clone(),
-                                    expected_revision: expected,
-                                    restore_revision,
-                                    reason: reason.clone(),
-                                },
-                            )
-                        }
-                    >
-                        {format!("Restore revision {restore_revision} anyway")}
-                    </button>
-                    <button type="button" on:click=move |_| ui.conflict.set(None)>"Cancel"</button>
-                </div>
-            }
-            .into_any()
-        }
+    let save_merged = conflict.merged.clone();
+    let edit_merged = conflict.merged.clone();
+    let actions = view! {
+        <div class="form-actions">
+            <button
+                type="button"
+                class="primary"
+                disabled=move || ui.busy.get()
+                on:click=move |_| save_edit(ui, part, save_merged.clone())
+            >
+                "Save my changes on top of theirs"
+            </button>
+            <button
+                type="button"
+                on:click=move |_| ui.start_editing(draft_from_request(&edit_merged))
+            >
+                "Edit again"
+            </button>
+            <button
+                type="button"
+                on:click=move |_| {
+                    ui.conflict.set(None);
+                    ui.notice.set(Some(Notice::Done("Your changes were discarded.".into())));
+                }
+            >
+                "Discard my changes"
+            </button>
+        </div>
     };
     view! {
         <section class="conflict" role="alert" aria-labelledby="conflict-heading">
@@ -1135,7 +957,7 @@ fn ConflictView(
                         <th scope="col">"Field"</th>
                         <th scope="col">{format!("Revision {} (you started here)", conflict.started_from)}</th>
                         <th scope="col">{format!("Theirs (revision {})", theirs.number)}</th>
-                        <th scope="col">{yours_heading}</th>
+                        <th scope="col">"Yours"</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1156,11 +978,9 @@ fn ConflictView(
                         .collect_view()}
                 </tbody>
             </table>
-            {conflict.restore_revision.is_none().then(|| view! {
-                <p class="hint">
-                    "Saving on top keeps their changes and adds yours. Where you both changed a field, yours is kept."
-                </p>
-            })}
+            <p class="hint">
+                "Saving on top keeps their changes and adds yours. Where you both changed a field, yours is kept."
+            </p>
             {actions}
         </section>
     }

@@ -1,7 +1,8 @@
 // Team catalog journey: sign in to a disposable local team server, see a
 // part's details from the team catalog, edit it, watch someone else's
 // change arrive by itself, resolve a conflict, read the history with what
-// changed, restore an earlier revision, and view as a read-only member.
+// changed, and view as a read-only member. There is no Restore: an earlier
+// revision is never copied back (kicad-parts-9296).
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -31,7 +32,7 @@ const NOTICE = '.team-notice';
 /** The server address holds a port that changes from run to run. */
 const SERVER_ADDRESS = '#team-server';
 
-describe('team catalog: history, edits, conflicts and restore', () => {
+describe('team catalog: history, edits and conflicts', () => {
   let server;
   let browser;
   let editor;
@@ -300,47 +301,12 @@ describe('team catalog: history, edits, conflicts and restore', () => {
       ),
     );
     assert.deepEqual(rows, [['Value', '47', '47R']]);
+    const revisionButtons = await browser.execute(() =>
+      [...document.querySelectorAll('.revision button')].map((b) => b.textContent.trim()),
+    );
+    assert.deepEqual(revisionButtons, [], 'an earlier revision offers no restore');
     await assertAccessible(browser, '46-team-history');
     await screenshot(browser, '46-team-history');
-  });
-
-  it('restores revision 1 as a new revision', async () => {
-    const first = await browser.$('.history li:last-child button');
-    await first.click();
-    await waitForText(browser, '#revision-heading', 'What changed in revision 1');
-    await clickButton('.revision', 'Restore revision 1…');
-    await waitForText(browser, '#restore-heading', 'Restore revision 1');
-    assert.match(
-      await textOf(browser, '.restore-form p'),
-      /^Restoring adds revision 6 with the details of revision 1\. No revision is deleted or changed\.$/,
-    );
-    const rows = await browser.execute(() =>
-      [...document.querySelectorAll('.restore-form .changes tbody tr')].map((tr) =>
-        [...tr.children].map((cell) => cell.textContent.trim()),
-      ),
-    );
-    assert.deepEqual(rows, [
-      ['Description', 'Thick film resistor, 47 ohm, 1%', 'RES 47 OHM 1% 1/10W 0603'],
-      ['Value', '47.0', '47'],
-      ['Tolerance', '0.5%', '1%'],
-    ]);
-    await (await browser.$('#restore-reason')).setValue('Go back to the imported details');
-    await assertAccessible(browser, '47-team-restore');
-    await screenshot(browser, '47-team-restore');
-    await clickButton('.restore-form', 'Restore revision 1');
-    await waitForText(browser, NOTICE, 'Restored revision 1 as revision 6.');
-    await waitForRevision(6);
-    assert.equal(
-      await browser.execute(() => document.querySelector('.part-fields').scrollTop),
-      0,
-      'the column scrolls back to the message',
-    );
-    await waitForText(browser, '.history li:first-child .history-title', `Revision 6 · Restored by ${editor.name} (current)`);
-    assert.match(await textOf(browser, '.revision'), /It copies the details of revision 1\./);
-    // The results list catches up with the restored description by itself.
-    await waitForText(browser, '.results li .result-description', 'RES 47 OHM 1% 1/10W 0603');
-    await assertAccessible(browser, '48-team-restored');
-    await screenshot(browser, '48-team-restored');
   });
 
   it('lets a read-only member see everything but not edit', async () => {
@@ -348,19 +314,19 @@ describe('team catalog: history, edits, conflicts and restore', () => {
     await signIn(viewer);
     await waitForText(browser, BADGE, `Team catalog · ${viewer.name}`);
     await waitForLiveUpdates(browser);
-    await waitForRevision(6);
+    await waitForRevision(5);
     await waitForText(browser, '.read-only', 'You can view this part but not edit it.');
     assert.equal((await browser.$$(NOTICE)).length, 0, "no message left from the editor's session");
     const buttons = await browser.execute(() =>
       [...document.querySelectorAll('.part-fields button')].map((b) => b.textContent.trim()),
     );
     assert.ok(!buttons.includes('Edit details'), `no edit button: ${buttons}`);
-    await clickButton(COLUMN, 'History (6)');
-    await browser.waitUntil(async () => (await browser.$$('.history li')).length === 6, { timeout: 5_000 });
+    await clickButton(COLUMN, 'History (5)');
+    await browser.waitUntil(async () => (await browser.$$('.history li')).length === 5, { timeout: 5_000 });
     const second = await browser.$('.history li:nth-child(2) button');
     await second.click();
-    await waitForText(browser, '#revision-heading', 'What changed in revision 5');
-    assert.equal(await browser.execute(() => document.querySelectorAll('.restore-open').length), 0);
+    await waitForText(browser, '#revision-heading', 'What changed in revision 4');
+    assert.equal(await browser.execute(() => document.querySelectorAll('.revision button').length), 0);
     await clickButton(COLUMN, 'Details');
     await assertAccessible(browser, '49-team-read-only');
     await screenshot(browser, '49-team-read-only');
