@@ -19,7 +19,7 @@ The letters at the start of an IPN, like `RES`. It shows which number range the 
 _Avoid_: IPN Family, category code, CCC
 
 **Excluded from BOM**:
-A setting for a part that appears in designs but is never bought or assembled, such as a fiducial.
+A setting for a part that appears in designs but is never bought or assembled, such as a fiducial. It comes only from KiCad's own marks in the CAD a revision uses: a symbol marked not in the BOM, or every footprint choice marked excluded from the BOM. So it belongs to the revision: each new revision works it out again, and an existing revision keeps its own.
 _Avoid_: Off-BOM, no-BOM, virtual part
 
 ### Details and history
