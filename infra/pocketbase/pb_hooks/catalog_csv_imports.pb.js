@@ -28,13 +28,16 @@
 // Excluded from BOM); `source` is the CSV row both came from. `allowOlderCheckout` says
 // the importer was told to import from a checkout older than the team
 // catalog's latest imports (the importer checks git ancestry; the server
-// cannot), and is recorded on the audit entry. A `sourceCommit` ending in
-// `+dirty` means the files have changes that are not committed; such an
-// import is refused (400) unless `allowUncommittedChanges` is true, which
-// says the importer was told to import them anyway, and is recorded on the
-// audit entry too. The server cannot run git, so it trusts the importer to
-// mark uncommitted changes; it checks only that the mark comes with the
-// setting.
+// cannot), and is recorded on the audit entry. `sourceCommit` is empty
+// (the files were not read from git) or a commit ID of 40 lowercase hex
+// digits, followed by `+dirty` when the files have changes that are not
+// committed; anything else is refused (400). An import marked `+dirty` is
+// refused (400) unless `allowUncommittedChanges` is true, which says the
+// importer was told to import them anyway and is recorded on the audit
+// entry; `allowUncommittedChanges` without the mark is refused too, so the
+// record is never wrong. The server cannot run git, so it trusts the
+// importer to mark uncommitted changes; it checks only that the mark and
+// the setting agree.
 //
 // CAD item revisions are numbered from 1 per CAD item, like part
 // revisions, and the current revision is the newest. A request sends one
@@ -100,7 +103,10 @@
 // every import problem it found, new or already stored. A run is
 // recorded whenever it read other files than the previous run of the same
 // CSV file, even if it adds nothing else, so the latest run always holds
-// what the CSV says now.
+// what the CSV says now. It is also recorded when the previous run came
+// from uncommitted changes and this one from a commit, so that once those
+// changes are committed and imported again, the latest run names that
+// commit and the importer's older-checkout check protects them.
 //
 // Answers:
 //   200 { outcome: "applied", changeId, seq, auditEntryId, created, unchanged }
@@ -193,6 +199,12 @@ routerAdd(
     }
     const csvFile = text(body, "csvFile", 100, true);
     const sourceCommit = text(body, "sourceCommit", 100, false);
+    if (sourceCommit !== "" && !/^[0-9a-f]{40}(\+dirty)?$/.test(sourceCommit)) {
+      fail(
+        `the source commit must be empty or a commit ID of 40 lowercase hex digits, followed by +dirty when there are uncommitted changes; got ${sourceCommit.length} characters`,
+      );
+    }
+    const fromUncommittedChanges = sourceCommit.endsWith("+dirty");
     const DOCUMENT = 1000000;
 
     const allowOlderCheckout = body.allowOlderCheckout === undefined || body.allowOlderCheckout === null ? false : body.allowOlderCheckout;
@@ -204,11 +216,14 @@ routerAdd(
     if (typeof allowUncommittedChanges !== "boolean") {
       fail("the allowUncommittedChanges setting must be true or false");
     }
-    if (sourceCommit.endsWith("+dirty") && !allowUncommittedChanges) {
+    if (fromUncommittedChanges && !allowUncommittedChanges) {
       fail(
         "the files of this import have changes that are not committed (its source commit ends in +dirty). " +
           "Commit them and import again, or allow uncommitted changes to import them anyway",
       );
+    }
+    if (allowUncommittedChanges && !fromUncommittedChanges) {
+      fail("there are no uncommitted changes to allow: the source commit does not end in +dirty");
     }
     // The number of the latest import run of this CSV file that the
     // importer checked its checkout against (0 if there was none).
@@ -1151,10 +1166,18 @@ routerAdd(
           .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
       );
       const sameFilesAsPreviousRun = previousEntry !== null && previousEntry.getString("file_hashes") === fileHashes;
+      // A run from a commit after one from uncommitted changes is recorded
+      // even with the same files: the latest run must name the commit, or a
+      // later checkout without it could undo the committed changes.
+      const replacesUncommittedRun =
+        previousEntry !== null &&
+        previousEntry.getString("source_commit").endsWith("+dirty") &&
+        sourceCommit !== "" &&
+        !fromUncommittedChanges;
 
       let status;
       let result;
-      if (revisionCount === 0 && newProblems.length === 0 && sameFilesAsPreviousRun) {
+      if (revisionCount === 0 && newProblems.length === 0 && sameFilesAsPreviousRun && !replacesUncommittedRun) {
         status = 422;
         result = { outcome: "noop", correlationId: correlationId, unchanged: unchanged };
       } else {

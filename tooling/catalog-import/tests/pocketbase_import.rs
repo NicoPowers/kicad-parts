@@ -182,7 +182,8 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     let url = server.url().to_owned();
 
     let import = services::plan(&root, "g-res").unwrap();
-    let command = ImportCommand::new(&import, REASON);
+    let command = ImportCommand::new(&import, REASON)
+        .allowing_uncommitted_changes(services::has_uncommitted_changes(&import));
 
     // Only a superuser may import: anonymous and member calls are refused,
     // and members cannot write Catalog collections directly.
@@ -528,15 +529,21 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     // and with its own correlation ID, is a no-op: no Change, revision, CAD
     // item or blob. Its ID differs from the first import's because it
     // expects the parts that import made.
+    // Uncommitted changes in this checkout are allowed: the commit rule has
+    // its own tests in temporary repositories.
+    let allow = Allow {
+        uncommitted_changes: true,
+        ..Allow::default()
+    };
     let again = services::plan(&root, "g-res").unwrap();
-    let retry = services::prepare_import(&admin, &root, &again, REASON, Allow::default()).unwrap();
+    let retry = services::prepare_import(&admin, &root, &again, REASON, allow).unwrap();
     assert_ne!(retry.correlation_id, command.correlation_id);
     let noop = submit_import(&admin, &retry).unwrap();
     assert_eq!(noop.status, 422, "{}", noop.body);
     assert!(matches!(noop.outcome, ImportOutcome::Noop { .. }));
     assert_eq!(read_back(&admin).unwrap(), stored);
     // Preparing and sending it once more replays that answer.
-    let rerun = services::prepare_import(&admin, &root, &again, REASON, Allow::default()).unwrap();
+    let rerun = services::prepare_import(&admin, &root, &again, REASON, allow).unwrap();
     assert_eq!(rerun.correlation_id, retry.correlation_id);
     let replayed = submit_import(&admin, &rerun).unwrap();
     assert_eq!(
@@ -854,6 +861,37 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
                 body["allowUncommittedChanges"] = setting.clone();
             },
             "changes that are not committed (its source commit ends in +dirty). Commit them",
+        );
+    }
+    // A source commit is empty or a commit ID, with +dirty exactly as the
+    // importer writes it, so the mark cannot be hidden or misspelt.
+    let commit = "a".repeat(40);
+    for (name, source_commit) in [
+        ("upper-case-mark", format!("{commit}+DIRTY")),
+        ("trailing-space", format!("{commit}+dirty ")),
+        ("other-mark", format!("{commit}-dirty")),
+        ("upper-case-commit", format!("{}+dirty", "A".repeat(40))),
+        ("short-commit", "abc123".to_owned()),
+    ] {
+        refused(
+            name,
+            &|body| {
+                body["sourceCommit"] = source_commit.clone().into();
+                body["allowUncommittedChanges"] = true.into();
+            },
+            "source commit must be empty or a commit ID of 40 lowercase hex digits",
+        );
+    }
+    // Allowing uncommitted changes when there are none would leave a wrong,
+    // permanent record.
+    for source_commit in [commit.clone(), String::new()] {
+        refused(
+            "nothing-to-allow",
+            &|body| {
+                body["sourceCommit"] = source_commit.clone().into();
+                body["allowUncommittedChanges"] = true.into();
+            },
+            "are no uncommitted changes to allow",
         );
     }
     // The server numbers CAD item revisions itself and refuses a forged ID

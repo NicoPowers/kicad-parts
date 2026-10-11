@@ -176,8 +176,10 @@ impl<'a> ImportCommand<'a> {
     /// Imports even from files with changes that are not committed, if
     /// `allow`. Derives the correlation ID again.
     ///
-    /// Until those changes are committed, a later import from a checkout
-    /// without them undoes them, like an import from an older checkout.
+    /// Until those changes are committed and imported again, a later
+    /// import from a checkout without them undoes them, like an import from
+    /// an older checkout. The route refuses this setting when the source
+    /// commit does not end in `+dirty`.
     pub fn allowing_uncommitted_changes(mut self, allow: bool) -> Self {
         self.allow_uncommitted_changes = allow;
         self.correlation_id = self.derived_correlation_id();

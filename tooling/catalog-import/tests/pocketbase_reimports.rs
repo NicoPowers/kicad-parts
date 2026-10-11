@@ -608,8 +608,9 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
         1
     );
 
-    // It counts as its commit, so committing the change imports with
-    // nothing new to record.
+    // Until the change is committed and imported again, a checkout without
+    // it would undo it. Committing it and importing again records a run
+    // even though nothing else changed, so the latest run names the commit.
     git(&[
         "commit",
         "-q",
@@ -618,23 +619,62 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
         "--",
         SUBSTITUTES_CSV,
     ]);
+    let committed_commit = git(&["rev-parse", "HEAD"]);
     let committed = services::plan(root, "g-res").unwrap();
-    assert!(!services::has_uncommitted_changes(&committed));
+    assert_eq!(
+        committed.source_commit.as_deref(),
+        Some(committed_commit.as_str())
+    );
+    let command =
+        services::prepare_import(&admin, root, &committed, REASON, Allow::default()).unwrap();
+    assert_eq!(
+        outcome(&submit_import(&admin, &command).unwrap()),
+        "nothing_changed"
+    );
+    let after_commit = read_back(&admin).unwrap();
+    let entry = latest_audit_entry(&after_commit);
+    assert_eq!(entry.source_commit, committed_commit);
+    assert!(!entry.allowed_uncommitted_changes);
+    assert_eq!(
+        current_details(&after_commit, "RES-0000-1002").1,
+        current_details(&after_dirty, "RES-0000-1002").1
+    );
+    // The same import once more is a no-op: the latest run is a commit now.
     let command =
         services::prepare_import(&admin, root, &committed, REASON, Allow::default()).unwrap();
     assert_eq!(outcome(&submit_import(&admin, &command).unwrap()), "noop");
 
+    // A sibling checkout of the change's parent, without the change, is
+    // refused as an older checkout.
+    git(&["checkout", "-q", "-b", "sibling", &newer]);
+    fs::write(root.join("notes.txt"), "unrelated\n").unwrap();
+    git(&["add", "--", "notes.txt"]);
+    git(&["commit", "-q", "-m", "unrelated"]);
+    let sibling = services::plan(root, "g-res").unwrap();
+    assert!(!services::has_uncommitted_changes(&sibling));
+    let refused =
+        services::prepare_import(&admin, root, &sibling, REASON, Allow::default()).unwrap_err();
+    assert!(
+        refused.contains(&format!(
+            "does not include commit {}",
+            &committed_commit[..12]
+        )),
+        "{refused}"
+    );
+    assert_eq!(read_back(&admin).unwrap(), after_commit);
+
     // Uncommitted changes to files the import does not read never block
     // it, and allowing uncommitted changes when there are none records
     // nothing.
-    fs::write(root.join("notes.txt"), "unrelated\n").unwrap();
+    git(&["checkout", "-q", &committed_commit]);
+    fs::write(root.join("notes.txt"), "unrelated, not committed\n").unwrap();
     let unrelated = services::plan(root, "g-res").unwrap();
     assert_eq!(unrelated.source_commit, committed.source_commit);
     let command =
         services::prepare_import(&admin, root, &unrelated, REASON, allow_uncommitted).unwrap();
     assert!(!command.allow_uncommitted_changes());
     assert_eq!(outcome(&submit_import(&admin, &command).unwrap()), "noop");
-    assert_eq!(read_back(&admin).unwrap(), after_dirty);
+    assert_eq!(read_back(&admin).unwrap(), after_commit);
 
     // The older checkout is refused again.
     git(&["checkout", "-q", &older]);
