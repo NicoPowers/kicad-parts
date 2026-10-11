@@ -132,7 +132,12 @@ fn a_stored_revision_record_that_does_not_match_its_hash_is_not_drawn() {
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
     let import = services::plan(&root, "g-res").unwrap();
-    submit_import(&admin, &ImportCommand::new(&import, "Import the resistors")).unwrap();
+    submit_import(
+        &admin,
+        &ImportCommand::new(&import, "Import the resistors")
+            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
+    )
+    .unwrap();
     let member = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     // Find the stored revision of the R_US symbol, then change its snapshot
     // in the stopped server's database, keeping the hash the part names.
@@ -196,7 +201,12 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
     let import = services::plan(&root, "g-res").unwrap();
-    submit_import(&admin, &ImportCommand::new(&import, "Import the resistors")).unwrap();
+    submit_import(
+        &admin,
+        &ImportCommand::new(&import, "Import the resistors")
+            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
+    )
+    .unwrap();
     let member = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     let url = server.url().to_owned();
 
@@ -308,7 +318,9 @@ fn after_going_back_to_earlier_content_previews_draw_each_revisions_own_cad() {
             .import("g-res", None)
             .unwrap();
         let state = catalog::pocketbase::read_import_state(&admin).unwrap();
-        let mut command = ImportCommand::new(&import, "Import the resistors").expecting(&state);
+        let mut command = ImportCommand::new(&import, "Import the resistors")
+            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import))
+            .expecting(&state);
         command
             .correlation_id
             .push_str(&format!("-{}", step.replace(' ', "-")));

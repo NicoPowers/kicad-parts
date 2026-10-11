@@ -35,8 +35,12 @@ impl Team {
         let state = tempfile::tempdir().unwrap();
         let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
         let import = services::plan(&root, "g-res").unwrap();
-        let reply = submit_import(&admin, &ImportCommand::new(&import, "Import the resistors"))
-            .unwrap_or_else(|error| panic!("{error}\n{}", server_errors(&admin)));
+        let reply = submit_import(
+            &admin,
+            &ImportCommand::new(&import, "Import the resistors")
+                .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
+        )
+        .unwrap_or_else(|error| panic!("{error}\n{}", server_errors(&admin)));
         assert!(
             matches!(reply.outcome, ImportOutcome::Applied { .. }),
             "{}",
@@ -1288,7 +1292,12 @@ fn server_code_cannot_move_a_part_backwards_or_skip_a_revision() {
         .authenticate("_superusers", &superuser.email, &superuser.password)
         .unwrap();
     let import = services::plan(&root, "g-res").unwrap();
-    submit_import(&admin, &ImportCommand::new(&import, "Import the resistors")).unwrap();
+    submit_import(
+        &admin,
+        &ImportCommand::new(&import, "Import the resistors")
+            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
+    )
+    .unwrap();
     let readback = read_back(&admin).unwrap();
     applied(&submit_edit(&admin, &edit(&readback, IPN, "Symbol", "Device:R")).unwrap());
     applied(&submit_edit(&admin, &edit(&readback, IPN, "Value", "47R")).unwrap());

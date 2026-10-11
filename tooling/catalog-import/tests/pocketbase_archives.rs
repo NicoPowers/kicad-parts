@@ -31,7 +31,12 @@ impl Team {
         let state = tempfile::tempdir().unwrap();
         let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
         let import = services::plan(&root, "g-res").unwrap();
-        submit_import(&admin, &ImportCommand::new(&import, "Import the resistors")).unwrap();
+        submit_import(
+            &admin,
+            &ImportCommand::new(&import, "Import the resistors")
+                .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
+        )
+        .unwrap();
         Self {
             server,
             admin,
@@ -485,7 +490,12 @@ fn server_code_can_only_add_the_next_revision_and_point_at_the_newest_not_archiv
         .authenticate("_superusers", &superuser.email, &superuser.password)
         .unwrap();
     let import = services::plan(&root, "g-res").unwrap();
-    submit_import(&admin, &ImportCommand::new(&import, "Import the resistors")).unwrap();
+    submit_import(
+        &admin,
+        &ImportCommand::new(&import, "Import the resistors")
+            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
+    )
+    .unwrap();
     // Revisions 2 and 3, with 3 archived: revision 2 is current.
     change_symbol(&admin, &read_back(&admin).unwrap(), IPN, "Device:R");
     change_symbol(&admin, &read_back(&admin).unwrap(), IPN, "Device:R_Small");

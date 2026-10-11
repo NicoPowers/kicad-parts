@@ -37,7 +37,12 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
     let import = services::plan(&root, "g-res").unwrap();
-    submit_import(&admin, &ImportCommand::new(&import, "Import the resistors")).unwrap();
+    submit_import(
+        &admin,
+        &ImportCommand::new(&import, "Import the resistors")
+            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
+    )
+    .unwrap();
     let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     let other = services::add_member(&admin, "Grace Editor", "grace@example.test", true).unwrap();
     let viewer = services::add_member(&admin, "Vic Viewer", "vic@example.test", false).unwrap();
@@ -462,7 +467,9 @@ fn import_from(admin: &PocketBaseClient, root: &std::path::Path) {
         .import("g-res", None)
         .unwrap();
     let state = catalog::pocketbase::read_import_state(admin).unwrap();
-    let command = ImportCommand::new(&import, "Import the resistors").expecting(&state);
+    let command = ImportCommand::new(&import, "Import the resistors")
+        .allowing_uncommitted_changes(services::has_uncommitted_changes(&import))
+        .expecting(&state);
     let reply = submit_import(admin, &command).unwrap();
     assert_eq!(reply.status, 200, "{}", reply.body);
 }
