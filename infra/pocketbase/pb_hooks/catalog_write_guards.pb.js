@@ -8,15 +8,18 @@
 // - Nobody creates, updates or deletes a Catalog record through the record
 //   API (`/api/collections/catalog_*/records`, the batch API or the
 //   dashboard). The protected routes are the only way in:
-//   POST /api/catalog/csv-imports and /api/catalog/edits.
-// - Revisions, saved part details, CAD items, blobs, Changes, audit
-//   entries, import problems and the command ledger refuse every update
-//   and delete, whoever saves them.
-// - A part refuses every delete, and every update except moving its current
-//   revision, or its current details, forward to its own next one. Its IPN
-//   never changes.
-// - New saved part details and new CAD item revisions must be numbered
-//   right after the newest one, so the current one is always the newest.
+//   POST /api/catalog/csv-imports, /api/catalog/edits and
+//   /api/catalog/archives.
+// - Revisions, saved part details, archive entries, CAD items, blobs,
+//   Changes, audit entries, import problems and the command ledger refuse
+//   every update and delete, whoever saves them.
+// - A part refuses every delete. Its current details may only move to its
+//   next details. Its current revision may only move to its newest revision
+//   that is not archived (a new revision, or the one an archive or
+//   unarchive makes current). Its IPN never changes.
+// - New part revisions, saved part details and CAD item revisions must be
+//   numbered right after the newest one, archived or not, name it as their
+//   predecessor and have the ID derived from their owner and number.
 //
 // Raw SQL bypasses record hooks; only migrations and test fixtures that
 // tamper with a stopped instance's data.db use it.
@@ -37,6 +40,7 @@ onRecordCreateRequest(
   "catalog_parts",
   "catalog_part_details",
   "catalog_part_revisions",
+  "catalog_archive_entries",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -55,6 +59,7 @@ onRecordUpdateRequest(
   "catalog_parts",
   "catalog_part_details",
   "catalog_part_revisions",
+  "catalog_archive_entries",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -71,6 +76,7 @@ onRecordDeleteRequest(
   "catalog_parts",
   "catalog_part_details",
   "catalog_part_revisions",
+  "catalog_archive_entries",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -87,6 +93,7 @@ onRecordDelete(
   "catalog_parts",
   "catalog_part_details",
   "catalog_part_revisions",
+  "catalog_archive_entries",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -102,17 +109,22 @@ onRecordUpdate(
   "catalog_cad_item_revisions",
   "catalog_part_details",
   "catalog_part_revisions",
+  "catalog_archive_entries",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
 );
 
-// The one update the Catalog makes: a part's current revision or current
-// details move to the one just saved after it, in the same transaction.
+// The one update the Catalog makes: a part's current details move to the
+// details saved right after them, and its current revision moves to its
+// newest revision that is not archived, in the same transaction as the
+// records that make it so.
 onRecordUpdate((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
   const part = e.record;
   // The stored row, not part.original(): a record saved again right after
-  // it was created keeps an empty original.
+  // it was created keeps an empty original. e.app is the transaction, so it
+  // sees the records saved earlier in it (mx-3013a8).
   const before = e.app.findRecordById("catalog_parts", part.id);
   const ipn = before.getString("ipn");
   for (const name of ["ipn", "ipn_prefix", "variant", "first_change"]) {
@@ -120,35 +132,66 @@ onRecordUpdate((e) => {
       throw new Error(`a part's ${name} never changes (${ipn})`);
     }
   }
-  // Each pointer stays, or moves to the record saved right after it.
-  const pointers = [
-    ["current_revision", "current_revision_number", "catalog_part_revisions", "revision"],
-    ["current_details", "current_details_number", "catalog_part_details", "details"],
-  ];
-  for (const [field, numberField, collection, what] of pointers) {
-    const target = part.getString(field);
-    const number = part.getInt(numberField);
-    const previous = before.getString(field);
-    if (target === previous && number === before.getInt(numberField)) {
-      continue;
-    }
-    let record = null;
+  const find = (collection, id) => {
     try {
-      record = e.app.findRecordById(collection, target);
+      return e.app.findRecordById(collection, id);
     } catch (_) {
-      record = null;
+      return null;
     }
-    if (!record || record.getString("part") !== part.id || record.getInt("number") !== number) {
-      throw new Error(`the current ${what} of ${ipn} must be one of its own, numbered ${number}`);
+  };
+
+  // Details: stay, or move to the details saved right after them.
+  const details = part.getString("current_details");
+  const detailsNumber = part.getInt("current_details_number");
+  const previousDetails = before.getString("current_details");
+  if (details !== previousDetails || detailsNumber !== before.getInt("current_details_number")) {
+    const record = find("catalog_part_details", details);
+    if (!record || record.getString("part") !== part.id || record.getInt("number") !== detailsNumber) {
+      throw new Error(`the current details of ${ipn} must be one of its own, numbered ${detailsNumber}`);
     }
-    // A new part has neither until its first ones are saved.
-    const previousNumber = previous === "" ? 0 : before.getInt(numberField);
-    if (number !== previousNumber + 1 || record.getString("predecessor") !== previous) {
-      throw new Error(`the current ${what} of ${ipn} can only move to the one saved right after it`);
+    // A new part has none until its first ones are saved.
+    const previousNumber = previousDetails === "" ? 0 : before.getInt("current_details_number");
+    if (detailsNumber !== previousNumber + 1 || record.getString("predecessor") !== previousDetails) {
+      throw new Error(`the current details of ${ipn} can only move to the one saved right after it`);
+    }
+  }
+
+  // Revision: stay, or move to the newest revision that is not archived.
+  const revision = part.getString("current_revision");
+  const revisionNumber = part.getInt("current_revision_number");
+  if (revision !== before.getString("current_revision") || revisionNumber !== before.getInt("current_revision_number")) {
+    const record = find("catalog_part_revisions", revision);
+    if (!record || record.getString("part") !== part.id || record.getInt("number") !== revisionNumber) {
+      throw new Error(`the current revision of ${ipn} must be one of its own, numbered ${revisionNumber}`);
+    }
+    const newest = lib.newestNotArchived(e.app, part.id, lib.archiveState(e.app, part.id));
+    if (!newest || newest.id !== revision) {
+      throw new Error(
+        `the current revision of ${ipn} can only move to its newest revision that is not archived`,
+      );
     }
   }
   return e.next();
 }, "catalog_parts");
+
+// A new part revision must be numbered right after the part's newest
+// revision (archived or not), name it as its predecessor, and have the ID
+// derived from its part and number.
+onRecordCreate((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  const revision = e.record;
+  const part = revision.getString("part");
+  const number = revision.getInt("number");
+  const newest = lib.newestRevision(e.app, part);
+  const expected = newest ? newest.getInt("number") + 1 : 1;
+  if (number !== expected || revision.getString("predecessor") !== (newest ? newest.id : "")) {
+    throw new Error(`a new revision of part ${part} must be number ${expected}, right after its newest revision`);
+  }
+  if (revision.id !== lib.deriveId("part-revision", part + "\n" + number)) {
+    throw new Error(`revision ${number} of part ${part} must have the ID derived from its part and number`);
+  }
+  return e.next();
+}, "catalog_part_revisions");
 
 // Saved part details are numbered from 1 per part: new ones must be the
 // newest number + 1, name the newest as their predecessor, and have the ID

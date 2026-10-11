@@ -69,7 +69,11 @@
 //   revision only if its current revision came from a CSV import.
 //   Otherwise an import problem keeps the row, so a re-import never
 //   overwrites an edit made in the Catalog, while an edit of one kind does
-//   not stop the CSV from changing the other;
+//   not stop the CSV from changing the other. A new revision comes after
+//   the part's newest revision, which may be archived;
+// - an import never brings an archived design back: CAD whose content
+//   matches an archived revision of the part adds nothing, and an import
+//   problem (csv-cad-matches-archived-revision) keeps the row, on every run;
 // - a part whose details and CAD are both unchanged stays as it is. If its
 //   source row changed anyway (for example its supplier data), or the part
 //   was last saved by an edit, so there is no CSV row to compare with, an
@@ -653,15 +657,7 @@ routerAdd(
       // content. crates/catalog CadItemDetails::content_sha256 makes the
       // same comparison in Rust but hashes in its own key order, so the two
       // hashes differ and must never be compared with each other.
-      const contentOf = (snapshot) => {
-        const parsed = JSON.parse(snapshot);
-        for (const model of parsed.model_references || []) {
-          if (model && model.target && model.target.kind === "cad-item-revision") {
-            model.target.number = 0;
-          }
-        }
-        return $security.sha256(lib.canonicalJson(parsed));
-      };
+      const contentOf = (snapshot) => lib.cadContent(snapshot);
       // Each CAD item's current revision as it is after this request.
       const currentAfter = {};
       const newCadItems = [];
@@ -924,10 +920,45 @@ routerAdd(
             );
           }
         }
-        if (!sameRevision) {
+        // The part's CAD content as this row would save it: CAD item
+        // revisions this request adds are not stored yet, so their content
+        // comes from what the request makes current.
+        const storedContent = lib.storedCadContent(txApp);
+        const archivedMatch = sameRevision
+          ? 0
+          : lib.archivedRevisionWithContent(
+              txApp,
+              part.id,
+              lib.partRevisionContent(part.revision.parsed, (target) => {
+                const after = currentAfter[target.cadItem || target.cad_item];
+                return after && after.number === target.number ? after.content : storedContent(target);
+              }),
+            );
+        if (archivedMatch > 0) {
+          serverProblems.push(
+            problem(
+              "csv-cad-matches-archived-revision",
+              part.ipn,
+              row.path || "",
+              location,
+              `the symbols, footprints or 3D models that the row of ${part.ipn} uses are those of its archived revision ${archivedMatch}; an import never brings an archived revision back, so the row is kept here and the current revision ${revisionNumber} is left as it is`,
+              JSON.stringify({
+                current_revision_number: revisionNumber,
+                archived_revision_number: archivedMatch,
+                path: row.path,
+                row_number: row.row_number,
+                raw_record: row.raw_record,
+                substitutes_csv_rows: substitutesCsvRows(row),
+                revision: part.revision.snapshot,
+              }),
+            ),
+          );
+        } else if (!sameRevision) {
           if (revisionSavedBy.kind === lib.CHANGE_KINDS.csvImport) {
-            part.newRevision = { number: revisionNumber + 1, predecessor: currentRevision.id };
-            part.revisionAfter = revisionNumber + 1;
+            // After the newest revision, which may be archived.
+            const newest = lib.newestRevision(txApp, part.id);
+            part.newRevision = { number: newest.getInt("number") + 1, predecessor: newest.id };
+            part.revisionAfter = newest.getInt("number") + 1;
           } else {
             serverProblems.push(
               problem(

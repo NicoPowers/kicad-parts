@@ -10,6 +10,8 @@
 const CHANGE_KINDS = Object.freeze({
   csvImport: "csv-import",
   edit: "edit",
+  archive: "archive",
+  unarchive: "unarchive",
 });
 
 // The `source` value of rows read from the CSV catalog.
@@ -330,9 +332,9 @@ function fail(message) {
   throw new BadRequestError(message);
 }
 
-// The checked request: correlation ID, reason, IPN, and the sections sent,
-// each { expected, fields[, manufacturerParts] } or null.
-function editRequest(body) {
+// The correlation ID, reason and IPN every edit and archive request has,
+// checked.
+function commonRequest(body) {
   const text = (name, max) => {
     const value = body[name];
     if (typeof value !== "string" || value.length === 0) {
@@ -355,6 +357,13 @@ function editRequest(body) {
   if (!/^[A-Z]{3}-[0-9]{4}-[0-9A-Z]{4}$/.test(ipn)) {
     fail(`${ipn} is not an IPN`);
   }
+  return { correlationId: correlationId, reason: reason, ipn: ipn };
+}
+
+// The checked request: correlation ID, reason, IPN, and the sections sent,
+// each { expected, fields[, manufacturerParts] } or null.
+function editRequest(body) {
+  const { correlationId, reason, ipn } = commonRequest(body);
   const number = (section, name, what) => {
     const value = section[name];
     if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
@@ -533,6 +542,113 @@ function revisionProblem(revision) {
     return "its CAD references are not the ones its Symbol and Footprint fields name";
   }
   return "";
+}
+
+// ---- Archived revisions -------------------------------------------------------
+//
+// A part revision is archived when its newest catalog_archive_entries
+// record (by Change seq) says so. The part's current revision is its newest
+// revision that is not archived.
+
+function recordById(txApp, collection, id) {
+  try {
+    return txApp.findRecordById(collection, id);
+  } catch (_) {
+    return null;
+  }
+}
+
+// Each revision number's archive state, from the part's archive entries:
+// { number: true } for archived, false for unarchived; numbers with no
+// entry are not archived.
+function archiveState(txApp, partId) {
+  const state = {};
+  const entries = txApp.findRecordsByFilter("catalog_archive_entries", "part = {:part}", "seq", 0, 0, {
+    part: partId,
+  });
+  for (const entry of entries) {
+    state[entry.getInt("revision_number")] = entry.getBool("archived");
+  }
+  return state;
+}
+
+// The part's revisions, newest first.
+function revisionsNewestFirst(txApp, partId) {
+  return txApp.findRecordsByFilter("catalog_part_revisions", "part = {:part}", "-number", 0, 0, { part: partId });
+}
+
+// The part's newest revision, archived or not, or null.
+function newestRevision(txApp, partId) {
+  const found = txApp.findRecordsByFilter("catalog_part_revisions", "part = {:part}", "-number", 1, 0, {
+    part: partId,
+  });
+  return found.length > 0 ? found[0] : null;
+}
+
+// The part's newest revision that `state` (from archiveState) does not mark
+// archived, or null when every revision is archived.
+function newestNotArchived(txApp, partId, state) {
+  for (const revision of revisionsNewestFirst(txApp, partId)) {
+    if (state[revision.getInt("number")] !== true) {
+      return revision;
+    }
+  }
+  return null;
+}
+
+// A hash of a CAD item revision's content: its snapshot with the numbers of
+// its 3D model bindings left out, over key-sorted JSON (see the import
+// route). Never compare it with crates/catalog's content hash.
+function cadContent(snapshot) {
+  const parsed = JSON.parse(snapshot);
+  for (const model of parsed.model_references || []) {
+    if (model && model.target && model.target.kind === "cad-item-revision") {
+      model.target.number = 0;
+    }
+  }
+  return $security.sha256(canonicalJson(parsed));
+}
+
+// A hash of a part revision's CAD content: its document with every bound
+// CAD item revision replaced by that revision's content, so the same CAD
+// under newer CAD item numbers hashes the same. `contentFor(target)` gives
+// a bound CAD item revision's content.
+function partRevisionContent(parsed, contentFor) {
+  const copy = JSON.parse(JSON.stringify(parsed));
+  for (const reference of copy.cad_references || []) {
+    const target = reference && reference.target;
+    if (target && target.kind === "cad-item-revision") {
+      reference.target = { kind: target.kind, cad_item: target.cad_item, content: contentFor(target) };
+    }
+  }
+  delete copy.excluded_from_bom;
+  return $security.sha256(canonicalJson(copy));
+}
+
+// contentFor for stored CAD item revisions.
+function storedCadContent(txApp) {
+  return (target) => {
+    const record = recordById(
+      txApp,
+      "catalog_cad_item_revisions",
+      deriveId("cad-item-revision", target.cad_item + "\n" + target.number),
+    );
+    return record ? cadContent(record.getString("snapshot")) : "missing:" + target.cad_item + ":" + target.number;
+  };
+}
+
+// The number of the part's archived revision whose CAD content is
+// `content` (from partRevisionContent), or 0.
+function archivedRevisionWithContent(txApp, partId, content) {
+  const state = archiveState(txApp, partId);
+  const stored = storedCadContent(txApp);
+  for (const revision of revisionsNewestFirst(txApp, partId)) {
+    const number = revision.getInt("number");
+    if (state[number] === true && partRevisionContent(JSON.parse(revision.getString("snapshot")), stored) === content) {
+      return number;
+    }
+  }
+  return 0;
 }
 
 // ---- CAD item revisions ----------------------------------------------------
@@ -853,6 +969,16 @@ function publishEdit(e) {
         document.excluded_from_bom = true;
       }
       refuse("revision", revisionProblem(document));
+      const archived = archivedRevisionWithContent(
+        txApp,
+        partId,
+        partRevisionContent(document, storedCadContent(txApp)),
+      );
+      if (archived > 0) {
+        throw new BadRequestError(
+          `this symbol and footprint are those of archived revision ${archived} of ${request.ipn}; unarchive revision ${archived} instead of saving them again`,
+        );
+      }
       const snapshot = JSON.stringify(document);
       const sha = $security.sha256(snapshot);
       if (sha !== currentRevision.getString("snapshot_sha256")) {
@@ -886,7 +1012,9 @@ function publishEdit(e) {
           previous: { id: previous.id, number: previous.getInt("number") },
         });
       const detailsNumber = details ? currentDetails.getInt("number") + 1 : null;
-      const revisionNumber = revision ? currentRevision.getInt("number") + 1 : null;
+      // A new revision comes after the newest one, which may be archived.
+      const newest = newestRevision(txApp, partId);
+      const revisionNumber = revision ? newest.getInt("number") + 1 : null;
       const summary = JSON.stringify({
         ipn: request.ipn,
         partDetails: details ? 1 : 0,
@@ -936,7 +1064,7 @@ function publishEdit(e) {
         const made = record("catalog_part_revisions", id);
         made.set("part", partId);
         made.set("number", revisionNumber);
-        made.set("predecessor", currentRevision.id);
+        made.set("predecessor", newest.id);
         made.set("change", changeId);
         made.set("snapshot", revision.snapshot);
         made.set("snapshot_sha256", revision.sha);
@@ -990,6 +1118,168 @@ function publishEdit(e) {
   return e.json(reply.status, reply.body);
 }
 
+// ---- Archive and unarchive --------------------------------------------------
+//
+// POST /api/catalog/archives (see catalog_archives.pb.js) archives or
+// unarchives one part revision, in one transaction: replay a repeated
+// correlation ID; 404 if the part has no such revision; 422 noop if the
+// revision already has that state; 400 if archiving would leave no revision
+// that is not archived; otherwise save one Change, one archive entry, the
+// part's move to its newest revision that is not archived (if that
+// changed), and one audit entry. Nothing is deleted.
+function publishArchive(e) {
+  const actor = catalogEditor(e);
+  const body = e.requestInfo().body || {};
+  const request = commonRequest(body);
+  const revision = body.revision;
+  if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 1) {
+    fail("revision must be the number of one of the part's revisions");
+  }
+  const archived = body.archived;
+  if (typeof archived !== "boolean") {
+    fail("archived must be true (archive) or false (unarchive)");
+  }
+  const kind = archived ? CHANGE_KINDS.archive : CHANGE_KINDS.unarchive;
+  const requestHash = $security.sha256(JSON.stringify([kind, request.ipn, request.reason, revision]));
+
+  let reply = null;
+  $app.runInTransaction((txApp) => {
+    const first = (collection, filter, params, sort) => {
+      const found = txApp.findRecordsByFilter(collection, filter, sort || "", 1, 0, params);
+      return found.length > 0 ? found[0] : null;
+    };
+    const prior = first("catalog_commands", "correlation_id = {:id}", { id: request.correlationId });
+    if (prior) {
+      if (prior.getString("actor") !== actor.id || prior.getString("request_hash") !== requestHash) {
+        reply = {
+          status: 409,
+          body: {
+            outcome: "correlation_reused",
+            correlationId: request.correlationId,
+            message: "this correlation ID was already used for a different command",
+          },
+        };
+        return;
+      }
+      reply = { status: prior.getInt("status"), body: JSON.parse(prior.getString("result")), replayed: true };
+      return;
+    }
+
+    const partId = deriveId("part", request.ipn);
+    const part = recordById(txApp, "catalog_parts", partId);
+    if (!part || part.getString("ipn") !== request.ipn) {
+      throw new NotFoundError(`${request.ipn} is not a part in the Catalog`);
+    }
+    const target = recordById(txApp, "catalog_part_revisions", deriveId("part-revision", partId + "\n" + revision));
+    if (!target || target.getString("part") !== partId || target.getInt("number") !== revision) {
+      throw new NotFoundError(`${request.ipn} has no revision ${revision}`);
+    }
+    const state = archiveState(txApp, partId);
+    let status;
+    let result;
+    if ((state[revision] === true) === archived) {
+      status = 422;
+      result = {
+        outcome: "noop",
+        correlationId: request.correlationId,
+        ipn: request.ipn,
+        message: archived ? `revision ${revision} is already archived` : `revision ${revision} is not archived`,
+      };
+    } else {
+      state[revision] = archived;
+      const current = newestNotArchived(txApp, partId, state);
+      if (!current) {
+        throw new BadRequestError(
+          `revision ${revision} is the only revision that is not archived, so it cannot be archived. Add a corrected revision first`,
+        );
+      }
+      const record = (name, id) => {
+        const made = new Record(txApp.findCollectionByNameOrId(name));
+        made.set("id", id);
+        return made;
+      };
+      const last = first("catalog_changes", "seq > 0", {}, "-seq");
+      const seq = last ? last.getInt("seq") + 1 : 1;
+      const changeId = deriveId("change", request.correlationId);
+      const summary = JSON.stringify({
+        ipn: request.ipn,
+        revision: revision,
+        archived: archived,
+        currentRevision: current.getInt("number"),
+      });
+      const change = record("catalog_changes", changeId);
+      change.set("seq", seq);
+      change.set("kind", kind);
+      change.set("reason", request.reason);
+      change.set("correlation_id", request.correlationId);
+      change.set("actor", actor.id);
+      change.set("actor_name", actor.name);
+      change.set("sources", JSON.stringify({ parts: [request.ipn] }));
+      change.set("summary", summary);
+      txApp.save(change);
+
+      const entryId = deriveId("archive-entry", request.correlationId);
+      const entry = record("catalog_archive_entries", entryId);
+      entry.set("part", partId);
+      entry.set("part_revision", target.id);
+      entry.set("revision_number", revision);
+      entry.set("archived", archived);
+      entry.set("change", changeId);
+      entry.set("seq", seq);
+      entry.set("current_revision_after", current.id);
+      entry.set("current_revision_number_after", current.getInt("number"));
+      txApp.save(entry);
+
+      if (part.getString("current_revision") !== current.id) {
+        part.set("current_revision", current.id);
+        part.set("current_revision_number", current.getInt("number"));
+        txApp.save(part);
+      }
+
+      const auditEntryId = deriveId("audit-entry", request.correlationId);
+      const audit = record("catalog_audit_entries", auditEntryId);
+      audit.set("action", "catalog." + kind);
+      audit.set("actor", actor.id);
+      audit.set("actor_name", actor.name);
+      audit.set("change", changeId);
+      audit.set("reason", request.reason);
+      audit.set("correlation_id", request.correlationId);
+      audit.set("summary", summary);
+      txApp.save(audit);
+
+      status = 200;
+      result = {
+        outcome: "applied",
+        correlationId: request.correlationId,
+        ipn: request.ipn,
+        changeId: changeId,
+        seq: seq,
+        auditEntryId: auditEntryId,
+        revision: revision,
+        archived: archived,
+        currentRevision: {
+          id: current.id,
+          number: current.getInt("number"),
+          snapshotSha256: current.getString("snapshot_sha256"),
+        },
+      };
+    }
+    const ledger = new Record(txApp.findCollectionByNameOrId("catalog_commands"));
+    ledger.set("correlation_id", request.correlationId);
+    ledger.set("actor", actor.id);
+    ledger.set("request_hash", requestHash);
+    ledger.set("status", status);
+    ledger.set("result", JSON.stringify(result));
+    txApp.save(ledger);
+    reply = { status: status, body: result };
+  });
+
+  if (reply.replayed) {
+    e.response.header().set("X-Collab-Replayed", "true");
+  }
+  return e.json(reply.status, reply.body);
+}
+
 module.exports = {
   CHANGE_KINDS: CHANGE_KINDS,
   CSV_CATALOG_SOURCE: CSV_CATALOG_SOURCE,
@@ -997,6 +1287,14 @@ module.exports = {
   PART_REVISION_SCHEMA: PART_REVISION_SCHEMA,
   SOURCE_SCHEMA: SOURCE_SCHEMA,
   publishEdit: publishEdit,
+  publishArchive: publishArchive,
+  archiveState: archiveState,
+  newestRevision: newestRevision,
+  newestNotArchived: newestNotArchived,
+  cadContent: cadContent,
+  partRevisionContent: partRevisionContent,
+  storedCadContent: storedCadContent,
+  archivedRevisionWithContent: archivedRevisionWithContent,
   detailsProblem: detailsProblem,
   revisionProblem: revisionProblem,
   describeRecord: describeRecord,
