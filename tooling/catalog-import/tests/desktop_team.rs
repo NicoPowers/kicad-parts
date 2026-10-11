@@ -7,7 +7,10 @@ use catalog::pocketbase::{EditCommand, ImportCommand, read_back, submit_edit, su
 use catalog_browser::team::TeamCatalog;
 use catalog_import::services;
 use collaboration::PocketBaseClient;
-use desktop_contract::{LiveUpdates, PublishResult, SignInRequest, TeamEditRequest, TeamSession};
+use desktop_contract::{
+    LiveUpdates, PreviewKind, PublishResult, RevisionStatus, SignInRequest, TeamArchiveRequest,
+    TeamEditRequest, TeamSession,
+};
 use std::time::{Duration, Instant};
 
 const IPN: &str = "RES-0000-0470";
@@ -322,6 +325,88 @@ fn the_desktop_edits_and_resolves_a_conflict() {
             .all(|hit| hit.ipn != IPN)
     );
 
+    // Archiving revision 3 makes revision 2 current again; the history says
+    // so, the part lists revision 3 as archived, and revision 3 stays
+    // readable, with its previews.
+    let archive = |revision: u32, archived: bool, reason: &str| {
+        team.archive(TeamArchiveRequest {
+            correlation_id: None,
+            ipn: IPN.into(),
+            revision,
+            archived,
+            reason: reason.into(),
+        })
+        .unwrap()
+    };
+    let PublishResult::Archived {
+        revision,
+        archived,
+        current,
+        part,
+    } = archive(3, true, "The footprint is the wrong size")
+    else {
+        panic!("not archived");
+    };
+    assert_eq!((revision, archived, current), (3, true, 2));
+    assert_eq!(part.revision.number, 2);
+    assert_eq!(
+        part.revisions,
+        [
+            RevisionStatus {
+                number: 1,
+                archived: false
+            },
+            RevisionStatus {
+                number: 2,
+                archived: false
+            },
+            RevisionStatus {
+                number: 3,
+                archived: true
+            },
+        ]
+    );
+    let latest = &part.history[0];
+    assert_eq!(
+        (
+            latest.action.as_str(),
+            latest.revision,
+            latest.reason.as_str()
+        ),
+        ("Archived", None, "The footprint is the wrong size")
+    );
+    let note = latest.archive.as_ref().unwrap();
+    assert_eq!(
+        (note.revision, note.archived, note.current_after),
+        (3, true, 2)
+    );
+    assert!(matches!(
+        team.cad_for_preview(IPN, 3, PreviewKind::Footprint),
+        Ok(catalog_browser::team::TeamCad::Library { .. })
+    ));
+    assert!(matches!(
+        team.cad_for_preview(IPN, 1, PreviewKind::Symbol),
+        Ok(catalog_browser::team::TeamCad::Stored(_))
+    ));
+    // Archiving it again saves nothing; archiving 1 and 2 leaves 2 as the
+    // only one, which is refused in plain words.
+    assert!(matches!(
+        archive(3, true, "again"),
+        PublishResult::NothingToSave { .. }
+    ));
+    assert!(matches!(
+        archive(1, true, "Old symbol"),
+        PublishResult::Archived { current: 2, .. }
+    ));
+    let PublishResult::Refused { message } = archive(2, true, "Everything is wrong") else {
+        panic!("not refused");
+    };
+    assert!(
+        message.starts_with("Revision 2 is the only revision that is not archived"),
+        "{message}"
+    );
+    wait_until("the archives", || checkpoint(&team) == 9);
+
     // A read-only member sees everything but cannot save.
     let reader = TeamCatalog::open(state.path().join("reader.json"), None, None);
     let status = reader.sign_in(SignInRequest {
@@ -337,7 +422,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         }
     ));
     let part = reader.part(IPN).unwrap().unwrap();
-    assert_eq!(part.history.len(), 7);
+    assert_eq!(part.history.len(), 9);
     let PublishResult::Refused { message } = reader
         .edit(TeamEditRequest {
             expected_details: 5,

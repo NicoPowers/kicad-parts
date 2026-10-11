@@ -1589,8 +1589,9 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
             .unwrap()
     };
 
-    // With parts, the newest undo refuses: the older version cannot read
-    // part details kept apart from revisions. Nothing is changed.
+    // With an archived revision, the newest undo refuses: the older version
+    // cannot read archive entries (nor, one step further, part details kept
+    // apart from revisions). Nothing is changed.
     let populated = tempfile::tempdir().unwrap();
     let options = services::options(&root, populated.path());
     let (server, admin, _superuser) = services::start(&root, populated.path()).unwrap();
@@ -1612,12 +1613,41 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
         "Before the rollback",
     );
     assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
+    // A second revision, archived, so the newest undo has archive entries
+    // to refuse too.
+    let stored = read_back(&admin).unwrap();
+    let part = stored.part("RES-0000-0470").unwrap();
+    let revision: PartRevision = serde_json::from_str(
+        &stored
+            .part_revision(&part.current_revision)
+            .unwrap()
+            .snapshot,
+    )
+    .unwrap();
+    let mut cad = EditCommand::new("RES-0000-0470", "Use KiCad's symbol").editing_cad(&revision, 1);
+    assert!(cad.set_field("Symbol", "Device:R"));
+    assert_eq!(submit_edit(&admin, &cad).unwrap().status, 200);
+    let archive =
+        catalog::pocketbase::ArchiveCommand::new("RES-0000-0470", 2, true, "Wrong symbol");
+    assert_eq!(
+        catalog::pocketbase::submit_archive(&admin, &archive)
+            .unwrap()
+            .status,
+        200
+    );
     server.stop();
     let said = migrate(&root, &options, &["down", "1"]);
     assert!(
-        said.contains("keeps part details apart from revisions")
+        said.contains("has archived revisions")
             && said.contains("Nothing was changed")
             && !said.contains("Reverted"),
+        "{said}"
+    );
+    // Undoing past it is refused at the first step too, so the details
+    // migration is never undone.
+    let said = migrate(&root, &options, &["down", "2"]);
+    assert!(
+        said.contains("has archived revisions") && !said.contains("Reverted"),
         "{said}"
     );
     let database = rusqlite::Connection::open_with_flags(
@@ -1645,8 +1675,9 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
         "(id = @request.auth.id) && @request.body.can_edit_catalog:isset = false && @request.body.name:isset = false"
     );
     assert!(fields.contains("can_edit_catalog"));
-    let said = migrate(&root, &options, &["down", "4"]);
+    let said = migrate(&root, &options, &["down", "5"]);
     for reverted in [
+        "1791900000_archived_revisions.js",
         "1791800000_shared_part_details.js",
         "1791700000_cad_item_revision_numbers.js",
         "1791600000_catalog_edits.js",

@@ -1288,3 +1288,114 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
         "the tests changed the CSV catalog"
     );
 }
+
+#[test]
+fn an_import_never_brings_an_archived_revision_back() {
+    use catalog::pocketbase::{ArchiveCommand, submit_archive};
+    let before = catalog_hashes();
+    let copy = tempfile::tempdir().unwrap();
+    let root = copy.path();
+    copy_catalog(root);
+    let footprint_a = fs::read_to_string(root.join(FOOTPRINT)).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
+    let ipn = "RES-0000-0470";
+    let current = |stored: &CatalogReadback| stored.part(ipn).unwrap().current_revision_number;
+
+    import_step(&admin, root, "footprint A", "applied");
+    replace_once(
+        root,
+        FOOTPRINT,
+        "(tags \"resistor\")",
+        "(tags \"resistor B\")",
+    );
+    let stored = import_step(&admin, root, "footprint B", "applied");
+    assert_eq!(current(&stored), 2);
+
+    // Footprint B turns out wrong for this resistor: revision 2 is archived
+    // and revision 1 is current again.
+    let reply = submit_archive(
+        &admin,
+        &ArchiveCommand::new(ipn, 2, true, "Footprint B is wrong for this part"),
+    )
+    .unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.body);
+
+    // The CSV still says footprint B. The import adds nothing for this part
+    // and keeps the row in an import problem, so the archived design never
+    // comes back; the other resistors are unchanged.
+    let stored = import_step(
+        &admin,
+        root,
+        "archived CAD still in the CSV",
+        "nothing_changed",
+    );
+    assert_eq!(current(&stored), 1);
+    let problem = stored
+        .problems
+        .iter()
+        .find(|problem| problem.code == "csv-cad-matches-archived-revision")
+        .unwrap();
+    assert_eq!(problem.subject, ipn);
+    let detail: serde_json::Value = serde_json::from_str(&problem.detail).unwrap();
+    assert_eq!(
+        (
+            detail["archived_revision_number"].as_u64(),
+            detail["current_revision_number"].as_u64()
+        ),
+        (Some(2), Some(1))
+    );
+    let report = lossless_report(root, &stored, "archived CAD still in the CSV");
+    assert_eq!(
+        field(&report, ipn, "Footprint").destination,
+        "import-problem"
+    );
+    assert_eq!(field(&report, ipn, "Value").destination, "part-details");
+    // Every run finds it again, so nothing new is written.
+    let noop = import_reading_first(&admin, &plan(root), "");
+    assert_eq!(outcome(&noop), "noop", "{}", noop.body);
+
+    // Back to footprint A: the footprint gets revision 3 (content A again),
+    // the other resistors follow it, and this one keeps revision 1, whose
+    // content is the same.
+    fs::write(root.join(FOOTPRINT), &footprint_a).unwrap();
+    let stored = import_step(&admin, root, "footprint A again", "applied");
+    assert_eq!(current(&stored), 1);
+    assert_eq!(
+        stored
+            .part("RES-0000-1000")
+            .unwrap()
+            .current_revision_number,
+        3
+    );
+
+    // New content C adds revision 3 of this part, after the archived
+    // revision 2.
+    replace_once(
+        root,
+        FOOTPRINT,
+        "(tags \"resistor\")",
+        "(tags \"resistor C\")",
+    );
+    let stored = import_step(&admin, root, "footprint C", "applied");
+    assert_eq!(current(&stored), 3);
+    let part = stored.part(ipn).unwrap();
+    let newest = stored.part_revision(&part.current_revision).unwrap();
+    let archived = stored
+        .part_revisions
+        .iter()
+        .find(|revision| revision.part == part.id && revision.number == 2)
+        .unwrap();
+    assert_eq!(newest.predecessor, archived.id);
+    assert_eq!(
+        stored.archived(&part.id).into_iter().collect::<Vec<_>>(),
+        [2]
+    );
+
+    server.stop();
+    assert_eq!(
+        catalog_hashes(),
+        before,
+        "the tests changed the CSV catalog"
+    );
+}
