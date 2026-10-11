@@ -594,8 +594,31 @@ export async function startTeamServer() {
   });
   const info = JSON.parse(line);
   record({ event: 'team-server', url: info.url, accounts: info.accounts.map((a) => a.email) });
+  // Later lines answer `reimport` requests, one each, in order.
+  let rest = '';
+  const waiting = [];
+  child.stdout.on('data', (chunk) => {
+    rest += chunk.toString('utf8');
+    for (let end = rest.indexOf('\n'); end >= 0; end = rest.indexOf('\n')) {
+      const answer = rest.slice(0, end);
+      rest = rest.slice(end + 1);
+      if (answer.includes('"reimported"')) waiting.shift()?.(JSON.parse(answer).reimported);
+    }
+  });
   return {
     ...info,
+    /**
+     * Imports the resistors again, as an importer would after reading the
+     * team catalog, and returns the outcome, such as `nothing_changed`.
+     * With `folder`, imports them from the copy of the CSV catalog there.
+     */
+    async reimport(folder) {
+      const answered = new Promise((resolve) => waiting.push(resolve));
+      child.stdin.write(folder ? `reimport ${folder}\n` : 'reimport\n');
+      const outcome = await answered;
+      record({ event: 'reimport', outcome });
+      return outcome;
+    },
     async stop() {
       child.stdin.end();
       const timeout = new Promise((resolve) => setTimeout(() => resolve('timeout'), 15_000));

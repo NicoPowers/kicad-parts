@@ -18,8 +18,16 @@
 //! - with `--desktop`, opens the built desktop app pointed at the server
 //!   and stops the server when the app closes;
 //! - with `--json`, prints one JSON line instead of text and stops when
-//!   standard input closes (the desktop journeys use this);
+//!   standard input closes (the desktop journeys use this). Each line
+//!   `reimport` it reads imports the resistors again, as an importer would
+//!   after reading the team catalog, and prints one JSON line with the
+//!   outcome (`{"reimported":"nothing_changed"}`); `reimport <folder>`
+//!   imports them from a copy of the CSV catalog in that folder instead;
 //! - otherwise, stops when you press Enter.
+//!
+//! Without `--json`, typing `reimport` and pressing Enter imports the
+//! resistors again (to see what an import does to parts edited in the app)
+//! and prints the outcome in words.
 //!
 //! The server runs without a window in a kill-on-close job, so it also
 //! stops if this command is killed. Its data lives in
@@ -27,10 +35,12 @@
 //! including on Ctrl+C; a run killed outright is deleted by the next run.
 //! Nothing else is written.
 
-use catalog::pocketbase::{ImportCommand, ImportOutcome, read_back, submit_import};
+use catalog::pocketbase::{
+    ImportCommand, ImportOutcome, read_back, read_import_state, submit_import,
+};
 use catalog_import::run_folder::RunFolder;
 use catalog_import::services::{self, Member};
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Mutex, mpsc};
@@ -160,11 +170,30 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             )?;
             out.flush()?;
             drop(out);
-            // Stop when whoever started us closes our input.
+            // Import again on each `reimport` line; stop when whoever
+            // started us closes our input.
             let sender = stop_sender.clone();
+            let (admin, import) = (admin.clone(), import.clone());
             std::thread::spawn(move || {
-                let mut sink = Vec::new();
-                let _ = std::io::stdin().lock().read_to_end(&mut sink);
+                for line in std::io::stdin().lock().lines() {
+                    let Ok(line) = line else { break };
+                    let line = line.trim();
+                    let from = match line.strip_prefix("reimport") {
+                        Some("") => None,
+                        Some(folder) if folder.starts_with(' ') => {
+                            Some(PathBuf::from(folder.trim()))
+                        }
+                        _ => continue,
+                    };
+                    let outcome = match from {
+                        None => reimport(&admin, &import),
+                        Some(folder) => services::plan(&folder, "g-res")
+                            .map_err(Into::into)
+                            .and_then(|copy| reimport(&admin, &copy)),
+                    }
+                    .unwrap_or_else(|error| format!("failed: {error}"));
+                    println!("{}", serde_json::json!({ "reimported": outcome }));
+                }
                 let _ = sender.send(Stop::Finished);
             });
         }
@@ -185,6 +214,30 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             out.flush()?;
             drop(out);
             let sender = stop_sender.clone();
+            println!(
+                "Type reimport and press Enter to import the resistors again, for example after editing a part in the app."
+            );
+            let (admin, import) = (admin.clone(), import.clone());
+            let typed = (then == Then::WaitForEnter).then(|| sender.clone());
+            std::thread::spawn(move || {
+                for line in std::io::stdin().lock().lines() {
+                    let Ok(line) = line else { break };
+                    if line.trim() == "reimport" {
+                        match reimport(&admin, &import) {
+                            Ok(outcome) => {
+                                println!("Imported again: {}.", outcome.replace('_', " "))
+                            }
+                            Err(error) => println!("The import failed: {error}"),
+                        }
+                    } else if let Some(sender) = &typed {
+                        let _ = sender.send(Stop::Finished);
+                        return;
+                    }
+                }
+                if let Some(sender) = &typed {
+                    let _ = sender.send(Stop::Finished);
+                }
+            });
             if then == Then::OpenDesktop {
                 println!("Opening the desktop app. Close it to stop the team server.");
                 let mut child = Command::new(&desktop)
@@ -202,11 +255,6 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 });
             } else {
                 println!("Press Enter (or Ctrl+C) to stop the team server.");
-                std::thread::spawn(move || {
-                    let mut line = String::new();
-                    let _ = std::io::stdin().lock().read_line(&mut line);
-                    let _ = sender.send(Stop::Finished);
-                });
             }
         }
     }
@@ -220,6 +268,24 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
     removed?;
     Ok(())
+}
+
+/// Imports the resistors again as an importer would after reading the team
+/// catalog, and names the outcome.
+fn reimport(
+    admin: &collaboration::PocketBaseClient,
+    import: &catalog::CsvImport,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let state = read_import_state(admin)?;
+    let command = ImportCommand::new(import, "Import the resistors from database/g-res.csv")
+        .expecting(&state);
+    let reply = submit_import(admin, &command)?;
+    Ok(match reply.outcome {
+        ImportOutcome::Applied { .. } => "applied".to_owned(),
+        ImportOutcome::NothingChanged { .. } => "nothing_changed".to_owned(),
+        ImportOutcome::Noop { .. } => "noop".to_owned(),
+        _ => format!("refused: {}", reply.body),
+    })
 }
 
 #[derive(Debug, PartialEq)]
