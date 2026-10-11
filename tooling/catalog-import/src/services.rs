@@ -257,8 +257,8 @@ pub fn check_committed(repository: &Path, import: &CsvImport, allow: Allow) -> R
         changed.join(", ")
     };
     Err(format!(
-        "{named} {} changes that are not committed. Commit them first and import again, so the team catalog matches a commit everyone can check out. To import them anyway, allow uncommitted changes (--allow-uncommitted-changes). Until you commit these changes and import again, a later import from a checkout without them will undo them.",
-        if changed.len() == 1 { "has" } else { "have" }
+        "{named} {} changed, new or deleted, and not committed. Commit them first and import again, so the team catalog matches a commit everyone can check out. To import them anyway, allow uncommitted changes (--allow-uncommitted-changes). Until you commit these changes and import again, a later import from a checkout without them will undo them.",
+        if changed.len() == 1 { "is" } else { "are" }
     ))
 }
 
@@ -583,7 +583,7 @@ mod tests {
             prepare_import(&nobody_listening(), root, &import, "r", Allow::default()).unwrap_err();
         assert!(
             refused.starts_with(
-                "database/substitutes.csv, symbols/g-pas.kicad_sym have changes that are not committed. Commit them first"
+                "database/substitutes.csv, symbols/g-pas.kicad_sym are changed, new or deleted, and not committed. Commit them first"
             ) && refused.contains(
                 "(--allow-uncommitted-changes). Until you commit these changes and import again, a later import"
             ),
@@ -625,7 +625,9 @@ mod tests {
         );
         let refused = check_committed(root, &deleted, Allow::default()).unwrap_err();
         assert!(
-            refused.starts_with(&format!("{FOOTPRINT} has changes that are not committed")),
+            refused.starts_with(&format!(
+                "{FOOTPRINT} is changed, new or deleted, and not committed"
+            )),
             "{refused}"
         );
         // Renamed only in its letter case: Windows would still open it under

@@ -568,7 +568,7 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
         services::prepare_import(&admin, root, &dirty, REASON, Allow::default()).unwrap_err();
     assert!(
         refused.starts_with(
-            "database/substitutes.csv has changes that are not committed. Commit them first"
+            "database/substitutes.csv is changed, new or deleted, and not committed. Commit them first"
         ),
         "{refused}"
     );
