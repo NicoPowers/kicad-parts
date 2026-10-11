@@ -97,5 +97,5 @@ Something an import could not handle, such as a missing symbol. The import recor
 _Avoid_: Import Diagnostic, warning, error
 
 **CSV review**:
-A person's answer to CSV changes that an import did not apply because the part was edited in this app: they take some of the CSV's values and keep the rest, or keep all of theirs. It covers what the CSV said, so the same CSV values never ask again; new CSV values do.
+A person's answer to new CSV values that an import did not apply because the part was edited in this app: they accept some of the CSV's values and keep the rest, or keep all the current values. It covers what the CSV said, so the app does not ask again about the same CSV values; it asks again when the CSV changes.
 _Avoid_: merge, sync, override
