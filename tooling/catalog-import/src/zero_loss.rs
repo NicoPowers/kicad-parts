@@ -104,7 +104,9 @@ use catalog::{
     CadReferenceTarget, License, ModelTarget, PartDetails, PartRevision, sha256_hex,
 };
 use csv_catalog_fixture::Manifest;
-use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
+use kicad_integration::library_file::{
+    SymbolLibrary, SymbolLookup, footprint_says_excluded_from_bom, symbol_entries_say_not_in_bom,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -980,6 +982,15 @@ impl<'a> Reporter<'a> {
         let readback = self.readback;
         for stored in &readback.part_revisions {
             let Ok(revision) = serde_json::from_str::<PartRevision>(&stored.snapshot) else {
+                let ipn = readback
+                    .parts
+                    .iter()
+                    .find(|part| part.id == stored.part)
+                    .map_or(stored.part.as_str(), |part| part.ipn.as_str());
+                self.problem(format!(
+                    "{ipn} revision {}: its stored snapshot is not a part revision, so its Excluded from BOM cannot be checked",
+                    stored.number
+                ));
                 continue;
             };
             let (symbol_marked, footprints) = bom_marks(readback, &revision);
@@ -2032,20 +2043,8 @@ fn bom_marks(readback: &CatalogReadback, revision: &PartRevision) -> (bool, Vec<
             return false;
         };
         match reference.role {
-            CadReferenceRole::Symbol => {
-                let mut library = b"(kicad_symbol_lib ".to_vec();
-                library.extend_from_slice(&blob.bytes);
-                library.push(b')');
-                SymbolLibrary::parse(&library).is_ok_and(|library| {
-                    library
-                        .entries
-                        .iter()
-                        .any(|entry| entry.in_bom == Some(false))
-                })
-            }
-            CadReferenceRole::Footprint => {
-                FootprintFile::parse(&blob.bytes).is_ok_and(|footprint| footprint.exclude_from_bom)
-            }
+            CadReferenceRole::Symbol => symbol_entries_say_not_in_bom(&blob.bytes),
+            CadReferenceRole::Footprint => footprint_says_excluded_from_bom(&blob.bytes),
         }
     };
     let of_role = |role: CadReferenceRole| -> Vec<bool> {
