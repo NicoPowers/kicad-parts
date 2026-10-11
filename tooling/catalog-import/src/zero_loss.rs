@@ -12,8 +12,9 @@
 //!
 //! | destination                       | where it is checked                                         |
 //! |-----------------------------------|-------------------------------------------------------------|
-//! | `part-details`                    | the part's revision after the latest import run: `ipn` or a named field |
-//! | `part-details.manufacturer-parts` | that revision's manufacturer parts                          |
+//! | `part-details`                    | the part's details after the latest import run: `ipn` or a named field |
+//! | `part-details.manufacturer-parts` | those details' manufacturer parts                           |
+//! | `part-revision`                   | the part's revision after the latest import run: its Symbol or Footprint field, exactly |
 //! | `supplier-data`                   | the latest import run's row (supplier data never makes a revision) |
 //! | `import-problem`                  | a stored import problem's detail                            |
 //!
@@ -27,6 +28,8 @@
 //! checks this table against the oracle's headers):
 //!
 //! - `IPN` and every column not named below: `part-details`.
+//! - `Symbol` and `Footprint`: `part-revision`, where they bind CAD item
+//!   revisions.
 //! - `MPN` and `Manufacturer`: `part-details.manufacturer-parts`, the main
 //!   manufacturer part. If either is blank, an
 //!   `incomplete-main-manufacturer-part` import problem keeps both.
@@ -44,6 +47,9 @@
 //!
 //! | CSV file | `part-details` besides `IPN` | manufacturer parts | `import-problem` |
 //! |----------|------------------------------|--------------------|------------------|
+//! Symbol and Footprint go to `part-revision` in every file that has them
+//! (all but g-pcb); the table lists them where they appear.
+//!
 //! | g-ana | Description, Symbol, Footprint, Datasheet, Sim_Library, Sim_Name, Sim_Device, Sim_Pins | MPN, Manufacturer | |
 //! | g-art | Description, Symbol, Footprint, Comments | | |
 //! | g-cap | Description, Symbol, Footprint, Value, Voltage, Material, Tolerance, Datasheet | MPN, Manufacturer | |
@@ -68,8 +74,14 @@
 //!
 //! All 21 files also have the 7 supplier data columns.
 //!
-//! Excluded from BOM is part details but no column: the report checks that
-//! a part has it exactly when a symbol revision it binds says `(in_bom no)`
+//! A row whose details or CAD differ from what an edit saved is kept by an
+//! import problem for that kind only (`csv-details-differ-from-edited-details`
+//! or `csv-cad-differs-from-edited-revision`); its other columns are checked
+//! as usual.
+//!
+//! Excluded from BOM belongs to the revision but is no column: the report
+//! checks that a part has it exactly when a symbol revision it binds says
+//! `(in_bom no)`
 //! in its stored bytes, or every footprint choice has `exclude_from_bom` in
 //! its `(attr ...)`; footprint choices that disagree need a
 //! `footprint-choices-disagree-on-bom` import problem.
@@ -79,11 +91,12 @@ use catalog::csv_import::{
     route_column, route_substitutes_csv_column,
 };
 use catalog::pocketbase::{
-    CatalogReadback, ImportRun, StoredAuditEntry, StoredImportProblem, StoredPartRevision,
+    CatalogReadback, ImportRun, StoredAuditEntry, StoredImportProblem, StoredPartDetails,
+    StoredPartRevision,
 };
 use catalog::{
     CadItemDetails, CadItemId, CadItemRevisionId, CadReference, CadReferenceRole,
-    CadReferenceTarget, License, ModelTarget, PartDetails, sha256_hex,
+    CadReferenceTarget, License, ModelTarget, PartDetails, PartRevision, sha256_hex,
 };
 use csv_catalog_fixture::Manifest;
 use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
@@ -93,6 +106,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub const PART_DETAILS: &str = "part-details";
+pub const PART_REVISION: &str = "part-revision";
 pub const MANUFACTURER_PARTS: &str = "part-details.manufacturer-parts";
 pub const SUPPLIER_DATA: &str = "supplier-data";
 pub const IMPORT_PROBLEM: &str = "import-problem";
@@ -275,9 +289,12 @@ struct Reporter<'a> {
     problems: Vec<String>,
 }
 
-/// A part's revision as the latest import run left it, decoded.
-struct RunRevision<'a> {
+/// A part's details and revision as the latest import run left them,
+/// decoded.
+struct RunPart<'a> {
     revision: &'a StoredPartRevision,
+    cad: PartRevision,
+    details_record: &'a StoredPartDetails,
     details: PartDetails,
 }
 
@@ -452,17 +469,19 @@ impl<'a> Reporter<'a> {
             allowed_older_checkout: entry.allowed_older_checkout,
         };
         let csv = self.rebuild_csv(&run, &source_path, &document.byte_sha256, &document.rows);
-        let run_parts: BTreeMap<&str, u32> = run
+        let run_parts: BTreeMap<&str, (u32, u32)> = run
             .parts
             .iter()
-            .map(|part| (part.ipn.as_str(), part.revision))
+            .map(|part| (part.ipn.as_str(), (part.revision, part.details)))
             .collect();
 
         let mut fields = Fields::default();
         let mut explained = BTreeSet::new();
-        // Parts whose row the latest run made, and the revision it left
-        // them at; parts whose row an import problem keeps instead.
-        let mut scope: BTreeMap<String, RunRevision> = BTreeMap::new();
+        // Parts whose row the latest run made, and the details and revision
+        // it left them at, unless an import problem keeps that kind of the
+        // row instead.
+        let mut details_scope: BTreeMap<String, PartDetails> = BTreeMap::new();
+        let mut cad_scope: BTreeMap<String, PartRevision> = BTreeMap::new();
         let mut kept_by_problem: BTreeMap<String, Value> = BTreeMap::new();
         let mut part_rows = BTreeSet::new();
         let mut rows_with_main_part: BTreeMap<String, bool> = BTreeMap::new();
@@ -498,7 +517,7 @@ impl<'a> Reporter<'a> {
             }
 
             let revision = match run_parts.get(ipn.as_str()) {
-                Some(&number) => self.run_revision(&ipn, number),
+                Some(&(number, details)) => self.run_part(&ipn, number, details),
                 None => {
                     self.problem(format!(
                         "row {row_number} ({ipn}) is neither a part of the latest import run nor an import problem"
@@ -514,27 +533,43 @@ impl<'a> Reporter<'a> {
             };
             part_rows.insert(ipn.clone());
 
-            // A row whose part details differ from a revision that an edit
-            // made is kept by an import problem instead.
-            let number = revision.revision.number;
-            if let Some((problem, detail)) = self.find_problem(|problem, detail| {
-                problem.code == "csv-row-conflicts-with-current-revision"
-                    && problem.subject == ipn
-                    && problem.path == source_path
-                    && detail["raw_record"].as_str() == Some(raw.as_str())
-                    && detail["current_revision_number"].as_u64() == Some(u64::from(number))
-            }) {
+            // Details or CAD that differ from what an edit saved are kept by
+            // an import problem instead, each kind on its own.
+            let details_kept = self
+                .find_problem(|problem, detail| {
+                    problem.code == "csv-details-differ-from-edited-details"
+                        && problem.subject == ipn
+                        && problem.path == source_path
+                        && detail["raw_record"].as_str() == Some(raw.as_str())
+                        && detail["current_details_number"].as_u64()
+                            == Some(u64::from(revision.details_record.number))
+                })
+                .map(|(problem, detail)| (problem.clone(), detail.clone()));
+            let cad_kept = self
+                .find_problem(|problem, detail| {
+                    problem.code == "csv-cad-differs-from-edited-revision"
+                        && problem.subject == ipn
+                        && problem.path == source_path
+                        && detail["raw_record"].as_str() == Some(raw.as_str())
+                        && detail["current_revision_number"].as_u64()
+                            == Some(u64::from(revision.revision.number))
+                })
+                .map(|(problem, detail)| (problem.clone(), detail.clone()));
+            for (problem, _) in details_kept.iter().chain(&cad_kept) {
                 explained.insert(problem.id.clone());
                 self.use_for_row(problem);
-                kept_by_problem.insert(ipn.clone(), detail.clone());
-                for (position, (column, value)) in headers.iter().zip(row).enumerate() {
-                    let stored = Some(csv.field(index, position));
-                    fields.account(row_number, &ipn, column, IMPORT_PROBLEM, value, stored);
-                }
-                continue;
             }
+            if let Some((_, detail)) = &details_kept {
+                kept_by_problem.insert(ipn.clone(), detail.clone());
+            }
+            let kept = |route: ColumnRoute| match route {
+                ColumnRoute::Cad => cad_kept.is_some(),
+                ColumnRoute::SupplierData => false,
+                _ => details_kept.is_some(),
+            };
 
             let details = &revision.details;
+            let cad = &revision.cad;
             let has_main_columns = headers.iter().any(|header| {
                 matches!(
                     route_column(header),
@@ -574,8 +609,14 @@ impl<'a> Reporter<'a> {
             let mut part_detail_columns = Vec::new();
             for (position, (column, value)) in headers.iter().zip(row).enumerate() {
                 let route = route_column(column);
+                if kept(route) {
+                    let stored = Some(csv.field(index, position));
+                    fields.account(row_number, &ipn, column, IMPORT_PROBLEM, value, stored);
+                    continue;
+                }
                 let (destination, stored) = match route {
                     ColumnRoute::Ipn => (PART_DETAILS, Some(details.ipn.clone())),
+                    ColumnRoute::Cad => (PART_REVISION, cad.field(column).map(str::to_owned)),
                     ColumnRoute::PartDetails => {
                         part_detail_columns.push(column.clone());
                         (PART_DETAILS, details.field(column).map(str::to_owned))
@@ -641,13 +682,25 @@ impl<'a> Reporter<'a> {
                 }
                 fields.account(row_number, &ipn, column, destination, value, stored);
             }
-            // Exactly one place: no extra or repeated part-details fields,
-            // and no supplier data in the part details.
+            // Exactly one place: no extra or repeated part-details or CAD
+            // fields, and no supplier data in either.
             let stored_fields: Vec<&String> =
                 details.fields.iter().map(|field| &field.name).collect();
-            if stored_fields != part_detail_columns.iter().collect::<Vec<_>>() {
+            if details_kept.is_none()
+                && stored_fields != part_detail_columns.iter().collect::<Vec<_>>()
+            {
                 self.problem(format!(
                     "row {row_number} ({ipn}): part-details fields {stored_fields:?} are not the part-details columns {part_detail_columns:?}"
+                ));
+            }
+            let cad_columns: Vec<&String> = headers
+                .iter()
+                .filter(|header| route_column(header) == ColumnRoute::Cad)
+                .collect();
+            let stored_cad: Vec<&String> = cad.cad_fields.iter().map(|field| &field.name).collect();
+            if cad_kept.is_none() && stored_cad != cad_columns {
+                self.problem(format!(
+                    "row {row_number} ({ipn}): part-revision fields {stored_cad:?} are not the CAD columns {cad_columns:?}"
                 ));
             }
             // A supplier part number may equal a value another column puts
@@ -663,15 +716,24 @@ impl<'a> Reporter<'a> {
                 if route_column(column) == ColumnRoute::SupplierData
                     && !value.is_empty()
                     && !detail_values.contains(value)
-                    && revision.revision.snapshot.contains(&format!("\"{value}\""))
+                    && (revision.revision.snapshot.contains(&format!("\"{value}\""))
+                        || revision
+                            .details_record
+                            .snapshot
+                            .contains(&format!("\"{value}\"")))
                 {
                     self.problem(format!(
                         "row {row_number} ({ipn}): supplier data {column}={value} also appears in the part details"
                     ));
                 }
             }
-            self.check_excluded_from_bom(row_number, &ipn, details, &mut explained);
-            scope.insert(ipn.clone(), revision);
+            if cad_kept.is_none() {
+                self.check_excluded_from_bom(row_number, &ipn, cad, &mut explained);
+                cad_scope.insert(ipn.clone(), revision.cad.clone());
+            }
+            if details_kept.is_none() {
+                details_scope.insert(ipn.clone(), revision.details.clone());
+            }
         }
 
         for part in &run.parts {
@@ -690,9 +752,9 @@ impl<'a> Reporter<'a> {
             ));
         }
 
-        let in_scope: BTreeMap<String, &PartDetails> = scope
+        let in_scope: BTreeMap<String, &PartDetails> = details_scope
             .iter()
-            .map(|(ipn, revision)| (ipn.clone(), &revision.details))
+            .map(|(ipn, details)| (ipn.clone(), details))
             .collect();
         let substitutes_csv_rows = self.substitutes_csv_rows(
             &run,
@@ -701,7 +763,11 @@ impl<'a> Reporter<'a> {
             &rows_with_main_part,
             &mut explained,
         );
-        let (cad_items, footprint_paths) = self.cad_items(&in_scope, &mut explained);
+        let cad_in_scope: BTreeMap<String, &PartRevision> = cad_scope
+            .iter()
+            .map(|(ipn, revision)| (ipn.clone(), revision))
+            .collect();
+        let (cad_items, footprint_paths) = self.cad_items(&cad_in_scope, &mut explained);
         let model_references = self.models(&footprint_paths, &mut explained);
         let oracle_import_problems =
             self.oracle_import_problems(&footprint_paths, &cad_items, &mut explained);
@@ -758,9 +824,9 @@ impl<'a> Reporter<'a> {
                 })
                 .collect(),
             parts: part_rows.len(),
-            excluded_from_bom: scope
+            excluded_from_bom: cad_scope
                 .iter()
-                .filter(|(_, revision)| revision.details.excluded_from_bom)
+                .filter(|(_, revision)| revision.excluded_from_bom)
                 .map(|(ipn, _)| ipn.clone())
                 .collect(),
             removed_parts,
@@ -802,8 +868,8 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    /// Checks every Change: one audit entry, at least one revision, a
-    /// reason.
+    /// Checks every Change: one audit entry, at least one revision or saved
+    /// part details, a reason.
     fn changes(&mut self) -> Vec<ChangeAccount> {
         let readback = self.readback;
         let mut changes = Vec::new();
@@ -828,9 +894,17 @@ impl<'a> Reporter<'a> {
                     .cad_item_revisions
                     .iter()
                     .filter(|revision| revision.change == change.id)
+                    .count()
+                + readback
+                    .part_details
+                    .iter()
+                    .filter(|details| details.change == change.id)
                     .count();
             if revisions == 0 {
-                self.problem(format!("Change {} has no revisions", change.seq));
+                self.problem(format!(
+                    "Change {} has no revisions and no part details",
+                    change.seq
+                ));
             }
             if change.reason.trim().is_empty() {
                 self.problem(format!("Change {} has no reason", change.seq));
@@ -857,7 +931,7 @@ impl<'a> Reporter<'a> {
         &mut self,
         row_number: usize,
         ipn: &str,
-        details: &PartDetails,
+        revision: &PartRevision,
         explained: &mut BTreeSet<String>,
     ) {
         let readback = self.readback;
@@ -892,7 +966,7 @@ impl<'a> Reporter<'a> {
             }
         };
         let of_role = |role: CadReferenceRole| -> Vec<bool> {
-            details
+            revision
                 .cad_references
                 .iter()
                 .filter(|reference| reference.role == role)
@@ -903,10 +977,10 @@ impl<'a> Reporter<'a> {
         let footprints = of_role(CadReferenceRole::Footprint);
         let all_footprints = !footprints.is_empty() && !footprints.contains(&false);
         let expected = symbol_marked || all_footprints;
-        if expected != details.excluded_from_bom {
+        if expected != revision.excluded_from_bom {
             self.problem(format!(
                 "row {row_number} ({ipn}): Excluded from BOM is {}, but its symbols and footprints say {expected}",
-                details.excluded_from_bom
+                revision.excluded_from_bom
             ));
         }
         if !symbol_marked && footprints.contains(&true) && !all_footprints {
@@ -965,11 +1039,37 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    /// The current revision of every part is one of its own, matches its
-    /// hash and holds that part's details.
+    /// The current revision and current details of every part are its own,
+    /// match their hashes and hold that part's revision and details.
     fn check_current_revisions(&mut self) {
         let readback = self.readback;
         for part in &readback.parts {
+            match readback.part_details(&part.current_details) {
+                None => self.problem(format!(
+                    "{}: current details {} are missing",
+                    part.ipn, part.current_details
+                )),
+                Some(details) => {
+                    if sha256_hex(&details.snapshot) != details.snapshot_sha256 {
+                        self.problem(format!("{}: details do not match their hash", part.ipn));
+                    }
+                    if details.number != part.current_details_number || details.part != part.id {
+                        self.problem(format!(
+                            "{}: current details pointer is inconsistent",
+                            part.ipn
+                        ));
+                    }
+                    match serde_json::from_str::<PartDetails>(&details.snapshot) {
+                        Ok(parsed) if parsed.ipn == part.ipn => {}
+                        Ok(parsed) => {
+                            self.problem(format!("{}: details name {}", part.ipn, parsed.ipn))
+                        }
+                        Err(error) => {
+                            self.problem(format!("{}: details do not parse: {error}", part.ipn))
+                        }
+                    }
+                }
+            }
             let Some(revision) = readback.part_revision(&part.current_revision) else {
                 self.problem(format!(
                     "{}: current revision {} is missing",
@@ -986,10 +1086,10 @@ impl<'a> Reporter<'a> {
                     part.ipn
                 ));
             }
-            match serde_json::from_str::<PartDetails>(&revision.snapshot) {
+            match serde_json::from_str::<PartRevision>(&revision.snapshot) {
                 Ok(details) if details.ipn == part.ipn => {
                     // The relation lists exactly the CAD item revisions the
-                    // details name, by CAD item and number.
+                    // revision names, by CAD item and number.
                     let named: Vec<String> = details
                         .cad_references
                         .iter()
@@ -1010,7 +1110,7 @@ impl<'a> Reporter<'a> {
                     related.dedup();
                     if named != related {
                         self.problem(format!(
-                            "{}: the current revision's CAD item revisions are not the ones its details name",
+                            "{}: the current revision's CAD item revisions are not the ones it names",
                             part.ipn
                         ));
                     }
@@ -1040,8 +1140,9 @@ impl<'a> Reporter<'a> {
             .and_then(|entry| Some((entry, entry.import_run()?)))
     }
 
-    /// Part `ipn`'s revision `number`, checked against its hash.
-    fn run_revision(&mut self, ipn: &str, number: u32) -> Option<RunRevision<'a>> {
+    /// Part `ipn`'s revision `number` and details `details_number`, checked
+    /// against their hashes.
+    fn run_part(&mut self, ipn: &str, number: u32, details_number: u32) -> Option<RunPart<'a>> {
         let readback = self.readback;
         let Some(part) = readback.part(ipn) else {
             self.problem(format!("{ipn} is in the latest import run but not a part"));
@@ -1057,20 +1158,57 @@ impl<'a> Reporter<'a> {
             ));
             return None;
         };
+        let Some(details_record) = readback
+            .part_details
+            .iter()
+            .find(|details| details.part == part.id && details.number == details_number)
+        else {
+            self.problem(format!(
+                "{ipn}: details {details_number}, which the latest import run left it at, are missing"
+            ));
+            return None;
+        };
         if sha256_hex(&revision.snapshot) != revision.snapshot_sha256 {
             self.problem(format!("{ipn}: revision {number} does not match its hash"));
         }
-        match serde_json::from_str::<PartDetails>(&revision.snapshot) {
-            Ok(details) if details.ipn == ipn => Some(RunRevision { revision, details }),
-            Ok(details) => {
-                self.problem(format!("{ipn}: revision {number} names {}", details.ipn));
-                None
+        if sha256_hex(&details_record.snapshot) != details_record.snapshot_sha256 {
+            self.problem(format!(
+                "{ipn}: details {details_number} do not match their hash"
+            ));
+        }
+        let cad = match serde_json::from_str::<PartRevision>(&revision.snapshot) {
+            Ok(cad) if cad.ipn == ipn => cad,
+            Ok(cad) => {
+                self.problem(format!("{ipn}: revision {number} names {}", cad.ipn));
+                return None;
             }
             Err(error) => {
                 self.problem(format!("{ipn}: revision {number} does not parse: {error}"));
-                None
+                return None;
             }
-        }
+        };
+        let details = match serde_json::from_str::<PartDetails>(&details_record.snapshot) {
+            Ok(details) if details.ipn == ipn => details,
+            Ok(details) => {
+                self.problem(format!(
+                    "{ipn}: details {details_number} name {}",
+                    details.ipn
+                ));
+                return None;
+            }
+            Err(error) => {
+                self.problem(format!(
+                    "{ipn}: details {details_number} do not parse: {error}"
+                ));
+                return None;
+            }
+        };
+        Some(RunPart {
+            revision,
+            cad,
+            details_record,
+            details,
+        })
     }
 
     /// Rebuilds `path` from the header line and rows `run` recorded, and
@@ -1353,7 +1491,7 @@ impl<'a> Reporter<'a> {
     /// path, the CAD item revision the parts bind.
     fn cad_items(
         &mut self,
-        scope: &BTreeMap<String, &PartDetails>,
+        scope: &BTreeMap<String, &PartRevision>,
         explained: &mut BTreeSet<String>,
     ) -> (Vec<CadItemAccount>, BTreeMap<String, String>) {
         let oracle = self.oracle;
