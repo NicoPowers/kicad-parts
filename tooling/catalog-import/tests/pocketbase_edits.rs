@@ -1,4 +1,5 @@
-//! Edits of one part through the protected Catalog routes,
+//! Edits of one part's details, symbol and footprint through the protected
+//! Catalog routes,
 //! records that never change once written, and a second client that
 //! converges through realtime notifications and catching up from its
 //! checkpoint. Each test starts its own disposable PocketBase on 127.0.0.1
@@ -9,7 +10,9 @@ use catalog::pocketbase::{
     StoredChange, read_back, submit_edit, submit_import,
 };
 use catalog::replica::CatalogReplica;
-use catalog::{CadReferenceTarget, DetailField, ManufacturerPart, PartDetails, sha256_hex};
+use catalog::{
+    CadReferenceTarget, DetailField, ManufacturerPart, PartDetails, PartRevision, sha256_hex,
+};
 use catalog_import::services;
 use collaboration::{ApplyResult, CollabError, PocketBaseClient, RealtimeConnection};
 use native_services::PocketBaseServer;
@@ -89,38 +92,73 @@ fn server_errors(admin: &PocketBaseClient) -> String {
         .unwrap_or_default()
 }
 
-/// The current revision of `ipn`: its number and part details.
-fn current(readback: &CatalogReadback, ipn: &str) -> (u32, PartDetails) {
-    let part = readback.part(ipn).unwrap();
-    let revision = readback.part_revision(&part.current_revision).unwrap();
-    (
-        revision.number,
-        serde_json::from_str(&revision.snapshot).unwrap(),
-    )
+/// A part as it is now: its current details and revision, with numbers.
+struct Current {
+    details_number: u32,
+    details: PartDetails,
+    revision_number: u32,
+    revision: PartRevision,
 }
 
-fn applied(reply: &PublishReply) -> (u64, u32, String) {
+fn current(readback: &CatalogReadback, ipn: &str) -> Current {
+    let part = readback.part(ipn).unwrap();
+    let details = readback.part_details(&part.current_details).unwrap();
+    let revision = readback.part_revision(&part.current_revision).unwrap();
+    Current {
+        details_number: details.number,
+        details: serde_json::from_str(&details.snapshot).unwrap(),
+        revision_number: revision.number,
+        revision: serde_json::from_str(&revision.snapshot).unwrap(),
+    }
+}
+
+/// What an applied edit saved: its Change's seq, the new details number
+/// and revision number (if any), and the Change's ID.
+struct Applied {
+    seq: u64,
+    details: Option<u32>,
+    revision: Option<u32>,
+    change_id: String,
+}
+
+fn applied(reply: &PublishReply) -> Applied {
     match &reply.outcome {
         PublishOutcome::Applied {
             seq,
+            details,
             revision,
             change_id,
             ..
-        } => (*seq, revision.number, change_id.clone()),
+        } => Applied {
+            seq: *seq,
+            details: details.as_ref().map(|record| record.number),
+            revision: revision.as_ref().map(|record| record.number),
+            change_id: change_id.clone(),
+        },
         other => panic!("expected applied, got {other:?}: {}", reply.body),
     }
 }
 
-/// An edit of the current revision of `ipn` that sets `field` to `value`.
+/// An edit of `ipn` as it is now that sets `field` to `value`: a details
+/// edit, or a CAD edit for Symbol and Footprint.
 fn edit(readback: &CatalogReadback, ipn: &str, field: &str, value: &str) -> EditCommand {
-    let (number, details) = current(readback, ipn);
-    let mut command = EditCommand::starting_from(&details, number, &format!("Set {field}"));
+    let now = current(readback, ipn);
+    let command = EditCommand::new(ipn, &format!("Set {field}"));
+    let mut command = if catalog::CAD_COLUMNS.contains(&field) {
+        command.editing_cad(&now.revision, now.revision_number)
+    } else {
+        command.editing_details(&now.details, now.details_number)
+    };
     assert!(command.set_field(field, value), "{ipn} has no {field}");
     command
 }
 
+fn details_edit(command: &mut EditCommand) -> &mut catalog::pocketbase::DetailsEdit {
+    command.details.as_mut().expect("a details edit")
+}
+
 #[test]
-fn an_editor_publishes_edits_with_exact_cad_revisions() {
+fn an_editor_publishes_details_and_cad_edits_separately() {
     let team = Team::start();
     let initial = team.read();
     let editor = team.member("Ada Editor", true);
@@ -159,20 +197,26 @@ fn an_editor_publishes_edits_with_exact_cad_revisions() {
         .unwrap();
     assert_eq!(team.read(), initial);
 
-    // An edit makes exactly one Change, one revision, one move of the
-    // current revision and one audit entry. The value is awkward on
-    // purpose: the stored bytes must be the canonical JSON Rust writes.
+    // A details edit makes exactly one Change, saves the part's next
+    // details, moves the part to them and adds one audit entry, but adds no
+    // revision. The value is awkward on purpose: the stored bytes must be
+    // the canonical JSON Rust writes.
     let awkward = "47 Ω \"exact\" \\ tab\there 😀";
     let mut command = edit(&initial, IPN, "Value", awkward);
-    command.manufacturer_parts.push(ManufacturerPart {
-        manufacturer: "Vishay".into(),
-        mpn: "ALT-47".into(),
-    });
+    details_edit(&mut command)
+        .manufacturer_parts
+        .push(ManufacturerPart {
+            manufacturer: "Vishay".into(),
+            mpn: "ALT-47".into(),
+        });
     command.reason = "Use the exact value and add a second source".into();
     let first = submit_edit(&editor, &command).unwrap();
     assert_eq!(first.status, 200, "{}", first.body);
-    let (seq, number, change_id) = applied(&first);
-    assert_eq!((seq, number), (2, 2));
+    let saved = applied(&first);
+    assert_eq!(
+        (saved.seq, saved.details, saved.revision),
+        (2, Some(2), None)
+    );
     let after = team.read();
     assert_eq!(after.changes.len(), 2);
     let change = &after.changes[1];
@@ -183,7 +227,7 @@ fn an_editor_publishes_edits_with_exact_cad_revisions() {
             change.reason.as_str()
         ),
         (
-            change_id.as_str(),
+            saved.change_id.as_str(),
             "edit",
             "Use the exact value and add a second source"
         )
@@ -200,36 +244,41 @@ fn an_editor_publishes_edits_with_exact_cad_revisions() {
         ("catalog.edit", "Ada Editor")
     );
     assert_eq!(after.audit_entries.len(), initial.audit_entries.len() + 1);
-    assert_eq!(after.part_revisions.len(), initial.part_revisions.len() + 1);
+    assert_eq!(after.part_details.len(), initial.part_details.len() + 1);
+    assert_eq!(after.part_revisions, initial.part_revisions);
     let part = after.part(IPN).unwrap();
-    assert_eq!(part.current_revision_number, 2);
-    let revision = after.part_revision(&part.current_revision).unwrap();
-    let first_revision = initial
-        .part_revision(&initial.part(IPN).unwrap().current_revision)
+    assert_eq!(
+        (part.current_details_number, part.current_revision_number),
+        (2, 1)
+    );
+    let stored = after.part_details(&part.current_details).unwrap();
+    let first_details = initial
+        .part_details(&initial.part(IPN).unwrap().current_details)
         .unwrap();
-    assert_eq!(revision.predecessor, first_revision.id);
-    let details: PartDetails = serde_json::from_str(&revision.snapshot).unwrap();
-    assert_eq!(details.canonical_json(), revision.snapshot);
-    assert_eq!(sha256_hex(&revision.snapshot), revision.snapshot_sha256);
+    assert_eq!(stored.predecessor, first_details.id);
+    assert_eq!(
+        stored.id,
+        catalog::PartDetailsId::new(&catalog::PartId::from_stored(&part.id), 2).as_str()
+    );
+    let details: PartDetails = serde_json::from_str(&stored.snapshot).unwrap();
+    assert_eq!(details.canonical_json(), stored.snapshot);
+    assert_eq!(sha256_hex(&stored.snapshot), stored.snapshot_sha256);
     assert_eq!(details.field("Value"), Some(awkward));
     assert_eq!(details.manufacturer_parts.len(), 2);
-    // The CAD bindings did not move: the same exact CAD item revisions.
-    let (_, first_details) = current(&initial, IPN);
-    assert_eq!(details.cad_references, first_details.cad_references);
-    assert_eq!(
-        revision.cad_item_revisions,
-        first_revision.cad_item_revisions
-    );
-    let source: Value = serde_json::from_str(&revision.source).unwrap();
+    let source: Value = serde_json::from_str(&stored.source).unwrap();
     assert_eq!(source["source"], "edit");
-    assert_eq!(source["previous_revision"]["number"], 1);
-    // Revision 1 and every other part are exactly as they were.
-    for old in &initial.part_revisions {
-        assert_eq!(after.part_revision(&old.id), Some(old));
+    assert_eq!(source["previous"]["number"], 1);
+    // Details 1, every revision and every other part are exactly as they
+    // were.
+    for old in &initial.part_details {
+        assert_eq!(after.part_details(&old.id), Some(old));
     }
     for old in initial.parts.iter().filter(|part| part.ipn != IPN) {
         assert_eq!(after.part(&old.ipn), Some(old));
     }
+    let first_revision = initial
+        .part_revision(&initial.part(IPN).unwrap().current_revision)
+        .unwrap();
 
     // Repeating the command replays its answer and writes nothing.
     let replay = submit_edit(&editor, &command).unwrap();
@@ -253,84 +302,59 @@ fn an_editor_publishes_edits_with_exact_cad_revisions() {
     assert!(matches!(noop.outcome, PublishOutcome::Noop { .. }));
     let again = submit_edit(&editor, &unchanged).unwrap();
     assert_eq!((again.status, again.replayed), (422, true));
+    // An edit with no section at all is bad input.
+    assert!(matches!(
+        submit_edit(&editor, &EditCommand::new(IPN, "Nothing")),
+        Err(CollabError::Http { status: 400, .. })
+    ));
     assert_eq!(team.read(), after);
 
-    // A stale edit is a conflict that names the current revision, so the
-    // client can show both. Conflicts are not stored: a retry is checked
+    // A stale details edit is a conflict that names the current details, so
+    // the client can show both. Conflicts are not stored: a retry is checked
     // again.
     let stale = edit(&initial, IPN, "Value", "48");
     for _ in 0..2 {
         let conflict = submit_edit(&other, &stale).unwrap();
         assert_eq!((conflict.status, conflict.replayed), (409, false));
         let PublishOutcome::Conflict {
-            expected_revision,
+            current_details,
             current_revision,
             ..
         } = &conflict.outcome
         else {
             panic!("expected a conflict, got {}", conflict.body);
         };
-        assert_eq!(*expected_revision, 1);
-        assert_eq!(current_revision.number, 2);
-        assert_eq!(current_revision.snapshot, revision.snapshot);
+        assert!(current_revision.is_none(), "the revision did not move");
+        let current_details = current_details.as_ref().unwrap();
+        assert_eq!(current_details.number, 2);
+        assert_eq!(current_details.snapshot, stored.snapshot);
         assert_eq!(
             (
-                current_revision.change_kind.as_str(),
-                current_revision.actor_name.as_str()
+                current_details.change_kind.as_str(),
+                current_details.actor_name.as_str()
             ),
             ("edit", "Ada Editor")
         );
-        assert_eq!(current_revision.details().unwrap(), details);
+        assert_eq!(current_details.details().unwrap(), details);
     }
     assert_eq!(team.read(), after);
 
-    // Supplier data can never enter the part details: an edit cannot add,
-    // drop, rename or reorder fields.
-    let bad = |change: &dyn Fn(&mut EditCommand)| {
-        let mut command = edit(&after, IPN, "Value", "49");
-        change(&mut command);
-        match submit_edit(&editor, &command) {
-            Err(CollabError::Http { status: 400, .. }) => {}
-            other => panic!("expected 400, got {other:?}"),
-        }
-    };
-    bad(&|command| {
-        command.fields.push(DetailField {
-            name: "LCSC".into(),
-            value: "C1".into(),
-        })
-    });
-    bad(&|command| {
-        command.fields.pop();
-    });
-    bad(&|command| command.fields[0].name = "Supplier".into());
-    bad(&|command| command.fields.swap(0, 1));
-    bad(&|command| {
-        command.manufacturer_parts.push(ManufacturerPart {
-            manufacturer: "Yageo".into(),
-            mpn: String::new(),
-        })
-    });
-    bad(&|command| {
-        let first = command.manufacturer_parts[0].clone();
-        command.manufacturer_parts.push(first);
-    });
-    bad(&|command| command.reason = "  ".into());
-    // A symbol the Catalog does not have cannot be used.
-    bad(&|command| {
-        command.set_field("Symbol", "g-pas:NOT_A_SYMBOL");
-    });
-    assert_eq!(team.read(), after);
-
-    // Pointing the symbol at another library binds no CAD item revision;
-    // pointing it back binds the CAD item's exact current revision.
-    let symbol = first_details.field("Symbol").unwrap().to_owned();
-    let external = submit_edit(&editor, &edit(&after, IPN, "Symbol", "Device:R")).unwrap();
-    assert_eq!(applied(&external).1, 3);
+    // But a CAD edit that started before the details edit is no conflict:
+    // the details and the revision are checked apart.
+    let symbol = current(&initial, IPN)
+        .revision
+        .field("Symbol")
+        .unwrap()
+        .to_owned();
+    let external = submit_edit(&other, &edit(&initial, IPN, "Symbol", "Device:R")).unwrap();
+    let saved = applied(&external);
+    assert_eq!((saved.details, saved.revision), (None, Some(2)));
     let moved = team.read();
-    let (_, details) = current(&moved, IPN);
-    let symbol_target = |details: &PartDetails| {
-        details
+    let now = current(&moved, IPN);
+    assert_eq!((now.details_number, now.revision_number), (2, 2));
+    // Pointing the symbol at another library binds no CAD item revision.
+    let symbol_target = |revision: &PartRevision| {
+        revision
             .cad_references
             .iter()
             .find(|reference| reference.role == catalog::CadReferenceRole::Symbol)
@@ -338,15 +362,93 @@ fn an_editor_publishes_edits_with_exact_cad_revisions() {
             .unwrap()
     };
     assert_eq!(
-        symbol_target(&details),
+        symbol_target(&now.revision),
         ("Device:R".into(), CadReferenceTarget::External)
     );
-    let bound = &moved
+    let revision = moved
         .part_revision(&moved.part(IPN).unwrap().current_revision)
-        .unwrap()
-        .cad_item_revisions;
-    assert_eq!(bound.len(), first_revision.cad_item_revisions.len() - 1);
-    let back = submit_edit(&editor, &edit(&moved, IPN, "Symbol", &symbol)).unwrap();
+        .unwrap();
+    assert_eq!(revision.predecessor, first_revision.id);
+    assert_eq!(
+        revision.cad_item_revisions.len(),
+        first_revision.cad_item_revisions.len() - 1
+    );
+    assert_eq!(now.revision.canonical_json(), revision.snapshot);
+    // A stale CAD edit is a conflict naming only the revision.
+    let stale = edit(&after, IPN, "Footprint", "Device:R_0603");
+    let PublishOutcome::Conflict {
+        current_details,
+        current_revision,
+        ..
+    } = submit_edit(&editor, &stale).unwrap().outcome
+    else {
+        panic!("expected a conflict");
+    };
+    assert!(current_details.is_none());
+    assert_eq!(current_revision.unwrap().revision().unwrap(), now.revision);
+
+    // Supplier data and CAD can never enter the part details: an edit
+    // cannot add, drop, rename or reorder fields, in either section.
+    let bad = |change: &dyn Fn(&mut EditCommand)| {
+        let mut command = edit(&moved, IPN, "Value", "49");
+        command = command.editing_cad(&now.revision, now.revision_number);
+        change(&mut command);
+        match submit_edit(&editor, &command) {
+            Err(CollabError::Http { status: 400, .. }) => {}
+            other => panic!("expected 400, got {other:?}"),
+        }
+    };
+    bad(&|command| {
+        details_edit(command).fields.push(DetailField {
+            name: "LCSC".into(),
+            value: "C1".into(),
+        })
+    });
+    bad(&|command| {
+        details_edit(command).fields.push(DetailField {
+            name: "Symbol".into(),
+            value: "g-pas:R_US".into(),
+        })
+    });
+    bad(&|command| {
+        details_edit(command).fields.pop();
+    });
+    bad(&|command| details_edit(command).fields[0].name = "Supplier".into());
+    bad(&|command| details_edit(command).fields.swap(0, 1));
+    bad(&|command| {
+        details_edit(command)
+            .manufacturer_parts
+            .push(ManufacturerPart {
+                manufacturer: "Yageo".into(),
+                mpn: String::new(),
+            })
+    });
+    bad(&|command| {
+        let edit = details_edit(command);
+        let first = edit.manufacturer_parts[0].clone();
+        edit.manufacturer_parts.push(first);
+    });
+    bad(&|command| {
+        command.cad.as_mut().unwrap().fields.push(DetailField {
+            name: "Value".into(),
+            value: "1".into(),
+        })
+    });
+    bad(&|command| command.reason = "  ".into());
+    // A symbol the Catalog does not have cannot be used.
+    bad(&|command| {
+        command.set_field("Symbol", "g-pas:NOT_A_SYMBOL");
+    });
+    assert_eq!(team.read(), moved);
+
+    // Pointing the symbol back binds the CAD item's exact current revision,
+    // and an edit of both saves details and a revision in one Change.
+    let mut both = edit(&moved, IPN, "Symbol", &symbol);
+    both = both.editing_details(&now.details, now.details_number);
+    assert!(both.set_field("Value", "47"));
+    let back = submit_edit(&editor, &both).unwrap();
+    let saved = applied(&back);
+    assert_eq!((saved.details, saved.revision), (Some(3), Some(3)));
     let PublishOutcome::Applied {
         cad_item_revisions, ..
     } = &back.outcome
@@ -354,8 +456,25 @@ fn an_editor_publishes_edits_with_exact_cad_revisions() {
         panic!("{}", back.body);
     };
     let rebound = team.read();
-    let (_, details) = current(&rebound, IPN);
-    assert_eq!(symbol_target(&details), symbol_target(&first_details));
+    let now = current(&rebound, IPN);
+    assert_eq!(
+        symbol_target(&now.revision),
+        symbol_target(&current(&initial, IPN).revision)
+    );
+    assert_eq!(now.details.field("Value"), Some("47"));
+    assert_eq!(
+        rebound
+            .part_details
+            .iter()
+            .filter(|details| details.change == saved.change_id)
+            .count()
+            + rebound
+                .part_revisions
+                .iter()
+                .filter(|revision| revision.change == saved.change_id)
+                .count(),
+        2
+    );
     let mut expected = first_revision.cad_item_revisions.clone();
     let mut actual = cad_item_revisions.clone();
     expected.sort();
@@ -371,45 +490,47 @@ fn an_editor_publishes_edits_with_exact_cad_revisions() {
 
     // There is no restore route any more (kicad-parts-9296): an earlier
     // revision is never copied back, and asking for it writes nothing.
-    let (number, _) = current(&rebound, IPN);
-    assert_eq!(number, 4);
-    let restore = editor
-        .post_json(
-            "/api/catalog/restores",
-            &json!({
-                "correlationId": "restore-is-gone",
-                "reason": "Go back to the imported details",
-                "ipn": IPN,
-                "expectedRevision": 4,
-                "restoreRevision": 1,
-            }),
-        )
-        .unwrap();
+    let gone = json!({
+        "correlationId": "restore-is-gone",
+        "reason": "Go back to the imported details",
+        "ipn": IPN,
+        "expectedRevision": 3,
+        "restoreRevision": 1,
+    });
+    let restore = editor.post_json("/api/catalog/restores", &gone).unwrap();
     assert_eq!(restore.status, 404, "{}", restore.body);
+    assert_eq!(team.read(), rebound);
+    // The refused request stored nothing under its correlation ID, so a real
+    // edit can still use it.
+    let mut reusing = edit(&rebound, IPN, "Tolerance", "2%");
+    reusing.correlation_id = collaboration::CorrelationId::new("restore-is-gone").unwrap();
+    let reused = submit_edit(&editor, &reusing).unwrap();
+    assert_eq!(reused.status, 200, "{}", reused.body);
     let last = team.read();
-    assert_eq!(last, rebound);
+    let mut missing = edit(&last, IPN, "Value", "50");
+    missing.ipn = "RES-9999-9999".into();
     assert!(matches!(
-        submit_edit(
-            &editor,
-            &EditCommand {
-                ipn: "RES-9999-9999".into(),
-                ..edit(&last, IPN, "Value", "50")
-            }
-        ),
+        submit_edit(&editor, &missing),
         Err(CollabError::Http { status: 404, .. })
     ));
 
-    // Changes stay numbered without gaps, and the edited part history is
-    // a chain of predecessors.
-    let last = team.read();
+    // Changes stay numbered without gaps, and the part's details and
+    // revisions are each a chain of predecessors.
     let sequences: Vec<u64> = last.changes.iter().map(|change| change.seq).collect();
-    assert_eq!(sequences, [1, 2, 3, 4]);
+    assert_eq!(sequences, [1, 2, 3, 4, 5]);
     let part = last.part(IPN).unwrap();
     let mut cursor = part.current_revision.clone();
     let mut numbers = Vec::new();
     while let Some(revision) = last.part_revision(&cursor) {
         numbers.push(revision.number);
         cursor = revision.predecessor.clone();
+    }
+    assert_eq!(numbers, [3, 2, 1]);
+    let mut cursor = part.current_details.clone();
+    let mut numbers = Vec::new();
+    while let Some(details) = last.part_details(&cursor) {
+        numbers.push(details.number);
+        cursor = details.predecessor.clone();
     }
     assert_eq!(numbers, [4, 3, 2, 1]);
     team.server.stop();
@@ -551,7 +672,8 @@ fn a_second_client_converges_through_realtime_and_its_checkpoint() {
         .subscribe(&watcher, &["catalog_changes"])
         .unwrap();
 
-    // An edit arrives as a notification and applies once.
+    // A details edit arrives as a notification and applies once. It saves
+    // details, not a revision.
     let readback = team.read();
     applied(&submit_edit(&editor, &edit(&readback, IPN, "Value", "47R")).unwrap());
     let event = connection
@@ -567,14 +689,17 @@ fn a_second_client_converges_through_realtime_and_its_checkpoint() {
         replica.receive(&change, &watcher).unwrap(),
         ApplyResult::Duplicate
     );
-    assert_eq!(replica.parts()[&readback.part(IPN).unwrap().id].number, 2);
+    let known = &replica.parts()[&readback.part(IPN).unwrap().id];
+    assert_eq!((known.details_number, known.number), (2, 1));
+    assert_eq!(known.details.as_ref().unwrap().field("Value"), Some("47R"));
 
-    // While it is disconnected, three edits happen.
+    // While it is disconnected, three edits happen, one of them to the
+    // symbol, which adds a revision.
     connection.disconnect();
     let other_ipn = "RES-0000-1000";
     applied(&submit_edit(&editor, &edit(&team.read(), IPN, "Value", "47.0")).unwrap());
     applied(&submit_edit(&editor, &edit(&team.read(), other_ipn, "Value", "1k")).unwrap());
-    applied(&submit_edit(&editor, &edit(&team.read(), IPN, "Value", "47")).unwrap());
+    applied(&submit_edit(&editor, &edit(&team.read(), IPN, "Symbol", "Device:R")).unwrap());
 
     // It reconnects and catches up from its checkpoint: nothing missed...
     let mut connection = RealtimeConnection::connect(team.url(), wait).unwrap();
@@ -623,14 +748,24 @@ fn a_second_client_converges_through_realtime_and_its_checkpoint() {
     );
 
     // Every Change applied exactly once, in order, and the replica agrees
-    // with the server about every part's current revision.
+    // with the server about every part's current revision and details.
     assert_eq!(replica.applied_sequences(), [1, 2, 3, 4, 5, 6, 7, 8]);
     let server = team.read();
     for part in &server.parts {
         let known = &replica.parts()[&part.id];
         assert_eq!(
-            (known.revision_id.as_str(), known.number),
-            (part.current_revision.as_str(), part.current_revision_number),
+            (
+                known.revision_id.as_str(),
+                known.number,
+                known.details_id.as_str(),
+                known.details_number
+            ),
+            (
+                part.current_revision.as_str(),
+                part.current_revision_number,
+                part.current_details.as_str(),
+                part.current_details_number
+            ),
             "{}",
             part.ipn
         );
@@ -972,7 +1107,7 @@ fn simultaneous_edits_apply_once_and_the_rest_conflict() {
     assert_eq!((applied_count, conflicts), (1, 9));
     let after = team.read();
     assert_eq!(after.changes.len(), 2);
-    assert_eq!(current(&after, IPN).0, 2);
+    assert_eq!(current(&after, IPN).details_number, 2);
     team.server.stop();
 }
 
@@ -983,9 +1118,9 @@ fn references_are_trimmed_the_way_rust_trims_them() {
     let team = Team::start();
     let editor = team.member("Ada Editor", true);
     let initial = team.read();
-    let (_, first) = current(&initial, IPN);
+    let first = current(&initial, IPN).revision;
     let symbol = first.field("Symbol").unwrap().to_owned();
-    let bound = |details: &PartDetails| {
+    let bound = |details: &PartRevision| {
         details
             .cad_references
             .iter()
@@ -995,12 +1130,12 @@ fn references_are_trimmed_the_way_rust_trims_them() {
     };
     let spaced = format!("\u{85}{symbol}\u{85}");
     applied(&submit_edit(&editor, &edit(&initial, IPN, "Symbol", &spaced)).unwrap());
-    let (_, details) = current(&team.read(), IPN);
+    let details = current(&team.read(), IPN).revision;
     assert_eq!(details.field("Symbol"), Some(spaced.as_str()));
     assert_eq!(bound(&details), bound(&first));
     let marked = format!("\u{feff}{symbol}");
     applied(&submit_edit(&editor, &edit(&team.read(), IPN, "Symbol", &marked)).unwrap());
-    let (_, details) = current(&team.read(), IPN);
+    let details = current(&team.read(), IPN).revision;
     assert_eq!(
         bound(&details),
         (marked.clone(), CadReferenceTarget::External),
@@ -1013,8 +1148,27 @@ fn references_are_trimmed_the_way_rust_trims_them() {
 /// test below. It runs in a copy of the repository's hooks.
 const DIRECT_SAVE_HOOK: &str = r#"
 routerAdd("POST", "/api/test/save-part", (e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
   const body = e.requestInfo().body;
   const part = $app.findFirstRecordByData("catalog_parts", "ipn", body.ipn);
+  // Saves a copy of the current details as details `createDetails`, with
+  // the derived ID and the current details as predecessor.
+  if (body.createDetails) {
+    const current = $app.findRecordById("catalog_part_details", part.getString("current_details"));
+    const made = new Record($app.findCollectionByNameOrId("catalog_part_details"));
+    made.set("id", lib.deriveId("part-details", part.id + "\n" + body.createDetails));
+    for (const name of ["part", "change", "snapshot", "snapshot_sha256", "source"]) {
+      made.set(name, current.getString(name));
+    }
+    made.set("number", body.createDetails);
+    made.set("predecessor", current.id);
+    try {
+      $app.save(made);
+    } catch (error) {
+      return e.json(409, { refused: String(error) });
+    }
+    return e.json(200, { saved: true });
+  }
   let revisionId = body.revision;
   if (body.createNumber) {
     const made = new Record($app.findCollectionByNameOrId("catalog_part_revisions"));
@@ -1031,6 +1185,10 @@ routerAdd("POST", "/api/test/save-part", (e) => {
   }
   if (body.ipnChange) {
     part.set("ipn", body.ipnChange);
+  } else if (body.details) {
+    const target = $app.findRecordById("catalog_part_details", body.details);
+    part.set("current_details", target.id);
+    part.set("current_details_number", target.getInt("number"));
   } else {
     const target = $app.findRecordById("catalog_part_revisions", revisionId);
     part.set("current_revision", target.id);
@@ -1092,10 +1250,17 @@ fn server_code_cannot_move_a_part_backwards_or_skip_a_revision() {
     let import = services::plan(&root, "g-res").unwrap();
     submit_import(&admin, &ImportCommand::new(&import, "Import the resistors")).unwrap();
     let readback = read_back(&admin).unwrap();
+    applied(&submit_edit(&admin, &edit(&readback, IPN, "Symbol", "Device:R")).unwrap());
     applied(&submit_edit(&admin, &edit(&readback, IPN, "Value", "47R")).unwrap());
     let after_edit = read_back(&admin).unwrap();
     let part = after_edit.part(IPN).unwrap();
     let second = part.current_revision.clone();
+    let second_details = part.current_details.clone();
+    let first_details = after_edit
+        .part_details(&second_details)
+        .unwrap()
+        .predecessor
+        .clone();
     let first = after_edit
         .part_revision(&second)
         .unwrap()
@@ -1118,6 +1283,19 @@ fn server_code_cannot_move_a_part_backwards_or_skip_a_revision() {
     assert_eq!(
         (part.current_revision.as_str(), part.current_revision_number),
         (second.as_str(), 2)
+    );
+    // The same for the part's details: never backwards, never skipping, and
+    // new details only right after the newest.
+    let back = save(json!({ "ipn": IPN, "details": first_details }));
+    assert_eq!(back.status, 409, "{}", back.body);
+    assert!(back.body.contains("right after it"), "{}", back.body);
+    let skip = save(json!({ "ipn": IPN, "createDetails": 4 }));
+    assert_eq!(skip.status, 409, "{}", skip.body);
+    assert!(skip.body.contains("must be number 3"), "{}", skip.body);
+    let part = read_back(&admin).unwrap().part(IPN).unwrap().clone();
+    assert_eq!(
+        (part.current_details.as_str(), part.current_details_number),
+        (second_details.as_str(), 2)
     );
 
     // A CAD item's current revision is its newest, so server code can only

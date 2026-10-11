@@ -165,7 +165,7 @@ fn a_stored_revision_record_that_does_not_match_its_hash_is_not_drawn() {
     let browser = open_browser(&root, data.path());
     let team = TeamCatalog::open(data.path().join("team.json"), Some(url.clone()), None);
     sign_in_live(&team, &url, &member);
-    let revision = team.part(IPN).unwrap().unwrap().current.number;
+    let revision = team.part(IPN).unwrap().unwrap().revision.number;
     let symbol =
         ready(browser.preview_request(&request(PreviewKind::Symbol, Some(revision)), Some(&team)));
     assert_eq!(
@@ -218,7 +218,7 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
         }
     }
     sign_in_live(&team, &url, &member);
-    let revision = team.part(IPN).unwrap().unwrap().current.number;
+    let revision = team.part(IPN).unwrap().unwrap().revision.number;
 
     for (kind, reference) in [
         (PreviewKind::Symbol, "g-pas:R_US"),
@@ -323,7 +323,7 @@ fn after_going_back_to_earlier_content_previews_draw_each_revisions_own_cad() {
     let redrawn = open_browser(changed.path(), &data.path().join("redrawn"));
     let team = TeamCatalog::open(data.path().join("team.json"), Some(url.clone()), None);
     sign_in_live(&team, &url, &member);
-    assert_eq!(team.part(IPN).unwrap().unwrap().current.number, 3);
+    assert_eq!(team.part(IPN).unwrap().unwrap().revision.number, 3);
 
     for kind in [PreviewKind::Symbol, PreviewKind::Footprint] {
         let content_a = drawing(&ready(original.preview_request(&request(kind, None), None)));

@@ -78,27 +78,40 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         )
     });
 
-    // The part's history starts with the import.
+    // The part's history starts with the import, which added revision 1
+    // and its first details.
     let part = team.part(IPN).unwrap().unwrap();
-    assert_eq!(part.current.number, 1);
+    assert_eq!((part.details.number, part.revision.number), (1, 1));
     assert_eq!(part.history.len(), 1);
-    assert_eq!(part.history[0].action, "Imported");
+    assert_eq!(
+        (
+            part.history[0].action.as_str(),
+            part.history[0].revision,
+            part.history[0].details
+        ),
+        ("Imported", Some(1), Some(1))
+    );
     assert!(
-        part.current
+        part.revision
             .cad_items
             .iter()
             .any(|item| item.binding == "revision 1")
     );
+    // Symbol and Footprint belong to the revision, not the details.
+    assert!(part.details.field("Symbol").is_none());
+    assert!(part.revision.field("Symbol").is_some());
     assert!(team.part("CAP-0000-0001").unwrap().is_none());
 
-    // An edit saves revision 2, and the history says what changed.
+    // A details edit adds no revision, and the history says what changed.
     let mut request = TeamEditRequest {
         correlation_id: None,
         ipn: IPN.into(),
+        expected_details: 1,
         expected_revision: 1,
         reason: "Exact value".into(),
-        fields: part.current.fields.clone(),
-        manufacturer_parts: part.current.manufacturer_parts.clone(),
+        fields: part.details.fields.clone(),
+        manufacturer_parts: part.details.manufacturer_parts.clone(),
+        cad_fields: part.revision.cad_fields.clone(),
     };
     request
         .fields
@@ -118,11 +131,12 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     let PublishResult::Saved { revision, part } = team.edit(request.clone()).unwrap() else {
         panic!("not saved");
     };
-    assert_eq!((again, revision), (2, 2));
+    assert_eq!((again, revision), (None, None));
+    assert_eq!((part.details.number, part.revision.number), (2, 1));
+    assert_eq!(part.history.len(), 2, "the repeated save saved nothing new");
     assert_eq!(
-        part.history.len(),
-        2,
-        "the repeated save made no new revision"
+        (part.history[0].revision, part.history[0].details),
+        (None, Some(2))
     );
     request.correlation_id = None;
     let latest = &part.history[0];
@@ -140,7 +154,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         ("Value", "47", "47R")
     );
     // Saving the same details again saves nothing.
-    request.expected_revision = 2;
+    request.expected_details = 2;
     assert!(matches!(
         team.edit(request.clone()).unwrap(),
         PublishResult::NothingToSave { .. }
@@ -148,7 +162,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     // A symbol the Catalog does not have is refused with the server's words.
     let mut unknown = request.clone();
     unknown
-        .fields
+        .cad_fields
         .iter_mut()
         .find(|field| field.name == "Symbol")
         .unwrap()
@@ -158,7 +172,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     };
     assert!(message.contains("g-pas:NOPE"), "{message}");
 
-    // Someone else saves revision 3 while this edit still starts from 2.
+    // Someone else saves details 3 while this edit still starts from 2.
     let other_client = PocketBaseClient::new(&url)
         .authenticate("users", &other.email, &other.password)
         .unwrap();
@@ -166,12 +180,12 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     let stored = readback.part(IPN).unwrap();
     let details = serde_json::from_str(
         &readback
-            .part_revision(&stored.current_revision)
+            .part_details(&stored.current_details)
             .unwrap()
             .snapshot,
     )
     .unwrap();
-    let mut theirs = EditCommand::starting_from(&details, 2, "Better description");
+    let mut theirs = EditCommand::new(IPN, "Better description").editing_details(&details, 2);
     theirs.set_field("Description", "Thick film resistor 47 ohm");
     submit_edit(&other_client, &theirs).unwrap();
     // It arrives by itself.
@@ -186,7 +200,10 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     let PublishResult::Conflict(conflict) = team.edit(mine).unwrap() else {
         panic!("no conflict");
     };
-    assert_eq!((conflict.started_from, conflict.theirs.number), (2, 3));
+    assert_eq!(
+        (conflict.theirs.details, conflict.theirs.revision),
+        (Some(3), None)
+    );
     assert_eq!(conflict.theirs.actor_name, "Grace Editor");
     let labels: Vec<&str> = conflict.rows.iter().map(|row| row.label.as_str()).collect();
     assert_eq!(labels, ["Description", "Tolerance"]);
@@ -195,21 +212,86 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     let changed: Vec<bool> = conflict.rows.iter().map(|row| row.you_changed).collect();
     assert_eq!(changed, [false, true]);
     // Saving on top keeps both changes.
-    assert_eq!(conflict.merged.expected_revision, 3);
+    assert_eq!(
+        (
+            conflict.merged.expected_details,
+            conflict.merged.expected_revision
+        ),
+        (3, 1)
+    );
     let PublishResult::Saved { revision, part } = team.edit(conflict.merged.clone()).unwrap()
     else {
         panic!("not saved on top");
     };
-    assert_eq!(revision, 4);
+    assert_eq!(revision, None);
     assert_eq!(
-        part.current.field("Description"),
+        part.details.field("Description"),
         Some("Thick film resistor 47 ohm")
     );
-    assert_eq!(part.current.field("Tolerance"), Some("0.5%"));
+    assert_eq!(part.details.field("Tolerance"), Some("0.5%"));
+
+    // A details edit does not conflict with someone else's new symbol: the
+    // two are saved apart. Theirs adds revision 2...
+    let readback = read_back(&admin).unwrap();
+    let stored = readback.part(IPN).unwrap();
+    let revision: catalog::PartRevision = serde_json::from_str(
+        &readback
+            .part_revision(&stored.current_revision)
+            .unwrap()
+            .snapshot,
+    )
+    .unwrap();
+    let symbol = revision.field("Symbol").unwrap().to_owned();
+    let mut theirs = EditCommand::new(IPN, "Use KiCad's symbol").editing_cad(&revision, 1);
+    theirs.set_field("Symbol", "Device:R");
+    submit_edit(&other_client, &theirs).unwrap();
+    // ...while mine, started from revision 1, changes only a detail.
+    let mut mine = conflict.merged.clone();
+    mine.expected_details = part.details.number;
+    mine.fields
+        .iter_mut()
+        .find(|field| field.name == "Datasheet")
+        .unwrap()
+        .value = "https://example.test/47.pdf".into();
+    let PublishResult::Saved { revision, part } = team.edit(mine.clone()).unwrap() else {
+        panic!("not saved");
+    };
+    assert_eq!(revision, None);
+    assert_eq!(part.revision.field("Symbol"), Some("Device:R"));
+    assert_eq!(part.revision.number, 2);
+    // Changing the symbol back from a stale start is a conflict about the
+    // symbol only; saving on top adds revision 3.
+    let mut stale = mine.clone();
+    stale.expected_details = part.details.number;
+    stale
+        .cad_fields
+        .iter_mut()
+        .find(|field| field.name == "Footprint")
+        .unwrap()
+        .value = "Device:R_0603".into();
+    let PublishResult::Conflict(conflict) = team.edit(stale).unwrap() else {
+        panic!("no conflict");
+    };
+    assert_eq!(conflict.theirs.revision, Some(2));
+    let labels: Vec<&str> = conflict.rows.iter().map(|row| row.label.as_str()).collect();
+    assert_eq!(labels, ["Symbol", "Footprint"]);
+    let PublishResult::Saved { revision, part } = team.edit(conflict.merged.clone()).unwrap()
+    else {
+        panic!("not saved on top");
+    };
+    assert_eq!(revision, Some(3));
+    assert_eq!(part.revision.field("Symbol"), Some("Device:R"));
+    assert_eq!(part.revision.field("Footprint"), Some("Device:R_0603"));
+    assert_ne!(symbol, "Device:R");
+    assert_eq!(
+        part.history[0].changes[0].label, "Footprint",
+        "{:?}",
+        part.history[0]
+    );
     // Searching finds team parts by the team catalog's details and lists
     // them with those details: the value is now 47R, which the CSV catalog
     // does not say.
-    wait_until("the saved revision", || checkpoint(&team) == 4);
+    wait_until("the saved changes", || checkpoint(&team) == 7);
     let cache = tempfile::tempdir().unwrap();
     let browser = catalog_browser::CatalogBrowser::open(catalog_browser::BrowserConfig {
         catalog_root: root.clone(),
@@ -255,10 +337,11 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         }
     ));
     let part = reader.part(IPN).unwrap().unwrap();
-    assert_eq!(part.history.len(), 4);
+    assert_eq!(part.history.len(), 7);
     let PublishResult::Refused { message } = reader
         .edit(TeamEditRequest {
-            expected_revision: 4,
+            expected_details: 5,
+            expected_revision: 3,
             ..request
         })
         .unwrap()

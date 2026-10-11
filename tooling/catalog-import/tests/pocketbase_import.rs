@@ -9,7 +9,7 @@ use catalog::pocketbase::{
     CSV_IMPORT_ROUTE, CatalogReadback, EditCommand, ImportCommand, ImportOutcome, ImportReply,
     read_back, read_import_state, submit_edit, submit_import,
 };
-use catalog::{CsvCatalog, PartDetails, sha256_hex};
+use catalog::{CsvCatalog, PartDetails, PartRevision, sha256_hex};
 use catalog_import::services;
 use collaboration::{CollabError, PocketBaseClient};
 use native_services::PocketBaseServer;
@@ -73,13 +73,36 @@ fn nothing_changed(reply: &catalog::pocketbase::ImportReply) -> (String, u64) {
     }
 }
 
-fn current_revision(readback: &CatalogReadback, ipn: &str) -> (u32, PartDetails) {
+fn current_revision(readback: &CatalogReadback, ipn: &str) -> (u32, PartRevision) {
     let part = readback.part(ipn).unwrap();
     let revision = readback.part_revision(&part.current_revision).unwrap();
     (
         revision.number,
         serde_json::from_str(&revision.snapshot).unwrap(),
     )
+}
+
+fn current_details(readback: &CatalogReadback, ipn: &str) -> (u32, PartDetails) {
+    let part = readback.part(ipn).unwrap();
+    let details = readback.part_details(&part.current_details).unwrap();
+    (
+        details.number,
+        serde_json::from_str(&details.snapshot).unwrap(),
+    )
+}
+
+/// A details edit of `ipn` as it is now that sets `field` to `value`.
+fn details_edit(
+    readback: &CatalogReadback,
+    ipn: &str,
+    field: &str,
+    value: &str,
+    reason: &str,
+) -> EditCommand {
+    let (number, details) = current_details(readback, ipn);
+    let mut command = EditCommand::new(ipn, reason).editing_details(&details, number);
+    assert!(command.set_field(field, value));
+    command
 }
 
 /// Imports `import` as an importer does: it reads the team catalog first and
@@ -206,6 +229,7 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
         (created.parts, created.part_revisions, created.updated_parts),
         (29, 29, 0)
     );
+    assert_eq!((created.part_details, created.updated_details), (29, 0));
     assert_eq!(
         (created.cad_items, created.cad_item_revisions, created.blobs),
         (2, 2, 2)
@@ -231,9 +255,11 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     // ...but cannot create, update or delete any of it directly.
     let part_id = stored.parts[0].id.clone();
     let revision_id = stored.parts[0].current_revision.clone();
+    let details_id = stored.parts[0].current_details.clone();
     for (collection, id) in [
         ("catalog_parts", &part_id),
         ("catalog_part_revisions", &revision_id),
+        ("catalog_part_details", &details_id),
         ("catalog_changes", &change.id),
         ("catalog_blobs", &stored.blobs[0].id),
     ] {
@@ -251,7 +277,7 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     assert_eq!(read_back(&admin).unwrap(), stored);
 
     // Stable identities and immutable IPNs: every ID is the one the domain
-    // derives, and every part has exactly revision 1.
+    // derives, and every part has exactly details 1 and revision 1.
     for part in &import.parts {
         let record = stored.part(part.ipn.as_str()).unwrap();
         assert_eq!(record.id, part.id.as_str());
@@ -259,11 +285,23 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
             (record.ipn_prefix.as_str(), record.variant.as_str()),
             (part.ipn.prefix(), part.ipn.variant())
         );
-        assert_eq!(record.current_revision_number, 1);
+        assert_eq!(
+            (
+                record.current_revision_number,
+                record.current_details_number
+            ),
+            (1, 1)
+        );
         let revision = stored.part_revision(&record.current_revision).unwrap();
-        assert_eq!(revision.snapshot, part.snapshot_json);
+        assert_eq!(revision.snapshot, part.revision_json);
         assert_eq!(revision.predecessor, "");
         assert_eq!(revision.cad_item_revisions.len(), 2);
+        let details = stored.part_details(&record.current_details).unwrap();
+        assert_eq!(details.snapshot, part.details_json);
+        assert_eq!(
+            (details.predecessor.as_str(), details.source.as_str()),
+            ("", revision.source.as_str())
+        );
     }
 
     // The zero-loss report, read back from PocketBase, against the oracle.
@@ -274,7 +312,10 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
         serde_json::to_string_pretty(&report.summary()).unwrap()
     );
     assert_eq!((report.rows, report.columns, report.fields), (29, 16, 464));
-    assert_eq!(report.destinations["part-details"], 29 * 7);
+    // Symbol and Footprint go to the revision; the other details columns
+    // (IPN, Description, Value, Tolerance, Datasheet) to the part details.
+    assert_eq!(report.destinations["part-details"], 29 * 5);
+    assert_eq!(report.destinations["part-revision"], 29 * 2);
     assert_eq!(
         report.destinations["part-details.manufacturer-parts"],
         29 * 2
@@ -314,12 +355,19 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
             .position(|revision| revision.id == current_revision)
             .unwrap()
     };
+    let current_details_of = |copy: &mut CatalogReadback, ipn: &str| -> usize {
+        let current_details = copy.part(ipn).unwrap().current_details.clone();
+        copy.part_details
+            .iter()
+            .position(|details| details.id == current_details)
+            .unwrap()
+    };
     fails(
         &|copy| {
-            let index = current_revision_of(copy, "RES-0000-0470");
-            let revision = &mut copy.part_revisions[index];
-            revision.snapshot = revision.snapshot.replace("\"47\"", "\"48\"");
-            revision.snapshot_sha256 = sha256_hex(&revision.snapshot);
+            let index = current_details_of(copy, "RES-0000-0470");
+            let details = &mut copy.part_details[index];
+            details.snapshot = details.snapshot.replace("\"47\"", "\"48\"");
+            details.snapshot_sha256 = sha256_hex(&details.snapshot);
         },
         "field Value",
     );
@@ -337,12 +385,12 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     );
     fails(
         &|copy| {
-            let index = current_revision_of(copy, "RES-0000-0470");
-            let revision = &mut copy.part_revisions[index];
-            revision.snapshot = revision
+            let index = current_details_of(copy, "RES-0000-0470");
+            let details = &mut copy.part_details[index];
+            details.snapshot = details
                 .snapshot
                 .replace("{\"name\":\"Tolerance\",\"value\":\"1%\"},", "");
-            revision.snapshot_sha256 = sha256_hex(&revision.snapshot);
+            details.snapshot_sha256 = sha256_hex(&details.snapshot);
         },
         "field Tolerance",
     );
@@ -450,7 +498,7 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
             let mut snapshot: serde_json::Value = serde_json::from_str(&revision.snapshot).unwrap();
             snapshot["cad_references"][1]["target"]["snapshot_sha256"] = "0".repeat(64).into();
             revision.snapshot =
-                serde_json::to_string(&serde_json::from_value::<PartDetails>(snapshot).unwrap())
+                serde_json::to_string(&serde_json::from_value::<PartRevision>(snapshot).unwrap())
                     .unwrap();
             revision.snapshot_sha256 = sha256_hex(&revision.snapshot);
         },
@@ -459,13 +507,13 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     // A field in the snapshot that no source column put there.
     fails(
         &|copy| {
-            let index = current_revision_of(copy, "RES-0000-0470");
-            let revision = &mut copy.part_revisions[index];
-            revision.snapshot = revision.snapshot.replace(
+            let index = current_details_of(copy, "RES-0000-0470");
+            let details = &mut copy.part_details[index];
+            details.snapshot = details.snapshot.replace(
                 "\"fields\":[",
                 "\"fields\":[{\"name\":\"Extra\",\"value\":\"x\"},",
             );
-            revision.snapshot_sha256 = sha256_hex(&revision.snapshot);
+            details.snapshot_sha256 = sha256_hex(&details.snapshot);
         },
         "are not the part-details columns",
     );
@@ -522,10 +570,27 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     // Tampered requests are refused before anything is written.
     let command = ImportCommand::new(&original, REASON);
     let mut body = command.body();
-    body["correlationId"] = "tampered-snapshot".into();
-    body["parts"][0]["snapshotSha256"] = sha256_hex("not the snapshot").into();
+    body["correlationId"] = "tampered-details".into();
+    body["parts"][0]["details"]["snapshotSha256"] = sha256_hex("not the snapshot").into();
     let reply = admin.post_json(CSV_IMPORT_ROUTE, &body).unwrap();
     assert_eq!(reply.status, 400, "{}", reply.body);
+    let mut body = command.body();
+    body["correlationId"] = "tampered-revision".into();
+    body["parts"][0]["revision"]["snapshotSha256"] = sha256_hex("not the snapshot").into();
+    let reply = admin.post_json(CSV_IMPORT_ROUTE, &body).unwrap();
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    // Each document must be what it says: details are never a revision.
+    let mut body = command.body();
+    body["correlationId"] = "swapped-documents".into();
+    let details = body["parts"][0]["details"].clone();
+    body["parts"][0]["revision"] = details;
+    let reply = admin.post_json(CSV_IMPORT_ROUTE, &body).unwrap();
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert!(
+        reply.body.contains("must be kicad-parts/part-revision/1"),
+        "{}",
+        reply.body
+    );
     let mut body = command.body();
     body["correlationId"] = "tampered-blob".into();
     body["blobs"][0]["text"] = "other bytes".into();
@@ -662,6 +727,16 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         "expected revision of RES-0000-0000",
     );
     refused(
+        "no-expected-details",
+        &|body| {
+            body["parts"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("expectedDetails");
+        },
+        "expected details of RES-0000-0000",
+    );
+    refused(
         "allow-as-text",
         &|body| body["allowOlderCheckout"] = "yes".into(),
         "allowOlderCheckout setting must be true or false",
@@ -705,10 +780,11 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         },
         "has the content of its current revision 1, so its revision number must be 1",
     );
-    // Part details must bind the current revision: not another number...
+    // A part revision must bind the current revision: not another number...
     let rebind = |body: &mut serde_json::Value, change: &dyn Fn(&mut serde_json::Value)| {
         let mut snapshot: serde_json::Value =
-            serde_json::from_str(body["parts"][0]["snapshot"].as_str().unwrap()).unwrap();
+            serde_json::from_str(body["parts"][0]["revision"]["snapshot"].as_str().unwrap())
+                .unwrap();
         let target = snapshot["cad_references"]
             .as_array_mut()
             .unwrap()
@@ -718,8 +794,8 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
             .unwrap();
         change(target);
         let snapshot = snapshot.to_string();
-        body["parts"][0]["snapshotSha256"] = sha256_hex(&snapshot).into();
-        body["parts"][0]["snapshot"] = snapshot.into();
+        body["parts"][0]["revision"]["snapshotSha256"] = sha256_hex(&snapshot).into();
+        body["parts"][0]["revision"]["snapshot"] = snapshot.into();
     };
     refused_current(
         "older-binding",
@@ -777,8 +853,8 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     );
     assert_eq!(read_back(&admin).unwrap(), initial);
 
-    // A changed part detail makes a new revision in a new Change; nothing
-    // else is touched.
+    // A changed part detail saves the part's next details in a new Change,
+    // and adds no revision; nothing else is touched.
     let copy = tempfile::tempdir().unwrap();
     copy_inputs(copy.path());
     let csv_path = copy.path().join("database/g-res.csv");
@@ -792,8 +868,9 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     let created = applied(&reply);
     assert_eq!(
         (created.parts, created.part_revisions, created.updated_parts),
-        (0, 1, 1)
+        (0, 0, 0)
     );
+    assert_eq!((created.part_details, created.updated_details), (1, 1));
     assert_eq!(
         (created.cad_items, created.cad_item_revisions, created.blobs),
         (0, 0, 0)
@@ -802,16 +879,17 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     let after = read_back(&admin).unwrap();
     assert_eq!(after.changes.len(), 2);
     assert_eq!(after.changes[1].seq, 2);
-    let (number, details) = current_revision(&after, "RES-0000-0470");
+    let (number, details) = current_details(&after, "RES-0000-0470");
     assert_eq!((number, details.field("Value")), (2, Some("47R")));
+    assert_eq!(after.part_revisions, initial.part_revisions);
     let newest = after
-        .part_revision(&after.part("RES-0000-0470").unwrap().current_revision)
+        .part_details(&after.part("RES-0000-0470").unwrap().current_details)
         .unwrap();
-    let previous = after.part_revision(&newest.predecessor).unwrap();
-    // The first revision never changes.
+    let previous = after.part_details(&newest.predecessor).unwrap();
+    // The first details never change.
     assert_eq!(
         Some(previous),
-        initial.part_revision(&initial.part("RES-0000-0470").unwrap().current_revision)
+        initial.part_details(&initial.part("RES-0000-0470").unwrap().current_details)
     );
 
     // A re-import that only changes supplier data (here an LCSC code) makes
@@ -826,6 +904,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     let supplier = read_back(&admin).unwrap();
     assert_eq!(supplier.changes, after.changes);
     assert_eq!(supplier.part_revisions, after.part_revisions);
+    assert_eq!(supplier.part_details, after.part_details);
     assert_eq!(supplier.audit_entries.len(), after.audit_entries.len() + 1);
     let entry = supplier
         .audit_entries
@@ -856,7 +935,9 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     .unwrap();
     let with_row = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
     let reply = import_reading_first(&admin, &with_row, "");
-    assert_eq!(applied(&reply).updated_parts, 1);
+    // A new manufacturer part changes the details, not the revision.
+    let created = applied(&reply);
+    assert_eq!((created.updated_details, created.updated_parts), (1, 0));
     fs::write(
         &substitutes_csv,
         format!("{header}RES-0000-1002,ALT-10K,Vishay,,DigiKey,541-47-CHANGED\n"),
@@ -881,17 +962,19 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         "{}",
         kept.detail
     );
-    assert_eq!(current_revision(&supplier, "RES-0000-1002").0, 2);
+    assert_eq!(current_details(&supplier, "RES-0000-1002").0, 2);
+    assert_eq!(current_revision(&supplier, "RES-0000-1002").0, 1);
     let changes_before_edit = supplier.changes.len();
 
-    // A current revision published by an edit is never overwritten by a
-    // CSV import: the changed row becomes an import problem instead.
-    let edit = {
-        let (number, details) = current_revision(&supplier, "RES-0000-0470");
-        let mut command = EditCommand::starting_from(&details, number, "Note the exact value");
-        command.set_field("Value", "47 Ohm");
-        command
-    };
+    // Part details saved by an edit are never overwritten by a CSV import:
+    // the changed row becomes an import problem instead.
+    let edit = details_edit(
+        &supplier,
+        "RES-0000-0470",
+        "Value",
+        "47 Ohm",
+        "Note the exact value",
+    );
     let edited = submit_edit(&admin, &edit).unwrap();
     assert_eq!(edited.status, 200, "{}", edited.body);
     let after_edit = read_back(&admin).unwrap();
@@ -905,15 +988,15 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     let last = read_back(&admin).unwrap();
     assert_eq!(last.changes, after_edit.changes);
     assert_eq!(
-        current_revision(&last, "RES-0000-0470"),
-        current_revision(&after_edit, "RES-0000-0470")
+        current_details(&last, "RES-0000-0470"),
+        current_details(&after_edit, "RES-0000-0470")
     );
     assert_eq!(
-        current_revision(&last, "RES-0000-0470").1.field("Value"),
+        current_details(&last, "RES-0000-0470").1.field("Value"),
         Some("47 Ohm")
     );
     assert!(last.problems.iter().any(|problem| problem.code
-        == "csv-row-conflicts-with-current-revision"
+        == "csv-details-differ-from-edited-details"
         && problem.subject == "RES-0000-0470"));
 
     // Nobody can relabel a Change, not even a superuser.
@@ -928,18 +1011,21 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         .unwrap();
     assert_eq!(relabel.status, 403, "{}", relabel.body);
 
-    // A current revision whose details match the row but whose source is
-    // not a CSV row (here an edit that puts back the imported value after
-    // another edit) is answered with an import problem that keeps the row,
-    // not a server error.
-    let (number, details) = current_revision(&last, "RES-0000-1001");
+    // A part whose details match the row but were last saved by an edit
+    // (here one that puts back the imported value after another edit) has
+    // no CSV row to compare with: an import problem keeps the row, not a
+    // server error.
+    let (_, details) = current_details(&last, "RES-0000-1001");
     let imported_value = details.field("Value").unwrap().to_owned();
-    let mut edit = EditCommand::starting_from(&details, number, "Try another value");
-    edit.set_field("Value", "1.0k");
+    let edit = details_edit(&last, "RES-0000-1001", "Value", "1.0k", "Try another value");
     assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
-    let (number, details) = current_revision(&read_back(&admin).unwrap(), "RES-0000-1001");
-    let mut back = EditCommand::starting_from(&details, number, "Back to the imported value");
-    back.set_field("Value", &imported_value);
+    let back = details_edit(
+        &read_back(&admin).unwrap(),
+        "RES-0000-1001",
+        "Value",
+        &imported_value,
+        "Back to the imported value",
+    );
     let put_back = submit_edit(&admin, &back).unwrap();
     assert_eq!(put_back.status, 200, "{}", put_back.body);
     let reply = import_reading_first(&admin, &conflicting, "-source");
@@ -948,11 +1034,12 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
     let problem = kept
         .problems
         .iter()
-        .find(|problem| problem.code == "current-revision-without-csv-source")
+        .find(|problem| problem.code == "part-last-saved-without-csv-source")
         .unwrap();
     assert_eq!(problem.subject, "RES-0000-1001");
     assert!(problem.detail.contains("raw_record"), "{}", problem.detail);
-    assert_eq!(current_revision(&kept, "RES-0000-1001").0, 3);
+    assert_eq!(current_details(&kept, "RES-0000-1001").0, 3);
+    assert_eq!(current_revision(&kept, "RES-0000-1001").0, 1);
 
     // A stored record whose derived ID matches but whose content does not
     // is an ID collision: refused, with nothing written. Stored records
@@ -1091,13 +1178,13 @@ fn substitutes_csv_rows_become_manufacturer_parts_end_to_end() {
     // The blank MPN leaves RES-0000-1500 without a main: both cells are
     // kept by the problem, and its substitutes.csv row is the first entry.
     assert_eq!(report.destinations["import-problem"], 2);
-    let (_, snapshot) = current_revision(&stored, "RES-0000-1500");
+    let (_, snapshot) = current_details(&stored, "RES-0000-1500");
     let first = &snapshot.manufacturer_parts[0];
     assert_eq!(
         (first.manufacturer.as_str(), first.mpn.as_str()),
         ("Panasonic", "ALT-150")
     );
-    let (_, details) = current_revision(&stored, "RES-0000-0470");
+    let (_, details) = current_details(&stored, "RES-0000-0470");
     let mpns: Vec<&str> = details
         .manufacturer_parts
         .iter()
@@ -1137,9 +1224,10 @@ fn substitutes_csv_rows_become_manufacturer_parts_end_to_end() {
 }
 
 #[test]
-fn adding_or_removing_a_manufacturer_part_makes_a_new_revision() {
+fn adding_or_removing_a_manufacturer_part_saves_new_details_but_no_revision() {
     // Manufacturer parts are part details, so adding or removing a
-    // substitutes.csv row on re-import makes a new revision.
+    // substitutes.csv row on re-import saves the part's next details and
+    // adds no revision.
     let copy = tempfile::tempdir().unwrap();
     copy_inputs(copy.path());
     let state = tempfile::tempdir().unwrap();
@@ -1158,16 +1246,18 @@ fn adding_or_removing_a_manufacturer_part_makes_a_new_revision() {
     )
     .unwrap();
     let created = applied(&submit("-added"));
-    assert_eq!((created.part_revisions, created.updated_parts), (1, 1));
+    assert_eq!((created.part_revisions, created.updated_parts), (0, 0));
+    assert_eq!((created.part_details, created.updated_details), (1, 1));
     let stored = read_back(&admin).unwrap();
-    let (number, details) = current_revision(&stored, "RES-0000-0470");
+    let (number, details) = current_details(&stored, "RES-0000-0470");
     assert_eq!(number, 2);
+    assert_eq!(current_revision(&stored, "RES-0000-0470").0, 1);
     assert_eq!(details.manufacturer_parts[1].mpn, "ALT-47");
     assert_eq!(stored.changes.len(), 2);
 
     fs::write(&substitutes_csv_rows, &header).unwrap();
     applied(&submit("-removed"));
-    let (number, details) = current_revision(&read_back(&admin).unwrap(), "RES-0000-0470");
+    let (number, details) = current_details(&read_back(&admin).unwrap(), "RES-0000-0470");
     assert_eq!((number, details.manufacturer_parts.len()), (3, 1));
     server.stop();
 }
@@ -1384,31 +1474,8 @@ fn the_route_hashes_blob_bytes_exactly() {
 }
 
 #[test]
-fn the_catalog_migration_rolls_back_from_a_populated_instance() {
+fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
     let root = repository();
-    let state = tempfile::tempdir().unwrap();
-    let options = services::options(&root, state.path());
-    let (server, admin, superuser) = services::start(&root, state.path()).unwrap();
-    // Only the CSV files, so no symbol or footprint resolves and no CAD item
-    // revision is stored: undoing the numbering of CAD item revisions is
-    // refused when there are any (see the next test).
-    let csv_only = tempfile::tempdir().unwrap();
-    for path in ["database/g-res.csv", "database/substitutes.csv"] {
-        let target = csv_only.path().join(path);
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::copy(root.join(path), target).unwrap();
-    }
-    let import = CsvCatalog::new(csv_only.path())
-        .import("g-res", None)
-        .unwrap();
-    applied(&submit_import(&admin, &ImportCommand::new(&import, REASON)).unwrap());
-    // An edit populates the edit migration's fields too.
-    let stored = read_back(&admin).unwrap();
-    assert!(stored.cad_item_revisions.is_empty());
-    let (number, details) = current_revision(&stored, "RES-0000-0470");
-    let mut edit = EditCommand::starting_from(&details, number, "Before the rollback");
-    edit.set_field("Value", "47R");
-    assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
     let users_rule = |data_dir: &Path| -> (String, String) {
         let database = rusqlite::Connection::open_with_flags(
             data_dir.join("data.db"),
@@ -1423,6 +1490,56 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
             )
             .unwrap()
     };
+
+    // With parts, the newest undo refuses: the older version cannot read
+    // part details kept apart from revisions. Nothing is changed.
+    let populated = tempfile::tempdir().unwrap();
+    let options = services::options(&root, populated.path());
+    let (server, admin, _superuser) = services::start(&root, populated.path()).unwrap();
+    let csv_only = tempfile::tempdir().unwrap();
+    for path in ["database/g-res.csv", "database/substitutes.csv"] {
+        let target = csv_only.path().join(path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(root.join(path), target).unwrap();
+    }
+    let import = CsvCatalog::new(csv_only.path())
+        .import("g-res", None)
+        .unwrap();
+    applied(&submit_import(&admin, &ImportCommand::new(&import, REASON)).unwrap());
+    let edit = details_edit(
+        &read_back(&admin).unwrap(),
+        "RES-0000-0470",
+        "Value",
+        "47R",
+        "Before the rollback",
+    );
+    assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
+    server.stop();
+    let said = migrate(&root, &options, &["down", "1"]);
+    assert!(
+        said.contains("keeps part details apart from revisions")
+            && said.contains("Nothing was changed")
+            && !said.contains("Reverted"),
+        "{said}"
+    );
+    let database = rusqlite::Connection::open_with_flags(
+        options.data_dir.join("data.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let details: i64 = database
+        .query_row("SELECT COUNT(*) FROM catalog_part_details", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(details, 30);
+    drop(database);
+
+    // Without parts, every catalog migration rolls back, and the users
+    // collection is back as it was.
+    let state = tempfile::tempdir().unwrap();
+    let options = services::options(&root, state.path());
+    let (server, _admin, superuser) = services::start(&root, state.path()).unwrap();
     server.stop();
     let (rule, fields) = users_rule(&options.data_dir);
     assert_eq!(
@@ -1430,36 +1547,15 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
         "(id = @request.auth.id) && @request.body.can_edit_catalog:isset = false && @request.body.name:isset = false"
     );
     assert!(fields.contains("can_edit_catalog"));
-
-    let binary = native_services::pocketbase_binary(&root).unwrap();
-    let mut command = std::process::Command::new(&binary);
-    command
-        .args(["migrate", "down", "3"])
-        .arg("--dir")
-        .arg(&options.data_dir)
-        .arg("--migrationsDir")
-        .arg(&options.migrations_dir)
-        .arg("--hooksDir")
-        .arg(&options.hooks_dir)
-        .arg("--automigrate=false");
-    // It asks for confirmation; without it, it cancels and still exits 0.
-    let output = native_services::run_hidden_with_input(
-        "pocketbase migrate down",
-        &mut command,
-        b"y
-",
-    )
-    .unwrap();
-    let said = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success()
-            && said.contains("Reverted 1791700000_cad_item_revision_numbers.js")
-            && said.contains("Reverted 1791600000_catalog_edits.js")
-            && said.contains("Reverted 1791500000_catalog_init.js"),
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let said = migrate(&root, &options, &["down", "4"]);
+    for reverted in [
+        "1791800000_shared_part_details.js",
+        "1791700000_cad_item_revision_numbers.js",
+        "1791600000_catalog_edits.js",
+        "1791500000_catalog_init.js",
+    ] {
+        assert!(said.contains(&format!("Reverted {reverted}")), "{said}");
+    }
 
     let database = rusqlite::Connection::open_with_flags(
         options.data_dir.join("data.db"),
@@ -1493,13 +1589,13 @@ fn the_catalog_migration_rolls_back_from_a_populated_instance() {
             .any(|file| file.contains("catalog_init") || file.contains("catalog_edits"))
     );
     drop(database);
-    // The users collection is back as it was: no edit mark, the old rule.
     let (rule, fields) = users_rule(&options.data_dir);
     assert_eq!(rule, "id = @request.auth.id");
     assert!(!fields.contains("can_edit_catalog"), "{fields}");
 
-    // Starting again re-applies all three, and the import works on the new
+    // Starting again re-applies them all, and the import works on the new
     // schema.
+    let binary = native_services::pocketbase_binary(&root).unwrap();
     let server = native_services::PocketBaseServer::start(&binary, &options, &superuser).unwrap();
     let admin = PocketBaseClient::new(server.url())
         .authenticate("_superusers", &superuser.email, &superuser.password)
@@ -1545,14 +1641,14 @@ fn team_server_data_from_before_numbered_cad_revisions_is_refused_not_changed() 
     let revision = read_back(&admin).unwrap().cad_item_revisions[0].clone();
     server.stop();
 
-    // Undoing the numbering is refused while CAD item revisions exist: the
-    // older version could not read their IDs or the numbers in part details.
-    let said = migrate(&root, &options, &["down", "1"]);
+    // Undoing is refused while there is data: the newest undo already
+    // refuses saved part details, so the numbering is never undone either.
+    let said = migrate(&root, &options, &["down", "2"]);
     assert!(
         said.contains("which the older version cannot read"),
         "{said}"
     );
-    assert!(!said.contains("Reverted 1791700000"), "{said}");
+    assert!(!said.contains("Reverted"), "{said}");
 
     // Make the data look like data saved before numbered CAD item
     // revisions: the migration not yet applied, and one CAD item revision
@@ -1604,4 +1700,59 @@ fn team_server_data_from_before_numbered_cad_revisions_is_refused_not_changed() 
         )
         .unwrap();
     assert_eq!(kept, 1);
+}
+
+#[test]
+fn team_server_data_from_before_shared_part_details_is_refused_not_changed() {
+    let root = repository();
+    let state = tempfile::tempdir().unwrap();
+    let options = services::options(&root, state.path());
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let import = CsvCatalog::new(&root).import("g-res", None).unwrap();
+    applied(&submit_import(&admin, &ImportCommand::new(&import, REASON)).unwrap());
+    let revisions = read_back(&admin).unwrap().part_revisions.len();
+    server.stop();
+
+    // Make the data look like data saved before part details were kept
+    // apart: the migration not yet applied, with part revisions stored.
+    let database = rusqlite::Connection::open(options.data_dir.join("data.db")).unwrap();
+    assert_eq!(
+        database
+            .execute(
+                "DELETE FROM _migrations WHERE file = '1791800000_shared_part_details.js'",
+                [],
+            )
+            .unwrap(),
+        1
+    );
+    drop(database);
+
+    // Starting refuses with a plain message and changes nothing.
+    let refused = services::start(&root, state.path()).err().unwrap();
+    let message = refused.to_string();
+    assert!(
+        message.contains("before part details were kept apart from revisions")
+            && message.contains("cannot be upgraded")
+            && message.contains("Start again with an empty data folder"),
+        "{message}"
+    );
+    let database = rusqlite::Connection::open_with_flags(
+        options.data_dir.join("data.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let applied_migrations: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM _migrations WHERE file = '1791800000_shared_part_details.js'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(applied_migrations, 0);
+    let kept: i64 = database
+        .query_row("SELECT COUNT(*) FROM catalog_part_revisions", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(kept, revisions as i64);
 }

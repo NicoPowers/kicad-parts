@@ -268,7 +268,16 @@ fn every_column_of_every_csv_file_has_one_destination() {
             .find(|category| format!("g-{}", category.table) == csv_file)
             .unwrap_or_else(|| panic!("the oracle has no {csv_file}"));
         let mut expected: Vec<(&str, &str)> = vec![("IPN", "part-details")];
-        expected.extend(part_details.iter().map(|column| (*column, "part-details")));
+        // The table lists Symbol and Footprint with the part details; they
+        // go to the part revision.
+        expected.extend(part_details.iter().map(|column| {
+            let destination = if catalog::CAD_COLUMNS.contains(column) {
+                "part-revision"
+            } else {
+                "part-details"
+            };
+            (*column, destination)
+        }));
         expected.extend(
             manufacturer_parts
                 .iter()
@@ -292,6 +301,7 @@ fn every_column_of_every_csv_file_has_one_destination() {
             .map(|header| {
                 let destination = match route_column(header) {
                     ColumnRoute::Ipn | ColumnRoute::PartDetails => "part-details",
+                    ColumnRoute::Cad => "part-revision",
                     ColumnRoute::MainMpn | ColumnRoute::MainManufacturer => "manufacturer-parts",
                     ColumnRoute::ExtraMpn
                     | ColumnRoute::MpnToBeConfirmed
@@ -369,16 +379,18 @@ fn extra_mpn_columns_are_kept_as_import_problems_end_to_end() {
         assert!(problem.detail.contains(kept), "{}", problem.detail);
         // Only the row's own MPN and Manufacturer make a manufacturer part.
         let part = stored.part(ipn).unwrap();
+        let saved = stored.part_details(&part.current_details).unwrap();
         let revision = stored.part_revision(&part.current_revision).unwrap();
-        let details: catalog::PartDetails = serde_json::from_str(&revision.snapshot).unwrap();
+        let details: catalog::PartDetails = serde_json::from_str(&saved.snapshot).unwrap();
         assert_eq!(details.manufacturer_parts.len(), 1, "{ipn}");
         assert!(details.field(column).is_none(), "{ipn}");
+        assert!(!saved.snapshot.contains(kept), "{ipn}");
         assert!(!revision.snapshot.contains(kept), "{ipn}");
     }
 }
 
 #[test]
-fn excluded_from_bom_comes_from_the_symbol_and_survives_an_edit() {
+fn excluded_from_bom_comes_from_the_symbol_and_belongs_to_the_revision() {
     // ART-0000-0001's symbol g-art:TestPoint says `(in_bom no)`, which
     // matches its row's note "Artwork part only, does not appear in BOM".
     // ART-0001-0006 has no evidence either way: its symbol
@@ -399,8 +411,8 @@ fn excluded_from_bom_comes_from_the_symbol_and_survives_an_edit() {
     let current = |stored: &catalog::pocketbase::CatalogReadback, ipn: &str| {
         let part = stored.part(ipn).unwrap();
         let revision = stored.part_revision(&part.current_revision).unwrap();
-        let details: catalog::PartDetails = serde_json::from_str(&revision.snapshot).unwrap();
-        (revision.number, revision.snapshot.clone(), details)
+        let parsed: catalog::PartRevision = serde_json::from_str(&revision.snapshot).unwrap();
+        (revision.number, revision.snapshot.clone(), parsed)
     };
     let stored = read_back(&admin).unwrap();
     let report = catalog_import::report(&oracle(), "g-art", &stored, &root);
@@ -420,25 +432,39 @@ fn excluded_from_bom_comes_from_the_symbol_and_survives_an_edit() {
     assert!(!details.excluded_from_bom);
     assert!(!snapshot.contains("excluded_from_bom"), "{snapshot}");
 
-    // An edit of another field keeps the setting, in Rust's canonical JSON.
-    let (number, _, details) = current(&stored, "ART-0000-0001");
-    let mut edit = EditCommand::starting_from(&details, number, "Say the pad size");
+    // A details edit leaves the revision, and so the setting, as it is.
+    let part = stored.part("ART-0000-0001").unwrap();
+    let saved = stored.part_details(&part.current_details).unwrap();
+    let details: catalog::PartDetails = serde_json::from_str(&saved.snapshot).unwrap();
+    let mut edit = EditCommand::new("ART-0000-0001", "Say the pad size")
+        .editing_details(&details, saved.number);
     assert!(edit.set_field("Description", "SMT test point, 1.5 mm round pad"));
     let reply = submit_edit(&admin, &edit).unwrap();
     assert_eq!(reply.status, 200, "{}", reply.body);
-    let (number, snapshot, details) = current(&read_back(&admin).unwrap(), "ART-0000-0001");
+    let (number, _, revision) = current(&read_back(&admin).unwrap(), "ART-0000-0001");
+    assert_eq!(number, 1);
+    assert!(revision.excluded_from_bom);
+    // A CAD edit copies it to the new revision, in Rust's canonical JSON
+    // (how it follows new CAD is kicad-parts-ccc0).
+    let footprint = revision.field("Footprint").unwrap().to_owned();
+    let mut edit =
+        EditCommand::new("ART-0000-0001", "Name the footprint plainly").editing_cad(&revision, 1);
+    assert!(edit.set_field("Footprint", &format!(" {footprint}")));
+    let reply = submit_edit(&admin, &edit).unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let (number, snapshot, revision) = current(&read_back(&admin).unwrap(), "ART-0000-0001");
     server.stop();
     assert_eq!(number, 2);
-    assert!(details.excluded_from_bom);
-    assert_eq!(details.canonical_json(), snapshot);
+    assert!(revision.excluded_from_bom);
+    assert_eq!(revision.canonical_json(), snapshot);
 }
 
 /// Rewrites the current revision of `ipn` in a read-back copy, keeping its
 /// hash consistent, so that only the report's own checks can notice.
-fn rewrite_current(
+fn rewrite_revision(
     stored: &mut catalog::pocketbase::CatalogReadback,
     ipn: &str,
-    change: impl FnOnce(&mut catalog::PartDetails),
+    change: impl FnOnce(&mut catalog::PartRevision),
 ) {
     let current = stored.part(ipn).unwrap().current_revision.clone();
     let revision = stored
@@ -446,10 +472,29 @@ fn rewrite_current(
         .iter_mut()
         .find(|revision| revision.id == current)
         .unwrap();
-    let mut details: catalog::PartDetails = serde_json::from_str(&revision.snapshot).unwrap();
-    change(&mut details);
-    revision.snapshot = details.canonical_json();
+    let mut parsed: catalog::PartRevision = serde_json::from_str(&revision.snapshot).unwrap();
+    change(&mut parsed);
+    revision.snapshot = parsed.canonical_json();
     revision.snapshot_sha256 = sha256_hex(&revision.snapshot);
+}
+
+/// Rewrites the current details of `ipn` in a read-back copy, keeping
+/// their hash consistent.
+fn rewrite_details(
+    stored: &mut catalog::pocketbase::CatalogReadback,
+    ipn: &str,
+    change: impl FnOnce(&mut catalog::PartDetails),
+) {
+    let current = stored.part(ipn).unwrap().current_details.clone();
+    let saved = stored
+        .part_details
+        .iter_mut()
+        .find(|details| details.id == current)
+        .unwrap();
+    let mut details: catalog::PartDetails = serde_json::from_str(&saved.snapshot).unwrap();
+    change(&mut details);
+    saved.snapshot = details.canonical_json();
+    saved.snapshot_sha256 = sha256_hex(&saved.snapshot);
 }
 
 /// Changes the detail of every stored import problem with `code`, or drops
@@ -551,7 +596,7 @@ fn the_zero_loss_report_fails_when_its_new_checks_find_a_loss() {
             "Excluded from BOM unset",
             "g-art",
             Box::new(|stored| {
-                rewrite_current(stored, "ART-0000-0001", |d| d.excluded_from_bom = false)
+                rewrite_revision(stored, "ART-0000-0001", |d| d.excluded_from_bom = false)
             }),
             "Excluded from BOM is false",
         ),
@@ -559,7 +604,7 @@ fn the_zero_loss_report_fails_when_its_new_checks_find_a_loss() {
             "Excluded from BOM set on mixed footprint choices",
             "g-art",
             Box::new(|stored| {
-                rewrite_current(stored, "ART-0001-0006", |d| d.excluded_from_bom = true)
+                rewrite_revision(stored, "ART-0001-0006", |d| d.excluded_from_bom = true)
             }),
             "Excluded from BOM is true",
         ),
@@ -621,7 +666,7 @@ fn the_zero_loss_report_fails_when_its_new_checks_find_a_loss() {
             "supplier number leaked into the part details",
             "g-rfm",
             Box::new(|stored| {
-                rewrite_current(stored, "RFM-0000-0001", |d| {
+                rewrite_details(stored, "RFM-0000-0001", |d| {
                     d.fields.push(catalog::DetailField {
                         name: "Order code".into(),
                         value: "C4365834".into(),

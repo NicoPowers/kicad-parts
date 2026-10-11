@@ -12,7 +12,7 @@ use catalog::pocketbase::{
 };
 use catalog::{
     CadItemDetails, CadItemId, CadItemKind, CadItemRevisionId, CadReferenceRole,
-    CadReferenceTarget, CsvCatalog, CsvImport, ModelTarget, PartDetails, sha256_hex,
+    CadReferenceTarget, CsvCatalog, CsvImport, ModelTarget, PartDetails, PartRevision, sha256_hex,
 };
 use catalog_import::{ZeroLossReport, services};
 use collaboration::PocketBaseClient;
@@ -149,12 +149,21 @@ fn field<'r>(
         .unwrap()
 }
 
-fn current_revision(stored: &CatalogReadback, ipn: &str) -> (u32, PartDetails) {
+fn current_revision(stored: &CatalogReadback, ipn: &str) -> (u32, PartRevision) {
     let part = stored.part(ipn).unwrap();
     let revision = stored.part_revision(&part.current_revision).unwrap();
     (
         revision.number,
         serde_json::from_str(&revision.snapshot).unwrap(),
+    )
+}
+
+fn current_details(stored: &CatalogReadback, ipn: &str) -> (u32, PartDetails) {
+    let part = stored.part(ipn).unwrap();
+    let details = stored.part_details(&part.current_details).unwrap();
+    (
+        details.number,
+        serde_json::from_str(&details.snapshot).unwrap(),
     )
 }
 
@@ -225,12 +234,12 @@ fn re_imports_stay_lossless() {
     let reply = import_reading_first(&admin, &plan(root), "-supplier-pn");
     assert_eq!(outcome(&reply), "nothing_changed", "{}", reply.body);
     let stored = read_back(&admin).unwrap();
-    assert_eq!(current_revision(&stored, "RES-0000-1002").0, 2);
+    assert_eq!(current_details(&stored, "RES-0000-1002").0, 2);
     let report = lossless_report(root, &stored, "substitutes.csv supplier change");
     assert_eq!(report.substitutes_csv_rows.destinations["supplier-data"], 2);
 
-    // Filling in the blank MPN makes a new revision with a main
-    // manufacturer part; the old import problem no longer applies.
+    // Filling in the blank MPN saves new details with a main manufacturer
+    // part; the old import problem no longer applies.
     replace_once(
         root,
         CSV,
@@ -246,21 +255,30 @@ fn re_imports_stay_lossless() {
         (mpn.destination.as_str(), mpn.stored.as_deref()),
         ("part-details.manufacturer-parts", Some("RC0603FR-07150RL"))
     );
-    // Unchanged parts keep revision 1, whose source names the first file.
-    assert_eq!(current_revision(&stored, "RES-0000-0000").0, 1);
+    // Unchanged parts keep details 1 and revision 1, whose source names the
+    // first file. No step so far changed any CAD.
+    assert_eq!(current_details(&stored, "RES-0000-0000").0, 1);
+    assert!(
+        stored
+            .parts
+            .iter()
+            .all(|part| part.current_revision_number == 1)
+    );
 
     // An edit after the latest import does not matter: the report checks
-    // the revision that import left the part at.
+    // the details that import left the part at.
     let edit = {
-        let (number, details) = current_revision(&stored, "RES-0000-0470");
-        let mut command = EditCommand::starting_from(&details, number, "Note the exact value");
+        let (number, details) = current_details(&stored, "RES-0000-0470");
+        let mut command = EditCommand::new("RES-0000-0470", "Note the exact value")
+            .editing_details(&details, number);
         command.set_field("Value", "47 Ohm");
         command
     };
     assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
     lossless_report(root, &read_back(&admin).unwrap(), "edit after the import");
-    // A changed row of a part maintained by edits is kept whole by an
-    // import problem.
+    // A changed row of a part whose details are maintained by edits keeps
+    // its details columns in an import problem; its CAD and supplier data
+    // are checked as usual.
     replace_once(
         root,
         CSV,
@@ -271,7 +289,7 @@ fn re_imports_stay_lossless() {
     assert_eq!(outcome(&reply), "nothing_changed", "{}", reply.body);
     let stored = read_back(&admin).unwrap();
     assert_eq!(
-        current_revision(&stored, "RES-0000-0470").1.field("Value"),
+        current_details(&stored, "RES-0000-0470").1.field("Value"),
         Some("47 Ohm")
     );
     let report = lossless_report(root, &stored, "part maintained by edits");
@@ -279,7 +297,34 @@ fn re_imports_stay_lossless() {
         field(&report, "RES-0000-0470", "Value").destination,
         "import-problem"
     );
-    assert_eq!(report.destinations["import-problem"], 16);
+    assert_eq!(
+        field(&report, "RES-0000-0470", "Footprint").destination,
+        "part-revision"
+    );
+    // IPN, MPN, Manufacturer, Description, Value, Tolerance and Datasheet.
+    assert_eq!(report.destinations["import-problem"], 7);
+
+    // The CSV still owns that part's CAD: a footprint change adds a
+    // revision to every resistor, this one too, and its edited details stay.
+    replace_once(
+        root,
+        FOOTPRINT,
+        "(tags \"resistor\")",
+        "(tags \"resistor B\")",
+    );
+    let reply = import_reading_first(&admin, &plan(root), "-footprint");
+    assert_eq!(outcome(&reply), "applied", "{}", reply.body);
+    let stored = read_back(&admin).unwrap();
+    assert_eq!(current_revision(&stored, "RES-0000-0470").0, 2);
+    assert_eq!(
+        current_details(&stored, "RES-0000-0470").1.field("Value"),
+        Some("47 Ohm")
+    );
+    let report = lossless_report(root, &stored, "footprint changed under edited details");
+    assert_eq!(
+        field(&report, "RES-0000-0470", "Value").destination,
+        "import-problem"
+    );
 
     // An inserted row becomes a new part; every row after it moves down,
     // and rows are still matched by IPN.
@@ -453,9 +498,7 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
     );
     let imported = read_back(&admin).unwrap();
     assert_eq!(
-        current_revision(&imported, "RES-0000-0470")
-            .1
-            .field("Value"),
+        current_details(&imported, "RES-0000-0470").1.field("Value"),
         Some("47R")
     );
 
@@ -483,7 +526,7 @@ fn an_older_checkout_is_refused_unless_allowed_and_the_override_is_recorded() {
     let entry = latest_audit_entry(&stored);
     assert!(entry.allowed_older_checkout);
     assert_eq!(entry.source_commit, older);
-    let (number, details) = current_revision(&stored, "RES-0000-0470");
+    let (number, details) = current_details(&stored, "RES-0000-0470");
     assert_eq!((number, details.field("Value")), (2, Some("47")));
     // No earlier run was allowed anything.
     assert_eq!(
@@ -630,15 +673,16 @@ fn a_part_changed_between_reading_and_importing_is_reported_not_overwritten() {
     // ...someone edits the part before the import arrives...
     let edit = {
         let stored = read_back(&admin).unwrap();
-        let (number, details) = current_revision(&stored, "RES-0000-0470");
-        let mut command = EditCommand::starting_from(&details, number, "Note the exact value");
+        let (number, details) = current_details(&stored, "RES-0000-0470");
+        let mut command = EditCommand::new("RES-0000-0470", "Note the exact value")
+            .editing_details(&details, number);
         command.set_field("Value", "47 Ohm");
         command
     };
     assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
     let edited = read_back(&admin).unwrap();
 
-    // ...so the import is refused with the part's new current revision, and
+    // ...so the import is refused with the part's new current details, and
     // nothing is written.
     let reply = submit_import(&admin, &command).unwrap();
     assert_eq!(reply.status, 409, "{}", reply.body);
@@ -651,11 +695,16 @@ fn a_part_changed_between_reading_and_importing_is_reported_not_overwritten() {
     assert_eq!(conflicts.len(), 1, "{conflicts:?}");
     let conflict = &conflicts[0];
     assert_eq!(
-        (conflict.ipn.as_str(), conflict.expected_revision),
-        ("RES-0000-0470", 1)
+        (
+            conflict.ipn.as_str(),
+            conflict.expected_revision,
+            conflict.expected_details
+        ),
+        ("RES-0000-0470", 1, 1)
     );
-    let current = conflict.current_revision.as_ref().unwrap();
+    let current = conflict.current_details.as_ref().unwrap();
     assert_eq!((current.number, current.change_kind.as_str()), (2, "edit"));
+    assert_eq!(conflict.current_revision.as_ref().unwrap().number, 1);
     assert!(
         message.contains("someone else changed RES-0000-0470"),
         "{message}"
@@ -671,17 +720,18 @@ fn a_part_changed_between_reading_and_importing_is_reported_not_overwritten() {
     assert_eq!(outcome(&reply), "nothing_changed", "{}", reply.body);
     let stored = read_back(&admin).unwrap();
     assert_eq!(
-        current_revision(&stored, "RES-0000-0470").1.field("Value"),
+        current_details(&stored, "RES-0000-0470").1.field("Value"),
         Some("47 Ohm")
     );
     assert!(stored.problems.iter().any(|problem| problem.code
-        == "csv-row-conflicts-with-current-revision"
+        == "csv-details-differ-from-edited-details"
         && problem.subject == "RES-0000-0470"));
 
     // A command that expects every part to be new, sent to a catalog that
     // has them, conflicts on every part.
     let mut latest_only = read_import_state(&admin).unwrap();
     latest_only.current_revisions.clear();
+    latest_only.current_details.clear();
     let stale = ImportCommand::new(&changed, REASON).expecting(&latest_only);
     let reply = submit_import(&admin, &stale).unwrap();
     let ImportOutcome::Conflict { conflicts, .. } = &reply.outcome else {
@@ -691,7 +741,7 @@ fn a_part_changed_between_reading_and_importing_is_reported_not_overwritten() {
     assert!(
         conflicts
             .iter()
-            .all(|conflict| conflict.expected_revision == 0)
+            .all(|conflict| (conflict.expected_revision, conflict.expected_details) == (0, 0))
     );
     let ImportOutcome::Conflict { message, .. } = &reply.outcome else {
         unreachable!()
@@ -803,7 +853,7 @@ fn revisions_of<'a>(
 }
 
 /// The revision number `details` binds for its first `role` reference.
-fn bound_number(details: &PartDetails, role: CadReferenceRole) -> u32 {
+fn bound_number(details: &PartRevision, role: CadReferenceRole) -> u32 {
     details
         .cad_references
         .iter()
@@ -850,7 +900,7 @@ fn numbered_and_current<'a>(
         let mut users = 0;
         for part in &stored.parts {
             let revision = stored.part_revision(&part.current_revision).unwrap();
-            let details: PartDetails = serde_json::from_str(&revision.snapshot).unwrap();
+            let details: PartRevision = serde_json::from_str(&revision.snapshot).unwrap();
             let uses = details.cad_references.iter().any(|reference| {
                 reference.role == role
                     && matches!(&reference.target, CadReferenceTarget::CadItemRevision { cad_item: id, .. } if id == cad_item.as_str())
@@ -891,8 +941,12 @@ fn refuse_footprint_binding(
         .iter()
         .position(|part| part["ipn"] == ipn)
         .unwrap();
-    let mut snapshot: serde_json::Value =
-        serde_json::from_str(body["parts"][index]["snapshot"].as_str().unwrap()).unwrap();
+    let mut snapshot: serde_json::Value = serde_json::from_str(
+        body["parts"][index]["revision"]["snapshot"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
     for reference in snapshot["cad_references"].as_array_mut().unwrap() {
         if reference["role"] == "footprint" {
             assert_eq!(reference["target"]["number"], now, "{ipn}");
@@ -901,8 +955,8 @@ fn refuse_footprint_binding(
         }
     }
     let snapshot = snapshot.to_string();
-    body["parts"][index]["snapshotSha256"] = sha256_hex(&snapshot).into();
-    body["parts"][index]["snapshot"] = snapshot.into();
+    body["parts"][index]["revision"]["snapshotSha256"] = sha256_hex(&snapshot).into();
+    body["parts"][index]["revision"]["snapshot"] = snapshot.into();
     let reply = admin
         .post_json(catalog::pocketbase::CSV_IMPORT_ROUTE, &body)
         .unwrap();
@@ -913,11 +967,18 @@ fn refuse_footprint_binding(
 /// A resistor kept by an edit in the test below.
 const EDITED: &str = "RES-0000-1000";
 
-/// Sets `field` of `ipn` to `value` with an edit, as a person in the app does.
+/// Sets `field` of `ipn` to `value` with an edit, as a person in the app
+/// does: a CAD edit for Symbol and Footprint, otherwise a details edit.
 fn edit_field(admin: &PocketBaseClient, ipn: &str, field: &str, value: &str) {
     let stored = read_back(admin).unwrap();
-    let (number, details) = current_revision(&stored, ipn);
-    let mut command = EditCommand::starting_from(&details, number, &format!("Set {field}"));
+    let command = EditCommand::new(ipn, &format!("Set {field}"));
+    let mut command = if catalog::CAD_COLUMNS.contains(&field) {
+        let (number, revision) = current_revision(&stored, ipn);
+        command.editing_cad(&revision, number)
+    } else {
+        let (number, details) = current_details(&stored, ipn);
+        command.editing_details(&details, number)
+    };
     assert!(command.set_field(field, value));
     let reply = submit_edit(admin, &command).unwrap();
     assert_eq!(reply.status, 200, "{}", reply.body);
@@ -934,8 +995,8 @@ fn bound_state(stored: &CatalogReadback, ipn: &str) -> (u32, u32, u32) {
     )
 }
 
-/// The messages of the `csv-row-conflicts-with-current-revision` problems
-/// about `ipn` that the latest import run found.
+/// The messages of the import problems about `ipn`, the latest import run
+/// found, that keep a row's details or CAD because an edit saved them.
 fn conflicts_found(stored: &CatalogReadback, ipn: &str) -> Vec<String> {
     let run = stored
         .audit_entries
@@ -948,7 +1009,8 @@ fn conflicts_found(stored: &CatalogReadback, ipn: &str) -> Vec<String> {
         .problems
         .iter()
         .filter(|problem| {
-            problem.code == "csv-row-conflicts-with-current-revision"
+            (problem.code == "csv-details-differ-from-edited-details"
+                || problem.code == "csv-cad-differs-from-edited-revision")
                 && problem.subject == ipn
                 && run.problems.contains(&problem.id)
         })
@@ -995,13 +1057,18 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
     let symbol = "g-pas:R_US";
 
     import_step(&admin, root, "content A", "applied");
-    // A person edits one resistor and changes it back, so its details equal
-    // its row again, but an edit, not the CSV, now keeps it: it misses the
-    // CAD changes below.
-    edit_field(&admin, EDITED, "Value", "100 Ohm");
-    edit_field(&admin, EDITED, "Value", "100");
+    // A person points one resistor's footprint elsewhere and back, so its
+    // CAD equals its row again, but an edit, not the CSV, now keeps its
+    // CAD: it misses the CAD changes below.
+    let footprint_field = current_revision(&read_back(&admin).unwrap(), EDITED)
+        .1
+        .field("Footprint")
+        .unwrap()
+        .to_owned();
+    edit_field(&admin, EDITED, "Footprint", "Device:R_0603");
+    edit_field(&admin, EDITED, "Footprint", &footprint_field);
     let cad_changed =
-        format!("the symbols, footprints or 3D models that the row of {EDITED} uses changed");
+        format!("the symbols, footprints or 3D models that the row of {EDITED} uses differ");
     // Footprint A, B, A: revisions 1, 2 and 3, with 3 current. Parts the
     // imports keep get real revisions binding 1, 2 and 3.
     replace_once(
@@ -1070,20 +1137,20 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
     );
     assert_eq!(read_back(&admin).unwrap(), stored);
 
-    // The edited part is still kept by its edit: a change to its row is an
-    // import problem, not a revision.
+    // Only its CAD is kept by the edit: a change to its details in the row
+    // still comes in, as new details and no revision.
     let value = "\"RES 100 OHM 1% 1/10W 0603\",\"100\"";
     let changed_value = "\"RES 100 OHM 1% 1/10W 0603\",\"100R\"";
     replace_once(root, CSV, value, changed_value);
-    let stored = import_step(&admin, root, "edited part's row changed", "nothing_changed");
+    let stored = import_step(&admin, root, "edited part's row changed", "applied");
     assert_eq!(bound_state(&stored, EDITED), (3, 1, 1));
-    let found = conflicts_found(&stored, EDITED);
-    assert!(
-        found.len() == 1 && found[0].starts_with(&format!("the source row of {EDITED} changed")),
-        "{found:?}"
+    assert_eq!(
+        current_details(&stored, EDITED).1.field("Value"),
+        Some("100R")
     );
+    assert!(conflicts_found(&stored, EDITED).is_empty());
     replace_once(root, CSV, changed_value, value);
-    import_step(&admin, root, "edited part's row back", "nothing_changed");
+    import_step(&admin, root, "edited part's row back", "applied");
 
     // The same for a symbol.
     replace_once(
@@ -1194,25 +1261,23 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
     );
     assert_eq!(read_back(&admin).unwrap(), stored);
 
-    // An edit of the part that kept the older numbers keeps them too: the
+    // A CAD edit of the part that kept the older numbers keeps them too: the
     // binding moves only when the CAD content or the reference changes.
-    edit_field(&admin, EDITED, "Value", "100 Ohm");
+    edit_field(&admin, EDITED, "Symbol", "Device:R");
+    edit_field(&admin, EDITED, "Symbol", symbol);
     let stored = read_back(&admin).unwrap();
-    assert_eq!(bound_state(&stored, EDITED), (4, 1, 1));
+    assert_eq!(bound_state(&stored, EDITED).1, 1);
     assert_eq!(stored.cad_item_revisions.len(), cad_item_revisions);
 
-    // An edit after that binds the current revisions, and adds none.
+    // A details edit adds no revision and moves no binding.
     let ipn = "RES-0000-0470";
-    let (number, details) = current_revision(&stored, ipn);
-    assert_eq!(number, 7);
-    let mut edit = EditCommand::starting_from(&details, number, "Note the exact value");
-    edit.set_field("Value", "47 Ohm");
-    assert_eq!(submit_edit(&admin, &edit).unwrap().status, 200);
+    assert_eq!(current_revision(&stored, ipn).0, 7);
+    edit_field(&admin, ipn, "Value", "47 Ohm");
     let edited = read_back(&admin).unwrap();
-    let (number, details) = current_revision(&edited, ipn);
-    assert_eq!(number, 8);
-    assert_eq!(bound_number(&details, CadReferenceRole::Footprint), 5);
-    assert_eq!(bound_number(&details, CadReferenceRole::Symbol), 3);
+    let (number, revision) = current_revision(&edited, ipn);
+    assert_eq!(number, 7);
+    assert_eq!(bound_number(&revision, CadReferenceRole::Footprint), 5);
+    assert_eq!(bound_number(&revision, CadReferenceRole::Symbol), 3);
     assert_eq!(edited.cad_item_revisions.len(), cad_item_revisions);
     lossless_report(root, &edited, "edit after the imports");
 
