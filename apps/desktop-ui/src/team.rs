@@ -239,9 +239,9 @@ pub struct TeamUi {
     pub notice: RwSignal<Option<Notice>>,
     /// The history entry selected, by its Change's number.
     pub selected: RwSignal<Option<u64>>,
-    /// The open archive form: the revision, and true to archive it or false
-    /// to unarchive it.
-    pub archiving: RwSignal<Option<(u32, bool)>>,
+    /// The open archive form: the revision, true to archive it or false to
+    /// unarchive it, and the part's current revision when the form opened.
+    pub archiving: RwSignal<Option<(u32, bool, u32)>>,
     pub archive_reason: RwSignal<String>,
     pub busy: RwSignal<bool>,
     /// The last save sent and its correlation ID: sending the same save
@@ -371,7 +371,9 @@ fn published(ui: TeamUi, part: RwSignal<Option<TeamPart>>, result: Result<Publis
             current,
             part: saved,
         }) => {
-            let before = part.with_untracked(|shown| shown.as_ref().map(|p| p.revision.number));
+            // The current revision when the form opened: a live update may
+            // already have refreshed the part while the request was out.
+            let before = ui.archiving.get_untracked().map(|(_, _, current)| current);
             part.set(Some(saved));
             ui.archiving.set(None);
             ui.archive_reason.set(String::new());
@@ -500,10 +502,15 @@ pub fn TeamColumn(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) 
     // If someone else archives or unarchives the revision whose form is
     // open, close the form and say so plainly, rather than turning it into
     // the opposite action with the reason still in it.
+    // While this app's own request is out, a live update may already show
+    // its result; that is not someone else's doing.
     Effect::new(move |_| {
-        let Some((number, wanted)) = ui.archiving.get() else {
+        let Some((number, wanted, _)) = ui.archiving.get() else {
             return;
         };
+        if ui.busy.get() {
+            return;
+        }
         let done = part.with(|part| {
             part.as_ref()
                 .is_some_and(|part| is_archived(part, number) == wanted)
@@ -1118,7 +1125,11 @@ fn ArchiveSection(
         };
         let verb = if archived { "Unarchive" } else { "Archive" };
         let opener = format!("archive-open-{number}");
-        if ui.archiving.get() != Some((number, !archived)) {
+        let open = ui
+            .archiving
+            .get()
+            .is_some_and(|(open, wanted, _)| open == number && wanted != archived);
+        if !open {
             return view! {
                 <button
                     type="button"
@@ -1127,7 +1138,7 @@ fn ArchiveSection(
                     on:click=move |_| {
                         ui.notice.set(None);
                         ui.archive_reason.set(String::new());
-                        ui.archiving.set(Some((number, !archived)));
+                        ui.archiving.set(Some((number, !archived, current)));
                         focus_later("archive-reason");
                     }
                 >
