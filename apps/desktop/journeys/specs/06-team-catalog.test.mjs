@@ -380,6 +380,11 @@ describe('team catalog: history, edits and conflicts', () => {
     await waitForHistory(6);
     assert.equal(await textOf(browser, '#cad-items-heading'), 'Symbol and footprint (revision 2 of this part)');
     assert.match(await textOf(browser, COLUMN), /Device:R, KiCad library/);
+    // KiCad's own library is not read yet, so the app does not claim to know.
+    assert.equal(
+      await fieldValue('Excluded from BOM'),
+      "Not known: the symbol comes from KiCad's own library, which this app does not read yet",
+    );
     await waitForPreview(browser, SYMBOL);
     await clickButton(COLUMN, 'History (6)');
     await browser.waitUntil(async () => (await browser.$$('.history li')).length === 6, { timeout: 5_000 });
