@@ -41,11 +41,11 @@ The newest revision of a part or CAD item that is not archived.
 _Avoid_: Head, latest
 
 **Archived**:
-A revision hidden from KiCad's part chooser and from the app, so nobody new picks it. Designs that already use it still find it, and nothing is deleted.
-_Avoid_: withdrawn, deleted, retired, obsolete
+A revision hidden from KiCad's part chooser and from the app, so nobody new picks it. Designs that already use it still find it, nothing is deleted, and archiving can be undone, with a reason.
+_Avoid_: withdrawn, deleted, retired, obsolete, restore
 
 **Change**:
-One saved update with a reason, such as an import or an edit. It can add revisions to several parts and CAD items at once.
+One saved update with a reason, such as an import, an edit or an archive. It can change part details and add or archive revisions of several parts and CAD items at once.
 _Avoid_: Change Set, commit, batch, transaction
 
 **Audit entry**:
