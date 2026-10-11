@@ -1,5 +1,5 @@
-//! A local copy of every part's current revision, kept in step with the
-//! team server's Changes.
+//! A local copy of every part's current revision and current details, kept
+//! in step with the team server's Changes.
 //!
 //! Changes are numbered by `seq` without gaps. The replica applies them
 //! strictly in that order and remembers the last one it applied (its
@@ -9,18 +9,28 @@
 //! `collaboration::Replica`, which does the same for the provisional
 //! `collab_*` records.
 
-use crate::part::PartDetails;
-use crate::pocketbase::{StoredChange, StoredPartRevision, changes_since, revisions_in_change};
+use crate::part::{PartDetails, PartRevision};
+use crate::pocketbase::{
+    StoredChange, StoredPartDetails, StoredPartRevision, changes_since, details_in_change,
+    revisions_in_change,
+};
 use collaboration::{ApplyResult, CollabError, CollabResult, PocketBaseClient};
 use std::collections::BTreeMap;
 
-/// A part's current revision as the replica knows it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A part's current revision and current details as the replica knows
+/// them. A part appears once the replica has seen both (every new part
+/// gets details 1 and revision 1 in the same Change).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ReplicaPart {
     pub revision_id: String,
+    /// The current revision's number.
     pub number: u32,
     pub snapshot_sha256: String,
-    /// Its part details, when the snapshot parses.
+    /// The current revision, when its snapshot parses.
+    pub revision: Option<PartRevision>,
+    pub details_id: String,
+    pub details_number: u32,
+    /// The current part details, when their snapshot parses.
     pub details: Option<PartDetails>,
 }
 
@@ -44,12 +54,12 @@ impl CatalogReplica {
         self.checkpoint
     }
 
-    /// Current revisions by part ID.
+    /// Current revisions and details by part ID.
     pub fn parts(&self) -> &BTreeMap<String, ReplicaPart> {
         &self.parts
     }
 
-    /// The current revision of the part with `ipn`, if known.
+    /// The current revision and details of the part with `ipn`, if known.
     pub fn part_by_ipn(&self, ipn: &str) -> Option<&ReplicaPart> {
         self.parts.get(self.ipns.get(ipn)?)
     }
@@ -59,11 +69,13 @@ impl CatalogReplica {
         &self.applied
     }
 
-    /// Applies `change`, whose part revisions are `revisions`, if it is the
-    /// next one after the checkpoint.
+    /// Applies `change`, whose saved part details are `details` and whose
+    /// part revisions are `revisions`, if it is the next one after the
+    /// checkpoint. A Change may hold only details, only revisions, or both.
     pub fn apply(
         &mut self,
         change: &StoredChange,
+        details: &[StoredPartDetails],
         revisions: &[StoredPartRevision],
     ) -> ApplyResult {
         if change.seq <= self.checkpoint {
@@ -75,28 +87,32 @@ impl CatalogReplica {
                 received: change.seq,
             };
         }
+        for saved in details.iter().filter(|saved| saved.change == change.id) {
+            let part = self.parts.entry(saved.part.clone()).or_default();
+            if part.details_number < saved.number {
+                let parsed: Option<PartDetails> = serde_json::from_str(&saved.snapshot).ok();
+                if let Some(parsed) = &parsed {
+                    self.ipns.insert(parsed.ipn.clone(), saved.part.clone());
+                }
+                part.details_id.clone_from(&saved.id);
+                part.details_number = saved.number;
+                part.details = parsed;
+            }
+        }
         for revision in revisions
             .iter()
             .filter(|revision| revision.change == change.id)
         {
-            let newer = self
-                .parts
-                .get(&revision.part)
-                .is_none_or(|known| known.number < revision.number);
-            if newer {
-                let details: Option<PartDetails> = serde_json::from_str(&revision.snapshot).ok();
-                if let Some(details) = &details {
-                    self.ipns.insert(details.ipn.clone(), revision.part.clone());
+            let part = self.parts.entry(revision.part.clone()).or_default();
+            if part.number < revision.number {
+                let parsed: Option<PartRevision> = serde_json::from_str(&revision.snapshot).ok();
+                if let Some(parsed) = &parsed {
+                    self.ipns.insert(parsed.ipn.clone(), revision.part.clone());
                 }
-                self.parts.insert(
-                    revision.part.clone(),
-                    ReplicaPart {
-                        revision_id: revision.id.clone(),
-                        number: revision.number,
-                        snapshot_sha256: revision.snapshot_sha256.clone(),
-                        details: details.clone(),
-                    },
-                );
+                part.revision_id.clone_from(&revision.id);
+                part.number = revision.number;
+                part.snapshot_sha256.clone_from(&revision.snapshot_sha256);
+                part.revision = parsed;
             }
         }
         self.checkpoint = change.seq;
@@ -109,8 +125,9 @@ impl CatalogReplica {
     pub fn catch_up(&mut self, client: &PocketBaseClient) -> CollabResult<usize> {
         let mut applied = 0;
         for change in changes_since(client, self.checkpoint)? {
+            let details = details_in_change(client, &change.id)?;
             let revisions = revisions_in_change(client, &change.id)?;
-            match self.apply(&change, &revisions) {
+            match self.apply(&change, &details, &revisions) {
                 ApplyResult::Applied => applied += 1,
                 ApplyResult::Duplicate => {}
                 ApplyResult::Gap {
@@ -148,8 +165,9 @@ impl CatalogReplica {
                 }
             });
         }
+        let details = details_in_change(client, &change.id)?;
         let revisions = revisions_in_change(client, &change.id)?;
-        Ok(self.apply(change, &revisions))
+        Ok(self.apply(change, &details, &revisions))
     }
 }
 
@@ -173,6 +191,19 @@ mod tests {
         }
     }
 
+    fn details(seq: u64, part: &str, number: u32) -> StoredPartDetails {
+        StoredPartDetails {
+            id: format!("{part}-details-{number}"),
+            part: part.into(),
+            number,
+            predecessor: String::new(),
+            change: format!("change{seq}"),
+            snapshot: "{}".into(),
+            snapshot_sha256: format!("{number:064}"),
+            source: "{}".into(),
+        }
+    }
+
     fn revision(seq: u64, part: &str, number: u32) -> StoredPartRevision {
         StoredPartRevision {
             id: format!("{part}-{number}"),
@@ -191,27 +222,49 @@ mod tests {
     fn changes_apply_in_order_once() {
         let mut replica = CatalogReplica::new();
         assert_eq!(
-            replica.apply(&change(1), &[revision(1, "p", 1), revision(1, "q", 1)]),
+            replica.apply(
+                &change(1),
+                &[details(1, "p", 1), details(1, "q", 1)],
+                &[revision(1, "p", 1), revision(1, "q", 1)]
+            ),
             ApplyResult::Applied
         );
         assert_eq!(
-            replica.apply(&change(3), &[revision(3, "p", 3)]),
+            replica.apply(&change(3), &[], &[revision(3, "p", 3)]),
             ApplyResult::Gap {
                 checkpoint: 1,
                 received: 3
             }
         );
         assert_eq!(
-            replica.apply(&change(2), &[revision(2, "p", 2)]),
+            replica.apply(&change(2), &[], &[revision(2, "p", 2)]),
             ApplyResult::Applied
         );
         assert_eq!(
-            replica.apply(&change(2), &[revision(2, "p", 2)]),
+            replica.apply(&change(2), &[], &[revision(2, "p", 2)]),
             ApplyResult::Duplicate
         );
-        assert_eq!(replica.checkpoint(), 2);
-        assert_eq!(replica.parts()["p"].number, 2);
-        assert_eq!(replica.parts()["q"].number, 1);
-        assert_eq!(replica.applied_sequences(), [1, 2]);
+        // A Change that saves only details moves the details, not the
+        // revision.
+        assert_eq!(
+            replica.apply(&change(3), &[details(3, "p", 2)], &[]),
+            ApplyResult::Applied
+        );
+        assert_eq!(replica.checkpoint(), 3);
+        assert_eq!(
+            (
+                replica.parts()["p"].number,
+                replica.parts()["p"].details_number
+            ),
+            (2, 2)
+        );
+        assert_eq!(
+            (
+                replica.parts()["q"].number,
+                replica.parts()["q"].details_number
+            ),
+            (1, 1)
+        );
+        assert_eq!(replica.applied_sequences(), [1, 2, 3]);
     }
 }

@@ -59,6 +59,10 @@ derived_id!(
     PartRevisionId
 );
 derived_id!(
+    /// One saved copy of a part's details, from its part and number.
+    PartDetailsId
+);
+derived_id!(
     /// A CAD item, from its kind and library reference.
     CadItemId
 );
@@ -100,6 +104,12 @@ impl PartId {
 impl PartRevisionId {
     pub fn new(part: &PartId, number: u32) -> Self {
         Self(derive_id("part-revision", &format!("{part}\n{number}")))
+    }
+}
+
+impl PartDetailsId {
+    pub fn new(part: &PartId, number: u32) -> Self {
+        Self(derive_id("part-details", &format!("{part}\n{number}")))
     }
 }
 
@@ -170,6 +180,17 @@ mod tests {
         assert_ne!(
             PartRevisionId::new(&id, 1).as_str(),
             PartRevisionId::new(&id, 2).as_str()
+        );
+        // Saved part details are numbered per part too, under their own
+        // kind, so details 1 and revision 1 never share an ID. Pinned; the
+        // server derives the same (catalog_lib.js).
+        assert_eq!(
+            PartDetailsId::new(&id, 1).as_str(),
+            derive_id("part-details", "0670aad03a0e111\n1")
+        );
+        assert_ne!(
+            PartDetailsId::new(&id, 1).as_str(),
+            PartRevisionId::new(&id, 1).as_str()
         );
         // CAD item revisions are numbered like part revisions; the route
         // derives the same key (catalog_csv_imports.pb.js). Pinned, like the

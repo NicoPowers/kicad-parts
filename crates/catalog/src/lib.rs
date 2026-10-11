@@ -7,10 +7,15 @@
 //! - A **part** is identified by a [`PartId`] derived from its [`Ipn`], so
 //!   every import of the same IPN finds the same part. The IPN never
 //!   changes.
-//! - A **revision** of a part saves its [`PartDetails`] as canonical JSON
-//!   (the revision's snapshot). The SHA-256 of those exact stored bytes
-//!   identifies the revision, so a reader can check it. Revisions are
-//!   numbered from 1 per part; the **current revision** is the newest.
+//! - A part's [`PartDetails`] (what it is: its describing fields and
+//!   manufacturer parts) are shared by every revision. Each change saves
+//!   the next numbered copy, as canonical JSON whose SHA-256 a reader can
+//!   check, but adds no revision.
+//! - A **revision** of a part saves its [`PartRevision`]: only the exact
+//!   CAD it uses (its Symbol and Footprint fields, the CAD item revisions
+//!   they bind, and Excluded from BOM), as canonical JSON. Only a change to
+//!   CAD adds one. Revisions are numbered from 1 per part; the **current
+//!   revision** is the newest.
 //! - A **CAD item** is one symbol, footprint or 3D model, identified by its
 //!   kind and library reference (for example the symbol `g-pas:R_US`). A
 //!   revision of a CAD item saves its [`CadItemDetails`]: the exact
@@ -27,8 +32,8 @@
 //!   with the same bytes share one stored blob. A symbol's blob
 //!   is the exact bytes of that one symbol in its library file, so editing
 //!   a neighbouring symbol does not revise it.
-//! - A **Change** groups the revisions one import or edit published, with
-//!   its reason. A Change always has at least one revision.
+//! - A **Change** groups what one import or edit saved, with its reason:
+//!   at least one part revision, CAD item revision or saved part details.
 //! - **Supplier data** (supplier part numbers and prices) is kept in a
 //!   revision's [`Source`], never in its part details, so it never creates
 //!   a revision.
@@ -37,8 +42,8 @@
 //! without touching any store; [`pocketbase`] submits imports and edits to
 //! the protected routes and reads the stored records back;
 //! [`replica`] keeps a local copy of every part's current revision in step
-//! with the server; [`compare_details`] lists what differs between two
-//! revisions.
+//! with the server; [`compare_details`] and [`compare_revisions`] list what
+//! differs between two saved part details or two revisions.
 
 mod cad_item;
 mod change;
@@ -55,7 +60,9 @@ pub use cad_item::{
     Blob, CadItem, CadItemDetails, CadItemKind, License, ModelReference, ModelTarget,
 };
 pub use change::ChangeKind;
-pub use compare::{DetailDifference, DifferenceKind, compare_details, describe_binding};
+pub use compare::{
+    DetailDifference, DifferenceKind, compare_details, compare_revisions, describe_binding,
+};
 pub use csv_import::{
     Binding, CadItemRevisionDraft, CsvCatalog, CsvImport, CurrentCad, CurrentCadItemRevision,
     ImportProblem, PartDraft, Source, SourceFile,
@@ -63,12 +70,12 @@ pub use csv_import::{
 pub use hash::sha256_hex;
 pub use ids::{
     AuditEntryId, BlobId, CadItemId, CadItemRevisionId, ChangeId, ID_LENGTH, ImportProblemId,
-    PartId, PartRevisionId, derive_id,
+    PartDetailsId, PartId, PartRevisionId, derive_id,
 };
 pub use ipn::{Ipn, IpnError};
 pub use part::{
-    CadReference, CadReferenceRole, CadReferenceTarget, DetailField, ManufacturerPart,
-    PART_DETAILS_SCHEMA, PartDetails,
+    CAD_COLUMNS, CadReference, CadReferenceRole, CadReferenceTarget, DetailField, ManufacturerPart,
+    PART_DETAILS_SCHEMA, PART_REVISION_SCHEMA, PartDetails, PartRevision,
 };
 
 /// The schema tag every canonical JSON document in this crate carries.

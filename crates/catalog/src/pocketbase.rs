@@ -2,12 +2,12 @@
 //! (`infra/pocketbase/pb_hooks/catalog_csv_imports.pb.js` for CSV imports,
 //! `catalog_edits.pb.js` for edits) and the `catalog_*`
 //! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`
-//! and `1791600000_catalog_edits.js`).
+//! `1791600000_catalog_edits.js` and `1791800000_shared_part_details.js`).
 
 use crate::cad_item::Blob;
 use crate::cad_item::{CadItemDetails, ModelTarget};
 use crate::csv_import::{Binding, CsvImport, CurrentCad, CurrentCadItemRevision, SourceFile};
-use crate::part::{DetailField, ManufacturerPart, PartDetails};
+use crate::part::{DetailField, ManufacturerPart, PartDetails, PartRevision};
 use crate::sha256_hex;
 use collaboration::{CollabError, CollabResult, CorrelationId, PocketBaseClient};
 use serde::Deserialize;
@@ -25,12 +25,13 @@ pub const CSV_IMPORT_ROUTE: &str = "/api/catalog/csv-imports";
 pub const IMPORT_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Every Catalog collection, in dependency order.
-pub const COLLECTIONS: [&str; 9] = [
+pub const COLLECTIONS: [&str; 10] = [
     "catalog_changes",
     "catalog_blobs",
     "catalog_cad_items",
     "catalog_cad_item_revisions",
     "catalog_parts",
+    "catalog_part_details",
     "catalog_part_revisions",
     "catalog_audit_entries",
     "catalog_import_problems",
@@ -47,12 +48,15 @@ pub struct ImportCommand<'a> {
     pub import: Cow<'a, CsvImport>,
     /// The current revision number the importer read for each IPN. A part
     /// missing here is expected not to exist yet (number 0). This and the
-    /// next two fields are private so that only [`ImportCommand::expecting`]
+    /// next three fields are private so that only [`ImportCommand::expecting`]
     /// and [`ImportCommand::allowing_older_checkout`] set them, which derive
     /// the correlation ID again. If any part's
     /// current revision differs when the import arrives, the route answers
     /// 409 conflict and writes nothing. See [`ImportCommand::expecting`].
     expected_revisions: BTreeMap<String, u32>,
+    /// The number of the current part details the importer read for each
+    /// IPN, checked like `expected_revisions`.
+    expected_details: BTreeMap<String, u32>,
     /// The number of the latest import run of this CSV file that the
     /// importer read (0 if none). If another import of the file lands
     /// first, the route answers 409 and writes nothing, because the checkout
@@ -75,6 +79,7 @@ impl<'a> ImportCommand<'a> {
             reason: reason.to_owned(),
             import: Cow::Borrowed(import),
             expected_revisions: BTreeMap::new(),
+            expected_details: BTreeMap::new(),
             expected_csv_import: 0,
             allow_older_checkout: false,
         };
@@ -82,9 +87,9 @@ impl<'a> ImportCommand<'a> {
         command
     }
 
-    /// Expects each part's current revision, each CAD item's current
-    /// revision, and the latest import run of this CSV file, to be the ones
-    /// in `state`. Numbers the CAD item revisions against `state` (see
+    /// Expects each part's current revision and current details, each CAD
+    /// item's current revision, and the latest import run of this CSV file,
+    /// to be the ones in `state`. Numbers the CAD item revisions against `state` (see
     /// [`CsvImport::numbered_against`]): a binding keeps its number while its
     /// content is the same, and otherwise names the CAD item's current
     /// revision. Derives the correlation ID again.
@@ -100,6 +105,16 @@ impl<'a> ImportCommand<'a> {
                 Some((ipn.to_owned(), number))
             })
             .collect();
+        self.expected_details = self
+            .import
+            .parts
+            .iter()
+            .filter_map(|part| {
+                let ipn = part.ipn.as_str();
+                let number = *state.current_details.get(ipn)?;
+                Some((ipn.to_owned(), number))
+            })
+            .collect();
         self.expected_csv_import = state
             .latest_import(&self.import.csv_file)
             .map_or(0, |run| run.csv_import_number);
@@ -111,6 +126,12 @@ impl<'a> ImportCommand<'a> {
     /// here is expected to be new.
     pub fn expected_revisions(&self) -> &BTreeMap<String, u32> {
         &self.expected_revisions
+    }
+
+    /// The current details number expected for each IPN; a part missing
+    /// here is expected to be new.
+    pub fn expected_details(&self) -> &BTreeMap<String, u32> {
+        &self.expected_details
     }
 
     /// The number of the latest import run of this CSV file expected.
@@ -146,6 +167,9 @@ impl<'a> ImportCommand<'a> {
         let mut key = self.import.fingerprint();
         for (ipn, number) in &self.expected_revisions {
             key.push_str(&format!("\n{ipn}={number}"));
+        }
+        for (ipn, number) in &self.expected_details {
+            key.push_str(&format!("\n{ipn} details={number}"));
         }
         key.push_str(&format!(
             "\nimport={}\nallow-older-checkout={}",
@@ -192,8 +216,15 @@ impl<'a> ImportCommand<'a> {
                 "id": part.id,
                 "ipn": part.ipn.as_str(),
                 "expectedRevision": self.expected_revisions.get(part.ipn.as_str()).copied().unwrap_or(0),
-                "snapshot": part.snapshot_json,
-                "snapshotSha256": part.snapshot_sha256,
+                "expectedDetails": self.expected_details.get(part.ipn.as_str()).copied().unwrap_or(0),
+                "details": {
+                    "snapshot": part.details_json,
+                    "snapshotSha256": part.details_sha256,
+                },
+                "revision": {
+                    "snapshot": part.revision_json,
+                    "snapshotSha256": part.revision_sha256,
+                },
                 "source": part.source_json,
             })).collect::<Vec<_>>(),
             "problems": import.problems.iter().map(|problem| json!({
@@ -229,6 +260,8 @@ fn blob_body(blob: &Blob) -> Value {
 pub struct ImportState {
     /// Each part's current revision number, by IPN.
     pub current_revisions: BTreeMap<String, u32>,
+    /// Each part's current details number, by IPN.
+    pub current_details: BTreeMap<String, u32>,
     /// Each CAD item's current revision (its newest), and the CAD item
     /// revisions each part's current revision binds.
     pub current_cad: CurrentCad,
@@ -291,16 +324,16 @@ struct PartRevisionBindings {
     cad_item_revisions: Vec<String>,
 }
 
-/// Reads each part's current revision number and the CAD item revisions it
-/// binds, each CAD item's current revision, and the latest import run of
-/// each CSV file. Downloads only the fields it needs, never the recorded
+/// Reads each part's current revision and details numbers and the CAD item
+/// revisions its current revision binds, each CAD item's current revision,
+/// and the latest import run of each CSV file. Downloads only the fields it needs, never the recorded
 /// rows or the stored bytes.
 pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState> {
     let parts: Vec<StoredPart> = client.list_record_fields(
         "catalog_parts",
         "",
         "ipn",
-        "id,ipn,ipn_prefix,variant,current_revision,current_revision_number,first_change",
+        "id,ipn,ipn_prefix,variant,current_revision,current_revision_number,current_details,current_details_number,first_change",
     )?;
     let entries: Vec<LatestImportFields> = client.list_record_fields(
         "catalog_audit_entries",
@@ -332,8 +365,12 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
     latest_imports.sort_by_key(|run| run.csv_import_number);
     Ok(ImportState {
         current_revisions: parts
+            .iter()
+            .map(|part| (part.ipn.clone(), part.current_revision_number))
+            .collect(),
+        current_details: parts
             .into_iter()
-            .map(|part| (part.ipn, part.current_revision_number))
+            .map(|part| (part.ipn, part.current_details_number))
             .collect(),
         current_cad,
         latest_imports,
@@ -441,8 +478,9 @@ pub struct ImportReply {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum ImportOutcome {
-    /// 200: one Change with at least one revision, plus an audit entry for
-    /// the import run that also holds its new import problems.
+    /// 200: one Change with at least one revision or saved part details,
+    /// plus an audit entry for the import run that also holds its new
+    /// import problems.
     #[serde(rename_all = "camelCase")]
     Applied {
         correlation_id: String,
@@ -452,7 +490,7 @@ pub enum ImportOutcome {
         created: Counts,
         unchanged: Value,
     },
-    /// 200: no part details changed, so there is no Change, but the run read
+    /// 200: nothing was saved, so there is no Change, but the run read
     /// other CSV files than the last import run of this CSV file, or found
     /// new import problems (for example a row whose supplier data changed).
     /// The run's audit entry records the files, and the problems point to it.
@@ -482,9 +520,10 @@ pub enum ImportOutcome {
         correlation_id: String,
         collisions: Vec<String>,
     },
-    /// 409: some parts' or CAD items' current revisions are not the ones
-    /// the importer read, because someone changed them in between. Nothing
-    /// was written; read the team catalog again and import again.
+    /// 409: some parts' current revisions or details, or CAD items'
+    /// current revisions, are not the ones the importer read, because
+    /// someone changed them in between. Nothing was written; read the team
+    /// catalog again and import again.
     #[serde(rename_all = "camelCase")]
     Conflict {
         correlation_id: String,
@@ -506,15 +545,20 @@ pub enum ImportOutcome {
     },
 }
 
-/// One part whose current revision changed after the importer read it.
+/// One part whose current revision or details changed after the importer
+/// read it.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportConflict {
     pub ipn: String,
     /// 0 when the importer expected no such part.
     pub expected_revision: u32,
+    /// 0 when the importer expected no such part.
+    pub expected_details: u32,
     /// The part's current revision; `None` if there is no such part.
-    pub current_revision: Option<ConflictingRevision>,
+    pub current_revision: Option<ConflictingRecord>,
+    /// The part's current details; `None` if there is no such part.
+    pub current_details: Option<ConflictingRecord>,
 }
 
 /// One CAD item whose current revision changed after the importer read it.
@@ -537,12 +581,17 @@ pub struct Counts {
     pub blobs: u64,
     pub cad_items: u64,
     pub cad_item_revisions: u64,
-    /// New parts, each with revision 1.
+    /// New parts, each with details 1 and revision 1.
     pub parts: u64,
     /// Every new part revision: one per new part plus one per updated part.
     pub part_revisions: u64,
     /// Existing parts that got a new revision.
     pub updated_parts: u64,
+    /// Every new saved part details: one per new part plus one per part
+    /// with updated details.
+    pub part_details: u64,
+    /// Existing parts whose details were saved again.
+    pub updated_details: u64,
     pub problems: u64,
 }
 
@@ -577,66 +626,122 @@ pub fn submit_import(
     }
 }
 
-/// The route that publishes a change to one part's details.
+/// The route that publishes a change to one part's details, symbol or
+/// footprint.
 pub const EDIT_ROUTE: &str = "/api/catalog/edits";
 
-/// A change to one part's details: every field of the current revision (the
-/// same names in the same order, with new values) and the full list of
-/// manufacturer parts. The server reads the new CAD references from the
-/// `Symbol` and `Footprint` fields and binds exact CAD item revisions.
+/// A change to one part: its details, its Symbol and Footprint, or both.
+/// Each section carries the number it started from and is sent only when
+/// something in it changed, so a details edit never conflicts with someone
+/// else's change of the symbol or footprint, and the reverse.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditCommand {
     pub correlation_id: CorrelationId,
     pub reason: String,
     pub ipn: String,
-    /// The number of the revision the edit starts from.
-    pub expected_revision: u32,
+    pub details: Option<DetailsEdit>,
+    pub cad: Option<CadEdit>,
+}
+
+/// New part details: every field of the current details (the same names in
+/// the same order, with new values) and the full list of manufacturer
+/// parts. Saving them adds no revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetailsEdit {
+    /// The number of the part details the edit starts from.
+    pub expected_details: u32,
     pub fields: Vec<DetailField>,
     pub manufacturer_parts: Vec<ManufacturerPart>,
 }
 
+/// A new Symbol or Footprint: the CAD fields of the current revision (the
+/// same names in the same order, with new values). The server binds exact
+/// CAD item revisions and adds a revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CadEdit {
+    /// The number of the revision the edit starts from.
+    pub expected_revision: u32,
+    pub fields: Vec<DetailField>,
+}
+
 impl EditCommand {
-    /// An edit of `current` (the part's current revision, numbered
-    /// `expected_revision`) with a fresh correlation ID, starting from its
-    /// details unchanged.
-    pub fn starting_from(current: &PartDetails, expected_revision: u32, reason: &str) -> Self {
+    /// An edit of the part `ipn` that changes nothing yet, with a fresh
+    /// correlation ID.
+    pub fn new(ipn: &str, reason: &str) -> Self {
         Self {
             correlation_id: CorrelationId::generate(),
             reason: reason.to_owned(),
-            ipn: current.ipn.clone(),
-            expected_revision,
-            fields: current.fields.clone(),
-            manufacturer_parts: current.manufacturer_parts.clone(),
+            ipn: ipn.to_owned(),
+            details: None,
+            cad: None,
         }
     }
 
-    /// Sets the value of the field named exactly `name`. Returns false if
-    /// the details have no such field.
+    /// Changes the details too, starting from `current`, numbered
+    /// `expected_details`, unchanged.
+    pub fn editing_details(mut self, current: &PartDetails, expected_details: u32) -> Self {
+        self.details = Some(DetailsEdit {
+            expected_details,
+            fields: current.fields.clone(),
+            manufacturer_parts: current.manufacturer_parts.clone(),
+        });
+        self
+    }
+
+    /// Changes the Symbol or Footprint too, starting from revision
+    /// `current`, numbered `expected_revision`, unchanged.
+    pub fn editing_cad(mut self, current: &PartRevision, expected_revision: u32) -> Self {
+        self.cad = Some(CadEdit {
+            expected_revision,
+            fields: current.cad_fields.clone(),
+        });
+        self
+    }
+
+    /// Sets the value of the field named exactly `name`, in the details or
+    /// in the CAD fields, whichever section has it. Returns false if no
+    /// section has such a field.
     pub fn set_field(&mut self, name: &str, value: &str) -> bool {
-        match self.fields.iter_mut().find(|field| field.name == name) {
-            Some(field) => {
+        let details = self.details.as_mut().map(|edit| &mut edit.fields);
+        let cad = self.cad.as_mut().map(|edit| &mut edit.fields);
+        for fields in [details, cad].into_iter().flatten() {
+            if let Some(field) = fields.iter_mut().find(|field| field.name == name) {
                 field.value = value.to_owned();
-                true
+                return true;
             }
-            None => false,
         }
+        false
     }
 
     pub fn body(&self) -> Value {
-        json!({
+        let fields = |fields: &[DetailField]| {
+            fields
+                .iter()
+                .map(|field| json!({ "name": field.name, "value": field.value }))
+                .collect::<Vec<_>>()
+        };
+        let mut body = json!({
             "correlationId": self.correlation_id,
             "reason": self.reason,
             "ipn": self.ipn,
-            "expectedRevision": self.expected_revision,
-            "fields": self.fields.iter().map(|field| json!({
-                "name": field.name,
-                "value": field.value,
-            })).collect::<Vec<_>>(),
-            "manufacturerParts": self.manufacturer_parts.iter().map(|part| json!({
-                "manufacturer": part.manufacturer,
-                "mpn": part.mpn,
-            })).collect::<Vec<_>>(),
-        })
+        });
+        if let Some(details) = &self.details {
+            body["details"] = json!({
+                "expectedDetails": details.expected_details,
+                "fields": fields(&details.fields),
+                "manufacturerParts": details.manufacturer_parts.iter().map(|part| json!({
+                    "manufacturer": part.manufacturer,
+                    "mpn": part.mpn,
+                })).collect::<Vec<_>>(),
+            });
+        }
+        if let Some(cad) = &self.cad {
+            body["cad"] = json!({
+                "expectedRevision": cad.expected_revision,
+                "fields": fields(&cad.fields),
+            });
+        }
+        body
     }
 }
 
@@ -653,8 +758,8 @@ pub struct PublishReply {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum PublishOutcome {
-    /// 200: one Change holding the new revision, the part moved to it, and
-    /// one audit entry.
+    /// 200: one Change holding the new part details, the new revision, or
+    /// both, the part moved to them, and one audit entry.
     #[serde(rename_all = "camelCase")]
     Applied {
         correlation_id: String,
@@ -662,25 +767,31 @@ pub enum PublishOutcome {
         change_id: String,
         seq: u64,
         audit_entry_id: String,
-        revision: PublishedRevision,
-        /// The exact CAD item revisions the new revision binds.
+        /// The new part details, if the edit changed them.
+        details: Option<PublishedRecord>,
+        /// The new revision, if the edit changed the symbol or footprint.
+        revision: Option<PublishedRecord>,
+        /// The exact CAD item revisions the part's current revision binds.
         cad_item_revisions: Vec<String>,
     },
-    /// 422: the details would not change; nothing was written.
+    /// 422: nothing would change; nothing was written.
     #[serde(rename_all = "camelCase")]
     Noop {
         correlation_id: String,
         ipn: String,
-        revision: RevisionNumber,
         message: String,
     },
-    /// 409: someone else published a revision first. Nothing was written.
+    /// 409: someone else saved first the part details or the revision the
+    /// edit started from. Nothing was written. Only the ones that moved are
+    /// given.
     #[serde(rename_all = "camelCase")]
     Conflict {
         correlation_id: String,
         ipn: String,
-        expected_revision: u32,
-        current_revision: ConflictingRevision,
+        #[serde(default)]
+        current_details: Option<Box<ConflictingRecord>>,
+        #[serde(default)]
+        current_revision: Option<Box<ConflictingRecord>>,
         message: String,
     },
     #[serde(rename_all = "camelCase")]
@@ -690,27 +801,23 @@ pub enum PublishOutcome {
     },
 }
 
+/// A record an edit saved.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct PublishedRevision {
+pub struct PublishedRecord {
     pub id: String,
     pub number: u32,
     pub snapshot_sha256: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct RevisionNumber {
-    pub id: String,
-    pub number: u32,
-}
-
-/// The part's current revision when a command expected another one.
+/// A part's current details or revision when a command expected another
+/// one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct ConflictingRevision {
+pub struct ConflictingRecord {
     pub id: String,
     pub number: u32,
-    /// Its part details as canonical JSON.
+    /// Its part details or part revision as canonical JSON.
     pub snapshot: String,
     pub snapshot_sha256: String,
     pub change_kind: String,
@@ -722,8 +829,15 @@ pub struct ConflictingRevision {
     pub created: String,
 }
 
-impl ConflictingRevision {
+impl ConflictingRecord {
+    /// Its snapshot as part details.
     pub fn details(&self) -> CollabResult<PartDetails> {
+        serde_json::from_str(&self.snapshot)
+            .map_err(|error| CollabError::Protocol(format!("details {}: {error}", self.number)))
+    }
+
+    /// Its snapshot as a part revision.
+    pub fn revision(&self) -> CollabResult<PartRevision> {
         serde_json::from_str(&self.snapshot)
             .map_err(|error| CollabError::Protocol(format!("revision {}: {error}", self.number)))
     }
@@ -762,6 +876,16 @@ pub fn part_by_ipn(client: &PocketBaseClient, ipn: &str) -> CollabResult<Option<
         .list_records("catalog_parts", &filter, "ipn")?
         .into_iter()
         .next())
+}
+
+/// Every saved copy of the details of the part with ID `part_id`, oldest
+/// first.
+pub fn part_details_of(
+    client: &PocketBaseClient,
+    part_id: &str,
+) -> CollabResult<Vec<StoredPartDetails>> {
+    let filter = format!("part = {}", Value::from(part_id));
+    client.list_records("catalog_part_details", &filter, "number")
 }
 
 /// Every revision of the part with ID `part_id`, oldest first.
@@ -821,6 +945,15 @@ pub fn changes_since(
     client.list_records("catalog_changes", &format!("seq > {checkpoint}"), "seq")
 }
 
+/// The part details one Change saved.
+pub fn details_in_change(
+    client: &PocketBaseClient,
+    change_id: &str,
+) -> CollabResult<Vec<StoredPartDetails>> {
+    let filter = format!("change = {}", Value::from(change_id));
+    client.list_records("catalog_part_details", &filter, "part,number")
+}
+
 /// The part revisions one Change published.
 pub fn revisions_in_change(
     client: &PocketBaseClient,
@@ -858,7 +991,22 @@ pub struct StoredPart {
     pub variant: String,
     pub current_revision: String,
     pub current_revision_number: u32,
+    pub current_details: String,
+    pub current_details_number: u32,
     pub first_change: String,
+}
+
+/// One saved copy of a part's details.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct StoredPartDetails {
+    pub id: String,
+    pub part: String,
+    pub number: u32,
+    pub predecessor: String,
+    pub change: String,
+    pub snapshot: String,
+    pub snapshot_sha256: String,
+    pub source: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -986,8 +1134,8 @@ pub struct ImportRun {
     /// Every file read. The CSV files carry their header line and every
     /// row, so the header followed by the rows is the file, byte for byte.
     pub files: Vec<SourceFile>,
-    /// Every part a row of the CSV file made, in row order, with the number
-    /// of its current revision just after the run.
+    /// Every part a row of the CSV file made, in row order, with the
+    /// numbers of its current revision and details just after the run.
     pub parts: Vec<ImportedPart>,
     /// The IDs of every import problem the run found, new or already
     /// stored. Problems are shared by content, so only these explain the
@@ -1005,12 +1153,13 @@ impl ImportRun {
     }
 }
 
-/// A part that a row of an import run's CSV file made, and the number of
-/// its current revision just after that run.
+/// A part that a row of an import run's CSV file made, and the numbers of
+/// its current revision and details just after that run.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct ImportedPart {
     pub ipn: String,
     pub revision: u32,
+    pub details: u32,
 }
 
 /// Every Catalog record as stored, with each blob's bytes downloaded.
@@ -1018,6 +1167,7 @@ pub struct ImportedPart {
 pub struct CatalogReadback {
     pub changes: Vec<StoredChange>,
     pub parts: Vec<StoredPart>,
+    pub part_details: Vec<StoredPartDetails>,
     pub part_revisions: Vec<StoredPartRevision>,
     pub cad_items: Vec<StoredCadItem>,
     pub cad_item_revisions: Vec<StoredCadItemRevision>,
@@ -1029,6 +1179,10 @@ pub struct CatalogReadback {
 impl CatalogReadback {
     pub fn part(&self, ipn: &str) -> Option<&StoredPart> {
         self.parts.iter().find(|part| part.ipn == ipn)
+    }
+
+    pub fn part_details(&self, id: &str) -> Option<&StoredPartDetails> {
+        self.part_details.iter().find(|details| details.id == id)
     }
 
     pub fn part_revision(&self, id: &str) -> Option<&StoredPartRevision> {
@@ -1053,10 +1207,11 @@ impl CatalogReadback {
 
     /// The number of records in each Catalog collection (blobs counted
     /// once each), for idempotency checks.
-    pub fn counts(&self) -> [usize; 8] {
+    pub fn counts(&self) -> [usize; 9] {
         [
             self.changes.len(),
             self.parts.len(),
+            self.part_details.len(),
             self.part_revisions.len(),
             self.cad_items.len(),
             self.cad_item_revisions.len(),
@@ -1073,6 +1228,7 @@ pub fn read_back(client: &PocketBaseClient) -> CollabResult<CatalogReadback> {
     let mut readback = CatalogReadback {
         changes: client.list_records("catalog_changes", "", "seq")?,
         parts: client.list_records("catalog_parts", "", "ipn")?,
+        part_details: client.list_records("catalog_part_details", "", "part,number")?,
         part_revisions: client.list_records("catalog_part_revisions", "", "part,number")?,
         cad_items: client.list_records("catalog_cad_items", "", "kind,key")?,
         cad_item_revisions: client.list_records(
@@ -1129,7 +1285,7 @@ mod tests {
     #[test]
     fn outcomes_parse() {
         let applied: ImportOutcome = serde_json::from_str(
-            r#"{"outcome":"applied","correlationId":"c","changeId":"x","seq":1,"auditEntryId":"a","created":{"blobs":2,"cadItems":2,"cadItemRevisions":2,"parts":29,"partRevisions":29,"updatedParts":0,"problems":1},"unchanged":{}}"#,
+            r#"{"outcome":"applied","correlationId":"c","changeId":"x","seq":1,"auditEntryId":"a","created":{"blobs":2,"cadItems":2,"cadItemRevisions":2,"parts":29,"partRevisions":29,"updatedParts":0,"partDetails":29,"updatedDetails":0,"problems":1},"unchanged":{}}"#,
         )
         .unwrap();
         assert!(matches!(applied, ImportOutcome::Applied { seq: 1, .. }));
@@ -1149,7 +1305,7 @@ mod tests {
             }
         ));
         let conflict: ImportOutcome = serde_json::from_str(
-            r#"{"outcome":"conflict","correlationId":"c","conflicts":[{"ipn":"RES-0000-0470","expectedRevision":1,"currentRevision":{"id":"r","number":2,"snapshot":"{}","snapshotSha256":"s","changeKind":"edit","reason":"x","actor":"users:u","actorName":"A","created":"t"}},{"ipn":"RES-0000-9999","expectedRevision":3,"currentRevision":null}],"message":"m"}"#,
+            r#"{"outcome":"conflict","correlationId":"c","conflicts":[{"ipn":"RES-0000-0470","expectedRevision":1,"expectedDetails":1,"currentRevision":{"id":"r","number":2,"snapshot":"{}","snapshotSha256":"s","changeKind":"edit","reason":"x","actor":"users:u","actorName":"A","created":"t"},"currentDetails":null},{"ipn":"RES-0000-9999","expectedRevision":3,"expectedDetails":3,"currentRevision":null,"currentDetails":null}],"message":"m"}"#,
         )
         .unwrap();
         let ImportOutcome::Conflict { conflicts, .. } = conflict else {
@@ -1232,10 +1388,11 @@ mod tests {
             .unwrap();
         let state = ImportState {
             current_revisions: [("RES-0000-1000".to_owned(), 4)].into(),
+            current_details: [("RES-0000-1000".to_owned(), 7)].into(),
             ..ImportState::default()
         };
         let body = ImportCommand::new(&import, "r").expecting(&state).body();
-        let expected: Vec<(&str, u64)> = body["parts"]
+        let expected: Vec<(&str, u64, u64)> = body["parts"]
             .as_array()
             .unwrap()
             .iter()
@@ -1243,10 +1400,25 @@ mod tests {
                 (
                     part["ipn"].as_str().unwrap(),
                     part["expectedRevision"].as_u64().unwrap(),
+                    part["expectedDetails"].as_u64().unwrap(),
                 )
             })
             .collect();
-        assert_eq!(expected, [("RES-0000-0470", 0), ("RES-0000-1000", 4)]);
+        assert_eq!(expected, [("RES-0000-0470", 0, 0), ("RES-0000-1000", 4, 7)]);
+        // Details and revision travel as two documents with one source.
+        let part = &body["parts"][0];
+        assert!(
+            part["details"]["snapshot"]
+                .as_str()
+                .unwrap()
+                .contains("part-details/2")
+        );
+        assert!(
+            part["revision"]["snapshot"]
+                .as_str()
+                .unwrap()
+                .contains("part-revision/1")
+        );
         assert_eq!(body["allowOlderCheckout"], false);
         let csv = body["sources"]
             .as_array()

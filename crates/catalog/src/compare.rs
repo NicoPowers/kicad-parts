@@ -1,20 +1,23 @@
-//! What differs between two revisions' part details, in plain rows a
-//! person can read: one per changed field, one for the manufacturer parts,
-//! one for Excluded from BOM, and one per symbol or footprint whose exact
-//! CAD item revision changed.
+//! What differs between two saved part details, or between two part
+//! revisions, in plain rows a person can read: one per changed field, one
+//! for the manufacturer parts, one for Excluded from BOM, and one per
+//! symbol or footprint whose exact CAD item revision changed.
 
-use crate::part::{CadReference, CadReferenceRole, CadReferenceTarget, PartDetails};
+use crate::part::{
+    CadReference, CadReferenceRole, CadReferenceTarget, DetailField, PartDetails, PartRevision,
+};
 
-/// One difference between two revisions' part details.
+/// One difference between two part details or two part revisions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetailDifference {
     pub what: DifferenceKind,
-    /// The field name, `Manufacturer parts`, or `Symbol` or `Footprint`
-    /// (with `choice N` for later footprint choices).
+    /// The field name, `Manufacturer parts`, `Excluded from BOM`, or
+    /// `Symbol revision` or `Footprint revision` (with `choice N` for later
+    /// footprint choices).
     pub label: String,
-    /// Blank when the older details did not have it.
+    /// Blank when the older one did not have it.
     pub before: String,
-    /// Blank when the newer details do not have it.
+    /// Blank when the newer one does not have it.
     pub after: String,
 }
 
@@ -22,46 +25,18 @@ pub struct DetailDifference {
 pub enum DifferenceKind {
     Field,
     ManufacturerParts,
-    /// The same or another reference bound to a different exact CAD item
-    /// revision. `before` and `after` come from the `describe` callback of
-    /// [`compare_details`].
+    /// The same reference bound to a different exact CAD item revision.
+    /// `before` and `after` come from the `describe` callback of
+    /// [`compare_revisions`].
     CadBinding,
     /// The Excluded from BOM setting, `yes` or `no`.
     ExcludedFromBom,
 }
 
-/// Every difference from `before` to `after`, fields first in `after`'s
-/// order (then fields only `before` had), then manufacturer parts, then
-/// Excluded from BOM, then CAD bindings. `describe` turns a CAD reference into text, for example its
-/// library reference and CAD item revision number.
-pub fn compare_details(
-    before: &PartDetails,
-    after: &PartDetails,
-    describe: impl Fn(&CadReference) -> String,
-) -> Vec<DetailDifference> {
-    let mut differences = Vec::new();
-    let value_in = |details: &PartDetails, name: &str| details.field(name).map(str::to_owned);
-    for field in &after.fields {
-        let old = value_in(before, &field.name);
-        if old.as_deref() != Some(field.value.as_str()) {
-            differences.push(DetailDifference {
-                what: DifferenceKind::Field,
-                label: field.name.clone(),
-                before: old.unwrap_or_default(),
-                after: field.value.clone(),
-            });
-        }
-    }
-    for field in &before.fields {
-        if after.field(&field.name).is_none() {
-            differences.push(DetailDifference {
-                what: DifferenceKind::Field,
-                label: field.name.clone(),
-                before: field.value.clone(),
-                after: String::new(),
-            });
-        }
-    }
+/// Every difference from `before` to `after`: fields first in `after`'s
+/// order (then fields only `before` had), then the manufacturer parts.
+pub fn compare_details(before: &PartDetails, after: &PartDetails) -> Vec<DetailDifference> {
+    let mut differences = compare_fields(&before.fields, &after.fields);
     if before.manufacturer_parts != after.manufacturer_parts {
         let list = |details: &PartDetails| {
             details
@@ -78,6 +53,19 @@ pub fn compare_details(
             after: list(after),
         });
     }
+    differences
+}
+
+/// Every difference from revision `before` to revision `after`: the Symbol
+/// and Footprint fields, then Excluded from BOM, then CAD bindings.
+/// `describe` turns a CAD reference into text, for example its library
+/// reference and CAD item revision number.
+pub fn compare_revisions(
+    before: &PartRevision,
+    after: &PartRevision,
+    describe: impl Fn(&CadReference) -> String,
+) -> Vec<DetailDifference> {
+    let mut differences = compare_fields(&before.cad_fields, &after.cad_fields);
     if before.excluded_from_bom != after.excluded_from_bom {
         let text = |setting: bool| if setting { "yes" } else { "no" }.to_owned();
         differences.push(DetailDifference {
@@ -102,6 +90,38 @@ pub fn compare_details(
                 label: binding_label(reference),
                 before: describe(old),
                 after: describe(reference),
+            });
+        }
+    }
+    differences
+}
+
+fn compare_fields(before: &[DetailField], after: &[DetailField]) -> Vec<DetailDifference> {
+    let value_in = |fields: &[DetailField], name: &str| {
+        fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| field.value.clone())
+    };
+    let mut differences = Vec::new();
+    for field in after {
+        let old = value_in(before, &field.name);
+        if old.as_deref() != Some(field.value.as_str()) {
+            differences.push(DetailDifference {
+                what: DifferenceKind::Field,
+                label: field.name.clone(),
+                before: old.unwrap_or_default(),
+                after: field.value.clone(),
+            });
+        }
+    }
+    for field in before {
+        if value_in(after, &field.name).is_none() {
+            differences.push(DetailDifference {
+                what: DifferenceKind::Field,
+                label: field.name.clone(),
+                before: field.value.clone(),
+                after: String::new(),
             });
         }
     }
@@ -138,22 +158,16 @@ pub fn describe_binding(reference: &CadReference) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::part::{DetailField, ManufacturerPart, PART_DETAILS_SCHEMA};
+    use crate::part::{ManufacturerPart, PART_DETAILS_SCHEMA, PART_REVISION_SCHEMA};
 
-    fn details(value: &str, number: u32, parts: &[(&str, &str)]) -> PartDetails {
+    fn details(value: &str, parts: &[(&str, &str)]) -> PartDetails {
         PartDetails {
             schema: PART_DETAILS_SCHEMA.into(),
             ipn: "RES-0000-0470".into(),
-            fields: vec![
-                DetailField {
-                    name: "Value".into(),
-                    value: value.into(),
-                },
-                DetailField {
-                    name: "Symbol".into(),
-                    value: "g-pas:R_US".into(),
-                },
-            ],
+            fields: vec![DetailField {
+                name: "Value".into(),
+                value: value.into(),
+            }],
             manufacturer_parts: parts
                 .iter()
                 .map(|(manufacturer, mpn)| ManufacturerPart {
@@ -161,10 +175,21 @@ mod tests {
                     mpn: (*mpn).into(),
                 })
                 .collect(),
+        }
+    }
+
+    fn revision(symbol: &str, number: u32) -> PartRevision {
+        PartRevision {
+            schema: PART_REVISION_SCHEMA.into(),
+            ipn: "RES-0000-0470".into(),
+            cad_fields: vec![DetailField {
+                name: "Symbol".into(),
+                value: symbol.into(),
+            }],
             cad_references: vec![CadReference {
                 role: CadReferenceRole::Symbol,
                 ordinal: 0,
-                reference: "g-pas:R_US".into(),
+                reference: symbol.into(),
                 target: CadReferenceTarget::CadItemRevision {
                     cad_item: "c".into(),
                     number,
@@ -176,16 +201,11 @@ mod tests {
     }
 
     #[test]
-    fn lists_changed_fields_manufacturer_parts_excluded_from_bom_and_cad_bindings() {
-        let before = details("47", 1, &[("Yageo", "RC0603FR-0747RL")]);
-        assert!(compare_details(&before, &before, describe_binding).is_empty());
-        let mut after = details(
-            "48",
-            3,
-            &[("Yageo", "RC0603FR-0747RL"), ("Vishay", "ALT-47")],
-        );
-        after.excluded_from_bom = true;
-        let differences = compare_details(&before, &after, describe_binding);
+    fn lists_changed_fields_and_manufacturer_parts() {
+        let before = details("47", &[("Yageo", "RC0603FR-0747RL")]);
+        assert!(compare_details(&before, &before).is_empty());
+        let after = details("48", &[("Yageo", "RC0603FR-0747RL"), ("Vishay", "ALT-47")]);
+        let differences = compare_details(&before, &after);
         assert_eq!(
             differences
                 .iter()
@@ -204,19 +224,49 @@ mod tests {
                     "Yageo RC0603FR-0747RL",
                     "Yageo RC0603FR-0747RL\nVishay ALT-47"
                 ),
+            ]
+        );
+    }
+
+    #[test]
+    fn lists_changed_cad_fields_excluded_from_bom_and_bindings() {
+        let before = revision("g-pas:R_US", 1);
+        assert!(compare_revisions(&before, &before, describe_binding).is_empty());
+        let mut after = revision("g-pas:R_US", 3);
+        after.excluded_from_bom = true;
+        let rows = |differences: Vec<DetailDifference>| {
+            differences
+                .into_iter()
+                .map(|d| (d.what, d.label, d.before, d.after))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rows(compare_revisions(&before, &after, describe_binding)),
+            [
                 (
                     DifferenceKind::ExcludedFromBom,
-                    "Excluded from BOM",
-                    "no",
-                    "yes"
+                    "Excluded from BOM".to_owned(),
+                    "no".to_owned(),
+                    "yes".to_owned()
                 ),
                 (
                     DifferenceKind::CadBinding,
-                    "Symbol revision",
-                    "g-pas:R_US (revision 1)",
-                    "g-pas:R_US (revision 3)"
+                    "Symbol revision".to_owned(),
+                    "g-pas:R_US (revision 1)".to_owned(),
+                    "g-pas:R_US (revision 3)".to_owned()
                 ),
             ]
+        );
+        // Another reference shows as a changed field, not as a binding.
+        let other = revision("Device:R", 1);
+        assert_eq!(
+            rows(compare_revisions(&before, &other, describe_binding)),
+            [(
+                DifferenceKind::Field,
+                "Symbol".to_owned(),
+                "g-pas:R_US".to_owned(),
+                "Device:R".to_owned()
+            )]
         );
     }
 }

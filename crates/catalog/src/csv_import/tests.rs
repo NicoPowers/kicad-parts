@@ -45,11 +45,22 @@ fn routes_every_field_and_binds_exact_cad_items() {
     let first = &import.parts[0];
     assert_eq!(first.ipn.as_str(), "RES-0000-0470");
     assert_eq!(first.id, PartId::for_ipn(&first.ipn));
-    let snapshot = &first.snapshot;
-    // Part details columns only, in source order, under their source names.
+    let snapshot = &first.details;
+    // Part details columns only, in source order, under their source names;
+    // Symbol and Footprint belong to the revision, exactly as written.
     let names: Vec<&str> = snapshot.fields.iter().map(|f| f.name.as_str()).collect();
-    assert_eq!(names, ["Value", "Symbol", "Footprint"]);
+    assert_eq!(names, ["Value"]);
     assert_eq!(snapshot.ipn, "RES-0000-0470");
+    let cad: Vec<&str> = first
+        .revision
+        .cad_fields
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(cad, ["Symbol", "Footprint"]);
+    assert_eq!(first.revision.ipn, "RES-0000-0470");
+    assert_eq!(route_column("Symbol"), ColumnRoute::Cad);
+    assert_eq!(route_column("Footprint"), ColumnRoute::Cad);
     assert_eq!(
         snapshot.manufacturer_parts,
         vec![
@@ -77,7 +88,9 @@ fn routes_every_field_and_binds_exact_cad_items() {
             },
         ]
     );
-    assert!(!first.snapshot_json.contains("C23182"));
+    assert!(!first.details_json.contains("C23182"));
+    assert!(!first.revision_json.contains("C23182"));
+    assert!(!first.details_json.contains("cad_references"));
     assert_eq!(first.source.substitutes_csv_rows.len(), 1);
     assert_eq!(
         first.source.substitutes_csv_rows[0].supplier_data[1],
@@ -94,7 +107,7 @@ fn routes_every_field_and_binds_exact_cad_items() {
     assert_eq!(second.source.record.len(), 6);
     assert_eq!(second.source.supplier_data[0].value, "");
     let targets: Vec<_> = second
-        .snapshot
+        .revision
         .cad_references
         .iter()
         .map(|binding| (binding.role, binding.ordinal, binding.target.clone()))
@@ -341,7 +354,7 @@ fn rows_that_cannot_become_parts_are_kept_as_import_problems() {
     assert_eq!(detail["raw_record"], "RES-0000-0002,M2,Y,2,,,,\n");
     assert_eq!(detail["row_number"], 3);
     // A part without a complete main manufacturer part has none.
-    assert!(import.parts[1].snapshot.manufacturer_parts.is_empty());
+    assert!(import.parts[1].details.manufacturer_parts.is_empty());
 }
 
 #[test]
@@ -423,7 +436,7 @@ fn a_part_has_one_datasheet() {
     let substitutes_csv_rows = "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\nRES-0000-0470,A,Vishay,,,\nRES-0000-0470,B,Bourns,https://part,,\nRES-0000-0470,C,Panasonic,https://other,,\n";
     let root = fixture(csv, substitutes_csv_rows);
     let import = CsvCatalog::new(root.path()).import("g-res", None).unwrap();
-    let details = &import.parts[0].snapshot;
+    let details = &import.parts[0].details;
     // Every substitutes.csv row is a manufacturer part; only the part keeps a
     // datasheet.
     let mpns: Vec<&str> = details
@@ -493,13 +506,13 @@ fn extra_mpns_and_mpns_to_be_confirmed_are_import_problems() {
     // add nothing.
     for part in &import.parts {
         let names: Vec<&str> = part
-            .snapshot
+            .details
             .fields
             .iter()
             .map(|f| f.name.as_str())
             .collect();
         assert_eq!(names, ["Value"]);
-        assert_eq!(part.snapshot.manufacturer_parts.len(), 1);
+        assert_eq!(part.details.manufacturer_parts.len(), 1);
     }
 }
 
@@ -520,7 +533,7 @@ fn excluded_from_bom_is_set_only_by_a_marked_symbol_or_footprint() {
     let excluded: Vec<(&str, bool)> = import
         .parts
         .iter()
-        .map(|part| (part.ipn.as_str(), part.snapshot.excluded_from_bom))
+        .map(|part| (part.ipn.as_str(), part.revision.excluded_from_bom))
         .collect();
     // A note in a field is never read for it (RES-0000-0004).
     assert_eq!(
@@ -534,10 +547,11 @@ fn excluded_from_bom_is_set_only_by_a_marked_symbol_or_footprint() {
     );
     assert!(
         import.parts[0]
-            .snapshot_json
+            .revision_json
             .ends_with(r#","excluded_from_bom":true}"#)
     );
-    assert!(!import.parts[2].snapshot_json.contains("excluded_from_bom"));
+    assert!(!import.parts[2].revision_json.contains("excluded_from_bom"));
+    assert!(!import.parts[0].details_json.contains("excluded_from_bom"));
 }
 
 #[test]
@@ -558,7 +572,7 @@ fn footprint_choices_that_disagree_on_the_bom_are_an_import_problem() {
     let excluded: Vec<(&str, bool)> = import
         .parts
         .iter()
-        .map(|part| (part.ipn.as_str(), part.snapshot.excluded_from_bom))
+        .map(|part| (part.ipn.as_str(), part.revision.excluded_from_bom))
         .collect();
     // A choice that is not marked, or that cannot be read (KiCad's own
     // library), leaves the setting unset; all choices marked sets it.
@@ -612,7 +626,7 @@ fn unknown_mpn_columns_are_import_problems() {
         )]
     );
     let names: Vec<&str> = import.parts[0]
-        .snapshot
+        .details
         .fields
         .iter()
         .map(|field| field.name.as_str())
@@ -690,7 +704,7 @@ fn current_after(import: &CsvImport) -> CurrentCad {
         .iter()
         .map(|part| {
             let bindings = part
-                .snapshot
+                .revision
                 .cad_references
                 .iter()
                 .filter_map(|reference| match &reference.target {
@@ -715,7 +729,7 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
     let plan = || CsvCatalog::new(root.path()).import("g-res", None).unwrap();
     let footprint_target = |import: &CsvImport| {
         import.parts[0]
-            .snapshot
+            .revision
             .cad_references
             .iter()
             .find(|reference| reference.role == CadReferenceRole::Footprint)
@@ -747,7 +761,7 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
             ("g-res:R_0603", 1, 1)
         ]
     );
-    assert!(again.parts[0].snapshot_json == first.parts[0].snapshot_json);
+    assert!(again.parts[0].revision_json == first.parts[0].revision_json);
 
     // Footprint content B: revision 2. Then A again: revision 3, not 1.
     let path = root.path().join("footprints/g-res.pretty/R_0603.kicad_mod");
@@ -777,12 +791,12 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
     };
     assert_eq!(number, 3);
     assert_ne!(
-        third.parts[0].snapshot_sha256,
-        first.parts[0].snapshot_sha256
+        third.parts[0].revision_sha256,
+        first.parts[0].revision_sha256
     );
     assert_eq!(
-        third.parts[0].snapshot.canonical_json(),
-        third.parts[0].snapshot_json
+        third.parts[0].revision.canonical_json(),
+        third.parts[0].revision_json
     );
 
     // A part that still binds revision 1 (it missed revision 2, say because
@@ -796,7 +810,7 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
         panic!("the footprint is bound");
     };
     assert_eq!(number, 1);
-    assert_eq!(kept.parts[0].snapshot_json, first.parts[0].snapshot_json);
+    assert_eq!(kept.parts[0].revision_json, first.parts[0].revision_json);
 
     // A new 3D model revision makes a new footprint revision that names it.
     let after_third = current_after(&third);
@@ -857,5 +871,5 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
         panic!("the footprint is bound");
     };
     assert_eq!(number, 3);
-    assert_eq!(kept.parts[0].snapshot_json, third.parts[0].snapshot_json);
+    assert_eq!(kept.parts[0].revision_json, third.parts[0].revision_json);
 }

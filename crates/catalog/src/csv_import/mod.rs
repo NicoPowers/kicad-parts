@@ -1,15 +1,17 @@
 //! Turns one file of the read-only CSV catalog (such as `g-res`, that is
-//! `database/g-res.csv`) into a [`CsvImport`]: parts with their first
-//! revision, the CAD items, CAD item revisions and blobs they use, and
-//! every import problem. Nothing here writes anywhere; the same inputs
+//! `database/g-res.csv`) into a [`CsvImport`]: parts with their part
+//! details and first revision, the CAD items, CAD item revisions and blobs
+//! they use, and every import problem. Nothing here writes anywhere; the same inputs
 //! always give the same [`CsvImport`].
 //!
 //! Every source field ends up in exactly one place (see [`route_column`]
 //! and [`route_substitutes_csv_column`]):
 //!
-//! - the part details of the revision: the IPN, every column that
-//!   describes the part, and the manufacturer parts (`MPN` and
-//!   `Manufacturer` of the row, then of each `substitutes.csv` row);
+//! - the part details: the IPN, every column that describes the part, and
+//!   the manufacturer parts (`MPN` and `Manufacturer` of the row, then of
+//!   each `substitutes.csv` row);
+//! - the part revision: the `Symbol` and `Footprint` columns exactly as
+//!   written, and the CAD item revisions they bind;
 //! - supplier data, kept in the revision's [`Source`] and never in its
 //!   part details (supplier part numbers and prices);
 //! - an import problem, for anything the import cannot place, such as a
@@ -17,7 +19,7 @@
 //!   datasheet, an extra MPN (`MPN2`) whose manufacturer the CSV file does
 //!   not name, or MPNs still to be confirmed (`MPN TBC`).
 //!
-//! Excluded from BOM is set in the part details only from explicit
+//! Excluded from BOM is set in the part revision only from explicit
 //! evidence in the CAD libraries: a local symbol the part uses says
 //! `(in_bom no)`, or every footprint choice is a local footprint with
 //! `exclude_from_bom` in its `(attr ...)`. If only some footprint choices
@@ -40,7 +42,7 @@ use crate::ids::{CadItemRevisionId, ImportProblemId, PartId};
 use crate::ipn::Ipn;
 use crate::part::{
     CadReference, CadReferenceRole, CadReferenceTarget, DetailField, ManufacturerPart,
-    PART_DETAILS_SCHEMA, PartDetails,
+    PART_DETAILS_SCHEMA, PART_REVISION_SCHEMA, PartDetails, PartRevision,
 };
 use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
 use kicad_integration::{LibRef, LibraryResolver, ResolveError};
@@ -78,6 +80,9 @@ pub enum ColumnRoute {
     Ipn,
     /// A field of the part details, under the column's name.
     PartDetails,
+    /// `Symbol` or `Footprint`: a CAD field of the part revision, kept
+    /// exactly as written, whose references bind CAD item revisions.
+    Cad,
     /// The main manufacturer part's MPN, in the part details.
     MainMpn,
     /// The main manufacturer part's manufacturer, in the part details.
@@ -121,6 +126,7 @@ pub fn route_column(name: &str) -> ColumnRoute {
         "MPN" => ColumnRoute::MainMpn,
         "Manufacturer" => ColumnRoute::MainManufacturer,
         "MPN TBC" => ColumnRoute::MpnToBeConfirmed,
+        "Symbol" | "Footprint" => ColumnRoute::Cad,
         name if is_extra_mpn_column(name) => ColumnRoute::ExtraMpn,
         name if SUPPLIER_DATA_COLUMNS.contains(&name) => ColumnRoute::SupplierData,
         name if name.to_ascii_lowercase().contains("mpn") => ColumnRoute::UnknownMpn,
@@ -186,7 +192,7 @@ pub struct SupplierData {
     pub value: String,
 }
 
-/// Where a part revision came from: one CSV row, exactly.
+/// Where a part's details and revision came from: one CSV row, exactly.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Source {
     pub schema: String,
@@ -235,14 +241,19 @@ pub struct CadItemSource {
     pub byte_range: Option<[u64; 2]>,
 }
 
-/// A part and the revision this import would publish for it.
+/// A part, and the part details and revision this import would publish
+/// for it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PartDraft {
     pub id: PartId,
     pub ipn: Ipn,
-    pub snapshot: PartDetails,
-    pub snapshot_json: String,
-    pub snapshot_sha256: String,
+    pub details: PartDetails,
+    pub details_json: String,
+    pub details_sha256: String,
+    pub revision: PartRevision,
+    pub revision_json: String,
+    pub revision_sha256: String,
+    /// The CSV row both came from.
     pub source: Source,
     pub source_json: String,
 }
@@ -357,7 +368,8 @@ impl CsvImport {
             push(&revision.source_json);
         }
         for part in &self.parts {
-            push(&part.snapshot_sha256);
+            push(&part.details_sha256);
+            push(&part.revision_sha256);
             push(&part.source_json);
         }
         for problem in &self.problems {
@@ -430,7 +442,7 @@ impl CsvImport {
         let no_bindings = BTreeMap::new();
         for part in &mut numbered.parts {
             let kept = current.parts.get(part.ipn.as_str()).unwrap_or(&no_bindings);
-            for reference in &mut part.snapshot.cad_references {
+            for reference in &mut part.revision.cad_references {
                 if let CadReferenceTarget::CadItemRevision {
                     cad_item,
                     number,
@@ -443,8 +455,8 @@ impl CsvImport {
                     }
                 }
             }
-            part.snapshot_json = part.snapshot.canonical_json();
-            part.snapshot_sha256 = sha256_hex(&part.snapshot_json);
+            part.revision_json = part.revision.canonical_json();
+            part.revision_sha256 = sha256_hex(&part.revision_json);
         }
         numbered
     }
@@ -822,6 +834,7 @@ impl<'a> Planner<'a> {
     ) -> Result<PartDraft, ImportError> {
         let value = |index: usize| record.fields.get(index).cloned().unwrap_or_default();
         let mut fields = Vec::new();
+        let mut cad_fields = Vec::new();
         let mut supplier_data = Vec::new();
         let mut mpn = None;
         let mut manufacturer = None;
@@ -830,6 +843,10 @@ impl<'a> Planner<'a> {
             match route_column(header) {
                 ColumnRoute::Ipn => {}
                 ColumnRoute::PartDetails => fields.push(DetailField {
+                    name: header.clone(),
+                    value: value(index),
+                }),
+                ColumnRoute::Cad => cad_fields.push(DetailField {
                     name: header.clone(),
                     value: value(index),
                 }),
@@ -1079,11 +1096,16 @@ impl<'a> Planner<'a> {
         }
         let excluded_from_bom = symbol_marked || all_choices_marked;
 
-        let snapshot = PartDetails {
+        let details = PartDetails {
             schema: PART_DETAILS_SCHEMA.to_owned(),
             ipn: ipn.as_str().to_owned(),
             fields,
             manufacturer_parts,
+        };
+        let revision = PartRevision {
+            schema: PART_REVISION_SCHEMA.to_owned(),
+            ipn: ipn.as_str().to_owned(),
+            cad_fields,
             cad_references,
             excluded_from_bom,
         };
@@ -1101,14 +1123,18 @@ impl<'a> Planner<'a> {
             supplier_data,
             substitutes_csv_rows,
         };
-        let snapshot_json = snapshot.canonical_json();
+        let details_json = details.canonical_json();
+        let revision_json = revision.canonical_json();
         Ok(PartDraft {
             id: PartId::for_ipn(ipn),
             ipn: ipn.clone(),
-            snapshot_sha256: sha256_hex(&snapshot_json),
-            snapshot_json,
+            details_sha256: sha256_hex(&details_json),
+            details_json,
+            details,
+            revision_sha256: sha256_hex(&revision_json),
+            revision_json,
+            revision,
             source_json: serde_json::to_string(&source).expect("source serializes"),
-            snapshot,
             source,
         })
     }
