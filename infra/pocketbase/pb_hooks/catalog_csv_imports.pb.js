@@ -15,6 +15,9 @@
 //               revision: { snapshot, snapshotSha256 }, source }],
 //     problems: [{ id, code, subject, path, location, message, detail }] }
 //
+// `csvFile` is a plain name of at most 64 characters: a letter or digit,
+// then letters, digits and . _ - (such as g-res); anything else is refused
+// (400), so importers can put it in a filter as it is.
 // Every run sends exactly one catalog-csv source (database/<csvFile>.csv)
 // and one substitutes-csv source (database/substitutes.csv). `rows` is
 // given for these two only: every row's exact bytes, in file order, none
@@ -198,6 +201,9 @@ routerAdd(
       fail("reason is required");
     }
     const csvFile = text(body, "csvFile", 100, true);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(csvFile)) {
+      fail("the CSV file name may only contain letters, digits and . _ -, start with a letter or digit, and be at most 64 characters long");
+    }
     const sourceCommit = text(body, "sourceCommit", 100, false);
     if (sourceCommit !== "" && !/^[0-9a-f]{40}(\+dirty)?$/.test(sourceCommit)) {
       fail(

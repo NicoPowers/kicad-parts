@@ -882,6 +882,25 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
             "source commit must be empty or a commit ID of 40 lowercase hex digits",
         );
     }
+    // A CSV file name is plain, so importers can put it in a filter as it
+    // is (read_import_state).
+    for (name, csv_file) in [
+        ("backslash", "g-res\\x".to_owned()),
+        ("trailing-backslash", "g-res\\".to_owned()),
+        ("tab", "g\tres".to_owned()),
+        ("newline", "g\nres".to_owned()),
+        ("quote", "g\"res".to_owned()),
+        ("space", "g res".to_owned()),
+        ("slash", "sub/g-res".to_owned()),
+        ("leading-dot", ".g-res".to_owned()),
+        ("too-long", "g".repeat(65)),
+    ] {
+        refused(
+            name,
+            &|body| body["csvFile"] = csv_file.clone().into(),
+            "CSV file name may only contain letters, digits and . _ -",
+        );
+    }
     // Allowing uncommitted changes when there are none would leave a wrong,
     // permanent record.
     for source_commit in [commit.clone(), String::new()] {
