@@ -1335,3 +1335,94 @@ fn a_conflict_while_a_file_is_chosen() {
     };
     assert_eq!(revision, Some(4));
 }
+
+/// A download with two symbol files and two footprints: the engineer picks
+/// the second of each, and the part uses exactly those.
+#[test]
+fn a_download_with_two_symbols_and_two_footprints() {
+    let team = Team::start();
+    let zip = zip_of(&[
+        (
+            "KiCad/C_One.kicad_sym",
+            symbol_named("C_One", "TWO-1").as_bytes(),
+        ),
+        (
+            "KiCad/C_Two.kicad_sym",
+            symbol_named("C_Two", "TWO-2").as_bytes(),
+        ),
+        (
+            "KiCad/C_0603_One.kicad_mod",
+            footprint_named("C_0603_One").as_bytes(),
+        ),
+        (
+            "KiCad/C_0805_Two.kicad_mod",
+            footprint_named("C_0805_Two").as_bytes(),
+        ),
+        ("3D/C_0603_One.stp", MODEL),
+        ("3D/C_0805_Two.stp", MODEL),
+    ]);
+    let first = team.read(&zip);
+    assert_eq!(first.symbols.len(), 2, "{:?}", first.symbols);
+    assert_eq!(first.footprints.len(), 2, "{:?}", first.footprints);
+    let mut again = request(&zip, "download.zip");
+    again.symbol = Some(1);
+    again.footprint = Some(1);
+    let reading = team.browser.read_download(&again, &team.team).unwrap();
+    assert_eq!(
+        (
+            reading.symbol_name.as_str(),
+            reading.footprint_name.as_str()
+        ),
+        ("C_Two", "C_0805_Two")
+    );
+    assert_eq!(reading.mpn, "TWO-2");
+    // The model the second footprint names.
+    assert_eq!(reading.model, Some(1), "{:?}", reading.models);
+    let saved = team.add(&team.team, new_part(&reading, "CAP-0004-0001", "cap"));
+    let PublishResult::Added { part } = saved else {
+        panic!("{saved:?}");
+    };
+    assert_eq!(part.revision.cad_fields[0].value, "g-cap:C_Two");
+    assert_eq!(
+        part.revision.cad_fields[1].value,
+        "g-Capacitor_SMD:C_0805_Two"
+    );
+}
+
+/// 3D model file names as vendors write them: brackets, an apostrophe, a
+/// plus, non-ASCII letters. (A double quote, which Windows does not allow
+/// in file names, is refused with an unclear message; see the QA report.)
+#[test]
+fn model_file_names_with_odd_characters() {
+    let team = Team::start();
+    for (number, model) in [
+        "C_0603 (Murata).step",
+        "C_0603_'GRM'.step",
+        "C+0603.step",
+        "Kondensator_µF_0603.step",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let footprint = footprint_named(&format!("C_0603_Odd{number}")).replace(
+            &format!("${{KIPRJMOD}}/3D/C_0603_Odd{number}.stp"),
+            &format!("${{KIPRJMOD}}/3D/{model}"),
+        );
+        let zip = zip_of(&[
+            (
+                "C_Odd.kicad_sym",
+                symbol_named(&format!("C_Odd{number}"), &format!("ODD-{number}")).as_bytes(),
+            ),
+            ("C_0603_Odd.kicad_mod", footprint.as_bytes()),
+            (&format!("3D/{model}"), MODEL),
+        ]);
+        let reading = team.read(&zip);
+        assert_eq!(reading.model, Some(0), "{model}: {:?}", reading.notes);
+        let ipn = format!("CAP-{:04}-0001", 10 + number);
+        let saved = team.add(&team.team, new_part(&reading, &ipn, "cap"));
+        assert!(
+            matches!(saved, PublishResult::Added { .. }),
+            "{model}: {saved:?}"
+        );
+    }
+}
