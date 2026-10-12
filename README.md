@@ -66,7 +66,11 @@ If the symbol and footprint already exist, adding a new part is simple as:
 3. run `update_db.sh` (or use the GUI "Generate DB" button)
 4. No need to restart KiCad 9
 
-If you need to add a symbol or footprint, add to the matching `g-XXX.kicad_sym`, or `g-XXX.pretty` libraries.
+If you need to add a symbol, footprint or 3D model, put it here:
+
+- A symbol goes in the library for its part category, `symbols/g-<category>.kicad_sym` (for example `g-res.kicad_sym`).
+- A footprint goes in the library for its package, `footprints/g-<KiCad footprint library>.pretty`, named like the KiCad library where that kind of footprint lives (for example `g-Resistor_SMD.pretty` or `g-Package_SO.pretty`).
+- A 3D model goes next to its footprint's library, in `3d-models/g-<footprint library>.3dshapes/`, named like its footprint (for example `3d-models/g-Package_SO.3dshapes/TI_SO-PowerPAD-8.step`).
 
 ## Implementation details
 The IPN (Internal Part Number) format used is specified in [this document](partnumbers.md).
