@@ -55,7 +55,7 @@ _Avoid_: Audit Event, log entry
 ### Grouping and sourcing
 
 **Category**:
-A group of similar parts that share the same fields, such as chip resistors. A supplier's category is only a suggestion until someone confirms it.
+A group of similar parts that share the same fields, such as chip resistors. It is the only grouping people see: KiCad's part chooser shows one group per category, and the symbols the team makes are grouped the same way. Footprints are grouped by package instead, because one package serves many categories, and each 3D model goes with its footprint. A supplier's category is only a suggestion until someone confirms it.
 _Avoid_: Catalog Category, type, class, IPN prefix
 
 **Manufacturer part**:
