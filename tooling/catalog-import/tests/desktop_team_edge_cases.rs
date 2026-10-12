@@ -296,7 +296,7 @@ fn someone_else_saving_exactly_your_changes_is_not_a_conflict() {
     };
     assert_eq!(
         message,
-        "Someone else already saved the same changes, so nothing more was saved."
+        "These changes are already saved, so nothing more was saved."
     );
     assert_eq!(part.details.number, 2);
     assert_eq!(part.details.field("Value"), Some("47R"));

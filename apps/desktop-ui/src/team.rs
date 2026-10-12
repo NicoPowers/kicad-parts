@@ -499,16 +499,6 @@ fn published(ui: TeamUi, part: RwSignal<Option<TeamPart>>, result: Result<Publis
             ui.notice.set(Some(Notice::Done(message)));
             scroll_column_to_top();
         }
-        // Saving on top of their changes added nothing: theirs already
-        // hold yours, so the conflict closes instead of staying open.
-        Ok(PublishResult::NothingToSave { .. }) if ui.conflict.with_untracked(Option::is_some) => {
-            ui.editing.set(None);
-            ui.conflict.set(None);
-            ui.notice.set(Some(Notice::Done(
-                "Someone else already saved the same changes, so nothing more was saved.".into(),
-            )));
-            scroll_column_to_top();
-        }
         Ok(PublishResult::NothingToSave { message }) => ui.notice.set(Some(Notice::Done(message))),
         Ok(PublishResult::Conflict(conflict)) => {
             part.set(Some(conflict.part.clone()));
@@ -637,9 +627,10 @@ pub fn TeamColumn(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) 
             ui.notice.set(Some(Notice::Problem(message.into())));
         }
     });
-    // If someone else archives or unarchives the revision whose form is
-    // open, close the form and say so plainly, rather than turning it into
-    // the opposite action with the reason still in it.
+    // If the revision whose form is open is archived or unarchived
+    // elsewhere (by someone else, or in another window), close the form
+    // and say so plainly, rather than turning it into the opposite action
+    // with the reason still in it.
     // While this app's own request is out, a live update may already show
     // its result; that is not someone else's doing.
     Effect::new(move |_| {
@@ -656,10 +647,13 @@ pub fn TeamColumn(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) 
         if done {
             ui.archiving.set(None);
             ui.archive_reason.set(String::new());
-            let what = if wanted { "archived" } else { "unarchived" };
-            ui.notice.set(Some(Notice::Problem(format!(
-                "Someone else already {what} revision {number}, so nothing was saved."
-            ))));
+            let state = if wanted {
+                "already archived"
+            } else {
+                "already in use again"
+            };
+            ui.notice
+                .set(Some(Notice::Done(format!("Revision {number} is {state}."))));
         }
     });
     view! {

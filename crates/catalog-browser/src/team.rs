@@ -394,8 +394,9 @@ impl TeamCatalog {
         let result = self.published(&client, &request.ipn, reply, |details, revision, part| {
             edit_conflict(&request, details, revision, part)
         })?;
-        // Someone else already saved every change you made: nothing of
-        // yours is left to compare or to save on top.
+        // Every change you made is already saved (by someone else, or by
+        // you in another window): nothing of yours is left to compare or
+        // to save on top.
         Ok(match result {
             PublishResult::Conflict(conflict)
                 if !conflict.rows.iter().any(|row| row.you_changed) =>
@@ -826,9 +827,8 @@ fn plain_reason(error: &CollabError) -> String {
     }
 }
 
-/// What to say when someone else already saved the same changes.
-const ALREADY_SAVED: &str =
-    "Someone else already saved the same changes, so nothing more was saved.";
+/// What to say when every change an edit makes is already saved.
+const ALREADY_SAVED: &str = "These changes are already saved, so nothing more was saved.";
 
 /// What to say when a save could not reach the team server. It does not
 /// claim that nothing was saved: the answer to a request that arrived may

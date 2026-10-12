@@ -279,7 +279,7 @@ describe('team catalog: edge cases', () => {
     await editAsSomeoneElse(server.url, otherToken, IPN, { Tolerance: '0.25%' }, 'Tighter tolerance');
     await waitForHistory(count + 1);
     await clickButton('.edit-form', 'Save');
-    await waitForText(browser, NOTICE, 'Someone else already saved the same changes, so nothing more was saved.');
+    await waitForText(browser, NOTICE, 'These changes are already saved, so nothing more was saved.');
     assert.equal((await browser.$$('.conflict')).length, 0, 'no conflict is shown');
     assert.equal((await browser.$$('.edit-form')).length, 0, 'the edit form closed');
     assert.equal(await fieldValue('Tolerance'), '0.25%');

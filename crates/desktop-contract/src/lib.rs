@@ -552,7 +552,7 @@ pub enum PublishResult {
     },
     /// Nothing would change, so nothing was saved.
     NothingToSave { message: String },
-    /// Someone else already saved every change the edit makes, so nothing
+    /// Every change the edit makes is already saved, so nothing
     /// more was saved. `part` is the part as it is now.
     AlreadySaved { message: String, part: TeamPart },
     /// Someone else saved the details or the revision the edit started
