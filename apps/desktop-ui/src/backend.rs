@@ -1,9 +1,9 @@
 //! Calls into the Tauri shell. Payload shapes come from `desktop-contract`.
 
 use desktop_contract::{
-    AppStatus, PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
-    SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest, TeamEditRequest,
-    TeamPart, TeamStatus, command,
+    AppStatus, FilePreviewRequest, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
+    SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
+    TeamEditRequest, TeamFileReading, TeamFileRequest, TeamPart, TeamStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -128,4 +128,24 @@ pub async fn team_archive(request: TeamArchiveRequest) -> Result<PublishResult, 
 
 pub async fn team_csv_review(request: TeamCsvReviewRequest) -> Result<PublishResult, String> {
     call(command::TEAM_CSV_REVIEW, &CsvReviewArgs { request }).await
+}
+
+#[derive(Serialize)]
+struct ReadFileArgs {
+    request: TeamFileRequest,
+}
+
+#[derive(Serialize)]
+struct PreviewFileArgs {
+    request: FilePreviewRequest,
+}
+
+/// Reads a symbol library or footprint file chosen in Edit part.
+pub async fn team_read_file(request: TeamFileRequest) -> Result<TeamFileReading, String> {
+    call(command::TEAM_READ_FILE, &ReadFileArgs { request }).await
+}
+
+/// Draws a chosen symbol or footprint file before it is saved.
+pub async fn team_preview_file(request: FilePreviewRequest) -> Result<PreviewOutcome, String> {
+    call(command::TEAM_PREVIEW_FILE, &PreviewFileArgs { request }).await
 }

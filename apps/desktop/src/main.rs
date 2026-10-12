@@ -7,9 +7,9 @@
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
-    AppStatus, PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
-    SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest, TeamEditRequest,
-    TeamPart, TeamStatus,
+    AppStatus, FilePreviewRequest, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
+    SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
+    TeamEditRequest, TeamFileReading, TeamFileRequest, TeamPart, TeamStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -326,6 +326,24 @@ async fn team_csv_review(
     blocking(move || team.csv_review(request)).await?
 }
 
+#[tauri::command]
+async fn team_read_file(
+    team: State<'_, Team>,
+    request: TeamFileRequest,
+) -> Result<TeamFileReading, String> {
+    let team = team.inner().clone();
+    blocking(move || team.read_file(request)).await?
+}
+
+#[tauri::command]
+async fn team_preview_file(
+    browser: State<'_, Browser>,
+    request: FilePreviewRequest,
+) -> Result<PreviewOutcome, String> {
+    let browser = browser.inner().clone();
+    blocking(move || browser.preview_file(&request)).await
+}
+
 fn main() {
     let options = match LaunchOptions::parse(std::env::args_os().skip(1)) {
         Ok(options) => options,
@@ -399,6 +417,8 @@ fn main() {
             team_edit,
             team_archive,
             team_csv_review,
+            team_read_file,
+            team_preview_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -502,6 +522,8 @@ mod tests {
             command::TEAM_EDIT,
             command::TEAM_ARCHIVE,
             command::TEAM_CSV_REVIEW,
+            command::TEAM_READ_FILE,
+            command::TEAM_PREVIEW_FILE,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

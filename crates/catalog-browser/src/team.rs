@@ -17,11 +17,12 @@
 
 use crate::PartValues;
 use catalog::pocketbase::{
-    ArchiveCommand, ArchiveOutcome, CSV_CAD_DIFFERS, CSV_DETAILS_DIFFER, ConflictingRecord,
-    CsvReviewCommand, CsvReviewOutcome, EditCommand, MANUFACTURER_PARTS_FIELD, PublishOutcome,
-    PublishReply, StoredArchiveEntry, StoredBlob, StoredCadItemRevision, StoredChange,
-    StoredCsvReview, StoredPart, StoredPartRevision, archive_entries_of, archived_numbers,
-    changes_by_id, csv_reviews_of, latest_import_run, part_by_ipn, part_details_of, part_revisions,
+    ArchiveCommand, ArchiveOutcome, CSV_CAD_DIFFERS, CSV_CAD_ITEM_KEPT, CSV_DETAILS_DIFFER,
+    CadUpload, ConflictingRecord, CsvReviewCommand, CsvReviewOutcome, EDIT_BODY_LIMIT, EditCommand,
+    MANUFACTURER_PARTS_FIELD, PublishOutcome, PublishReply, StoredArchiveEntry, StoredBlob,
+    StoredCadItemRevision, StoredChange, StoredCsvReview, StoredPart, StoredPartRevision,
+    archive_entries_of, archived_numbers, cad_item_revisions_in_changes, changes_by_id,
+    csv_reviews_of, has_cad_item, latest_import_run, part_by_ipn, part_details_of, part_revisions,
     problems_of, recorded_csv_document, submit_archive, submit_csv_review, submit_edit,
 };
 use catalog::replica::CatalogReplica;
@@ -32,9 +33,10 @@ use catalog::{
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
     ArchiveNote, CadItemUse, ConflictRow, CsvChangeRow, CsvChanges, CurrentDetails,
-    CurrentRevision, DetailChange, Field, HistoryEntry, LiveUpdates, ManufacturerPart, PreviewKind,
-    PublishResult, RevisionStatus, SignInRequest, TeamArchiveRequest, TeamConflict,
-    TeamCsvReviewRequest, TeamEditRequest, TeamPart, TeamSession, TeamStatus,
+    CurrentRevision, DetailChange, Field, FileKind, HistoryEntry, LiveUpdates, ManufacturerPart,
+    OlderUse, PreviewKind, PublishResult, RevisionStatus, SignInRequest, TeamArchiveRequest,
+    TeamConflict, TeamCsvReviewRequest, TeamEditRequest, TeamFile, TeamFileReading,
+    TeamFileRequest, TeamPart, TeamSession, TeamStatus,
 };
 use kicad_integration::library_file::{
     footprint_says_excluded_from_bom, symbol_entries_say_not_in_bom,
@@ -378,6 +380,10 @@ impl TeamCatalog {
         let fields = detail_fields(&request.fields);
         let parts = catalog_parts(&request.manufacturer_parts);
         let cad_fields = detail_fields(&request.cad_fields);
+        let uploads = match uploads_of(&request.files, &request.cad_fields) {
+            Ok(uploads) => uploads,
+            Err(message) => return Ok(PublishResult::Refused { message }),
+        };
         let mut command = EditCommand::new(&request.ipn, &request.reason);
         command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
         if fields != base_details.fields || parts != base_details.manufacturer_parts {
@@ -387,15 +393,24 @@ impl TeamCatalog {
                 details.manufacturer_parts = parts;
             }
         }
-        if cad_fields != base_revision.cad_fields {
+        if cad_fields != base_revision.cad_fields || !uploads.is_empty() {
             command = command.editing_cad(base_revision, request.expected_revision);
             if let Some(cad) = &mut command.cad {
                 cad.fields = cad_fields;
+                cad.uploads = uploads;
             }
         }
         if command.details.is_none() && command.cad.is_none() {
             return Ok(PublishResult::NothingToSave {
                 message: "Nothing changed, so nothing was saved.".into(),
+            });
+        }
+        if command.body().to_string().len() > EDIT_BODY_LIMIT {
+            return Ok(PublishResult::Refused {
+                message: format!(
+                    "The files are too big to save together: one save can send at most {} MB. Nothing was saved.",
+                    EDIT_BODY_LIMIT / (1024 * 1024)
+                ),
             });
         }
         let reply = submit_edit(&client, &command);
@@ -522,6 +537,90 @@ impl TeamCatalog {
         }
     }
 
+    /// Reads a symbol library or footprint file chosen in Edit part: the
+    /// symbols it holds (or the footprint's name), the one to pick first,
+    /// the library to suggest, and the Catalog 3D models a footprint names
+    /// that the Catalog does not have yet.
+    pub fn read_file(&self, request: TeamFileRequest) -> Result<TeamFileReading, String> {
+        let bytes = decoded(&request.base64, &request.file_name)?;
+        let current = LibRef::parse(request.current_reference.trim()).ok();
+        let current_library = current
+            .as_ref()
+            .map(|reference| reference.library.clone())
+            .filter(|library| library.starts_with("g-"));
+        let current_name = current.map(|reference| reference.item);
+        match request.kind {
+            FileKind::Symbol => {
+                let file = catalog::cad_file::read_symbol_file(&bytes)?;
+                let chosen = current_name
+                    .filter(|name| file.names.contains(name))
+                    .unwrap_or_else(|| file.names[0].clone());
+                let library = match current_library {
+                    Some(library) => library,
+                    None => self.csv_file_of(&request.ipn)?.unwrap_or_default(),
+                };
+                Ok(TeamFileReading {
+                    names: file.names,
+                    chosen,
+                    library,
+                    missing_models: Vec::new(),
+                })
+            }
+            FileKind::Footprint => {
+                let file = catalog::cad_file::read_footprint_file(&bytes)?;
+                let library = current_library.unwrap_or_else(|| {
+                    catalog::cad_file::suggested_footprint_library(&file.name)
+                        .unwrap_or_default()
+                        .to_owned()
+                });
+                let client = self.client()?;
+                let mut missing_models = Vec::new();
+                for key in file.models.iter().filter_map(|model| model.key.as_ref()) {
+                    let known =
+                        has_cad_item(&client, CadItemKind::Model3d, key).map_err(|error| {
+                            format!(
+                                "The team catalog could not be checked because {}.",
+                                plain_reason(&error)
+                            )
+                        })?;
+                    if !known && !missing_models.contains(key) {
+                        missing_models.push(key.clone());
+                    }
+                }
+                Ok(TeamFileReading {
+                    names: vec![file.name.clone()],
+                    chosen: file.name,
+                    library,
+                    missing_models,
+                })
+            }
+            FileKind::Model3d => Err("Choose a 3D model for a footprint's 3D model.".into()),
+        }
+    }
+
+    /// The CSV file `ipn` was first imported from, such as `g-res`, if it
+    /// came from the CSV catalog.
+    fn csv_file_of(&self, ipn: &str) -> Result<Option<String>, String> {
+        let client = self.client()?;
+        let fail = |error: CollabError| {
+            format!(
+                "The team catalog could not be checked because {}.",
+                plain_reason(&error)
+            )
+        };
+        let Some(part) = part_by_ipn(&client, ipn).map_err(fail)? else {
+            return Ok(None);
+        };
+        let revisions = part_revisions(&client, &part.id).map_err(fail)?;
+        Ok(revisions.first().and_then(|revision| {
+            serde_json::from_str::<serde_json::Value>(&revision.source)
+                .ok()?
+                .get("csv_file")?
+                .as_str()
+                .map(str::to_owned)
+        }))
+    }
+
     fn published(
         &self,
         client: &PocketBaseClient,
@@ -535,10 +634,27 @@ impl TeamCatalog {
     ) -> Result<PublishResult, String> {
         match reply {
             Ok(reply) => match reply.outcome {
-                PublishOutcome::Applied { revision, .. } => {
+                PublishOutcome::Applied {
+                    revision,
+                    new_cad_item_revisions,
+                    ..
+                } => {
+                    let older_uses = new_cad_item_revisions
+                        .into_iter()
+                        .filter_map(|new| {
+                            let other_parts = new.other_parts.filter(|count| *count > 0)?;
+                            Some(OlderUse {
+                                kind: new.kind,
+                                reference: new.key,
+                                number: new.number,
+                                other_parts,
+                            })
+                        })
+                        .collect();
                     saved_then(reload(client, ipn), |part| PublishResult::Saved {
                         revision: revision.map(|revision| revision.number),
                         part,
+                        older_uses,
                     })
                 }
                 PublishOutcome::Noop { .. } => Ok(PublishResult::NothingToSave {
@@ -912,6 +1028,62 @@ fn attempt_id(sent: Option<&str>) -> Result<CorrelationId, String> {
     }
 }
 
+/// A chosen file's bytes from the base64 the UI sends.
+pub(crate) fn decoded(base64: &str, file_name: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(base64)
+        .map_err(|_| format!("The file {file_name} could not be read."))
+}
+
+/// The uploads for the files of an edit: a symbol or footprint file is for
+/// the reference its field names (a footprint's first choice), and is read
+/// the way the import reads the CSV catalog's files.
+fn uploads_of(files: &[TeamFile], cad_fields: &[Field]) -> Result<Vec<CadUpload>, String> {
+    let field = |name: &str| {
+        cad_fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| field.value.trim().to_owned())
+            .unwrap_or_default()
+    };
+    for kind in [FileKind::Symbol, FileKind::Footprint] {
+        if files.iter().filter(|file| file.kind == kind).count() > 1 {
+            return Err("Choose one file for each of the symbol and the footprint.".into());
+        }
+    }
+    let mut uploads = Vec::new();
+    for file in files {
+        let bytes = decoded(&file.base64, &file.file_name)?;
+        let upload = match file.kind {
+            FileKind::Symbol => {
+                let reference = field("Symbol");
+                let name = file
+                    .symbol
+                    .as_deref()
+                    .ok_or_else(|| "Choose which symbol of the file to use.".to_owned())?;
+                catalog::cad_file::symbol_upload(&bytes, name, &reference, &file.file_name)?
+            }
+            FileKind::Footprint => {
+                let footprint = field("Footprint");
+                let reference = footprint_choices(&footprint)
+                    .first()
+                    .map(|choice| (*choice).to_owned())
+                    .unwrap_or_default();
+                catalog::cad_file::footprint_upload(&bytes, &reference, &file.file_name)?
+            }
+            FileKind::Model3d => {
+                let key = file.model_key.as_deref().ok_or_else(|| {
+                    format!("Say which 3D model of the footprint {} is.", file.file_name)
+                })?;
+                catalog::cad_file::model_upload(&bytes, key, &file.file_name)?
+            }
+        };
+        uploads.push(upload);
+    }
+    Ok(uploads)
+}
+
 /// Checks the address, signs in, reads the account, and starts following.
 fn sign_in(request: &SignInRequest) -> Result<(Session, String), String> {
     let server_url = loopback_url(&request.server_url)?;
@@ -1232,6 +1404,26 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
             entry.changes.extend(changes);
         }
     }
+    // The CAD item revisions an edit's files made, each with the file it
+    // came from.
+    let edits: Vec<&str> = revisions
+        .iter()
+        .map(|revision| revision.change.as_str())
+        .filter(|change| {
+            change_records
+                .get(*change)
+                .is_some_and(|c| c.kind == "edit")
+        })
+        .collect();
+    if !edits.is_empty() {
+        for made in cad_item_revisions_in_changes(client, &edits).map_err(fail)? {
+            let (Some(change), Some(row)) = (change_records.get(&made.change), file_row(&made))
+            else {
+                continue;
+            };
+            history_entry(&mut entries, change).changes.push(row);
+        }
+    }
     for entry in &archive_entries {
         if let Some(change) = change_records.get(&entry.change) {
             history_entry(&mut entries, change).archive = Some(archive_note(entry));
@@ -1306,6 +1498,28 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
 /// The history action of a review that accepted CSV values.
 const ACCEPTED: &str = "Accepted CSV values";
 
+/// The history row of a CAD item revision made from a file, such as
+/// `Footprint file`: `R_0603.kicad_mod (footprint revision 2)`; `None` for
+/// one that came from anywhere else.
+fn file_row(made: &StoredCadItemRevision) -> Option<DetailChange> {
+    let source: serde_json::Value = serde_json::from_str(&made.source).ok()?;
+    let file_name = source.get("file_name")?.as_str()?;
+    let snapshot: CadItemDetails = serde_json::from_str(&made.snapshot).ok()?;
+    let (label, what) = match snapshot.kind {
+        CadItemKind::Symbol => ("Symbol file", "symbol"),
+        CadItemKind::Footprint => ("Footprint file", "footprint"),
+        CadItemKind::Model3d => ("3D model file", "3D model"),
+    };
+    Some(DetailChange {
+        label: label.to_owned(),
+        before: String::new(),
+        after: format!(
+            "{file_name} ({what} revision {} of {})",
+            made.number, snapshot.key
+        ),
+    })
+}
+
 /// The snapshots of a part's newest details and newest revision that a CSV
 /// import saved, with the seq of the Change that saved each: what the CSV
 /// said the last time an import applied to it.
@@ -1346,8 +1560,12 @@ fn open_csv_changes(
     describe: impl Fn(&CadReference) -> String,
 ) -> Result<Vec<CsvChanges>, String> {
     let fail = |error: CollabError| error.to_string();
-    let problems =
-        problems_of(client, &part.ipn, &[CSV_DETAILS_DIFFER, CSV_CAD_DIFFERS]).map_err(fail)?;
+    let problems = problems_of(
+        client,
+        &part.ipn,
+        &[CSV_DETAILS_DIFFER, CSV_CAD_DIFFERS, CSV_CAD_ITEM_KEPT],
+    )
+    .map_err(fail)?;
     let last_seen = |cad: bool| -> Option<LastSeen> {
         let code = if cad {
             CSV_CAD_DIFFERS
@@ -1387,14 +1605,18 @@ fn open_csv_changes(
     };
     let seen = [last_seen(false), last_seen(true)];
     let mut runs: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut open: Vec<CsvChanges> = Vec::new();
+    let mut open: Vec<(String, CsvChanges)> = Vec::new();
     for problem in &problems {
         let Some(document) = recorded_csv_document(problem) else {
             continue;
         };
-        let cad = problem.code == CSV_CAD_DIFFERS;
+        // A CSV file for a CAD item made in the app: the import applied
+        // nothing of it, so there is no "last seen" to compare with; only a
+        // review covers it.
+        let kept_cad_item = problem.code == CSV_CAD_ITEM_KEPT;
+        let cad = problem.code == CSV_CAD_DIFFERS || kept_cad_item;
         let csv_sha256 = catalog::sha256_hex(&document);
-        let last = seen[usize::from(cad)].as_ref();
+        let last = seen[usize::from(cad)].as_ref().filter(|_| !kept_cad_item);
         if last.is_some_and(|last| last.sha256 == csv_sha256) {
             continue;
         }
@@ -1423,7 +1645,12 @@ fn open_csv_changes(
         if !runs[csv_file].contains(&problem.id) {
             continue;
         }
-        let mut rows = if cad {
+        let mut rows = if kept_cad_item {
+            let Some(row) = kept_cad_item_row(problem, revision, &describe) else {
+                continue;
+            };
+            vec![row]
+        } else if cad {
             let Ok(csv) = serde_json::from_str::<PartRevision>(&document) else {
                 continue;
             };
@@ -1441,22 +1668,60 @@ fn open_csv_changes(
         if rows.is_empty() {
             continue;
         }
-        open.push(CsvChanges {
-            problem: problem.id.clone(),
-            csv_file: format!("{csv_file}.csv"),
-            cad,
-            expected: if cad {
-                part.current_revision_number
-            } else {
-                part.current_details_number
+        open.push((
+            problem.code.clone(),
+            CsvChanges {
+                problem: problem.id.clone(),
+                csv_file: format!("{csv_file}.csv"),
+                cad,
+                expected: if cad {
+                    part.current_revision_number
+                } else {
+                    part.current_details_number
+                },
+                rows,
             },
-            rows,
-        });
+        ));
     }
-    // Details first; one import run finds at most one of each kind.
-    open.sort_by_key(|changes| changes.cad);
-    open.dedup_by_key(|changes| changes.cad);
-    Ok(open)
+    // Details first; one import run finds at most one of each of the first
+    // two kinds, and one CAD item made in the app per symbol or footprint.
+    open.sort_by(|(a_code, a), (b_code, b)| {
+        (a.cad, a_code, &a.rows[0].field).cmp(&(b.cad, b_code, &b.rows[0].field))
+    });
+    open.dedup_by(|(a_code, a), (b_code, b)| {
+        a_code == b_code && (a_code != CSV_CAD_ITEM_KEPT || a.rows[0].field == b.rows[0].field)
+    });
+    Ok(open.into_iter().map(|(_, changes)| changes).collect())
+}
+
+/// The row of a [`CSV_CAD_ITEM_KEPT`] problem: the Symbol or Footprint, the
+/// exact revision the part uses now, and that the CSV has a changed file for
+/// it, which can only be kept.
+fn kept_cad_item_row(
+    problem: &catalog::pocketbase::StoredImportProblem,
+    revision: &PartRevision,
+    describe: &impl Fn(&CadReference) -> String,
+) -> Option<CsvChangeRow> {
+    let detail: serde_json::Value = serde_json::from_str(&problem.detail).ok()?;
+    let reference = detail.get("reference")?.as_str()?;
+    let (field, role, what) = match detail.get("role")?.as_str()? {
+        "symbol" => ("Symbol", CadReferenceRole::Symbol, "symbol"),
+        _ => ("Footprint", CadReferenceRole::Footprint, "footprint"),
+    };
+    let now = revision
+        .cad_references
+        .iter()
+        .find(|item| item.role == role && item.reference == reference)
+        .map_or_else(|| reference.to_owned(), describe);
+    Some(CsvChangeRow {
+        field: field.to_owned(),
+        now,
+        csv: format!(
+            "A changed file for {reference}. It cannot be accepted here, because this {what} was changed in this app."
+        ),
+        changed_in_csv: true,
+        keep_only: true,
+    })
 }
 
 /// The details fields both have whose values differ, in the part's order,
@@ -1479,6 +1744,7 @@ fn details_rows(
                 csv: theirs.to_owned(),
                 changed_in_csv: before
                     .is_none_or(|before| before.field(&field.name) != Some(theirs)),
+                keep_only: false,
             })
         })
         .collect();
@@ -1489,6 +1755,7 @@ fn details_rows(
             csv: stored_lines(csv),
             changed_in_csv: before
                 .is_none_or(|before| before.manufacturer_parts != csv.manufacturer_parts),
+            keep_only: false,
         });
     }
     rows
@@ -1542,6 +1809,7 @@ fn cad_rows(
             now: now_text,
             csv: csv_text,
             changed_in_csv,
+            keep_only: false,
         });
     }
     rows
@@ -1999,6 +2267,8 @@ fn edit_conflict(
             manufacturer_parts_of(&their_details)
         },
         cad_fields: merged_cad,
+        // Files you chose are still yours to save on top.
+        files: request.files.clone(),
     };
     // The newest of the changes that moved what the edit started from.
     let newest = [details, revision]

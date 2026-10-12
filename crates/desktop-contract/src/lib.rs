@@ -20,6 +20,8 @@ pub mod command {
     pub const TEAM_EDIT: &str = "team_edit";
     pub const TEAM_ARCHIVE: &str = "team_archive";
     pub const TEAM_CSV_REVIEW: &str = "team_csv_review";
+    pub const TEAM_READ_FILE: &str = "team_read_file";
+    pub const TEAM_PREVIEW_FILE: &str = "team_preview_file";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -353,6 +355,12 @@ pub struct CsvChangeRow {
     /// it): accepting it undoes that edit.
     #[serde(default)]
     pub changed_in_csv: bool,
+    /// The CSV's value cannot be accepted here, only kept: the CSV's file
+    /// for a symbol or footprint changed, but that symbol or footprint was
+    /// changed in this app, so the Catalog does not have the CSV's file.
+    /// Choose the file in Edit part to use it.
+    #[serde(default)]
+    pub keep_only: bool,
 }
 
 /// Accept the CSV's values for the fields in `accept` and keep the part's
@@ -519,6 +527,94 @@ pub struct TeamEditRequest {
     pub fields: Vec<Field>,
     pub manufacturer_parts: Vec<ManufacturerPart>,
     pub cad_fields: Vec<Field>,
+    /// Files to use as the Symbol, the Footprint or a footprint's 3D model.
+    /// A symbol or footprint file is for the reference its field names
+    /// when saving.
+    #[serde(default)]
+    pub files: Vec<TeamFile>,
+}
+
+/// What a chosen file is for.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileKind {
+    Symbol,
+    Footprint,
+    Model3d,
+}
+
+/// A file chosen in Edit part.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamFile {
+    pub kind: FileKind,
+    /// The file's name, without its folder.
+    pub file_name: String,
+    /// The file's bytes, in standard base64.
+    pub base64: String,
+    /// For a symbol library, the symbol chosen in it.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// For a 3D model, the `3d-models/...` path the footprint names.
+    #[serde(default)]
+    pub model_key: Option<String>,
+}
+
+/// Read a chosen symbol library or footprint file, for Edit part.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamFileRequest {
+    pub ipn: String,
+    /// [`FileKind::Symbol`] or [`FileKind::Footprint`].
+    pub kind: FileKind,
+    pub file_name: String,
+    /// The file's bytes, in standard base64.
+    pub base64: String,
+    /// The reference the field names now, such as
+    /// `g-Resistor_SMD:R_0603_1608Metric`.
+    pub current_reference: String,
+}
+
+/// What a chosen file holds, and the reference it suggests.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamFileReading {
+    /// The symbols in a symbol library, in file order, or the footprint's
+    /// one name.
+    pub names: Vec<String>,
+    /// The name chosen first: the one named like the current reference,
+    /// otherwise the first.
+    pub chosen: String,
+    /// The library suggested for the reference: the current reference's
+    /// when it is one of the Catalog's (`g-`) libraries, otherwise one from
+    /// the part's CSV file (symbols) or the footprint's package. Blank when
+    /// nothing says, so the person types it.
+    pub library: String,
+    /// For a footprint, the 3D models it names in the Catalog's 3D model
+    /// folder that the Catalog does not have yet, as `3d-models/...` paths.
+    pub missing_models: Vec<String>,
+}
+
+/// Draw a chosen symbol or footprint file before it is saved.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FilePreviewRequest {
+    /// The file and, for a symbol library, the symbol chosen.
+    pub file: TeamFile,
+    /// The reference it will have, such as `g-res:R_US`.
+    pub reference: String,
+    /// As in [`PreviewRequest`].
+    #[serde(default)]
+    pub selection: Option<u64>,
+}
+
+/// A symbol or footprint that a saved edit gave a new revision, which other
+/// parts still use in an older revision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OlderUse {
+    /// `symbol` or `footprint`.
+    pub kind: String,
+    pub reference: String,
+    /// The new revision of the symbol or footprint.
+    pub number: u32,
+    /// How many other parts still use an older revision of it.
+    pub other_parts: u32,
 }
 
 /// What publishing an edit, archive, unarchive or CSV review did.
@@ -530,6 +626,9 @@ pub enum PublishResult {
         /// part details.
         revision: Option<u32>,
         part: TeamPart,
+        /// Symbols and footprints the edit's files gave a new revision.
+        #[serde(default)]
+        older_uses: Vec<OlderUse>,
     },
     /// A revision was archived or unarchived.
     Archived {

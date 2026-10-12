@@ -185,6 +185,7 @@ fn opened(part: &TeamPart, reason: &str) -> TeamEditRequest {
         fields: part.details.fields.clone(),
         manufacturer_parts: part.details.manufacturer_parts.clone(),
         cad_fields: part.revision.cad_fields.clone(),
+        files: Vec::new(),
     }
 }
 

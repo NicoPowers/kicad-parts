@@ -123,6 +123,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         fields: part.details.fields.clone(),
         manufacturer_parts: part.details.manufacturer_parts.clone(),
         cad_fields: part.revision.cad_fields.clone(),
+        files: Vec::new(),
     };
     request
         .fields
@@ -139,7 +140,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     else {
         panic!("not saved");
     };
-    let PublishResult::Saved { revision, part } = team.edit(request.clone()).unwrap() else {
+    let PublishResult::Saved { revision, part, .. } = team.edit(request.clone()).unwrap() else {
         panic!("not saved");
     };
     assert_eq!((again, revision), (None, None));
@@ -230,7 +231,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         ),
         (3, 1)
     );
-    let PublishResult::Saved { revision, part } = team.edit(conflict.merged.clone()).unwrap()
+    let PublishResult::Saved { revision, part, .. } = team.edit(conflict.merged.clone()).unwrap()
     else {
         panic!("not saved on top");
     };
@@ -264,7 +265,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         .find(|field| field.name == "Datasheet")
         .unwrap()
         .value = "https://example.test/47.pdf".into();
-    let PublishResult::Saved { revision, part } = team.edit(mine.clone()).unwrap() else {
+    let PublishResult::Saved { revision, part, .. } = team.edit(mine.clone()).unwrap() else {
         panic!("not saved");
     };
     assert_eq!(revision, None);
@@ -291,7 +292,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     assert_eq!(conflict.theirs.revision, Some(2));
     let labels: Vec<&str> = conflict.rows.iter().map(|row| row.label.as_str()).collect();
     assert_eq!(labels, ["Symbol", "Footprint"]);
-    let PublishResult::Saved { revision, part } = team.edit(conflict.merged.clone()).unwrap()
+    let PublishResult::Saved { revision, part, .. } = team.edit(conflict.merged.clone()).unwrap()
     else {
         panic!("not saved on top");
     };

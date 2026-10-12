@@ -9,15 +9,15 @@ pub mod team;
 use base64::Engine;
 use csv_catalog::{CatalogPart, CsvCatalog};
 use desktop_contract::{
-    AppStatus, CatalogStatus, Field, KicadStatus, PartDetail, PartSummary, PreviewImage,
-    PreviewKind, PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet,
-    SearchResponse,
+    AppStatus, CatalogStatus, Field, FileKind, FilePreviewRequest, KicadStatus, PartDetail,
+    PartSummary, PreviewImage, PreviewKind, PreviewOutcome, PreviewProblem, PreviewProblemReason,
+    PreviewRequest, PreviewSet, SearchResponse,
 };
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use kicad_integration::{
     CacheOutcome, Discovery, DiscoveryOptions, InstallSource, KicadInstall, LibRef, LibraryOrigin,
     LibraryResolver, Preview, PreviewCache, PreviewError, ResolveError, SUPPORTED_MAJOR,
-    SearchLocations, discover, footprint_choices, sha256_hex,
+    SearchLocations, StoredItem, discover, footprint_choices, sha256_hex,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -274,6 +274,100 @@ impl CatalogBrowser {
         match (request.team_revision, team) {
             (Some(revision), Some(team)) => self.team_preview(request, revision, team, &install),
             _ => self.local_preview(request, &install, None),
+        }
+    }
+
+    /// Draws a symbol or footprint file chosen in Edit part, before it is
+    /// saved, exactly as a stored CAD item revision with those bytes would
+    /// be drawn (the same cache entries).
+    pub fn preview_file(&self, request: &FilePreviewRequest) -> PreviewOutcome {
+        let file = &request.file;
+        let kind = match file.kind {
+            FileKind::Symbol => PreviewKind::Symbol,
+            FileKind::Footprint => PreviewKind::Footprint,
+            FileKind::Model3d => {
+                return problem(
+                    PreviewKind::Footprint,
+                    PreviewProblemReason::Unexportable,
+                    None,
+                    "A 3D model is not drawn here.".into(),
+                );
+            }
+        };
+        let install = {
+            let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
+            match &kicad.discovery {
+                Discovery::Ready(install) => install.clone(),
+                _ => {
+                    return problem(
+                        kind,
+                        PreviewProblemReason::KicadUnavailable,
+                        None,
+                        "Previews are drawn by KiCad 10's kicad-cli, which is not available."
+                            .into(),
+                    );
+                }
+            }
+        };
+        let bytes = match team::decoded(&file.base64, &file.file_name) {
+            Ok(bytes) => bytes,
+            Err(message) => return problem(kind, PreviewProblemReason::Internal, None, message),
+        };
+        // The bytes the Catalog would store, and the name they have in the
+        // file. The library part of the reference only names the drawing,
+        // so one still being typed is fine.
+        let read = match kind {
+            PreviewKind::Symbol => {
+                let name = file.symbol.clone().unwrap_or_default();
+                catalog::cad_file::symbol_upload(&bytes, &name, &format!("g-file:{name}"), "")
+                    .map(|upload| (name, upload.bytes, upload.format_version))
+            }
+            PreviewKind::Footprint => catalog::cad_file::read_footprint_file(&bytes)
+                .map(|footprint| (footprint.name, bytes.clone(), None)),
+        };
+        let (name, stored, format_version) = match read {
+            Ok(read) => read,
+            Err(message) => return problem(kind, PreviewProblemReason::Unresolved, None, message),
+        };
+        let lib_ref = LibRef::parse(&request.reference)
+            .ok()
+            .filter(|reference| reference.item == name)
+            .unwrap_or(LibRef {
+                library: "g-file".into(),
+                item: name,
+            });
+        let item = StoredItem {
+            lib_ref,
+            blob_sha256: sha256_hex(&stored),
+            format_version,
+        };
+        let load = || Ok(stored.clone());
+        let exported = match kind {
+            PreviewKind::Symbol => {
+                self.previews
+                    .stored_symbol(&install, &item, load, request.selection)
+            }
+            PreviewKind::Footprint => {
+                self.previews
+                    .stored_footprint(&install, &item, load, request.selection)
+            }
+        };
+        let reference = item.lib_ref.to_string();
+        match exported {
+            Ok(preview) => ready(
+                kind,
+                &reference,
+                &[],
+                Drawn {
+                    library_path: String::new(),
+                    from_kicad_bundle: false,
+                    cad_item_revision: None,
+                    note: None,
+                },
+                &install,
+                preview,
+            ),
+            Err(error) => export_problem(kind, &reference, error),
         }
     }
 

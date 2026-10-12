@@ -8,7 +8,7 @@
 //! `1792200000_cad_item_revision_successor.js`).
 
 use crate::cad_item::Blob;
-use crate::cad_item::{CadItemDetails, ModelTarget};
+use crate::cad_item::{CadItemDetails, CadItemKind, ModelTarget};
 use crate::csv_import::{
     Binding, CsvImport, CurrentCad, CurrentCadItemRevision, EditedInApp, LastImported, SourceFile,
 };
@@ -1420,6 +1420,37 @@ pub fn cad_item_revisions_by_id(
         )?);
     }
     Ok(revisions)
+}
+
+/// The CAD item revisions the Changes with these IDs saved, such as the
+/// ones an edit's files made.
+pub fn cad_item_revisions_in_changes(
+    client: &PocketBaseClient,
+    change_ids: &[&str],
+) -> CollabResult<Vec<StoredCadItemRevision>> {
+    let mut revisions = Vec::new();
+    for chunk in change_ids.chunks(40) {
+        let filter = chunk
+            .iter()
+            .map(|id| format!("change = {}", Value::from(*id)))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        revisions.extend(client.list_records::<StoredCadItemRevision>(
+            "catalog_cad_item_revisions",
+            &filter,
+            "cad_item,number",
+        )?);
+    }
+    Ok(revisions)
+}
+
+/// Whether the Catalog has the CAD item `kind` `key`.
+pub fn has_cad_item(client: &PocketBaseClient, kind: CadItemKind, key: &str) -> CollabResult<bool> {
+    let id = crate::CadItemId::new(kind, key);
+    let filter = format!("id = {}", Value::from(id.as_str()));
+    Ok(client
+        .first_record::<StoredCadItem>("catalog_cad_items", &filter, "id")?
+        .is_some())
 }
 
 /// Every Change after `checkpoint`, in `seq` order.
