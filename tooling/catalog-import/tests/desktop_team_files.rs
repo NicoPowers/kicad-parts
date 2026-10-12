@@ -282,6 +282,11 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
         row.after,
         format!("R_0603_1608Metric.kicad_mod (footprint revision 2 of {FOOTPRINT})")
     );
+    // It replaced the file the import read.
+    assert_eq!(
+        row.before,
+        format!("{FOOTPRINT_FILE} (footprint revision 1 of {FOOTPRINT})")
+    );
     let other = team.part(OTHER).unwrap().unwrap();
     assert!(
         other
@@ -330,6 +335,7 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
             .changes
             .iter()
             .any(|change| change.label == "Symbol file"
+                && change.before.is_empty()
                 && change.after == "two.kicad_sym (symbol revision 1 of g-res:R_Second)")
     );
 

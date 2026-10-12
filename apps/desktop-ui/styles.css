@@ -1105,6 +1105,9 @@ a {
    file input itself is hidden; its label looks like a button and shows the
    input's keyboard focus. */
 .edit-file {
+  /* Holds the hidden file inputs, so they never widen or lengthen the
+     scrolling areas around the form. */
+  position: relative;
   margin: 0.25rem 0 0.6rem calc(40% + 0.5rem);
   font-size: 0.88rem;
 }
@@ -1179,6 +1182,7 @@ a {
 }
 
 .model-file {
+  position: relative;
   padding-top: 0.4rem;
   border-top: 1px dashed var(--line);
 }

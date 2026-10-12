@@ -762,7 +762,15 @@ fn shown(value: &str) -> String {
 /// A field's value as [`shown`] gives it, with a symbol or footprint
 /// reference kept whole up to its colon ([`crate::cad_reference`]).
 fn value_view(field: &str, value: &str) -> AnyView {
-    if crate::is_cad_field(field) && !value.is_empty() {
+    if field.ends_with(" file") && !value.is_empty() {
+        // A file and the CAD item revision it made, such as
+        // `R.kicad_mod (footprint revision 2 of g-Resistor_SMD:R)`: the
+        // reference after "of" is kept whole up to its colon.
+        let reference = value
+            .rsplit_once(" of ")
+            .map(|(_, reference)| reference.trim_end_matches(')'));
+        crate::text_with_reference(value, reference)
+    } else if crate::is_cad_field(field) && !value.is_empty() {
         crate::cad_reference(value)
     } else {
         shown(value).into_any()

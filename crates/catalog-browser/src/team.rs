@@ -21,9 +21,10 @@ use catalog::pocketbase::{
     CadUpload, ConflictingRecord, CsvReviewCommand, CsvReviewOutcome, EDIT_BODY_LIMIT, EditCommand,
     MANUFACTURER_PARTS_FIELD, PublishOutcome, PublishReply, StoredArchiveEntry, StoredBlob,
     StoredCadItemRevision, StoredChange, StoredCsvReview, StoredPart, StoredPartRevision,
-    archive_entries_of, archived_numbers, cad_item_revisions_in_changes, changes_by_id,
-    csv_reviews_of, has_cad_item, latest_import_run, part_by_ipn, part_details_of, part_revisions,
-    problems_of, recorded_csv_document, submit_archive, submit_csv_review, submit_edit,
+    archive_entries_of, archived_numbers, cad_item_revisions_by_id, cad_item_revisions_in_changes,
+    changes_by_id, csv_reviews_of, has_cad_item, latest_import_run, part_by_ipn, part_details_of,
+    part_revisions, problems_of, recorded_csv_document, submit_archive, submit_csv_review,
+    submit_edit,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
@@ -1416,9 +1417,24 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
         })
         .collect();
     if !edits.is_empty() {
-        for made in cad_item_revisions_in_changes(client, &edits).map_err(fail)? {
-            let (Some(change), Some(row)) = (change_records.get(&made.change), file_row(&made))
-            else {
+        let made = cad_item_revisions_in_changes(client, &edits).map_err(fail)?;
+        // The revision each one followed, to say what file it replaced.
+        let before_ids: Vec<&str> = made
+            .iter()
+            .map(|revision| revision.predecessor.as_str())
+            .filter(|id| !id.is_empty())
+            .collect();
+        let before = if before_ids.is_empty() {
+            Vec::new()
+        } else {
+            cad_item_revisions_by_id(client, &before_ids).map_err(fail)?
+        };
+        for revision in &made {
+            let replaced = before.iter().find(|old| old.id == revision.predecessor);
+            let (Some(change), Some(row)) = (
+                change_records.get(&revision.change),
+                file_row(revision, replaced),
+            ) else {
                 continue;
             };
             history_entry(&mut entries, change).changes.push(row);
@@ -1499,24 +1515,38 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
 const ACCEPTED: &str = "Accepted CSV values";
 
 /// The history row of a CAD item revision made from a file, such as
-/// `Footprint file`: `R_0603.kicad_mod (footprint revision 2)`; `None` for
-/// one that came from anywhere else.
-fn file_row(made: &StoredCadItemRevision) -> Option<DetailChange> {
-    let source: serde_json::Value = serde_json::from_str(&made.source).ok()?;
-    let file_name = source.get("file_name")?.as_str()?;
+/// `Footprint file`, from the file of the revision it `replaced` (blank for
+/// a new CAD item) to `R_0603.kicad_mod (footprint revision 2 of ...)`;
+/// `None` for one that came from anywhere else.
+fn file_row(
+    made: &StoredCadItemRevision,
+    replaced: Option<&StoredCadItemRevision>,
+) -> Option<DetailChange> {
     let snapshot: CadItemDetails = serde_json::from_str(&made.snapshot).ok()?;
     let (label, what) = match snapshot.kind {
         CadItemKind::Symbol => ("Symbol file", "symbol"),
         CadItemKind::Footprint => ("Footprint file", "footprint"),
         CadItemKind::Model3d => ("3D model file", "3D model"),
     };
+    // A file chosen in the app keeps its name; one an import read, its
+    // path in the CSV catalog.
+    let file = |revision: &StoredCadItemRevision| -> Option<String> {
+        let source: serde_json::Value = serde_json::from_str(&revision.source).ok()?;
+        let name = source
+            .get("file_name")
+            .or_else(|| source.get("path"))?
+            .as_str()?;
+        Some(format!(
+            "{name} ({what} revision {} of {})",
+            revision.number, snapshot.key
+        ))
+    };
+    let source: serde_json::Value = serde_json::from_str(&made.source).ok()?;
+    source.get("file_name")?;
     Some(DetailChange {
         label: label.to_owned(),
-        before: String::new(),
-        after: format!(
-            "{file_name} ({what} revision {} of {})",
-            made.number, snapshot.key
-        ),
+        before: replaced.and_then(file).unwrap_or_default(),
+        after: file(made)?,
     })
 }
 
