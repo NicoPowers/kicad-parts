@@ -54,6 +54,14 @@
 // under a newer number is not a change); any other binding must name the
 // CAD item's current revision as it is after this request.
 //
+// An import never replaces a CAD item revision made in the app (by an edit
+// that uploaded a file, kicad-parts-3b8b): a request that sends a revision
+// of such a CAD item is refused (400), and bindings to it are checked
+// against the newest revision a CSV import saved instead of the current
+// one. The importer records a csv-cad-differs-from-edited-cad-item import
+// problem for each part whose row uses such a CAD item when the CSV's file
+// for it changed since then.
+//
 // The server trusts none of the derived values: it re-hashes every blob and
 // snapshot, re-derives every record ID, checks that each CSV file's header
 // line and rows are the file with its byte hash and that every part's
@@ -642,6 +650,32 @@ routerAdd(
         }
         return storedCurrent[cadItemId];
       };
+      // Whether a stored CAD item revision was made in the app (by an
+      // edit), not by a CSV import.
+      const madeInApp = (revision) => {
+        const change = byId("catalog_changes", revision.getString("change"));
+        return !change || change.getString("kind") !== lib.CHANGE_KINDS.csvImport;
+      };
+      // What bindings to a CAD item are checked against: its current
+      // revision, or, when that was made in the app, the newest revision a
+      // CSV import saved (what the CSV said when it was last applied). An
+      // import never replaces a revision made in the app (kicad-parts-3b8b).
+      const importBases = {};
+      const importBase = (cadItemId) => {
+        if (!(cadItemId in importBases)) {
+          const current = currentStored(cadItemId);
+          importBases[cadItemId] =
+            current && madeInApp(current)
+              ? first(
+                  "catalog_cad_item_revisions",
+                  "cad_item = {:cad_item} && change.kind = {:kind}",
+                  { cad_item: cadItemId, kind: lib.CHANGE_KINDS.csvImport },
+                  "-number",
+                ) || current
+              : current;
+        }
+        return importBases[cadItemId];
+      };
       for (const revision of cadItemRevisions) {
         const current = currentStored(revision.cadItemId);
         const currentNumber = current ? current.getInt("number") : 0;
@@ -728,6 +762,11 @@ routerAdd(
         }
         const current = currentStored(revision.cadItemId);
         const currentNumber = current ? current.getInt("number") : 0;
+        if (current && madeInApp(current)) {
+          fail(
+            `the ${revision.kind} ${revision.key} was changed in the app (revision ${currentNumber}); an import never replaces that, so do not send it`,
+          );
+        }
         const consistent = !current || lib.isCadItemRevision(current, revision.cadItemId, currentNumber);
         if (!consistent) {
           collisions.push(`catalog_cad_item_revisions/${current.id}: the stored record is not revision ${currentNumber} of ${revision.key}`);
@@ -759,12 +798,13 @@ routerAdd(
         };
       }
       // Footprints and parts must bind the current revision of each CAD
-      // item, so an import never binds an older revision.
+      // item, so an import never binds an older revision; for a CAD item
+      // changed in the app, the newest revision an import saved.
       const currentOf = (cadItemId) => {
         if (currentAfter[cadItemId]) {
           return currentAfter[cadItemId];
         }
-        const stored = currentStored(cadItemId);
+        const stored = importBase(cadItemId);
         if (!stored) {
           return null;
         }

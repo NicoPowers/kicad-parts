@@ -145,10 +145,11 @@ fn the_import_state_is_read_from_current_records_only() {
     );
     // The latest run of the one CSV file imported, not every run.
     assert_eq!(fetched("catalog_audit_entries"), 1, "{summary}");
-    // Parts, current CAD item revisions, current part revisions, the older
-    // bound CAD item revisions, the latest run of g-res and the check that
-    // no other CSV file was imported.
-    assert_eq!(fetches.len(), 6, "{summary}");
+    // Parts, current CAD item revisions, the current CAD item revisions
+    // made in the app (none here, so no last imported revision is read),
+    // current part revisions, the older bound CAD item revisions, the latest
+    // run of g-res and the check that no other CSV file was imported.
+    assert_eq!(fetches.len(), 7, "{summary}");
     // Revisions are always asked for by filter, never listed whole.
     assert!(
         fetches

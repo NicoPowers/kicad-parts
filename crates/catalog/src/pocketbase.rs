@@ -9,7 +9,9 @@
 
 use crate::cad_item::Blob;
 use crate::cad_item::{CadItemDetails, ModelTarget};
-use crate::csv_import::{Binding, CsvImport, CurrentCad, CurrentCadItemRevision, SourceFile};
+use crate::csv_import::{
+    Binding, CsvImport, CurrentCad, CurrentCadItemRevision, EditedInApp, LastImported, SourceFile,
+};
 use crate::part::{DetailField, ManufacturerPart, PartDetails, PartRevision};
 use crate::sha256_hex;
 use collaboration::{CollabError, CollabResult, CorrelationId, PocketBaseClient};
@@ -450,14 +452,53 @@ fn read_current_cad(client: &PocketBaseClient, parts: &[StoredPart]) -> CollabRe
         "cad_item,number",
         CAD_ITEM_REVISION_FIELDS,
     )?;
+    let mut current_bindings: BTreeMap<String, Binding> = BTreeMap::new();
     for revision in newest {
         let (cad_item, binding, models) = read_cad_item_revision(revision, &mut by_id)?;
+        current_bindings.insert(cad_item.clone(), binding.clone());
         current.cad_items.insert(
             cad_item,
             CurrentCadItemRevision {
                 number: binding.number,
                 snapshot_sha256: binding.snapshot_sha256,
                 models,
+            },
+        );
+    }
+
+    // The CAD items whose current revision was made in the app, and for
+    // each, the newest revision a CSV import saved (kicad-parts-3b8b).
+    let edited: Vec<CadItemRevisionFields> = client.list_record_fields(
+        "catalog_cad_item_revisions",
+        "catalog_cad_item_revisions_via_predecessor.id = \"\" && change.kind != \"csv-import\"",
+        "cad_item,number",
+        CAD_ITEM_REVISION_FIELDS,
+    )?;
+    for revision in edited {
+        let Some(binding) = current_bindings.get(&revision.cad_item).cloned() else {
+            continue;
+        };
+        let filter = format!(
+            "cad_item = {} && change.kind = \"csv-import\"",
+            Value::from(revision.cad_item.as_str())
+        );
+        let last_imported = client
+            .first_record_fields::<CadItemRevisionFields>(
+                "catalog_cad_item_revisions",
+                &filter,
+                "-number",
+                CAD_ITEM_REVISION_FIELDS,
+            )?
+            .map(|last| {
+                read_cad_item_revision(last, &mut by_id)
+                    .map(|(_, binding, models)| LastImported { binding, models })
+            })
+            .transpose()?;
+        current.edited_in_app.insert(
+            revision.cad_item,
+            EditedInApp {
+                current: binding,
+                last_imported,
             },
         );
     }
@@ -1106,6 +1147,10 @@ pub const CSV_REVIEW_ROUTE: &str = "/api/catalog/csv-reviews";
 /// each one is about.
 pub const CSV_DETAILS_DIFFER: &str = "csv-details-differ-from-edited-details";
 pub const CSV_CAD_DIFFERS: &str = "csv-cad-differs-from-edited-revision";
+/// A symbol, footprint or 3D model the part uses whose CSV file changed
+/// while its current revision was made in the app (kicad-parts-3b8b). Its
+/// CSV file is not stored, so a review can only keep the part as it is.
+pub use crate::csv_import::CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM as CSV_CAD_ITEM_KEPT;
 
 /// The field name that takes the CSV's whole list of manufacturer parts.
 pub const MANUFACTURER_PARTS_FIELD: &str = "Manufacturer parts";
@@ -1546,11 +1591,13 @@ pub struct StoredCsvReview {
 }
 
 /// The CSV document an import problem recorded: the CSV's part details for
-/// [`CSV_DETAILS_DIFFER`], its part revision for [`CSV_CAD_DIFFERS`].
+/// [`CSV_DETAILS_DIFFER`], its part revision for [`CSV_CAD_DIFFERS`], and its
+/// snapshot of the CAD item for [`CSV_CAD_ITEM_KEPT`].
 pub fn recorded_csv_document(problem: &StoredImportProblem) -> Option<String> {
     let key = match problem.code.as_str() {
         CSV_DETAILS_DIFFER => "details",
         CSV_CAD_DIFFERS => "revision",
+        CSV_CAD_ITEM_KEPT => "csv_cad_item",
         _ => return None,
     };
     let detail: Value = serde_json::from_str(&problem.detail).ok()?;

@@ -260,8 +260,9 @@ onRecordCreate((e) => {
 }, "catalog_archive_entries");
 
 // A CSV review must be exactly what the review route saves: for one of the
-// part's own csv-details-differ-from-edited-details or
-// csv-cad-differs-from-edited-revision import problems, copying its code and
+// part's own csv-details-differ-from-edited-details,
+// csv-cad-differs-from-edited-revision or csv-cad-differs-from-edited-cad-item
+// import problems, copying its code and
 // the SHA-256 of the CSV document it recorded, in a Change of kind
 // csv-review whose seq it copies, under the ID derived from that Change's
 // correlation ID, with a list of field names.
@@ -287,7 +288,7 @@ onRecordCreate((e) => {
   let recorded = null;
   try {
     const detail = JSON.parse(problem.getString("detail"));
-    recorded = kind === "details" ? detail.details : detail.revision;
+    recorded = lib.recordedCsvDocument(problem.getString("code"), detail);
   } catch (_) {
     recorded = null;
   }

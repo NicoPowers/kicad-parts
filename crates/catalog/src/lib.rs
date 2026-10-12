@@ -68,8 +68,9 @@ pub use compare::{
     DetailDifference, DifferenceKind, compare_details, compare_revisions, describe_binding,
 };
 pub use csv_import::{
-    Binding, CadItemRevisionDraft, CsvCatalog, CsvImport, CurrentCad, CurrentCadItemRevision,
-    ImportProblem, PartDraft, Source, SourceFile,
+    Binding, CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM, CadItemRevisionDraft, CsvCatalog, CsvImport,
+    CurrentCad, CurrentCadItemRevision, EditedInApp, ImportProblem, LastImported, PartDraft,
+    Source, SourceFile,
 };
 pub use hash::sha256_hex;
 pub use ids::{

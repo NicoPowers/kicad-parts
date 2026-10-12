@@ -396,6 +396,14 @@ impl CsvImport {
     /// number is not a change. A binding whose content changed, or that is
     /// new, names the CAD item's current revision.
     ///
+    /// An import never replaces a CAD item revision made in the app
+    /// (kicad-parts-3b8b): a CAD item in [`CurrentCad::edited_in_app`] is not
+    /// sent, and bindings to it name the newest revision an import saved,
+    /// what the CSV said when an import last applied it. If the CSV's file
+    /// for it changed since then, each part whose row uses it gets a
+    /// [`CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM`] import problem that keeps the
+    /// row, so a person sees it.
+    ///
     /// A [`CsvImport`] fresh from [`CsvCatalog::import`] is numbered as if
     /// the team catalog were empty, which is the same as
     /// `numbered_against(&CurrentCad::default())`.
@@ -409,11 +417,30 @@ impl CsvImport {
         });
         // Each CAD item's current revision once this import is published.
         let mut after: BTreeMap<String, Binding> = BTreeMap::new();
+        // The CAD items made in the app, which the import does not send, and
+        // the CAD items whose CSV file changed while they were made in the
+        // app (or whose 3D model's did), by CAD item ID, with their index.
+        let mut not_sent: BTreeSet<usize> = BTreeSet::new();
+        let mut changed_in_csv: BTreeMap<String, usize> = BTreeMap::new();
+        let no_models = BTreeMap::new();
         for index in order {
             let draft = &mut numbered.cad_item_revisions[index];
-            let stored = current.cad_items.get(draft.cad_item.id.as_str());
-            let no_models = BTreeMap::new();
-            let kept = stored.map_or(&no_models, |stored| &stored.models);
+            let id = draft.cad_item.id.as_str().to_owned();
+            let model_changed = draft.snapshot.model_references.iter().any(|model| {
+                matches!(
+                    &model.target,
+                    ModelTarget::CadItemRevision { cad_item, .. } if changed_in_csv.contains_key(cad_item)
+                )
+            });
+            let stored = current.cad_items.get(&id);
+            let edited = current.edited_in_app.get(&id);
+            let kept = match edited {
+                Some(edited) => edited
+                    .last_imported
+                    .as_ref()
+                    .map_or(&no_models, |last| &last.models),
+                None => stored.map_or(&no_models, |stored| &stored.models),
+            };
             for model in &mut draft.snapshot.model_references {
                 if let ModelTarget::CadItemRevision {
                     cad_item,
@@ -429,6 +456,22 @@ impl CsvImport {
             }
             draft.snapshot_json = draft.snapshot.canonical_json();
             draft.snapshot_sha256 = sha256_hex(&draft.snapshot_json);
+            if let Some(edited) = edited {
+                let content = draft.snapshot.content_sha256();
+                let (binding, unchanged) = match &edited.last_imported {
+                    Some(last) => (last.binding.clone(), last.binding.content_sha256 == content),
+                    None => (edited.current.clone(), false),
+                };
+                if !unchanged || model_changed {
+                    changed_in_csv.insert(id.clone(), index);
+                }
+                after.insert(id, binding);
+                not_sent.insert(index);
+                continue;
+            }
+            if model_changed {
+                changed_in_csv.insert(id.clone(), index);
+            }
             draft.expected_revision = stored.map_or(0, |stored| stored.number);
             draft.number = match stored {
                 Some(stored) if stored.snapshot_sha256 == draft.snapshot_sha256 => stored.number,
@@ -436,7 +479,7 @@ impl CsvImport {
             };
             draft.id = CadItemRevisionId::new(&draft.cad_item.id, draft.number);
             after.insert(
-                draft.cad_item.id.as_str().to_owned(),
+                id,
                 Binding {
                     number: draft.number,
                     snapshot_sha256: draft.snapshot_sha256.clone(),
@@ -445,26 +488,111 @@ impl CsvImport {
             );
         }
         let no_bindings = BTreeMap::new();
+        let mut problems = Vec::new();
         for part in &mut numbered.parts {
             let kept = current.parts.get(part.ipn.as_str()).unwrap_or(&no_bindings);
-            for reference in &mut part.revision.cad_references {
-                if let CadReferenceTarget::CadItemRevision {
+            for position in 0..part.revision.cad_references.len() {
+                let reference = &mut part.revision.cad_references[position];
+                let CadReferenceTarget::CadItemRevision {
                     cad_item,
                     number,
                     snapshot_sha256,
                 } = &mut reference.target
-                {
-                    if let Some(bound) = binding_for(kept, &after, cad_item) {
-                        *number = bound.number;
-                        snapshot_sha256.clone_from(&bound.snapshot_sha256);
-                    }
+                else {
+                    continue;
+                };
+                if let Some(bound) = binding_for(kept, &after, cad_item) {
+                    *number = bound.number;
+                    snapshot_sha256.clone_from(&bound.snapshot_sha256);
+                }
+                let cad_item = cad_item.clone();
+                if let Some(&index) = changed_in_csv.get(&cad_item) {
+                    let edited = current
+                        .edited_in_app
+                        .get(&cad_item)
+                        .map(|edited| edited.current.number);
+                    // The CSV's own snapshot of the CAD item, as read (and
+                    // numbered as if the team catalog were empty), so its
+                    // hash changes exactly when the CSV's files do.
+                    let csv = &self.cad_item_revisions[index].snapshot_json;
+                    problems.push(cad_item_kept_problem(
+                        part,
+                        &part.revision.cad_references[position],
+                        csv,
+                        edited,
+                    ));
                 }
             }
             part.revision_json = part.revision.canonical_json();
             part.revision_sha256 = sha256_hex(&part.revision_json);
         }
+        // CAD items not sent take their bytes with them, unless another CAD
+        // item revision uses the same bytes.
+        let mut position = 0;
+        numbered.cad_item_revisions.retain(|_| {
+            position += 1;
+            !not_sent.contains(&(position - 1))
+        });
+        let used: BTreeSet<String> = numbered
+            .cad_item_revisions
+            .iter()
+            .map(|draft| draft.snapshot.blob_sha256.clone())
+            .collect();
+        numbered.blobs.retain(|blob| used.contains(&blob.sha256));
+        numbered.problems.extend(problems);
+        numbered.problems.sort_by(|a, b| a.id.cmp(&b.id));
+        numbered.problems.dedup_by(|a, b| a.id == b.id);
         numbered
     }
+}
+
+/// The import problem code of a part whose row uses a symbol, footprint or
+/// 3D model whose CSV file changed after an import last applied it, while
+/// its current revision was made in the app, so the import kept it.
+pub const CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM: &str = "csv-cad-differs-from-edited-cad-item";
+
+/// The [`CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM`] problem of `part`'s use of
+/// `reference`. Its detail keeps the row and the CSV's snapshot of the CAD
+/// item (`csv_cad_item`), whose SHA-256 a review covers.
+fn cad_item_kept_problem(
+    part: &PartDraft,
+    reference: &CadReference,
+    csv_cad_item: &str,
+    edited_revision: Option<u32>,
+) -> ImportProblem {
+    let (kind, column) = match reference.role {
+        CadReferenceRole::Symbol => ("symbol", "Symbol"),
+        CadReferenceRole::Footprint => ("footprint", "Footprint"),
+    };
+    let (cad_item, kept) = match &reference.target {
+        CadReferenceTarget::CadItemRevision {
+            cad_item, number, ..
+        } => (cad_item.clone(), *number),
+        _ => (String::new(), 0),
+    };
+    let source = &part.source;
+    let edited = edited_revision.map_or_else(String::new, |number| format!(" (revision {number})"));
+    ImportProblem::new(
+        CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM,
+        part.ipn.as_str(),
+        &source.path,
+        &format!("rows[IPN={}].{column}", part.ipn),
+        format!(
+            "the CSV catalog's file for the {kind} {} that the row of {} uses changed after an import last applied it, but the {kind} was changed in the app since{edited}; an import never replaces that, so the part keeps revision {kept} of it and the row is kept here",
+            reference.reference, part.ipn
+        ),
+        json!({
+            "role": kind,
+            "reference": reference.reference,
+            "cad_item": cad_item,
+            "kept_revision": kept,
+            "edited_revision": edited_revision,
+            "path": source.path,
+            "row_number": source.row_number,
+            "raw_record": source.raw_record,
+            "csv_cad_item": csv_cad_item,
+        }),
+    )
 }
 
 /// The revision a binding to `cad_item` names: the one in `kept` (what it
@@ -491,6 +619,29 @@ pub struct CurrentCad {
     /// The CAD item revisions each part's current revision binds, by IPN,
     /// then by CAD item ID.
     pub parts: BTreeMap<String, BTreeMap<String, Binding>>,
+    /// The CAD items whose current revision was made in the app (by an
+    /// edit, not a CSV import), by CAD item ID. An import never replaces
+    /// them.
+    pub edited_in_app: BTreeMap<String, EditedInApp>,
+}
+
+/// A CAD item whose current revision was made in the app.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditedInApp {
+    /// Its current revision, made in the app.
+    pub current: Binding,
+    /// The newest revision a CSV import saved, with a footprint's 3D model
+    /// bindings: what the CSV said when an import last applied it. `None`
+    /// when the CAD item was made in the app.
+    pub last_imported: Option<LastImported>,
+}
+
+/// The newest revision of a CAD item that a CSV import saved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LastImported {
+    pub binding: Binding,
+    /// For a footprint, the 3D model revisions it binds, by CAD item ID.
+    pub models: BTreeMap<String, Binding>,
 }
 
 /// A CAD item's current revision in the team catalog.

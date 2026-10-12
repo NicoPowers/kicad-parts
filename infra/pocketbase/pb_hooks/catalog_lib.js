@@ -2109,12 +2109,33 @@ function publishArchive(e) {
 // (no revision); taking Symbol or Footprint adds a revision; taking nothing
 // records that the person kept their values. Each review is one Change of
 // kind csv-review with one catalog_csv_reviews record.
+//
+// A csv-cad-differs-from-edited-cad-item problem (kicad-parts-3b8b) says the
+// CSV's file for a symbol, footprint or 3D model the part uses changed,
+// while that CAD item's current revision was made in the app. Its CSV file
+// is not stored, so it can only be kept; taking it is refused with a plain
+// message.
+
+// The import problem whose CSV file for a CAD item made in the app changed.
+const CSV_CAD_ITEM_KEPT = "csv-cad-differs-from-edited-cad-item";
 
 // The kind of each import problem a person can review.
 const CSV_REVIEW_KINDS = Object.freeze({
   "csv-details-differ-from-edited-details": "details",
   "csv-cad-differs-from-edited-revision": "cad",
+  [CSV_CAD_ITEM_KEPT]: "cad",
 });
+
+// The CSV document a reviewable import problem recorded (its parsed
+// detail): the CSV's part details, its part revision, or, for
+// CSV_CAD_ITEM_KEPT, its snapshot of the CAD item. A review covers its
+// SHA-256.
+function recordedCsvDocument(code, detail) {
+  if (code === CSV_CAD_ITEM_KEPT) {
+    return detail.csv_cad_item;
+  }
+  return CSV_REVIEW_KINDS[code] === "details" ? detail.details : detail.revision;
+}
 
 // The field name a person picks to take the CSV's manufacturer parts.
 const MANUFACTURER_PARTS = "Manufacturer parts";
@@ -2188,7 +2209,7 @@ function publishCsvReview(e) {
       throw new NotFoundError(`${request.ipn} has no such CSV change to review`);
     }
     const detail = JSON.parse(problem.getString("detail"));
-    const csvSnapshot = reviewKind === "details" ? detail.details : detail.revision;
+    const csvSnapshot = recordedCsvDocument(problem.getString("code"), detail);
     if (typeof csvSnapshot !== "string") {
       throw new Error(`import problem ${problemId} records no CSV document`);
     }
@@ -2291,6 +2312,11 @@ function publishCsvReview(e) {
         }
         const snapshot = JSON.stringify(document);
         details = { snapshot: snapshot, sha: $security.sha256(snapshot) };
+      }
+      if (problem.getString("code") === CSV_CAD_ITEM_KEPT && accept.length > 0) {
+        fail(
+          `the CSV catalog's ${detail.role} file for ${detail.reference} is not in the Catalog, because the ${detail.role} was changed in this app; to use it, choose the file in Edit part`,
+        );
       }
       if (reviewKind === "cad" && accept.length > 0) {
         const stored = JSON.parse(currentRevision.getString("snapshot"));
@@ -2510,6 +2536,7 @@ module.exports = {
   symbolSaysNotInBom: symbolSaysNotInBom,
   footprintExcludedFromBom: footprintExcludedFromBom,
   CSV_REVIEW_KINDS: CSV_REVIEW_KINDS,
+  recordedCsvDocument: recordedCsvDocument,
   archiveState: archiveState,
   newestRevision: newestRevision,
   newestNotArchived: newestNotArchived,

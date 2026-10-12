@@ -629,3 +629,154 @@ fn wrong_or_unused_files_are_refused_plainly_and_nothing_is_written() {
     let error = submit_edit(&editor, &cad_edit(&before, IPN, &[], vec![big])).unwrap_err();
     assert!(error.to_string().contains("nothing was sent"), "{error}");
 }
+
+/// The import problems with `code` the latest import run found, by subject.
+fn found(stored: &CatalogReadback, code: &str) -> Vec<catalog::pocketbase::StoredImportProblem> {
+    let run = stored
+        .audit_entries
+        .iter()
+        .filter(|entry| entry.csv_import_number > 0)
+        .max_by_key(|entry| entry.csv_import_number)
+        .and_then(|entry| entry.import_run())
+        .unwrap();
+    stored
+        .problems
+        .iter()
+        .filter(|problem| problem.code == code && run.problems.contains(&problem.id))
+        .cloned()
+        .collect()
+}
+
+/// The newest revision number of `reference`'s CAD item.
+fn newest(stored: &CatalogReadback, kind: catalog::CadItemKind, reference: &str) -> u32 {
+    let cad_item = catalog::CadItemId::new(kind, reference);
+    stored
+        .cad_item_revisions
+        .iter()
+        .filter(|revision| revision.cad_item == cad_item.as_str())
+        .map(|revision| revision.number)
+        .max()
+        .unwrap_or(0)
+}
+
+#[test]
+fn imports_never_replace_a_cad_item_revision_made_in_the_app() {
+    use catalog::pocketbase::{
+        CSV_CAD_DIFFERS, CSV_CAD_ITEM_KEPT, CsvReviewCommand, CsvReviewOutcome,
+        recorded_csv_document, submit_csv_review,
+    };
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    let before = team.read();
+    let footprint_users = users(&before, FOOTPRINT);
+    let original = team.file(FOOTPRINT_FILE);
+    let upload = footprint_upload(&redrawn(&original), FOOTPRINT, "R_0603.kicad_mod").unwrap();
+    applied(&submit_edit(&editor, &cad_edit(&before, IPN, &[], vec![upload])).unwrap());
+    let edited = team.read();
+    let footprint = catalog::CadItemKind::Footprint;
+    assert_eq!(newest(&edited, footprint, FOOTPRINT), 2);
+
+    // The CSV's file has not changed since the import last applied it, so
+    // nothing happens: no new footprint revision, every part as it was.
+    assert_eq!(team.import(), "nothing_changed");
+    let after = team.read();
+    assert_eq!(newest(&after, footprint, FOOTPRINT), 2);
+    assert_eq!(
+        after.cad_item_revisions.len(),
+        edited.cad_item_revisions.len()
+    );
+    assert_eq!(after.part_revisions.len(), edited.part_revisions.len());
+    assert_eq!(number_of(&bound(&after, IPN, FOOTPRINT)), 2);
+    for ipn in footprint_users.iter().filter(|ipn| *ipn != IPN) {
+        assert_eq!(number_of(&bound(&after, ipn, FOOTPRINT)), 1, "{ipn}");
+    }
+    assert!(found(&after, CSV_CAD_ITEM_KEPT).is_empty());
+    // The edited part's row is kept, as for any edited CAD; what it records
+    // is exactly what the last import saved, so the app asks nothing.
+    let kept = found(&after, CSV_CAD_DIFFERS);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].subject, IPN);
+    let first = after
+        .part_revisions
+        .iter()
+        .find(|revision| revision.part == after.part(IPN).unwrap().id && revision.number == 1)
+        .unwrap();
+    assert_eq!(recorded_csv_document(&kept[0]).unwrap(), first.snapshot);
+    assert_eq!(team.import(), "noop");
+
+    // An importer that does not know the footprint was changed in the app
+    // would send a new revision of it: the server refuses.
+    let import = CsvCatalog::new(team.copy.path())
+        .import("g-res", None)
+        .unwrap();
+    let mut state = read_import_state(&team.admin).unwrap();
+    assert!(!state.current_cad.edited_in_app.is_empty());
+    state.current_cad.edited_in_app.clear();
+    let command = ImportCommand::new(&import, "Import the resistors").expecting(&state);
+    match submit_import(&team.admin, &command) {
+        Err(CollabError::Http {
+            status: 400,
+            message,
+        }) => {
+            assert!(message.contains("never replaces"), "{message}")
+        }
+        other => panic!("expected 400, got {other:?}"),
+    }
+    assert_eq!(team.read().counts(), after.counts());
+
+    // The CSV's file changes: still no new footprint revision, but every
+    // part whose row uses it keeps the row with a problem the app shows.
+    let changed = String::from_utf8(original).unwrap().replacen(
+        "(tags \"resistor\")",
+        "(tags \"resistor 0603\")",
+        1,
+    );
+    fs::write(team.copy.path().join(FOOTPRINT_FILE), changed).unwrap();
+    assert_eq!(team.import(), "nothing_changed");
+    let changed = team.read();
+    assert_eq!(newest(&changed, footprint, FOOTPRINT), 2);
+    assert_eq!(changed.part_revisions.len(), edited.part_revisions.len());
+    let problems = found(&changed, CSV_CAD_ITEM_KEPT);
+    let mut subjects: Vec<String> = problems.iter().map(|p| p.subject.clone()).collect();
+    subjects.sort();
+    let mut expected = footprint_users.clone();
+    expected.sort();
+    assert_eq!(subjects, expected);
+    let problem = problems.iter().find(|p| p.subject == OTHER).unwrap();
+    assert_eq!(problem.location, format!("rows[IPN={OTHER}].Footprint"));
+
+    // The CSV's file is not stored, so it can only be kept.
+    let (number, _) = current_revision(&changed, OTHER);
+    let take = CsvReviewCommand::new(
+        OTHER,
+        &problem.id,
+        vec!["Footprint".into()],
+        number,
+        "Take it",
+    );
+    match submit_csv_review(&editor, &take) {
+        Err(CollabError::Http {
+            status: 400,
+            message,
+        }) => {
+            assert!(
+                message.contains("choose the file in Edit part"),
+                "{message}"
+            )
+        }
+        other => panic!("expected 400, got {other:?}"),
+    }
+    let keep = CsvReviewCommand::new(OTHER, &problem.id, vec![], number, "Keep ours");
+    let reply = submit_csv_review(&editor, &keep).unwrap();
+    assert!(
+        matches!(
+            reply.outcome,
+            CsvReviewOutcome::Applied { revision: None, .. }
+        ),
+        "{}",
+        reply.body
+    );
+    // Importing the same CSV again finds the same problem, which the review
+    // covers.
+    assert_eq!(team.import(), "noop");
+}

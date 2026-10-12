@@ -722,7 +722,11 @@ fn current_after(import: &CsvImport) -> CurrentCad {
             (part.ipn.as_str().to_owned(), bindings)
         })
         .collect();
-    CurrentCad { cad_items, parts }
+    CurrentCad {
+        cad_items,
+        parts,
+        ..CurrentCad::default()
+    }
 }
 
 #[test]
@@ -918,4 +922,121 @@ fn a_revision_keeps_symbol_before_footprint_whatever_the_column_order() {
     );
     // The details keep their own columns in source order.
     assert_eq!(import.parts[0].details.field("Value"), Some("47"));
+}
+
+#[test]
+fn an_import_never_replaces_a_cad_item_revision_made_in_the_app() {
+    let csv = format!(
+        "{HEADER}RES-0000-0470,MPN47,Yageo,47,g-res:R_US,g-Resistor_SMD:R_0603,,\nRES-0000-1000,MPN100,Yageo,100,g-res:R_US,g-Resistor_SMD:R_0603,,\n"
+    );
+    let root = fixture(&csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
+    let plan = || CsvCatalog::new(root.path()).import("g-res", None).unwrap();
+    let first = plan();
+    let mut catalog = current_after(&first);
+    let footprint = first
+        .cad_item_revisions
+        .iter()
+        .find(|draft| draft.cad_item.kind == CadItemKind::Footprint)
+        .unwrap()
+        .clone();
+    let id = footprint.cad_item.id.as_str().to_owned();
+    // Revision 2 of the footprint was made in the app, for the first part.
+    let imported = catalog.cad_items[&id].clone();
+    let last_imported = LastImported {
+        binding: Binding {
+            number: 1,
+            snapshot_sha256: imported.snapshot_sha256.clone(),
+            content_sha256: footprint.snapshot.content_sha256(),
+        },
+        models: imported.models.clone(),
+    };
+    let app = Binding {
+        number: 2,
+        snapshot_sha256: "a".repeat(64),
+        content_sha256: "b".repeat(64),
+    };
+    catalog.cad_items.insert(
+        id.clone(),
+        CurrentCadItemRevision {
+            number: 2,
+            snapshot_sha256: app.snapshot_sha256.clone(),
+            models: BTreeMap::new(),
+        },
+    );
+    catalog
+        .parts
+        .get_mut("RES-0000-0470")
+        .unwrap()
+        .insert(id.clone(), app.clone());
+    catalog.edited_in_app.insert(
+        id.clone(),
+        EditedInApp {
+            current: app,
+            last_imported: Some(last_imported),
+        },
+    );
+    let footprint_number = |import: &CsvImport, part: usize| {
+        import.parts[part]
+            .revision
+            .cad_references
+            .iter()
+            .find_map(|reference| match &reference.target {
+                CadReferenceTarget::CadItemRevision {
+                    cad_item, number, ..
+                } if *cad_item == id => Some(*number),
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    // The CSV's file is what the import last applied: the footprint is not
+    // sent, both rows name revision 1, and nothing is a problem.
+    let same = plan().numbered_against(&catalog);
+    assert!(same.cad_items().all(|item| item.id.as_str() != id));
+    assert!(
+        same.blobs
+            .iter()
+            .all(|blob| blob.sha256 != footprint.snapshot.blob_sha256)
+    );
+    assert_eq!(footprint_number(&same, 0), 1);
+    assert_eq!(footprint_number(&same, 1), 1);
+    assert_eq!(same.parts[1].revision_json, first.parts[1].revision_json);
+    assert!(
+        same.problems
+            .iter()
+            .all(|problem| problem.code != CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM)
+    );
+
+    // The CSV's file changes: still not sent, and each row that uses it
+    // keeps a problem with the CSV's own snapshot.
+    fs::write(
+        root.path()
+            .join("footprints/g-Resistor_SMD.pretty/R_0603.kicad_mod"),
+        FOOTPRINT.replace("R_0603\"\n", "R_0603\"\n\t(descr \"B\")\n"),
+    )
+    .unwrap();
+    let fresh = plan();
+    let changed = fresh.numbered_against(&catalog);
+    assert!(changed.cad_items().all(|item| item.id.as_str() != id));
+    assert_eq!(footprint_number(&changed, 1), 1);
+    let problems: Vec<&ImportProblem> = changed
+        .problems
+        .iter()
+        .filter(|problem| problem.code == CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM)
+        .collect();
+    let subjects: Vec<&str> = problems.iter().map(|p| p.subject.as_str()).collect();
+    assert_eq!(subjects.len(), 2);
+    assert!(subjects.contains(&"RES-0000-0470") && subjects.contains(&"RES-0000-1000"));
+    let detail: Value = serde_json::from_str(&problems[0].detail_json).unwrap();
+    let csv_snapshot = fresh
+        .cad_item_revisions
+        .iter()
+        .find(|draft| draft.cad_item.id.as_str() == id)
+        .unwrap()
+        .snapshot_json
+        .clone();
+    assert_eq!(detail["csv_cad_item"], csv_snapshot);
+    assert_eq!(detail["kept_revision"], 1);
+    assert_eq!(detail["edited_revision"], 2);
+    assert_eq!(detail["role"], "footprint");
 }

@@ -81,8 +81,11 @@
 //! A row whose details or CAD differ from what an edit saved is kept by an
 //! import problem for that kind only (`csv-details-differ-from-edited-details`
 //! or `csv-cad-differs-from-edited-revision`); so is CAD whose content matches
-//! an archived revision (`csv-cad-matches-archived-revision`). Its other
-//! columns are checked as usual. A CSV review (someone taking some of the
+//! an archived revision (`csv-cad-matches-archived-revision`), and CAD that
+//! uses a symbol, footprint or 3D model whose CSV file changed while its
+//! current revision was made in the app
+//! (`csv-cad-differs-from-edited-cad-item`, one per symbol or footprint):
+//! an import never replaces that. Its other columns are checked as usual. A CSV review (someone taking some of the
 //! CSV's values, or keeping theirs) does not change this: while the row
 //! still differs, each import records the problem again, and the review only
 //! stops the app from asking about the same CSV values twice.
@@ -96,8 +99,8 @@
 //! disagree need a `footprint-choices-disagree-on-bom` import problem.
 
 use catalog::csv_import::{
-    CadItemSource, ColumnRoute, CsvRecord, EMPTY_3D_MODEL, SubstitutesCsvColumn, parse_csv,
-    route_column, route_substitutes_csv_column,
+    CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM, CadItemSource, ColumnRoute, CsvRecord, EMPTY_3D_MODEL,
+    SubstitutesCsvColumn, parse_csv, route_column, route_substitutes_csv_column,
 };
 use catalog::pocketbase::{
     CatalogReadback, ImportRun, StoredAuditEntry, StoredImportProblem, StoredPartDetails,
@@ -570,15 +573,38 @@ impl<'a> Reporter<'a> {
                             == Some(u64::from(revision.revision.number))
                 })
                 .map(|(problem, detail)| (problem.clone(), detail.clone()));
-            for (problem, _) in details_kept.iter().chain(&cad_kept) {
+            // A symbol, footprint or 3D model the row uses whose CSV file
+            // changed while its current revision was made in the app: the
+            // import kept the CAD item as it is (kicad-parts-3b8b). One
+            // problem per symbol or footprint.
+            let cad_items_kept: Vec<StoredImportProblem> = readback
+                .problems
+                .iter()
+                .zip(&self.details)
+                .filter(|(problem, detail)| {
+                    self.in_run(problem)
+                        && problem.code == CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM
+                        && problem.subject == ipn
+                        && problem.path == source_path
+                        && detail["raw_record"].as_str() == Some(raw.as_str())
+                })
+                .map(|(problem, _)| problem.clone())
+                .collect();
+            for problem in details_kept
+                .iter()
+                .chain(&cad_kept)
+                .map(|(problem, _)| problem)
+                .chain(&cad_items_kept)
+            {
                 explained.insert(problem.id.clone());
                 self.use_for_row(problem);
             }
             if let Some((_, detail)) = &details_kept {
                 kept_by_problem.insert(ipn.clone(), detail.clone());
             }
+            let cad_kept = cad_kept.is_some() || !cad_items_kept.is_empty();
             let kept = |route: ColumnRoute| match route {
-                ColumnRoute::Cad => cad_kept.is_some(),
+                ColumnRoute::Cad => cad_kept,
                 ColumnRoute::SupplierData => false,
                 _ => details_kept.is_some(),
             };
@@ -713,7 +739,7 @@ impl<'a> Reporter<'a> {
                 .filter(|header| route_column(header) == ColumnRoute::Cad)
                 .collect();
             let stored_cad: Vec<&String> = cad.cad_fields.iter().map(|field| &field.name).collect();
-            if cad_kept.is_none() && stored_cad != cad_columns {
+            if !cad_kept && stored_cad != cad_columns {
                 self.problem(format!(
                     "row {row_number} ({ipn}): part-revision fields {stored_cad:?} are not the CAD columns {cad_columns:?}"
                 ));
@@ -755,7 +781,7 @@ impl<'a> Reporter<'a> {
                 cad_cell("Footprint"),
                 &mut explained,
             );
-            if cad_kept.is_none() {
+            if !cad_kept {
                 self.check_excluded_from_bom(row_number, &ipn, cad, &mut explained);
                 cad_scope.insert(ipn.clone(), revision.cad.clone());
             }
