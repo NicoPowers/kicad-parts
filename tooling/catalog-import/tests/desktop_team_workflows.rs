@@ -1697,3 +1697,94 @@ fn a_3d_model_link_outside_the_library_never_reaches_the_catalog() {
         "{saved:?}"
     );
 }
+
+/// The desktop's library check (kicad-parts-da65): for someone who can
+/// edit, the CSV catalog folder the app reads, compared with the team
+/// catalog; worked out again when the team catalog changes, and nothing
+/// for someone who can only view.
+#[test]
+fn editors_see_the_library_check_of_the_folder_the_app_reads() {
+    let team = Team::start();
+    let root = team.copy.path();
+    // A footprint drawn by hand in KiCad, linking a 3D model in a home
+    // folder, that no part uses yet; and a footprint the Catalog has,
+    // changed in KiCad to link a model on someone's drive.
+    let hand = footprint_named("C_0603_Hand").replace(
+        "${KIPRJMOD}/3D/C_0603_Hand.stp",
+        "/home/me/models/C_0603_Hand.step",
+    );
+    fs::write(
+        root.join("footprints/g-Capacitor_SMD.pretty/C_0603_Hand.kicad_mod"),
+        hand,
+    )
+    .unwrap();
+    let r0603 = root.join("footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod");
+    let original = fs::read_to_string(&r0603).unwrap();
+    let kicad_link = "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step";
+    assert!(original.contains(kicad_link));
+    fs::write(
+        &r0603,
+        original.replace(kicad_link, "C:/Users/me/R_0603.step"),
+    )
+    .unwrap();
+
+    let view = team.browser.library_check(&team.team).unwrap().unwrap();
+    let group = |title: &str| {
+        view.groups
+            .iter()
+            .find(|group| group.title == title)
+            .map(|group| {
+                group
+                    .items
+                    .iter()
+                    .map(|item| format!("{}:{}", item.library, item.name))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    assert!(
+        group("To fix").contains(&"g-Resistor_SMD:R_0603_1608Metric".to_owned()),
+        "{view:#?}"
+    );
+    assert!(group("Not in the Catalog yet").contains(&"g-Capacitor_SMD:C_0603_Hand".to_owned()));
+    assert!(group("Worth a look").contains(&"g-Capacitor_SMD:C_0603_Hand".to_owned()));
+    assert_eq!(view.to_fix, group("To fix").len());
+    let titles: Vec<&str> = view
+        .groups
+        .iter()
+        .map(|group| group.title.as_str())
+        .collect();
+    // The resistors' and capacitors' footprints have no old problems.
+    assert_eq!(titles, ["To fix", "Not in the Catalog yet", "Worth a look"]);
+
+    // Fixed in the folder: the app keeps its answer until the team catalog
+    // changes (it is not worked out per keystroke), then works it out again.
+    fs::write(&r0603, &original).unwrap();
+    let kept = team.browser.library_check(&team.team).unwrap().unwrap();
+    assert_eq!(kept, view);
+    let part = team.team.part("RES-0000-0470").unwrap().unwrap();
+    let mut edit = opened(&part, "A note");
+    set_field(
+        &mut edit.fields,
+        "Description",
+        "RES 47 OHM 1% 1/10W 0603 (checked)",
+    );
+    assert!(matches!(
+        team.team.edit(edit).unwrap(),
+        PublishResult::Saved { .. }
+    ));
+    wait_until("the change is followed", || {
+        let again = team.browser.library_check(&team.team).unwrap().unwrap();
+        !again.groups.iter().any(|group| {
+            group.title == "To fix"
+                && group
+                    .items
+                    .iter()
+                    .any(|item| item.name == "R_0603_1608Metric")
+        })
+    });
+
+    // Someone who can only view sees no library check.
+    let viewer = team.second("Vic Viewer", "vic@example.test", false);
+    assert_eq!(team.browser.library_check(&viewer).unwrap(), None);
+}
