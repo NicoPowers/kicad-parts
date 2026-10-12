@@ -12,6 +12,7 @@ import {
   FOOTPRINT,
   SYMBOL,
   assertAccessible,
+  editAsSomeoneElse,
   images,
   launchApp,
   repoRoot,
@@ -19,6 +20,7 @@ import {
   searchFor,
   selectResult,
   startTeamServer,
+  teamSignIn,
   tempDir,
   textOf,
   waitForLiveUpdates,
@@ -26,6 +28,7 @@ import {
   waitForText,
 } from '../harness.mjs';
 
+const IPN = 'RES-0000-0470';
 const MPN = 'RC0603FR-0747RL';
 const BADGE = '.team-settings > summary';
 const COLUMN = '.part-fields';
@@ -46,6 +49,25 @@ function correctedFootprint(folder) {
   const file = path.join(folder, 'R_0603_1608Metric.kicad_mod');
   fs.writeFileSync(file, corrected);
   return file;
+}
+
+/** The resistor footprint renamed R_Journey, naming a Catalog 3D model the Catalog lacks. */
+function footprintWithModel(folder) {
+  const original = fs.readFileSync(
+    path.join(repoRoot, 'footprints', 'g-Resistor_SMD.pretty', 'R_0603_1608Metric.kicad_mod'),
+    'utf8',
+  );
+  const changed = original
+    .replace('(footprint "R_0603_1608Metric"', '(footprint "R_Journey"')
+    .replace(
+      '${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step',
+      '${GITPLM_PARTS}/3d-models/g-Resistor_SMD.3dshapes/R_Journey.step',
+    );
+  const file = path.join(folder, 'R_Journey.kicad_mod');
+  fs.writeFileSync(file, changed);
+  const model = path.join(folder, 'R_Journey.step');
+  fs.writeFileSync(model, 'ISO-10303-21;\nEND-ISO-10303-21;\n');
+  return { file, model };
 }
 
 /** A symbol library with two symbols, a box and a circle. */
@@ -201,5 +223,34 @@ describe('team catalog: edit a part with files', () => {
     await waitForText(browser, `${SYMBOL} .provenance`, /^team catalog, symbol revision 1 · /, 60_000);
     assert.equal(await textOf(browser, `${SYMBOL} .reference`), 'g-res:R_Round');
     assert.match(await textOf(browser, COLUMN), /g-res:R_Round, symbol revision 1/);
+  });
+
+  it('keeps the chosen files, and what to put back, when someone else saved first', async () => {
+    await clickButton(COLUMN, 'Edit part');
+    const before = await fieldValue('#edit-cad-1');
+    const { file, model } = footprintWithModel(files);
+    await (await browser.$('#edit-cad-file-1')).addValue(file);
+    await waitForFilePreview('R_Journey');
+    assert.equal(await fieldValue('#edit-cad-1'), 'g-Resistor_SMD:R_Journey');
+    await waitForText(browser, '.model-file p', /names the 3D model 3d-models\/g-Resistor_SMD\.3dshapes\/R_Journey\.step/);
+    await (await browser.$('#edit-model-file-1-0')).addValue(model);
+    await waitForText(browser, '.model-file .file-name', 'From R_Journey.step');
+    // Someone else changes the symbol first, so saving shows a conflict.
+    const token = await teamSignIn(server.url, server.accounts[1]);
+    await editAsSomeoneElse(server.url, token, IPN, { Symbol: 'g-res:R_US' }, 'Back to the usual symbol');
+    await (await browser.$('#edit-reason')).setValue('Own footprint');
+    await clickButton('.edit-form', 'Save');
+    await waitForText(browser, '#conflict-heading', 'Someone else changed this part first');
+    await clickButton('.conflict', 'Edit again');
+    // The form opens again with both files still chosen.
+    await waitForFilePreview('R_Journey');
+    assert.equal(await fieldValue('#edit-cad-1'), 'g-Resistor_SMD:R_Journey');
+    await waitForText(browser, '.model-file .file-name', 'From R_Journey.step');
+    // Not using the file puts back what the field said before it.
+    await browser.execute(() => document.querySelector('.edit-file .file-remove').scrollIntoView({ block: 'center' }));
+    await clickButton('.edit-file', "Don't use the file");
+    assert.equal(await fieldValue('#edit-cad-1'), before);
+    assert.equal(await browser.execute(() => document.querySelectorAll('.model-file').length), 0);
+    await clickButton('.edit-form', 'Cancel');
   });
 });

@@ -83,6 +83,7 @@ fn file(kind: FileKind, name: &str, bytes: &[u8], symbol: Option<&str>) -> TeamF
         base64: encoded(bytes),
         symbol: symbol.map(str::to_owned),
         model_key: None,
+        replaces: None,
     }
 }
 

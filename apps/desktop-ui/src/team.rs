@@ -1309,6 +1309,9 @@ fn FileArea(ui: TeamUi, index: usize, kind: FileKind, ipn: String) -> impl IntoV
     let problem = RwSignal::new(None::<String>);
     let preview = RwSignal::new(None::<Result<PreviewOutcome, String>>);
     let previewing = RwSignal::new(false);
+    // Each drawing asked for gets the next number; only the newest one's
+    // answer is shown, so a slow older answer never replaces it.
+    let draws = StoredValue::new(0u64);
     let what = if kind == FileKind::Symbol {
         "symbol"
     } else {
@@ -1334,6 +1337,8 @@ fn FileArea(ui: TeamUi, index: usize, kind: FileKind, ipn: String) -> impl IntoV
             return;
         };
         let reference = file_reference(&field_value());
+        draws.update_value(|number| *number += 1);
+        let asked = draws.get_value();
         previewing.set(true);
         spawn_local(async move {
             let result = backend::team_preview_file(FilePreviewRequest {
@@ -1342,6 +1347,9 @@ fn FileArea(ui: TeamUi, index: usize, kind: FileKind, ipn: String) -> impl IntoV
                 selection: None,
             })
             .await;
+            if draws.get_value() != asked {
+                return;
+            }
             previewing.set(false);
             preview.set(Some(result));
         });
@@ -1371,18 +1379,31 @@ fn FileArea(ui: TeamUi, index: usize, kind: FileKind, ipn: String) -> impl IntoV
                 let name = symbol
                     .filter(|name| found.names.contains(name))
                     .unwrap_or(found.chosen.clone());
+                // What the field said before any file was chosen: from this
+                // form, or carried in the draft when the form was opened
+                // again (after a conflict).
                 let before = chosen
                     .get_untracked()
-                    .map_or_else(field_value, |earlier| earlier.before);
+                    .map(|earlier| earlier.before)
+                    .or_else(|| sent().and_then(|file| file.replaces))
+                    .unwrap_or_else(field_value);
+                let still_missing = found.missing_models.clone();
                 if !keep_field {
                     let value =
                         with_reference(&field_value(), &joined(&found.library, &name), kind);
                     set_field(value);
                 }
                 ui.draft.update_value(|draft| {
+                    // A 3D model file chosen for a model the footprint still
+                    // names stays chosen.
                     draft.files.retain(|file| {
                         file.kind != kind
-                            && (kind != FileKind::Footprint || file.kind != FileKind::Model3d)
+                            && (kind != FileKind::Footprint
+                                || file.kind != FileKind::Model3d
+                                || file
+                                    .model_key
+                                    .as_ref()
+                                    .is_some_and(|key| still_missing.contains(key)))
                     });
                     draft.files.push(TeamFile {
                         kind,
@@ -1390,6 +1411,7 @@ fn FileArea(ui: TeamUi, index: usize, kind: FileKind, ipn: String) -> impl IntoV
                         base64: encoded,
                         symbol: (kind == FileKind::Symbol).then(|| name.clone()),
                         model_key: None,
+                        replaces: Some(before.clone()),
                     });
                 });
                 chosen.set(Some(ChosenFile {
@@ -1572,7 +1594,14 @@ fn FilePreview(
 /// file input for it, or leave it out.
 #[component]
 fn ModelFile(ui: TeamUi, index: usize, number: usize, key: String) -> impl IntoView {
-    let chosen = RwSignal::new(None::<String>);
+    // A file chosen before (shown again after a conflict) is still chosen.
+    let chosen = RwSignal::new(ui.draft.with_value(|draft| {
+        draft
+            .files
+            .iter()
+            .find(|file| file.model_key.as_deref() == Some(key.as_str()))
+            .map(|file| file.file_name.clone())
+    }));
     let problem = RwSignal::new(None::<String>);
     let input_id = format!("edit-model-file-{index}-{number}");
     let (extensions, _) = accepted(FileKind::Model3d);
@@ -1595,6 +1624,7 @@ fn ModelFile(ui: TeamUi, index: usize, number: usize, key: String) -> impl IntoV
                                 base64: base64(&bytes),
                                 symbol: None,
                                 model_key: Some(key.clone()),
+                                replaces: None,
                             });
                         });
                         chosen.set(Some(name));

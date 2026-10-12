@@ -557,6 +557,10 @@ pub struct TeamFile {
     /// For a 3D model, the `3d-models/...` path the footprint names.
     #[serde(default)]
     pub model_key: Option<String>,
+    /// For a symbol or footprint file, what its field said before the file
+    /// was chosen, so the form can put it back; saving does not use it.
+    #[serde(default)]
+    pub replaces: Option<String>,
 }
 
 /// Read a chosen symbol library or footprint file, for Edit part.
