@@ -170,12 +170,41 @@ impl CsvCatalog {
         limit: usize,
         replace: impl Fn(&CatalogPart) -> Option<CatalogPart>,
     ) -> SearchResults {
+        self.search_with_extra(query, limit, replace, &[])
+    }
+
+    /// Like [`Self::search_replacing`], but `extra` parts (for example
+    /// ones only the team catalog has) are searched too, after the
+    /// catalog's own. A hit at `parts().len() + n` is `extra[n]`.
+    pub fn search_with_extra(
+        &self,
+        query: &str,
+        limit: usize,
+        replace: impl Fn(&CatalogPart) -> Option<CatalogPart>,
+        extra: &[CatalogPart],
+    ) -> SearchResults {
         let query = query.trim().to_lowercase();
         let terms: Vec<&str> = query.split_whitespace().collect();
         let mut ranked: Vec<(u8, usize)> = Vec::new();
-        for (position, indexed) in self.index.iter().enumerate() {
-            let replaced = replace(&self.parts[position]).map(|part| SearchKey::new(&part));
-            let key = replaced.as_ref().unwrap_or(indexed);
+        let extra_keys: Vec<SearchKey> = extra.iter().map(SearchKey::new).collect();
+        let keys = self
+            .index
+            .iter()
+            .enumerate()
+            .map(|(position, indexed)| {
+                let replaced = replace(&self.parts[position]).map(|part| SearchKey::new(&part));
+                (position, replaced, Some(indexed))
+            })
+            .chain(
+                extra_keys
+                    .iter()
+                    .enumerate()
+                    .map(|(at, key)| (self.parts.len() + at, None, Some(key))),
+            );
+        for (position, replaced, indexed) in keys {
+            let Some(key) = replaced.as_ref().or(indexed) else {
+                continue;
+            };
             if !terms.iter().all(|term| key.text.contains(term)) {
                 continue;
             }
@@ -316,6 +345,20 @@ mod tests {
         let results = catalog.search("abc", 10);
         assert_eq!(results.total, 3);
         assert_eq!(results.hits, vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn extra_parts_are_searched_after_the_catalogs_own() {
+        let catalog = CsvCatalog::from_parts(
+            vec![part("A-1", "X", "abc"), part("A-2", "Y", "other")],
+            Vec::new(),
+        );
+        let extra = [part("N-1", "ABC", "added in the app")];
+        let results = catalog.search_with_extra("abc", 10, |_| None, &extra);
+        // The extra part is an exact MPN match, so it ranks first; its hit
+        // is past the catalog's own parts.
+        assert_eq!(results.hits, vec![2, 0]);
+        assert_eq!(results.total, 2);
     }
 
     #[test]

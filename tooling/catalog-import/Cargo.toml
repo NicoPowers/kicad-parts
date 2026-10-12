@@ -22,6 +22,8 @@ catalog-browser = { path = "../../crates/catalog-browser" }
 desktop-contract = { path = "../../crates/desktop-contract" }
 # Inspects a rolled-back data.db while PocketBase is stopped.
 rusqlite = { version = "0.37", features = ["bundled"] }
+# Builds small downloads for Add part from the repository's CAD files.
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 
 [target.'cfg(windows)'.dependencies]
 # Ctrl+C handling for `local-team-server`.

@@ -18,13 +18,14 @@
 use crate::PartValues;
 use catalog::pocketbase::{
     ArchiveCommand, ArchiveOutcome, CSV_CAD_DIFFERS, CSV_CAD_ITEM_KEPT, CSV_DETAILS_DIFFER,
-    CadUpload, ConflictingRecord, CsvReviewCommand, CsvReviewOutcome, EDIT_BODY_LIMIT, EditCommand,
-    MANUFACTURER_PARTS_FIELD, PublishOutcome, PublishReply, StoredArchiveEntry, StoredBlob,
-    StoredCadItemRevision, StoredChange, StoredCsvReview, StoredPart, StoredPartRevision,
-    archive_entries_of, archived_numbers, cad_item_revisions_by_id, cad_item_revisions_in_changes,
-    changes_by_id, csv_reviews_of, current_categories, fields_for_category, has_cad_item,
-    latest_import_run, part_by_ipn, part_details_of, part_revisions, problems_of,
-    recorded_csv_document, submit_archive, submit_csv_review, submit_edit,
+    CadUpload, ConflictingRecord, CreateCommand, CreateOutcome, CsvReviewCommand, CsvReviewOutcome,
+    EDIT_BODY_LIMIT, EditCommand, MANUFACTURER_PARTS_FIELD, PublishOutcome, PublishReply,
+    StoredArchiveEntry, StoredBlob, StoredCadItemRevision, StoredChange, StoredCsvReview,
+    StoredPart, StoredPartRevision, archive_entries_of, archived_numbers, cad_item_revisions_by_id,
+    cad_item_revisions_in_changes, changes_by_id, csv_reviews_of, current_categories,
+    fields_for_category, has_cad_item, latest_import_run, part_by_ipn, part_details_of,
+    part_revisions, problems_of, recorded_csv_document, remembered_matches, submit_archive,
+    submit_create, submit_csv_review, submit_edit,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
@@ -38,14 +39,14 @@ use desktop_contract::{
     CurrentRevision, DetailChange, Field, FileKind, HistoryEntry, LiveUpdates, ManufacturerPart,
     OlderUse, PreviewKind, PublishResult, RevisionStatus, SignInRequest, TeamArchiveRequest,
     TeamCategory, TeamConflict, TeamCsvReviewRequest, TeamEditRequest, TeamFile, TeamFileReading,
-    TeamFileRequest, TeamPart, TeamSession, TeamStatus,
+    TeamFileRequest, TeamIpnCheck, TeamNewPartRequest, TeamPart, TeamSession, TeamStatus,
 };
 use kicad_integration::library_file::{
     footprint_says_excluded_from_bom, symbol_entries_say_not_in_bom,
 };
 use kicad_integration::{LibRef, StoredItem, footprint_choices};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -325,6 +326,14 @@ impl TeamCatalog {
                 let field = |name: &str| details.field(name).map(str::to_owned);
                 let cad = |name: &str| revision.field(name).map(str::to_owned);
                 let values = PartValues {
+                    category: Some(details.category.clone()),
+                    fields: Some(
+                        details
+                            .fields
+                            .iter()
+                            .map(|field| (field.name.clone(), field.value.clone()))
+                            .collect(),
+                    ),
                     mpn: Some(main.map(|part| part.mpn.clone()).unwrap_or_default()),
                     manufacturer: Some(
                         main.map(|part| part.manufacturer.clone())
@@ -574,6 +583,177 @@ impl TeamCatalog {
                 message: "Your sign-in has ended. Sign in again, then save.".into(),
             }),
             Err(error) => save_failed(error),
+        }
+    }
+
+    /// Every part's current details and current revision, from what the app
+    /// follows; no request. Empty while signed out.
+    pub(crate) fn current_parts(&self) -> Vec<(PartDetails, PartRevision)> {
+        let state = self.lock();
+        let Some(session) = &state.session else {
+            return Vec::new();
+        };
+        let live = session
+            .follower
+            .live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        live.replica
+            .parts()
+            .values()
+            .filter_map(|part| Some((part.details.clone()?, part.revision.clone()?)))
+            .collect()
+    }
+
+    /// Every category's current revision and every remembered match, for
+    /// Add part's category guess: two requests.
+    pub(crate) fn categories_and_matches(
+        &self,
+    ) -> Result<(Vec<CategoryDetails>, Vec<catalog::guess::RememberedMatch>), String> {
+        let client = self.client()?;
+        let fail = |error: CollabError| {
+            format!(
+                "The team catalog could not be read because {}.",
+                plain_reason(&error)
+            )
+        };
+        Ok((
+            current_categories(&client).map_err(fail)?,
+            remembered_matches(&client).map_err(fail)?,
+        ))
+    }
+
+    /// Whether `ipn` can be a new part's IPN: written as an IPN, and not
+    /// one the team catalog (or `known`, such as the CSV catalog's) has.
+    pub fn check_ipn(&self, ipn: &str, known: &BTreeSet<String>) -> TeamIpnCheck {
+        let problem = if catalog::Ipn::parse(ipn).is_err() {
+            Some("Write the IPN as three capital letters, four digits and four letters or digits, such as RES-0001-0001.".to_owned())
+        } else if known.contains(ipn)
+            || self
+                .current_parts()
+                .iter()
+                .any(|(details, _)| details.ipn == ipn)
+        {
+            Some(format!(
+                "{ipn} is already in the Catalog. An IPN is never reused."
+            ))
+        } else {
+            None
+        };
+        TeamIpnCheck { problem }
+    }
+
+    /// Saves a new part: part details 1 in the confirmed category, revision
+    /// 1 with its symbol and footprint, and the files they use. `known` are
+    /// the IPNs the team catalog may not have yet (the CSV catalog's), for
+    /// the next free IPN when someone took this one first.
+    pub fn add_part(
+        &self,
+        request: TeamNewPartRequest,
+        known: &BTreeSet<String>,
+    ) -> Result<PublishResult, String> {
+        let client = self.client()?;
+        let refused = |message: String| Ok(PublishResult::Refused { message });
+        if request.reason.trim().is_empty() {
+            return refused("Say why you are adding the part before you save.".into());
+        }
+        // A taken IPN is the server's to say: someone may take it any time.
+        if catalog::Ipn::parse(request.ipn.trim()).is_err() {
+            if let Some(problem) = self.check_ipn(request.ipn.trim(), known).problem {
+                return refused(problem);
+            }
+        }
+        let uploads = match crate::add_part::uploads(&request) {
+            Ok(uploads) => uploads,
+            Err(message) => return refused(message),
+        };
+        let ipn = request.ipn.trim().to_owned();
+        let mut command = CreateCommand::new(&ipn, &request.category, request.reason.trim());
+        command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
+        command.fields = request
+            .fields
+            .iter()
+            .map(|field| DetailField {
+                name: field.name.clone(),
+                value: field.value.trim().to_owned(),
+            })
+            .collect();
+        command.manufacturer_parts = request
+            .manufacturer_parts
+            .iter()
+            .map(|part| (part.manufacturer.trim(), part.mpn.trim()))
+            .filter(|(manufacturer, mpn)| !manufacturer.is_empty() || !mpn.is_empty())
+            .map(|(manufacturer, mpn)| catalog::ManufacturerPart {
+                manufacturer: manufacturer.to_owned(),
+                mpn: mpn.to_owned(),
+            })
+            .collect();
+        command.cad_fields[0].value = request.symbol.trim().to_owned();
+        command.cad_fields[1].value = request.footprint.trim().to_owned();
+        command.uploads = uploads;
+        command.from = request.from.trim().to_owned();
+        command.files = request.downloads.clone();
+        if command.body().to_string().len() > EDIT_BODY_LIMIT {
+            return refused(format!(
+                "The files are too big to save together: one save can send at most {} MB. Nothing was saved.",
+                EDIT_BODY_LIMIT / (1024 * 1024)
+            ));
+        }
+        match submit_create(&client, &command) {
+            Ok(reply) => match reply.outcome {
+                CreateOutcome::Applied { seq, .. } => {
+                    // The new part opens and is found at once: wait (a
+                    // little) until the followed replica has it.
+                    self.wait_for_change(seq);
+                    saved_then(reload(&client, &ipn), |part| PublishResult::Added { part })
+                }
+                CreateOutcome::IpnTaken { .. } => {
+                    let mut taken: BTreeSet<String> = known.clone();
+                    taken.extend(
+                        self.current_parts()
+                            .into_iter()
+                            .map(|(details, _)| details.ipn),
+                    );
+                    taken.insert(ipn.clone());
+                    let next_free = catalog::download::next_free_ipn(
+                        &ipn[..3],
+                        taken.iter().map(String::as_str),
+                    )
+                    .unwrap_or_default();
+                    Ok(PublishResult::IpnTaken {
+                        message: format!(
+                            "Someone added a part with the IPN {ipn} first, so nothing was saved. The next free IPN is {next_free}."
+                        ),
+                        next_free,
+                    })
+                }
+                CreateOutcome::CorrelationReused { message, .. } => refused(message),
+            },
+            Err(CollabError::Http {
+                status: 400,
+                message,
+            }) => refused(message),
+            Err(CollabError::Forbidden(message)) => refused(message),
+            Err(CollabError::Unauthorized(_)) => {
+                refused("Your sign-in has ended. Sign in again, then save.".into())
+            }
+            Err(error) => save_failed(error),
+        }
+    }
+
+    /// Waits up to five seconds for the followed replica to apply Change
+    /// `seq`.
+    fn wait_for_change(&self, seq: u64) {
+        for _ in 0..100 {
+            let reached = self
+                .lock()
+                .session
+                .as_ref()
+                .is_none_or(|session| session.follower.snapshot().1 >= seq);
+            if reached {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -1471,7 +1651,7 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
         .filter(|change| {
             change_records
                 .get(*change)
-                .is_some_and(|c| c.kind == "edit")
+                .is_some_and(|c| c.kind == "edit" || c.kind == "create")
         })
         .collect();
     if !edits.is_empty() {
@@ -1501,6 +1681,15 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
     for entry in &archive_entries {
         if let Some(change) = change_records.get(&entry.change) {
             history_entry(&mut entries, change).archive = Some(archive_note(entry));
+        }
+    }
+    // Where a part added in the app came from.
+    for change in change_records
+        .values()
+        .filter(|change| change.kind == "create")
+    {
+        if let Some(row) = downloaded_from(change) {
+            history_entry(&mut entries, change).changes.insert(0, row);
         }
     }
     for review in &reviews {
@@ -1576,6 +1765,28 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
         details,
         revisions: cad,
         categories,
+    })
+}
+
+/// The history row of a new part's download: the site and the files, such
+/// as `SnapEDA: LM317.zip`.
+fn downloaded_from(change: &StoredChange) -> Option<DetailChange> {
+    let sources: serde_json::Value = serde_json::from_str(&change.sources).ok()?;
+    let from = sources["from"].as_str().unwrap_or_default();
+    let files: Vec<&str> = sources["files"]
+        .as_array()
+        .map(|files| files.iter().filter_map(|file| file.as_str()).collect())
+        .unwrap_or_default();
+    let after = match (from.is_empty(), files.is_empty()) {
+        (true, true) => return None,
+        (false, true) => from.to_owned(),
+        (true, false) => files.join(", "),
+        (false, false) => format!("{from}: {}", files.join(", ")),
+    };
+    Some(DetailChange {
+        label: "Downloaded from".into(),
+        before: String::new(),
+        after,
     })
 }
 
@@ -2223,6 +2434,7 @@ fn action(kind: &str) -> &'static str {
         "archive" => "Archived",
         "unarchive" => "Unarchived",
         "csv-review" => ACCEPTED,
+        "create" => "Added",
         _ => "Saved",
     }
 }

@@ -3,7 +3,8 @@
 use desktop_contract::{
     AppStatus, FilePreviewRequest, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
     SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
-    TeamEditRequest, TeamFileReading, TeamFileRequest, TeamPart, TeamStatus, command,
+    TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest,
+    TeamIpnCheck, TeamIpnRequest, TeamNewPartRequest, TeamPart, TeamStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -148,4 +149,40 @@ pub async fn team_read_file(request: TeamFileRequest) -> Result<TeamFileReading,
 /// Draws a chosen symbol or footprint file before it is saved.
 pub async fn team_preview_file(request: FilePreviewRequest) -> Result<PreviewOutcome, String> {
     call(command::TEAM_PREVIEW_FILE, &PreviewFileArgs { request }).await
+}
+
+#[derive(Serialize)]
+struct DownloadArgs {
+    request: TeamDownloadRequest,
+}
+
+#[derive(Serialize)]
+struct IpnArgs {
+    request: TeamIpnRequest,
+}
+
+#[derive(Serialize)]
+struct NewPartArgs {
+    request: TeamNewPartRequest,
+}
+
+/// Reads the files chosen for Add part.
+pub async fn team_read_download(request: TeamDownloadRequest) -> Result<TeamDownload, String> {
+    call(command::TEAM_READ_DOWNLOAD, &DownloadArgs { request }).await
+}
+
+/// Whether an IPN can be a new part's.
+pub async fn team_check_ipn(ipn: String) -> Result<TeamIpnCheck, String> {
+    call(
+        command::TEAM_CHECK_IPN,
+        &IpnArgs {
+            request: TeamIpnRequest { ipn },
+        },
+    )
+    .await
+}
+
+/// Saves a new part.
+pub async fn team_add_part(request: TeamNewPartRequest) -> Result<PublishResult, String> {
+    call(command::TEAM_ADD_PART, &NewPartArgs { request }).await
 }

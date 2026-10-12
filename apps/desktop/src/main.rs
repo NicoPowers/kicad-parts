@@ -9,7 +9,8 @@ use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
     AppStatus, FilePreviewRequest, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
     SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
-    TeamEditRequest, TeamFileReading, TeamFileRequest, TeamPart, TeamStatus,
+    TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest,
+    TeamIpnCheck, TeamIpnRequest, TeamNewPartRequest, TeamPart, TeamStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -257,10 +258,13 @@ async fn search_parts(
 #[tauri::command]
 async fn part_detail(
     browser: State<'_, Browser>,
+    team: State<'_, Team>,
     ipn: String,
 ) -> Result<Option<PartDetail>, String> {
-    let browser = browser.inner().clone();
-    blocking(move || browser.part(&ipn)).await
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    // A part only the team catalog has, such as one added in the app, is
+    // found there.
+    blocking(move || browser.part_with(&ipn, &team.current_values())).await
 }
 
 #[tauri::command]
@@ -344,6 +348,36 @@ async fn team_preview_file(
     blocking(move || browser.preview_file(&request)).await
 }
 
+#[tauri::command]
+async fn team_read_download(
+    browser: State<'_, Browser>,
+    team: State<'_, Team>,
+    request: TeamDownloadRequest,
+) -> Result<TeamDownload, String> {
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    blocking(move || browser.read_download(&request, &team)).await?
+}
+
+#[tauri::command]
+async fn team_check_ipn(
+    browser: State<'_, Browser>,
+    team: State<'_, Team>,
+    request: TeamIpnRequest,
+) -> Result<TeamIpnCheck, String> {
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    blocking(move || browser.check_ipn(&request.ipn, &team)).await
+}
+
+#[tauri::command]
+async fn team_add_part(
+    browser: State<'_, Browser>,
+    team: State<'_, Team>,
+    request: TeamNewPartRequest,
+) -> Result<PublishResult, String> {
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    blocking(move || browser.add_part(request, &team)).await?
+}
+
 fn main() {
     let options = match LaunchOptions::parse(std::env::args_os().skip(1)) {
         Ok(options) => options,
@@ -419,6 +453,9 @@ fn main() {
             team_csv_review,
             team_read_file,
             team_preview_file,
+            team_read_download,
+            team_check_ipn,
+            team_add_part,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -524,6 +561,9 @@ mod tests {
             command::TEAM_CSV_REVIEW,
             command::TEAM_READ_FILE,
             command::TEAM_PREVIEW_FILE,
+            command::TEAM_READ_DOWNLOAD,
+            command::TEAM_CHECK_IPN,
+            command::TEAM_ADD_PART,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

@@ -22,6 +22,9 @@ pub mod command {
     pub const TEAM_CSV_REVIEW: &str = "team_csv_review";
     pub const TEAM_READ_FILE: &str = "team_read_file";
     pub const TEAM_PREVIEW_FILE: &str = "team_preview_file";
+    pub const TEAM_READ_DOWNLOAD: &str = "team_read_download";
+    pub const TEAM_CHECK_IPN: &str = "team_check_ipn";
+    pub const TEAM_ADD_PART: &str = "team_add_part";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -587,6 +590,11 @@ pub struct TeamFile {
     /// was chosen, so the form can put it back; saving does not use it.
     #[serde(default)]
     pub replaces: Option<String>,
+    /// Where the file came from when it is part of a download, such as
+    /// `KiCad/LM317.kicad_sym in LM317.zip`; saved as its source instead of
+    /// the file name.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// Read a chosen symbol library or footprint file, for Edit part.
@@ -632,6 +640,174 @@ pub struct FilePreviewRequest {
     /// As in [`PreviewRequest`].
     #[serde(default)]
     pub selection: Option<u64>,
+}
+
+// ---- Add part ----------------------------------------------------------------
+//
+// An engineer adds a new part from the CAD files they downloaded (SnapEDA,
+// Ultra Librarian, SamacSys or a manufacturer's site): a ZIP file or loose
+// .kicad_sym, .kicad_mod and 3D model files (kicad-parts-9693).
+
+/// A file chosen for Add part, as it was downloaded.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DownloadedFile {
+    /// The file's name, without its folder.
+    pub file_name: String,
+    /// The file's bytes, in standard base64.
+    pub base64: String,
+}
+
+/// Read the files chosen for Add part.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamDownloadRequest {
+    pub files: Vec<DownloadedFile>,
+    /// The symbol and the footprint chosen, by their place in
+    /// [`TeamDownload::symbols`] and [`TeamDownload::footprints`]; `None`
+    /// takes the first.
+    #[serde(default)]
+    pub symbol: Option<usize>,
+    #[serde(default)]
+    pub footprint: Option<usize>,
+}
+
+/// What a download holds and what the app makes of it.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamDownload {
+    /// Where the files came from, when a ZIP's layout says, such as
+    /// `SnapEDA`; blank otherwise.
+    pub from: String,
+    /// How many files were left out, such as files for other CAD tools.
+    pub ignored: usize,
+    /// Each symbol in the download, such as `LM317 in KiCad/LM317.kicad_sym
+    /// in LM317.zip`.
+    pub symbols: Vec<String>,
+    pub symbol: Option<usize>,
+    /// Each footprint in the download.
+    pub footprints: Vec<String>,
+    pub footprint: Option<usize>,
+    /// Each 3D model in the download.
+    pub models: Vec<String>,
+    /// The 3D model the footprint is linked to, if any.
+    pub model: Option<usize>,
+    /// The chosen symbol's library file, with the symbol named.
+    pub symbol_file: Option<TeamFile>,
+    /// The chosen footprint file.
+    pub footprint_file: Option<TeamFile>,
+    /// Every 3D model file, in the order of `models`.
+    pub model_files: Vec<TeamFile>,
+    /// The symbol's and footprint's own names.
+    pub symbol_name: String,
+    pub footprint_name: String,
+    /// The footprint group suggested from the footprint's name (by package,
+    /// such as `g-Resistor_SMD`); blank when the name does not say.
+    pub footprint_library: String,
+    /// What the symbol says, blank when it does not.
+    pub mpn: String,
+    pub manufacturer: String,
+    /// Every category, with the fields a new part in it gets, filled from
+    /// the symbol, and the next free IPN.
+    pub categories: Vec<TeamNewCategory>,
+    /// The best guesses of the category, best first, at most three; empty
+    /// when no clue matches.
+    pub guesses: Vec<TeamGuess>,
+    /// Parts that already have the symbol's MPN.
+    pub same_mpn: Vec<TeamSameMpn>,
+    /// Footprints the Catalog or KiCad already has that match the chosen
+    /// one.
+    pub known_footprints: Vec<TeamKnownFootprint>,
+    /// How many distinct pins the symbol has, and how many distinct
+    /// numbered pads the footprint has.
+    pub pins: Option<u32>,
+    pub pads: Option<u32>,
+    /// Plain notes about the files, such as a file that could not be read
+    /// or how the footprint finds its 3D model.
+    pub notes: Vec<String>,
+}
+
+/// A category as Add part offers it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamNewCategory {
+    pub code: String,
+    pub name: String,
+    /// The next free IPN for its IPN prefix, such as `ICS-0047-0001`; blank
+    /// when it has no prefix.
+    pub next_ipn: String,
+    /// Its fields, in order, filled from the symbol where it says.
+    pub fields: Vec<Field>,
+    /// What the symbol says that fills none of the fields, so nothing is
+    /// silently lost.
+    pub unused: Vec<Field>,
+}
+
+/// A guess of the new part's category.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamGuess {
+    pub code: String,
+    pub name: String,
+    /// Why, strongest first, such as `footprint C_0603_1608Metric matches
+    /// C_*`.
+    pub reasons: Vec<String>,
+}
+
+/// A part that already has the MPN.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamSameMpn {
+    pub ipn: String,
+    pub description: String,
+    pub manufacturer: String,
+    pub mpn: String,
+    /// The part already lists this manufacturer with this MPN, so adding it
+    /// as a manufacturer part would add nothing.
+    pub listed: bool,
+}
+
+/// A footprint the Catalog or KiCad already has, which a new part can use
+/// instead of storing a near-copy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamKnownFootprint {
+    /// Such as `g-Resistor_SMD:R_0603_1608Metric`, or
+    /// `Resistor_SMD:R_0603_1608Metric` for KiCad's own.
+    pub reference: String,
+    /// Why it matches, such as `the same pads`.
+    pub why: String,
+}
+
+/// Is this IPN free for a new part?
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamIpnRequest {
+    pub ipn: String,
+}
+
+/// The answer: `None` when the IPN can be used, otherwise why not.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamIpnCheck {
+    pub problem: Option<String>,
+}
+
+/// Save a new part.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamNewPartRequest {
+    /// As in [`TeamEditRequest`].
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    pub ipn: String,
+    pub reason: String,
+    /// The code of the category the person confirmed.
+    pub category: String,
+    /// Every field of the category, in its order.
+    pub fields: Vec<Field>,
+    pub manufacturer_parts: Vec<ManufacturerPart>,
+    /// The Symbol and Footprint references, such as `g-reg:LM317`.
+    pub symbol: String,
+    pub footprint: String,
+    /// The symbol file (with the symbol named), the footprint file and its
+    /// 3D model file, for the references above; a footprint the Catalog or
+    /// KiCad already has needs no file.
+    pub files: Vec<TeamFile>,
+    /// Where the files came from, such as `SnapEDA`; blank if not known.
+    pub from: String,
+    /// The names of the downloaded files.
+    pub downloads: Vec<String>,
 }
 
 /// A symbol or footprint that a saved edit gave a new revision, which other
@@ -694,6 +870,11 @@ pub enum PublishResult {
     /// The server refused it, for example a symbol the Catalog does not
     /// have, or no edit access.
     Refused { message: String },
+    /// A new part was saved as `part`.
+    Added { part: TeamPart },
+    /// Someone took the new part's IPN first; nothing was saved.
+    /// `next_free` is the next free IPN for its prefix.
+    IpnTaken { message: String, next_free: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

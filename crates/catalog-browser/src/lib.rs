@@ -1,9 +1,10 @@
 //! The "browse the catalog with exact KiCad previews" use cases, and the
-//! team catalog ([`team`]): sign in, history and edits.
+//! team catalog ([`team`]): sign in, history, edits and Add part.
 //!
 //! The desktop shell wraps each method in a Tauri command and does nothing
 //! else, so everything here is testable without a window.
 
+mod add_part;
 pub mod team;
 
 use base64::Engine;
@@ -11,7 +12,8 @@ use csv_catalog::{CatalogPart, CsvCatalog};
 use desktop_contract::{
     AppStatus, CatalogStatus, Field, FileKind, FilePreviewRequest, KicadStatus, PartDetail,
     PartSummary, PreviewImage, PreviewKind, PreviewOutcome, PreviewProblem, PreviewProblemReason,
-    PreviewRequest, PreviewSet, SearchResponse,
+    PreviewRequest, PreviewSet, PublishResult, SearchResponse, TeamDownload, TeamDownloadRequest,
+    TeamIpnCheck, TeamNewPartRequest,
 };
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use kicad_integration::{
@@ -20,10 +22,10 @@ use kicad_integration::{
     SearchLocations, StoredItem, discover, footprint_choices, sha256_hex,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 use team::{StoredCad, TeamCad, TeamCadError, TeamCatalog};
 
@@ -62,6 +64,9 @@ pub struct CatalogBrowser {
     catalog: Result<CsvCatalog, String>,
     previews: PreviewCache,
     kicad: RwLock<KicadState>,
+    /// The CSV catalog's footprints with their pads, read the first time
+    /// Add part needs them.
+    footprints: OnceLock<Vec<add_part::LocalFootprint>>,
 }
 
 impl CatalogBrowser {
@@ -80,6 +85,7 @@ impl CatalogBrowser {
             previews.evict_unused(&install.version);
         }
         Self {
+            footprints: OnceLock::new(),
             previews,
             catalog,
             kicad: RwLock::new(KicadState {
@@ -176,17 +182,24 @@ impl CatalogBrowser {
         let replace = |part: &CatalogPart| current.get(&part.ipn).map(|values| values.apply(part));
         let (total, hits) = match &self.catalog {
             Ok(catalog) => {
+                // Parts only the team catalog has, such as ones added in the
+                // app, are found too, after the CSV catalog's.
+                let extra = self.team_only_parts(current);
                 let results = if current.is_empty() {
                     catalog.search(query, limit.min(MAX_SEARCH_LIMIT))
                 } else {
-                    catalog.search_replacing(query, limit.min(MAX_SEARCH_LIMIT), replace)
+                    catalog.search_with_extra(query, limit.min(MAX_SEARCH_LIMIT), replace, &extra)
                 };
+                let count = catalog.parts().len();
                 let hits = results
                     .hits
                     .iter()
-                    .map(|&position| {
-                        let part = &catalog.parts()[position];
-                        summary(&replace(part).unwrap_or_else(|| part.clone()))
+                    .map(|&position| match position.checked_sub(count) {
+                        Some(at) => summary(&extra[at]),
+                        None => {
+                            let part = &catalog.parts()[position];
+                            summary(&replace(part).unwrap_or_else(|| part.clone()))
+                        }
                     })
                     .collect();
                 (results.total, hits)
@@ -201,22 +214,98 @@ impl CatalogBrowser {
         }
     }
 
+    /// The parts in `current` (the team catalog's) that the CSV catalog
+    /// does not have, in IPN order.
+    fn team_only_parts(&self, current: &BTreeMap<String, PartValues>) -> Vec<CatalogPart> {
+        let Ok(catalog) = &self.catalog else {
+            return Vec::new();
+        };
+        current
+            .iter()
+            .filter(|(ipn, _)| catalog.find(ipn).is_none())
+            .map(|(ipn, values)| values.part(ipn))
+            .collect()
+    }
+
+    /// Every IPN the CSV catalog has.
+    pub fn csv_ipns(&self) -> BTreeSet<String> {
+        self.catalog
+            .as_ref()
+            .map(|catalog| {
+                catalog
+                    .parts()
+                    .iter()
+                    .map(|part| part.ipn.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Like [`Self::part`], but a part only the team catalog has (in
+    /// `current`, such as one added in the app) is found too.
+    pub fn part_with(
+        &self,
+        ipn: &str,
+        current: &BTreeMap<String, PartValues>,
+    ) -> Option<PartDetail> {
+        self.part(ipn).or_else(|| {
+            let values = current.get(ipn)?;
+            Some(detail(&values.part(ipn)))
+        })
+    }
+
+    /// Reads the files chosen for Add part (kicad-parts-9693): what they
+    /// hold, what the symbol says, the category guess, the next free IPN
+    /// for each category, and the checks before saving.
+    pub fn read_download(
+        &self,
+        request: &TeamDownloadRequest,
+        team: &TeamCatalog,
+    ) -> Result<TeamDownload, String> {
+        let (categories, remembered) = team.categories_and_matches()?;
+        let parts = team.current_parts();
+        let mut ipns = self.csv_ipns();
+        ipns.extend(parts.iter().map(|(details, _)| details.ipn.clone()));
+        let kicad_share = {
+            let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
+            match &kicad.discovery {
+                Discovery::Ready(install) => install.share_dir.clone(),
+                _ => None,
+            }
+        };
+        let footprints = self
+            .footprints
+            .get_or_init(|| add_part::local_footprints(&self.config.catalog_root));
+        add_part::read(
+            request,
+            &add_part::Context {
+                categories,
+                remembered,
+                parts,
+                ipns,
+                footprints,
+                kicad_share,
+            },
+        )
+    }
+
+    /// Whether `ipn` can be a new part's IPN.
+    pub fn check_ipn(&self, ipn: &str, team: &TeamCatalog) -> TeamIpnCheck {
+        team.check_ipn(ipn, &self.csv_ipns())
+    }
+
+    /// Saves a new part from Add part.
+    pub fn add_part(
+        &self,
+        request: TeamNewPartRequest,
+        team: &TeamCatalog,
+    ) -> Result<PublishResult, String> {
+        team.add_part(request, &self.csv_ipns())
+    }
+
     pub fn part(&self, ipn: &str) -> Option<PartDetail> {
         let part = self.catalog.as_ref().ok()?.find(ipn)?;
-        Some(PartDetail {
-            summary: summary(part),
-            symbol: part.symbol.clone(),
-            footprint: part.footprint.clone(),
-            datasheet: part.datasheet.clone(),
-            fields: part
-                .fields
-                .iter()
-                .map(|(name, value)| Field {
-                    name: name.clone(),
-                    value: value.clone(),
-                })
-                .collect(),
-        })
+        Some(detail(part))
     }
 
     /// The exact kicad-cli preview of a part's symbol (every unit) or
@@ -780,10 +869,32 @@ fn kicad_status(discovery: &Discovery) -> KicadStatus {
     }
 }
 
+fn detail(part: &CatalogPart) -> PartDetail {
+    PartDetail {
+        summary: summary(part),
+        symbol: part.symbol.clone(),
+        footprint: part.footprint.clone(),
+        datasheet: part.datasheet.clone(),
+        fields: part
+            .fields
+            .iter()
+            .map(|(name, value)| Field {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+    }
+}
+
 fn summary(part: &CatalogPart) -> PartSummary {
     PartSummary {
         ipn: part.ipn.clone(),
-        csv_file: format!("{}.csv", part.category),
+        // A part only the team catalog has comes from no CSV file.
+        csv_file: if part.category.is_empty() {
+            "Team catalog".to_owned()
+        } else {
+            format!("{}.csv", part.category)
+        },
         mpn: part.mpn.clone(),
         manufacturer: part.manufacturer.clone(),
         description: part.description.clone(),
@@ -863,6 +974,10 @@ fn display(path: &Path) -> String {
 /// as the team catalog. `None` keeps the CSV catalog's value.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PartValues {
+    /// The part's category code.
+    pub category: Option<String>,
+    /// Every details field, in order.
+    pub fields: Option<Vec<(String, String)>>,
     pub mpn: Option<String>,
     pub manufacturer: Option<String>,
     pub description: Option<String>,
@@ -872,6 +987,37 @@ pub struct PartValues {
 }
 
 impl PartValues {
+    /// The part `ipn` as these values describe it, for a part the CSV
+    /// catalog does not have.
+    fn part(&self, ipn: &str) -> CatalogPart {
+        let text = |value: &Option<String>| value.clone().unwrap_or_default();
+        let reference =
+            |value: &Option<String>| value.clone().filter(|value| !value.trim().is_empty());
+        let fields: Vec<(String, String)> = self
+            .fields
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, value)| !value.trim().is_empty())
+            .collect();
+        CatalogPart {
+            ipn: ipn.to_owned(),
+            category: String::new(),
+            mpn: text(&self.mpn),
+            manufacturer: text(&self.manufacturer),
+            description: text(&self.description),
+            value: text(&self.value),
+            symbol: reference(&self.symbol),
+            footprint: reference(&self.footprint),
+            datasheet: fields
+                .iter()
+                .find(|(name, _)| name == "Datasheet")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default(),
+            fields,
+        }
+    }
+
     fn apply(&self, part: &CatalogPart) -> CatalogPart {
         let pick = |new: &Option<String>, old: &String| new.clone().unwrap_or_else(|| old.clone());
         let pick_reference = |new: &Option<String>, old: &Option<String>| match new {

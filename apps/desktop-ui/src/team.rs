@@ -579,6 +579,11 @@ fn published(ui: TeamUi, part: RwSignal<Option<TeamPart>>, result: Result<Publis
             scroll_column_to_top();
         }
         Ok(PublishResult::Refused { message }) => ui.notice.set(Some(Notice::Problem(message))),
+        // Only Add part answers these; see AddPartForm.
+        Ok(PublishResult::Added { part: saved }) => part.set(Some(saved)),
+        Ok(PublishResult::IpnTaken { message, .. }) => {
+            ui.notice.set(Some(Notice::Problem(message)))
+        }
         Err(message) => ui.notice.set(Some(Notice::Problem(message))),
     }
 }
@@ -1538,6 +1543,7 @@ fn FileArea(ui: TeamUi, index: usize, kind: FileKind, ipn: String) -> impl IntoV
                         symbol: (kind == FileKind::Symbol).then(|| name.clone()),
                         model_key: None,
                         replaces: Some(before.clone()),
+                        label: None,
                     });
                 });
                 chosen.set(Some(ChosenFile {
@@ -1751,6 +1757,7 @@ fn ModelFile(ui: TeamUi, index: usize, number: usize, key: String) -> impl IntoV
                                 symbol: None,
                                 model_key: Some(key.clone()),
                                 replaces: None,
+                                label: None,
                             });
                         });
                         chosen.set(Some(name));
