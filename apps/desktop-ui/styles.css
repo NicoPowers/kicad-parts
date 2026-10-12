@@ -377,6 +377,15 @@ button:disabled {
   font-size: 1.45rem;
 }
 
+/* A long unbroken word (a pasted part number list or address, or a long
+   MPN) wraps instead of widening the panel past the window. */
+.part-header h2,
+.part-description,
+.fact dd,
+.manufacturer-parts li {
+  overflow-wrap: anywhere;
+}
+
 .part-description {
   margin: 0.2rem 0 0.75rem;
   color: var(--muted);
@@ -722,6 +731,14 @@ a {
    comparisons; the previews stay on the left. */
 .part-body.team {
   grid-template-columns: minmax(0, 2fr) minmax(24rem, 3fr);
+}
+
+/* Narrow windows stack the team column under the previews too (this comes
+   after the rule above, which would otherwise win). */
+@media (max-width: 70rem) {
+  .part-body.team {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .team-tabs {
