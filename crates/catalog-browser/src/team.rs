@@ -705,7 +705,7 @@ impl TeamCatalog {
         command.files = request.downloads.clone();
         if command.body().to_string().len() > EDIT_BODY_LIMIT {
             return refused(format!(
-                "The files are too big to save together: one save can send at most {} MB. Nothing was saved.",
+                "The files are too big to save together: one save can send at most {} MB. Choose No 3D model, or a smaller model. Nothing was saved.",
                 EDIT_BODY_LIMIT / (1024 * 1024)
             ));
         }

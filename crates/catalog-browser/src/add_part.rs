@@ -18,7 +18,7 @@ use catalog::download::{
     next_free_ipn, pad_count, pad_signature, pin_count, symbol_fields,
 };
 use catalog::guess::{Clues, ExamplePart, RememberedMatch, best_guess, guess_category};
-use catalog::pocketbase::CadUpload;
+use catalog::pocketbase::{CadUpload, EDIT_BODY_LIMIT};
 use catalog::{CategoryDetails, PartDetails, PartRevision};
 use desktop_contract::{
     Field, FileKind, TeamDownload, TeamDownloadRequest, TeamFile, TeamGuess, TeamKnownFootprint,
@@ -261,10 +261,24 @@ pub(crate) fn read(
         .and_then(|info| linked_model(info, &models))
         .or((!models.is_empty()).then_some(0));
     match (footprint, model) {
-        (Some(_), Some(at)) => notes.push(format!(
-            "The footprint will use the 3D model {} from the download.",
-            models[at].file_name
-        )),
+        (Some(file), Some(at)) => {
+            notes.push(format!(
+                "The footprint will use the 3D model {} from the download.",
+                models[at].file_name
+            ));
+            // Said now rather than only when saving, after the form is
+            // filled in: the download may hold more than one save can send.
+            let together = sent_size(&file.bytes)
+                + symbol.map_or(0, |symbol| sent_size(&symbol.file.bytes))
+                + sent_size(&models[at].bytes);
+            if together > EDIT_BODY_LIMIT {
+                notes.push(format!(
+                    "The 3D model {} is too big to save with the part: one save can send at most {} MB. Choose No 3D model, or a smaller model.",
+                    models[at].file_name,
+                    EDIT_BODY_LIMIT / (1024 * 1024)
+                ));
+            }
+        }
         (Some(_), None) => notes.push("The download has no 3D model.".into()),
         _ => {}
     }
@@ -317,6 +331,16 @@ pub(crate) fn read(
         pads: footprint.map(|file| pad_count(&file.bytes) as u32),
         notes,
     })
+}
+
+/// About how many bytes a file takes in a save: text as it is, other bytes
+/// as base64.
+fn sent_size(bytes: &[u8]) -> usize {
+    if std::str::from_utf8(bytes).is_ok() {
+        bytes.len()
+    } else {
+        bytes.len().div_ceil(3) * 4
+    }
 }
 
 fn team_file(file: &DownloadFile, kind: FileKind) -> TeamFile {

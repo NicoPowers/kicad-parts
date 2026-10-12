@@ -624,3 +624,240 @@ fn a_csv_row_for_a_part_added_in_the_app() {
     let now = team.team.part("CAP-0004-0001").unwrap().unwrap();
     assert!(!now.csv_changes.is_empty(), "no CSV notice: {outcome:?}");
 }
+
+/// Real downloads vary: upper-case extensions, a KiCad 5 footprint with an
+/// unquoted model path, a .wrl model, a model name with spaces, a model
+/// missing from the ZIP, only a footprint, only a symbol.
+#[test]
+fn odd_downloads_still_add_a_part() {
+    let team = Team::start();
+    let symbol = symbol_named("C_Odd", "ODD-1");
+    let footprint = footprint_named("C_0603_Odd");
+    let kicad5 = footprint_named("C_0603_Five")
+        .replacen("(footprint \"C_0603_Five\"", "(module C_0603_Five", 1)
+        .replace(
+            "\"${KIPRJMOD}/3D/C_0603_Five.stp\"",
+            "${KIPRJMOD}/3D/C_0603_Five.stp",
+        );
+    let spaced = footprint_named("C_0603_Spaced").replace(
+        "${KIPRJMOD}/3D/C_0603_Spaced.stp",
+        "${KIPRJMOD}/3D/C 0603 Spaced.wrl",
+    );
+    let owned = |entries: &[(&str, &[u8])]| -> Vec<(String, Vec<u8>)> {
+        entries
+            .iter()
+            .map(|(name, bytes)| ((*name).to_owned(), bytes.to_vec()))
+            .collect()
+    };
+    let cases: Vec<(&str, Vec<(String, Vec<u8>)>, bool)> = vec![
+        (
+            "upper-case extensions",
+            owned(&[
+                ("KiCad/C_ODD.KICAD_SYM", symbol.as_bytes()),
+                ("KiCad/C_0603_ODD.KICAD_MOD", footprint.as_bytes()),
+                ("3D/C_0603_Odd.STEP", MODEL),
+            ]),
+            true,
+        ),
+        (
+            "KiCad 5 footprint",
+            owned(&[
+                (
+                    "KiCad/C_Odd.kicad_sym",
+                    symbol.replace("C_Odd", "C_Five").as_bytes(),
+                ),
+                ("KiCad/C_0603_Five.kicad_mod", kicad5.as_bytes()),
+                ("3D/C_0603_Five.stp", MODEL),
+            ]),
+            true,
+        ),
+        (
+            "a .wrl model with spaces in its name",
+            owned(&[
+                (
+                    "C_Spaced.kicad_sym",
+                    symbol.replace("C_Odd", "C_Spaced").as_bytes(),
+                ),
+                ("C_0603_Spaced.kicad_mod", spaced.as_bytes()),
+                ("C 0603 Spaced.wrl", b"#VRML V2.0 utf8\n"),
+            ]),
+            true,
+        ),
+        (
+            "no 3D model",
+            owned(&[
+                (
+                    "C_None.kicad_sym",
+                    symbol.replace("C_Odd", "C_None").as_bytes(),
+                ),
+                (
+                    "C_0603_None.kicad_mod",
+                    footprint_named("C_0603_None").as_bytes(),
+                ),
+            ]),
+            false,
+        ),
+    ];
+    let mut number = 10;
+    for (what, entries, has_model) in cases {
+        let entries: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+            .collect();
+        let reading = team.read(&zip_of(&entries));
+        assert!(reading.symbol.is_some(), "{what}: {:?}", reading.notes);
+        assert!(reading.footprint.is_some(), "{what}: {:?}", reading.notes);
+        assert_eq!(
+            reading.model.is_some(),
+            has_model,
+            "{what}: {:?}",
+            reading.notes
+        );
+        assert_eq!(
+            reading.guesses[0].code, "cap",
+            "{what}: {:?}",
+            reading.guesses
+        );
+        let ipn = format!("CAP-{number:04}-0001");
+        number += 1;
+        let saved = team.add(&team.team, new_part(&reading, &ipn, "cap"));
+        assert!(
+            matches!(saved, PublishResult::Added { .. }),
+            "{what}: not added: {saved:?}"
+        );
+        // The footprint names its model in the Catalog's folder, and the
+        // model is stored there.
+        if has_model {
+            let stored = catalog::pocketbase::read_back(&team.admin).unwrap();
+            let footprint = stored
+                .cad_items
+                .iter()
+                .find(|item| item.key == format!("g-Capacitor_SMD:{}", reading.footprint_name))
+                .unwrap();
+            let revision = stored
+                .cad_item_revisions
+                .iter()
+                .find(|revision| revision.cad_item == footprint.id)
+                .unwrap();
+            let model = &reading.models[reading.model.unwrap()];
+            let file = model
+                .split(" in ")
+                .next()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap();
+            let key = format!("3d-models/g-Capacitor_SMD.3dshapes/{file}");
+            assert!(
+                stored.cad_items.iter().any(|item| item.key == key),
+                "{what}: no 3D model {key}"
+            );
+            assert!(
+                revision
+                    .snapshot
+                    .contains(&format!("${{GITPLM_PARTS}}/{key}"))
+                    && revision.snapshot.contains("\"kind\":\"cad-item-revision\"")
+                    && !revision.snapshot.contains("\"missing\""),
+                "{what}: {}",
+                revision.snapshot
+            );
+        }
+    }
+
+    // Only a footprint: the engineer types the Catalog's symbol.
+    let reading = team.read(&zip_of(&[(
+        "C_0603_Lone.kicad_mod",
+        footprint_named("C_0603_Lone").as_bytes(),
+    )]));
+    assert!(reading.symbol.is_none());
+    let mut request = new_part(&reading, "CAP-0020-0001", "cap");
+    request.symbol = "g-cap:C".into();
+    let saved = team.add(&team.team, request);
+    assert!(
+        matches!(saved, PublishResult::Added { .. }),
+        "footprint only: {saved:?}"
+    );
+    // Only a symbol: the engineer types the Catalog's footprint.
+    let reading = team.read(&zip_of(&[(
+        "C_Lone.kicad_sym",
+        symbol.replace("C_Odd", "C_Lone").as_bytes(),
+    )]));
+    assert!(reading.footprint.is_none());
+    let mut request = new_part(&reading, "CAP-0021-0001", "cap");
+    request.footprint = "g-Capacitor_SMD:C_0603_1608Metric".into();
+    let saved = team.add(&team.team, request);
+    assert!(
+        matches!(saved, PublishResult::Added { .. }),
+        "symbol only: {saved:?}"
+    );
+}
+
+/// A symbol whose fields carry long values and characters beyond ASCII.
+#[test]
+fn long_and_unusual_symbol_values() {
+    let team = Team::start();
+    let long = "Ceramic capacitor ±10 % 0.1 µF 50 V X7R, AEC-Q200 – ".repeat(20);
+    let symbol = symbol_named("C_Long", "LONG-1").replace("CAP CER 0.1UF 50V X7R 0603", &long);
+    let reading = team.read(&zip_of(&[
+        ("C_Long.kicad_sym", symbol.as_bytes()),
+        (
+            "C_0603_Long.kicad_mod",
+            footprint_named("C_0603_Long").as_bytes(),
+        ),
+    ]));
+    let saved = team.add(&team.team, new_part(&reading, "CAP-0004-0001", "cap"));
+    match saved {
+        PublishResult::Added { part } => {
+            let description = part
+                .details
+                .fields
+                .iter()
+                .find(|field| field.name == "Description")
+                .unwrap();
+            assert_eq!(description.value, long.trim());
+        }
+        PublishResult::Refused { message } => {
+            // Refused is fine if it says plainly what to do.
+            assert!(message.contains("Description"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A big 3D model (vendors' connector models can be tens of MB): the
+/// download is read (up to 100 MB), but one save sends at most 32 MB. The
+/// form says so as soon as the files are read, not only after the engineer
+/// has filled it in, and the refusal says what to do: save without it.
+#[test]
+fn a_3d_model_too_big_to_save_is_said_early_with_a_way_forward() {
+    let team = Team::start();
+    let mut model = b"ISO-10303-21;
+"
+    .to_vec();
+    model.resize(40 * 1024 * 1024, b'x');
+    let reading = team.read(&zip_of(&[
+        ("C_Big.kicad_sym", symbol_named("C_Big", "BIG-1").as_bytes()),
+        (
+            "C_0603_Big.kicad_mod",
+            footprint_named("C_0603_Big").as_bytes(),
+        ),
+        ("C_0603_Big.stp", &model),
+    ]));
+    assert!(
+        reading.notes.iter().any(|note| note
+            == "The 3D model C_0603_Big.stp is too big to save with the part: one save can send at most 32 MB. Choose No 3D model, or a smaller model."),
+        "{:?}",
+        reading.notes
+    );
+    let PublishResult::Refused { message } =
+        team.add(&team.team, new_part(&reading, "CAP-0004-0001", "cap"))
+    else {
+        panic!("not refused");
+    };
+    assert!(message.contains("Choose No 3D model"), "{message}");
+    // Without the model, it saves.
+    let mut request = new_part(&reading, "CAP-0004-0001", "cap");
+    request.files.retain(|file| file.kind != FileKind::Model3d);
+    let saved = team.add(&team.team, request);
+    assert!(matches!(saved, PublishResult::Added { .. }), "{saved:?}");
+}
