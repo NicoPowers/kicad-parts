@@ -634,6 +634,9 @@ fn a_csv_row_for_a_part_added_in_the_app() {
     );
 }
 
+/// A ZIP's entries, owned: each name and its bytes.
+type Entries = Vec<(String, Vec<u8>)>;
+
 /// Real downloads vary: upper-case extensions, a KiCad 5 footprint with an
 /// unquoted model path, a .wrl model, a model name with spaces, a model
 /// missing from the ZIP, only a footprint, only a symbol.
@@ -652,13 +655,13 @@ fn odd_downloads_still_add_a_part() {
         "${KIPRJMOD}/3D/C_0603_Spaced.stp",
         "${KIPRJMOD}/3D/C 0603 Spaced.wrl",
     );
-    let owned = |entries: &[(&str, &[u8])]| -> Vec<(String, Vec<u8>)> {
+    let owned = |entries: &[(&str, &[u8])]| -> Entries {
         entries
             .iter()
             .map(|(name, bytes)| ((*name).to_owned(), bytes.to_vec()))
             .collect()
     };
-    let cases: Vec<(&str, Vec<(String, Vec<u8>)>, bool)> = vec![
+    let cases: Vec<(&str, Entries, bool)> = vec![
         (
             "upper-case extensions",
             owned(&[
