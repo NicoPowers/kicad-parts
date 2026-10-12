@@ -69,7 +69,7 @@ A symbol, footprint or 3D model that parts use. It keeps its identity when its c
 _Avoid_: Catalog Asset, asset, file, library item
 
 **Source**:
-Where a revision's data came from, such as a CSV file and row.
+Where a revision's data came from, such as a CSV file and row, or the file someone chose in the app.
 _Avoid_: Provenance, origin
 
 **License**:
@@ -97,5 +97,5 @@ Something an import could not handle, such as a missing symbol. The import recor
 _Avoid_: Import Diagnostic, warning, error
 
 **CSV review**:
-A person's answer to new CSV values that an import did not apply because the part was edited in this app: they accept some of the CSV's values and keep the rest, or keep all the current values. It covers what the CSV said, so the app does not ask again about the same CSV values; it asks again when the CSV changes.
+A person's answer to new CSV values that an import did not apply because the part, or a symbol or footprint it uses, was edited in this app: they accept some of the CSV's values and keep the rest, or keep all the current values. It covers what the CSV said, so the app does not ask again about the same CSV values; it asks again when the CSV changes.
 _Avoid_: merge, sync, override
