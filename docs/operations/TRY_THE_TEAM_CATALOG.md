@@ -24,7 +24,7 @@ cargo run --locked -p catalog-import -- local-team-server --desktop
 The command:
 
 1. starts PocketBase on `127.0.0.1` with a random port, with no window and no browser;
-2. imports every CSV file in `database/` (`g-*.csv`), so all 178 parts and all 21 categories are there, one category per CSV file; this takes about 12 seconds;
+2. imports every CSV file in `database/` (`g-*.csv`), so all 178 parts and all 21 categories are there, one category per CSV file; this takes about 12 seconds (add `--csv g-res,g-cap` to import only some files, which is faster);
 3. creates three accounts with new random passwords and prints them;
 4. opens the desktop app with the server address and the first email already filled in.
 
@@ -41,7 +41,7 @@ The accounts are:
 1. In the app, open **Team catalog: not signed in** at the top right and sign in with the first account's password from the console.
 2. Search for `RC0603FR-0747RL` and select it. The right-hand column shows **Details** and **History**.
 3. The details show the part's **Category** by name, such as "Category: Resistors". Choose **Edit part**, change a value, give a reason, and save. The part details change, but the part gets no new revision: every revision shares the same details. Only changing the **Symbol** or **Footprint** adds a revision. The revision also shows **Excluded from BOM**, which the team server works out from the symbol and footprints the revision uses, never by hand. It says which mark sets it ("Yes: its symbol says it is not in the BOM"), "No: only some footprint choices say it is not in the BOM" when the choices disagree, and "Not known" when the answer depends on a symbol or footprint the server cannot read: one from KiCad's own library, which the app does not read yet, or one that is not in the Catalog.
-4. To move a part to another category, choose **Edit part** and pick one under **Category**. The part keeps its IPN and every field it has; the fields of the new category that the part lacks are added below, blank, so you can fill them in. Save with a reason. The history shows the change by category name. The app also remembers the part's footprint family, reference letter and manufacturer for that category, so a later guess of a new part's category gets better.
+4. To move a part to another category, choose **Edit part** and pick one under **Category**. The part keeps its IPN and every field it has; the fields of the new category that the part lacks are added below, blank, so you can fill them in. Save with a reason. The history shows the change by category name. Changing a category also records remembered matches: the part's footprint family, reference letter and manufacturer, kept for that category. The coming Add part screen will use them to guess a new part's category.
 5. To see a conflict, keep the first app open and open a second copy pointed at the same server, with its own settings folder:
 
    ```
