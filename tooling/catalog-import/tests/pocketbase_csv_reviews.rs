@@ -624,3 +624,88 @@ fn server_code_can_only_save_the_reviews_the_route_saves() {
     assert_eq!(changed.status, 403, "{}", changed.body);
     team.server.stop();
 }
+
+/// `text` (a CSV file with every field quoted) as a spreadsheet saves it:
+/// a UTF-8 byte order mark, CRLF line ends, and quotes only around fields
+/// that need them.
+fn as_a_spreadsheet_saves_it(text: &str) -> String {
+    let mut saved = String::from("\u{feff}");
+    for line in text.lines() {
+        let inner = line
+            .strip_prefix('"')
+            .and_then(|line| line.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("not fully quoted: {line}"));
+        let fields: Vec<String> = inner
+            .split("\",\"")
+            .map(|field| {
+                assert!(!field.contains('"'), "{field}");
+                if field.contains(',') {
+                    format!("\"{field}\"")
+                } else {
+                    field.to_owned()
+                }
+            })
+            .collect();
+        saved.push_str(&fields.join(","));
+        saved.push_str("\r\n");
+    }
+    saved
+}
+
+#[test]
+fn a_csv_file_saved_by_a_spreadsheet_changes_no_part() {
+    // Opening g-res.csv in a spreadsheet and saving it as "CSV UTF-8"
+    // adds a byte order mark, CRLF line ends and fewer quotes. The parts
+    // say the same, so the import changes none of them.
+    let team = Team::start();
+    let before = team.read();
+    let file = team.copy.path().join(CSV);
+    let text = fs::read_to_string(&file).unwrap();
+    fs::write(&file, as_a_spreadsheet_saves_it(&text)).unwrap();
+    assert_eq!(team.import(), "nothing_changed");
+    let after = team.read();
+    assert_eq!(after.part_details, before.part_details);
+    assert_eq!(after.part_revisions, before.part_revisions);
+    assert_eq!(after.changes, before.changes);
+    team.server.stop();
+}
+
+#[test]
+fn a_csv_value_changed_back_asks_again_unless_already_reviewed() {
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    // Edited in the app: the value is 47R (details 2).
+    edit(&editor, &team.read(), IPN, &[("Value", "47R")]);
+    let notice = |team: &Team| {
+        let stored = team.read();
+        found_problem(&stored, IPN, CSV_DETAILS_DIFFER)
+            .filter(|problem| !covered(&stored, IPN, problem))
+    };
+    let keep = |team: &Team, problem: &StoredImportProblem| {
+        let reply = submit_csv_review(&editor, &review(IPN, problem, &[], 2)).unwrap();
+        assert_eq!(applied(&reply), (None, None));
+    };
+    // The CSV goes from 47 to 47.0: asked, and the edited value is kept.
+    team.change_row(IPN, "\"47\"", "\"47.0\"");
+    assert_eq!(team.import(), "nothing_changed");
+    let first = notice(&team).expect("the CSV changed, so the app asks");
+    keep(&team, &first);
+    assert!(notice(&team).is_none());
+    // Back to 47, what the CSV said before the edit: that is a change of
+    // the CSV, never reviewed, so the app asks again.
+    team.change_row(IPN, "\"47.0\"", "\"47\"");
+    assert_eq!(team.import(), "nothing_changed");
+    let second = notice(&team).expect("the CSV changed back, so the app asks again");
+    assert_ne!(second.id, first.id);
+    keep(&team, &second);
+    // And to 47.0 again: those exact values were already reviewed, so the
+    // app does not ask about them a second time.
+    team.change_row(IPN, "\"47\"", "\"47.0\"");
+    assert_eq!(team.import(), "nothing_changed");
+    assert!(notice(&team).is_none(), "already reviewed");
+    // The edited value stayed throughout, with no new details.
+    let stored = team.read();
+    assert_eq!(current_details(&stored, IPN).0, 2);
+    assert_eq!(current_details(&stored, IPN).1.field("Value"), Some("47R"));
+    team.server.stop();
+}
