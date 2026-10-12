@@ -25,7 +25,7 @@ _Avoid_: Off-BOM, no-BOM, virtual part
 ### Details and history
 
 **Part details**:
-What a part is: its description, value, datasheet and manufacturer parts. Every revision of the part shares them, so changing them is recorded in the history but adds no revision.
+What a part is: its category, description, value, datasheet and manufacturer parts. Every revision of the part shares them, so changing them is recorded in the history but adds no revision.
 _Avoid_: semantic change, attributes
 
 **Supplier data**:
@@ -55,8 +55,12 @@ _Avoid_: Audit Event, log entry
 ### Grouping and sourcing
 
 **Category**:
-A group of similar parts that share the same fields, such as chip resistors. It is the only grouping people see: KiCad's part chooser shows one group per category, and the symbols the team makes are grouped the same way. Footprints are grouped by package instead, because one package serves many categories, and each 3D model goes with its footprint. A supplier's category is only a suggestion until someone confirms it.
+A group of similar parts that share the same fields, such as resistors. It is the only grouping people see: KiCad's part chooser shows one group per category, and the symbols the team makes are grouped the same way. Footprints are grouped by package instead, because one package serves many categories, and each 3D model goes with its footprint. Each CSV file of the CSV catalog makes one category. A part's category is part of its details, so changing it never changes the part's IPN. A supplier's category is only a suggestion until someone confirms it.
 _Avoid_: Catalog Category, type, class, IPN prefix
+
+**Remembered match**:
+A clue that a person confirmed for a category when they chose a part's category, such as its footprint family or manufacturer. The category guess for new parts uses them; nothing else makes one.
+_Avoid_: alias, mapping, learned rule
 
 **Manufacturer part**:
 A manufacturer and their part number (MPN) approved for an IPN. A part can have several, the first is the main one, and every revision of the part shares them.
