@@ -1754,9 +1754,34 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
             .status,
         200
     );
+    // A part added in the app, so the newest undo has one to refuse.
+    let mut added = catalog::pocketbase::CreateCommand::new("RES-0001-0001", "res", "A new part");
+    added.fields = ["Description", "Value", "Tolerance", "Datasheet"]
+        .iter()
+        .map(|name| catalog::DetailField {
+            name: (*name).to_owned(),
+            value: String::new(),
+        })
+        .collect();
+    added.cad_fields[0].value = "Device:R".into();
+    added.cad_fields[1].value = "Resistor_SMD:R_0603_1608Metric".into();
+    assert_eq!(
+        catalog::pocketbase::submit_create(&admin, &added)
+            .unwrap()
+            .status,
+        200
+    );
     server.stop();
-    // Any data has categories, so the newest undo refuses first, as a
-    // whole.
+    // The newest undo refuses the part added in the app, as a whole.
+    let said = migrate(&root, &options, &["down", "5"]);
+    assert!(
+        said.contains("parts added in the app")
+            && said.contains("Nothing was changed")
+            && !said.contains("Reverted"),
+        "{said}"
+    );
+    set_aside_migration(&options, "1792400000_new_parts.js");
+    // Any data has categories, so the next undo refuses first, as a whole.
     let said = migrate(&root, &options, &["down", "4"]);
     assert!(
         said.contains("has categories")
@@ -1791,7 +1816,9 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(details, 30);
+    // The 29 imported parts, the edit of RES-0000-0470 and the part added
+    // in the app.
+    assert_eq!(details, 31);
     drop(database);
 
     // Without parts, every catalog migration rolls back, and the users
@@ -1806,8 +1833,9 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
         "(id = @request.auth.id) && @request.body.can_edit_catalog:isset = false && @request.body.name:isset = false"
     );
     assert!(fields.contains("can_edit_catalog"));
-    let said = migrate(&root, &options, &["down", "9"]);
+    let said = migrate(&root, &options, &["down", "10"]);
     for reverted in [
+        "1792400000_new_parts.js",
         "1792300000_categories.js",
         "1792200000_cad_item_revision_successor.js",
         "1792100000_uncommitted_changes.js",
@@ -1948,7 +1976,8 @@ fn an_import_allowed_from_uncommitted_changes_is_recorded_kept_and_not_undone() 
     // The older version would lose that record, so the undo refuses and
     // changes nothing, not even the newer step, which this data allows.
     // (The categories step, newer still, refuses any data, so it is set
-    // aside.)
+    // aside, with the new parts step after it.)
+    set_aside_migration(&options, "1792400000_new_parts.js");
     set_aside_migration(&options, "1792300000_categories.js");
     let said = migrate(&root, &options, &["down", "2"]);
     assert!(
@@ -2066,7 +2095,9 @@ fn a_cad_item_revision_has_at_most_one_successor() {
 
     // Undoing the index loses nothing and lets the fork in; starting again
     // then refuses with a plain message and changes nothing. (The
-    // categories step, newer, refuses any data, so it is set aside.)
+    // categories step, newer, refuses any data, so it is set aside, with
+    // the new parts step after it.)
+    set_aside_migration(&options, "1792400000_new_parts.js");
     set_aside_migration(&options, "1792300000_categories.js");
     let said = migrate(&root, &options, &["down", "1"]);
     assert!(

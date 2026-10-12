@@ -8,15 +8,15 @@
 // - Nobody creates, updates or deletes a Catalog record through the record
 //   API (`/api/collections/catalog_*/records`, the batch API or the
 //   dashboard). The protected routes are the only way in:
-//   POST /api/catalog/csv-imports, /api/catalog/edits,
+//   POST /api/catalog/csv-imports, /api/catalog/edits, /api/catalog/parts,
 //   /api/catalog/archives and /api/catalog/csv-reviews.
 // - Revisions, saved part details, archive entries, CSV reviews, CAD items, blobs,
 //   categories and their revisions, remembered matches, Changes, audit
 //   entries, import problems and the command ledger refuse every update and
 //   delete, whoever saves them.
 // - A remembered match is made only with an edit that changes that part's
-//   category to the match's category, by the person who made the edit;
-//   never by an import.
+//   category to the match's category, or with a new part in that category,
+//   by the person who made it; never by an import.
 // - A part refuses every delete. Its current details may only move to its
 //   next details. Its current revision may only move to its newest revision
 //   that is not archived (a new revision, or the one an archive or
@@ -420,10 +420,11 @@ onRecordCreate((e) => {
 }, "catalog_categories");
 
 // A remembered match is a person's confirmation: it must belong to a Change
-// of kind edit, copy its seq, actor and actor name, have the ID derived from
-// the Change and its clue, and that Change must save the part's details in
-// the match's category, changed from another category. So an import, or a
-// supplier category on its own, never makes one.
+// of kind edit or create, copy its seq, actor and actor name, have the ID
+// derived from the Change and its clue, and that Change must save the
+// part's details in the match's category: changed from another category
+// (an edit), or the new part's first details (a create, kicad-parts-9693).
+// So an import, or a supplier category on its own, never makes one.
 onRecordCreate((e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
   const match = e.record;
@@ -437,12 +438,12 @@ onRecordCreate((e) => {
   const change = find("catalog_changes", match.getString("change"));
   if (
     !change ||
-    change.getString("kind") !== lib.CHANGE_KINDS.edit ||
+    (change.getString("kind") !== lib.CHANGE_KINDS.edit && change.getString("kind") !== lib.CHANGE_KINDS.create) ||
     change.getInt("seq") !== match.getInt("seq") ||
     change.getString("actor") !== match.getString("actor") ||
     change.getString("actor_name") !== match.getString("actor_name")
   ) {
-    throw new Error("a remembered match must belong to an edit and copy its seq and who made it");
+    throw new Error("a remembered match must belong to an edit or a new part and copy its seq and who made it");
   }
   if (match.id !== lib.deriveId("category-match", change.id + "\n" + match.getString("clue"))) {
     throw new Error("a remembered match must have the ID derived from its Change and clue");
@@ -465,13 +466,20 @@ onRecordCreate((e) => {
     }
   };
   const category = details ? categoryOf(details) : null;
+  // A new part's first details have no predecessor; an edit's must have
+  // been in another category.
+  const confirmed =
+    change.getString("kind") === lib.CHANGE_KINDS.create
+      ? details && details.getInt("number") === 1 && details.getString("predecessor") === ""
+      : previous && categoryOf(previous) !== category;
   if (
     typeof category !== "string" ||
     lib.deriveId("category", category) !== match.getString("category") ||
-    !previous ||
-    categoryOf(previous) === category
+    !confirmed
   ) {
-    throw new Error("a remembered match must come with an edit that moves its part to the match's category");
+    throw new Error(
+      "a remembered match must come with an edit that moves its part to the match's category, or with a new part in it",
+    );
   }
   return e.next();
 }, "catalog_category_matches");

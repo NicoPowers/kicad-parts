@@ -1,12 +1,13 @@
 //! The Catalog's PocketBase contract: the protected routes
 //! (`infra/pocketbase/pb_hooks/catalog_csv_imports.pb.js` for CSV imports,
-//! `catalog_edits.pb.js` for edits) and the `catalog_*`
+//! `catalog_edits.pb.js` for edits, `catalog_new_parts.pb.js` for new
+//! parts) and the `catalog_*`
 //! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`
 //! `1791600000_catalog_edits.js`, `1791800000_shared_part_details.js`,
 //! `1791900000_archived_revisions.js`, `1792000000_csv_reviews.js`,
 //! `1792100000_uncommitted_changes.js`,
-//! `1792200000_cad_item_revision_successor.js` and
-//! `1792300000_categories.js`).
+//! `1792200000_cad_item_revision_successor.js`,
+//! `1792300000_categories.js` and `1792400000_new_parts.js`).
 
 use crate::cad_item::Blob;
 use crate::cad_item::{CadItemDetails, CadItemKind, ModelTarget};
@@ -1125,6 +1126,160 @@ pub struct PublishedRecord {
     pub id: String,
     pub number: u32,
     pub snapshot_sha256: String,
+}
+
+/// The route that adds a new part from downloaded CAD files.
+pub const NEW_PART_ROUTE: &str = "/api/catalog/parts";
+
+/// A new part (kicad-parts-9693): its IPN, its category with exactly the
+/// category's fields, its manufacturer parts, its Symbol and Footprint, the
+/// files they use, and where the files came from. The server saves part
+/// details 1, revision 1 and revision 1 of each new CAD item in one Change,
+/// and remembers the clues of the category the person confirmed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateCommand {
+    pub correlation_id: CorrelationId,
+    pub reason: String,
+    pub ipn: String,
+    /// The code of the part's category.
+    pub category: String,
+    /// Every field of the category, in its order.
+    pub fields: Vec<DetailField>,
+    pub manufacturer_parts: Vec<ManufacturerPart>,
+    /// Symbol, then Footprint.
+    pub cad_fields: Vec<DetailField>,
+    pub uploads: Vec<CadUpload>,
+    /// Where the files came from, such as `SnapEDA`; blank if not known.
+    pub from: String,
+    /// The names of the downloaded files.
+    pub files: Vec<String>,
+}
+
+impl CreateCommand {
+    pub fn new(ipn: &str, category: &str, reason: &str) -> Self {
+        Self {
+            correlation_id: CorrelationId::generate(),
+            reason: reason.to_owned(),
+            ipn: ipn.to_owned(),
+            category: category.to_owned(),
+            fields: Vec::new(),
+            manufacturer_parts: Vec::new(),
+            cad_fields: vec![
+                DetailField {
+                    name: "Symbol".into(),
+                    value: String::new(),
+                },
+                DetailField {
+                    name: "Footprint".into(),
+                    value: String::new(),
+                },
+            ],
+            uploads: Vec::new(),
+            from: String::new(),
+            files: Vec::new(),
+        }
+    }
+
+    pub fn body(&self) -> Value {
+        let fields = |fields: &[DetailField]| {
+            fields
+                .iter()
+                .map(|field| json!({ "name": field.name, "value": field.value }))
+                .collect::<Vec<_>>()
+        };
+        json!({
+            "correlationId": self.correlation_id,
+            "reason": self.reason,
+            "ipn": self.ipn,
+            "category": self.category,
+            "fields": fields(&self.fields),
+            "manufacturerParts": self.manufacturer_parts.iter().map(|part| json!({
+                "manufacturer": part.manufacturer,
+                "mpn": part.mpn,
+            })).collect::<Vec<_>>(),
+            "cadFields": fields(&self.cad_fields),
+            "uploads": self.uploads.iter().map(CadUpload::body).collect::<Vec<_>>(),
+            "from": self.from,
+            "files": self.files,
+        })
+    }
+}
+
+/// What the new-part route answered.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateReply {
+    pub status: u16,
+    pub outcome: CreateOutcome,
+    /// The answer was replayed from the correlation-ID ledger.
+    pub replayed: bool,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum CreateOutcome {
+    /// 200: one Change holding the new part, its details 1 and revision 1,
+    /// the new CAD item revisions and the remembered matches.
+    #[serde(rename_all = "camelCase")]
+    Applied {
+        correlation_id: String,
+        ipn: String,
+        change_id: String,
+        seq: u64,
+        audit_entry_id: String,
+        details: PublishedRecord,
+        revision: PublishedRecord,
+        cad_item_revisions: Vec<String>,
+        #[serde(default)]
+        new_cad_item_revisions: Vec<NewCadItemRevision>,
+        #[serde(default)]
+        remembered_matches: Vec<RememberedClue>,
+    },
+    /// 409: the Catalog already has a part with the IPN; nothing was
+    /// written. An IPN is never reused.
+    #[serde(rename_all = "camelCase")]
+    IpnTaken {
+        correlation_id: String,
+        ipn: String,
+        message: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    CorrelationReused {
+        correlation_id: String,
+        message: String,
+    },
+}
+
+/// Submits a new part. Applied, IPN-taken and correlation-reuse answers are
+/// `Ok`; inspect the outcome. Bad input (400), 401 and 403 are errors.
+pub fn submit_create(
+    client: &PocketBaseClient,
+    command: &CreateCommand,
+) -> CollabResult<CreateReply> {
+    let body = command.body().to_string();
+    if body.len() > EDIT_BODY_LIMIT {
+        return Err(CollabError::Protocol(format!(
+            "the new part {} is {} bytes, more than the {EDIT_BODY_LIMIT} bytes the route accepts in one request; nothing was sent",
+            command.ipn,
+            body.len()
+        )));
+    }
+    let reply = client.post_json_text(NEW_PART_ROUTE, &body)?;
+    match reply.status {
+        200 | 409 => {
+            let outcome: CreateOutcome = serde_json::from_str(&reply.body)
+                .map_err(|parse| CollabError::Protocol(format!("{parse}: {}", reply.body)))?;
+            Ok(CreateReply {
+                status: reply.status,
+                outcome,
+                replayed: reply.replayed,
+                body: reply.body,
+            })
+        }
+        _ => Err(reply.success().err().unwrap_or_else(|| {
+            CollabError::Protocol(format!("unexpected status {}", reply.status))
+        })),
+    }
 }
 
 /// The route that archives or unarchives one part revision.

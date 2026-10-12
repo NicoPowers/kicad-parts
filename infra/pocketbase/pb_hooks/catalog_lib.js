@@ -13,6 +13,7 @@ const CHANGE_KINDS = Object.freeze({
   archive: "archive",
   unarchive: "unarchive",
   csvReview: "csv-review",
+  create: "create",
 });
 
 // The `source` value of rows read from the CSV catalog.
@@ -1785,6 +1786,101 @@ function describeRecord(txApp, revision) {
   };
 }
 
+// Saves the new CAD item revisions an edit's or a new part's files make
+// (entries from newEntries), 3D models first, with their blobs and new CAD
+// items. Blobs and CAD items are shared by content and identity, so one that
+// is already stored is reused once it is shown to be the same. Each
+// revision's source names the file it came from.
+function saveNewCadItemRevisions(txApp, entries, changeId, source) {
+  const record = (name, id) => {
+    const made = new Record(txApp.findCollectionByNameOrId(name));
+    made.set("id", id);
+    return made;
+  };
+  for (const entry of entries) {
+    const blobId = deriveId("blob", entry.upload.sha256);
+    const storedBlob = recordById(txApp, "catalog_blobs", blobId);
+    if (storedBlob && storedBlob.getString("sha256") !== entry.upload.sha256) {
+      throw new Error(`the stored blob ${blobId} is not the bytes with SHA-256 ${entry.upload.sha256}`);
+    }
+    if (!storedBlob) {
+      const blob = record("catalog_blobs", blobId);
+      blob.set("sha256", entry.upload.sha256);
+      blob.set("size", entry.upload.bytes.length);
+      blob.set("file", $filesystem.fileFromBytes(entry.upload.bytes, entry.upload.sha256 + ".bin"));
+      blob.set("first_change", changeId);
+      txApp.save(blob);
+    }
+    if (entry.cadItemIsNew) {
+      const cadItem = record("catalog_cad_items", entry.cadItemId);
+      cadItem.set("kind", entry.kind);
+      cadItem.set("key", entry.key);
+      cadItem.set("first_change", changeId);
+      txApp.save(cadItem);
+    }
+    const made = record("catalog_cad_item_revisions", entry.id);
+    made.set("cad_item", entry.cadItemId);
+    made.set("number", entry.number);
+    made.set("predecessor", entry.predecessor);
+    made.set("change", changeId);
+    made.set("blob", blobId);
+    made.set("snapshot_sha256", entry.snapshotSha256);
+    made.set("snapshot", entry.snapshot);
+    made.set("license", UNKNOWN_LICENSE);
+    made.set("source", JSON.stringify({ schema: SOURCE_SCHEMA, source: source, file_name: entry.upload.fileName }));
+    txApp.save(made);
+  }
+}
+
+// The new CAD item revisions of `prepared` (from preparedUploads), 3D models
+// first, as their footprints name them.
+function newEntries(prepared) {
+  return Object.keys(prepared)
+    .map((key) => prepared[key])
+    .filter((entry) => entry.isNew)
+    .sort((a, b) => (a.kind === "model-3d" ? 0 : 1) - (b.kind === "model-3d" ? 0 : 1));
+}
+
+// Saves one remembered match per clue a part has (categoryClues) for the
+// category a person chose, in the Change that saved their choice, and gives
+// the clues saved. `what` holds category, details and revision (the parsed
+// documents the part has after the Change), prepared (the Change's uploads),
+// partId, changeId, seq and actor. The match create guard checks each.
+function saveRememberedMatches(txApp, what) {
+  const bytesOf = (target) => {
+    const sent = newUploadFor(what.prepared, target);
+    if (sent) {
+      return sent.kind === "symbol" ? sent.upload.bytes : null;
+    }
+    const stored = recordById(
+      txApp,
+      "catalog_cad_item_revisions",
+      deriveId("cad-item-revision", target.cad_item + "\n" + target.number),
+    );
+    if (!stored || !isCadItemRevision(stored, target.cad_item, target.number)) {
+      return null;
+    }
+    const blob = recordById(txApp, "catalog_blobs", stored.getString("blob"));
+    return blob ? blobBytes(blob) : null;
+  };
+  const remembered = [];
+  for (const clue of categoryClues(what.details, what.revision, bytesOf)) {
+    const made = new Record(txApp.findCollectionByNameOrId("catalog_category_matches"));
+    made.set("id", deriveId("category-match", what.changeId + "\n" + clue.clue));
+    made.set("category", deriveId("category", what.category));
+    made.set("clue", clue.clue);
+    made.set("value", clue.value);
+    made.set("part", what.partId);
+    made.set("change", what.changeId);
+    made.set("seq", what.seq);
+    made.set("actor", what.actor.id);
+    made.set("actor_name", what.actor.name);
+    txApp.save(made);
+    remembered.push(clue);
+  }
+  return remembered;
+}
+
 function publishEdit(e) {
   const kind = CHANGE_KINDS.edit;
   const actor = catalogEditor(e);
@@ -2030,12 +2126,7 @@ function publishEdit(e) {
       // The new CAD item revisions the uploaded files make, 3D models
       // first, as their footprints name them. A new CAD item revision is
       // only ever saved with the part revision that binds it.
-      const newCadItemRevisions = revision
-        ? Object.keys(prepared)
-            .map((key) => prepared[key])
-            .filter((entry) => entry.isNew)
-            .sort((a, b) => (a.kind === "model-3d" ? 0 : 1) - (b.kind === "model-3d" ? 0 : 1))
-        : [];
+      const newCadItemRevisions = revision ? newEntries(prepared) : [];
       const summary = JSON.stringify({
         ipn: request.ipn,
         partDetails: details ? 1 : 0,
@@ -2056,44 +2147,7 @@ function publishEdit(e) {
       change.set("summary", summary);
       txApp.save(change);
 
-      // Blobs and CAD items are shared by content and identity, so one
-      // that is already stored is reused once it is shown to be the same.
-      for (const entry of newCadItemRevisions) {
-        const blobId = deriveId("blob", entry.upload.sha256);
-        const storedBlob = recordById(txApp, "catalog_blobs", blobId);
-        if (storedBlob && storedBlob.getString("sha256") !== entry.upload.sha256) {
-          throw new Error(`the stored blob ${blobId} is not the bytes with SHA-256 ${entry.upload.sha256}`);
-        }
-        if (!storedBlob) {
-          const blob = record("catalog_blobs", blobId);
-          blob.set("sha256", entry.upload.sha256);
-          blob.set("size", entry.upload.bytes.length);
-          blob.set("file", $filesystem.fileFromBytes(entry.upload.bytes, entry.upload.sha256 + ".bin"));
-          blob.set("first_change", changeId);
-          txApp.save(blob);
-        }
-        if (entry.cadItemIsNew) {
-          const cadItem = record("catalog_cad_items", entry.cadItemId);
-          cadItem.set("kind", entry.kind);
-          cadItem.set("key", entry.key);
-          cadItem.set("first_change", changeId);
-          txApp.save(cadItem);
-        }
-        const made = record("catalog_cad_item_revisions", entry.id);
-        made.set("cad_item", entry.cadItemId);
-        made.set("number", entry.number);
-        made.set("predecessor", entry.predecessor);
-        made.set("change", changeId);
-        made.set("blob", blobId);
-        made.set("snapshot_sha256", entry.snapshotSha256);
-        made.set("snapshot", entry.snapshot);
-        made.set("license", UNKNOWN_LICENSE);
-        made.set(
-          "source",
-          JSON.stringify({ schema: SOURCE_SCHEMA, source: UPLOAD_SOURCE, file_name: entry.upload.fileName }),
-        );
-        txApp.save(made);
-      }
+      saveNewCadItemRevisions(txApp, newCadItemRevisions, changeId, UPLOAD_SOURCE);
 
       let savedDetails = null;
       if (details) {
@@ -2151,39 +2205,19 @@ function publishEdit(e) {
 
       // The category the person chose is remembered with the part's clues,
       // from the details and revision it has after this edit.
-      const remembered = [];
-      if (newCategory !== null && details) {
-        const afterRevision = revision ? JSON.parse(revision.snapshot) : storedRevision;
-        const bytesOf = (target) => {
-          const sent = newUploadFor(prepared, target);
-          if (sent) {
-            return sent.kind === "symbol" ? sent.upload.bytes : null;
-          }
-          const stored = recordById(
-            txApp,
-            "catalog_cad_item_revisions",
-            deriveId("cad-item-revision", target.cad_item + "\n" + target.number),
-          );
-          if (!stored || !isCadItemRevision(stored, target.cad_item, target.number)) {
-            return null;
-          }
-          const blob = recordById(txApp, "catalog_blobs", stored.getString("blob"));
-          return blob ? blobBytes(blob) : null;
-        };
-        for (const clue of categoryClues(JSON.parse(details.snapshot), afterRevision, bytesOf)) {
-          const made = record("catalog_category_matches", deriveId("category-match", changeId + "\n" + clue.clue));
-          made.set("category", deriveId("category", newCategory));
-          made.set("clue", clue.clue);
-          made.set("value", clue.value);
-          made.set("part", partId);
-          made.set("change", changeId);
-          made.set("seq", seq);
-          made.set("actor", actor.id);
-          made.set("actor_name", actor.name);
-          txApp.save(made);
-          remembered.push(clue);
-        }
-      }
+      const remembered =
+        newCategory !== null && details
+          ? saveRememberedMatches(txApp, {
+              category: newCategory,
+              details: JSON.parse(details.snapshot),
+              revision: revision ? JSON.parse(revision.snapshot) : storedRevision,
+              prepared: prepared,
+              partId: partId,
+              changeId: changeId,
+              seq: seq,
+              actor: actor,
+            })
+          : [];
 
       status = 200;
       result = {
@@ -2229,6 +2263,353 @@ function publishEdit(e) {
     ledger.set("result", JSON.stringify(result));
     txApp.save(ledger);
     reply = { status: status, body: result };
+  });
+
+  if (reply.replayed) {
+    e.response.header().set("X-Collab-Replayed", "true");
+  }
+  return e.json(reply.status, reply.body);
+}
+
+// ---- New parts --------------------------------------------------------------
+//
+// POST /api/catalog/parts (see catalog_new_parts.pb.js) adds one new part
+// from CAD files someone downloaded (kicad-parts-9693). It runs
+// publishCreate in one transaction:
+//
+//   1. replay the stored answer if the correlation ID was used before for
+//      the same request (409 correlation_reused for a different one);
+//   2. answer 409 ipn_taken if the Catalog already has a part with the IPN;
+//   3. build part details 1 in the category, with exactly its fields, and
+//      revision 1 binding exact CAD item revisions: ones the Catalog
+//      already has, KiCad's own libraries (external), or ones made from the
+//      files sent, read and checked as for an edit;
+//   4. save one Change of kind create, the CAD item revisions, the part,
+//      its details and revision, an audit entry, and one remembered match
+//      per clue the part has for the category the person confirmed.
+//
+// Applied answers are stored under the correlation ID; ipn_taken is not, so
+// a retry with another IPN is checked again.
+
+// The `source` of a new part's details, revision and CAD item revisions.
+const CREATE_SOURCE = "create";
+
+// The checked request of a new part.
+function createRequest(body) {
+  const { correlationId, reason, ipn } = commonRequest(body);
+  const category = body.category;
+  if (typeof category !== "string" || !CATEGORY_CODE.test(category)) {
+    fail("category must be the code of a category, such as res");
+  }
+  const list = (name, max) => {
+    const value = body[name] === undefined || body[name] === null ? [] : body[name];
+    if (!Array.isArray(value) || value.length > max) {
+      fail(`${name} must be a list of at most ${max}`);
+    }
+    return value;
+  };
+  const fields = list("fields", 200);
+  const manufacturerParts = list("manufacturerParts", 100);
+  const cadFields = list("cadFields", 2);
+  const from = body.from === undefined || body.from === null ? "" : body.from;
+  if (typeof from !== "string" || from.length > 200) {
+    fail("from must be text of at most 200 characters");
+  }
+  const files = list("files", 20).map((name) => {
+    if (typeof name !== "string" || trimSpace(name).length === 0 || name.length > 255) {
+      fail("files must be the names of the downloaded files, each of at most 255 characters");
+    }
+    return name;
+  });
+  return {
+    correlationId: correlationId,
+    reason: reason,
+    ipn: ipn,
+    category: category,
+    fields: fields,
+    manufacturerParts: manufacturerParts,
+    cadFields: cadFields,
+    uploads: editUploads(body.uploads),
+    from: trimSpace(from),
+    files: files,
+  };
+}
+
+// The fields of a new part: exactly `names` (its category's fields), in that
+// order, each with a text value.
+function createdFields(fields, names) {
+  if (fields.length !== names.length) {
+    fail(`fields must list the category's ${names.length} fields, in its order: ${names.join(", ")}`);
+  }
+  return fields.map((field, index) => {
+    if (!field || field.name !== names[index]) {
+      fail(`field ${index + 1} must be ${names[index]}, the category's field ${index + 1}`);
+    }
+    if (typeof field.value !== "string" || field.value.length > 10000) {
+      fail(`the value of ${field.name} must be text of at most 10000 characters`);
+    }
+    return { name: field.name, value: field.value };
+  });
+}
+
+// The Symbol and Footprint fields of a new part, in that order. Every
+// reference they name must be LIB:NAME with plain names, as for a file.
+function createdCadFields(fields) {
+  const checked = fields.map((field, index) => {
+    if (!field || CAD_FIELDS.indexOf(field.name) < 0 || typeof field.value !== "string" || field.value.length > 10000) {
+      fail(`cad field ${index + 1} must be Symbol or Footprint, with a text value`);
+    }
+    return { name: field.name, value: field.value };
+  });
+  for (const field of checked) {
+    for (const reference of namedReferences(field.value)) {
+      const parts = reference.split(":");
+      if (parts.length !== 2 || !isPlainName(parts[0]) || !isPlainName(parts[1])) {
+        fail(
+          `${reference} cannot be used as a reference: write LIBRARY:NAME with one colon, and a library and name that are not . or .., do not start with -, and hold no / \\ : or control characters`,
+        );
+      }
+    }
+  }
+  return checked;
+}
+
+function publishCreate(e) {
+  const kind = CHANGE_KINDS.create;
+  const actor = catalogEditor(e);
+  const request = createRequest(e.requestInfo().body || {});
+  const pairs = (fields) => fields.map((field) => [field && field.name, field && field.value]);
+  const requestHash = $security.sha256(
+    JSON.stringify([
+      kind,
+      request.ipn,
+      request.reason,
+      request.category,
+      pairs(request.fields),
+      request.manufacturerParts.map((part) => [part && part.manufacturer, part && part.mpn]),
+      pairs(request.cadFields),
+      request.uploads.map((upload) => [
+        upload.role,
+        upload.reference,
+        upload.fileName,
+        upload.formatVersion,
+        upload.sha256,
+      ]),
+      request.from,
+      request.files,
+    ]),
+  );
+
+  let reply = null;
+  $app.runInTransaction((txApp) => {
+    const first = (collection, filter, params, sort) => {
+      const found = txApp.findRecordsByFilter(collection, filter, sort || "", 1, 0, params);
+      return found.length > 0 ? found[0] : null;
+    };
+    const prior = first("catalog_commands", "correlation_id = {:id}", { id: request.correlationId });
+    if (prior) {
+      if (prior.getString("actor") !== actor.id || prior.getString("request_hash") !== requestHash) {
+        reply = {
+          status: 409,
+          body: {
+            outcome: "correlation_reused",
+            correlationId: request.correlationId,
+            message: "this correlation ID was already used for a different command",
+          },
+        };
+        return;
+      }
+      reply = { status: prior.getInt("status"), body: JSON.parse(prior.getString("result")), replayed: true };
+      return;
+    }
+
+    const partId = deriveId("part", request.ipn);
+    if (recordById(txApp, "catalog_parts", partId) || first("catalog_parts", "ipn = {:ipn}", { ipn: request.ipn })) {
+      reply = {
+        status: 409,
+        body: {
+          outcome: "ipn_taken",
+          correlationId: request.correlationId,
+          ipn: request.ipn,
+          message: `the Catalog already has a part with the IPN ${request.ipn}; an IPN is never reused`,
+        },
+      };
+      return;
+    }
+    const categoryRevision = currentCategoryRevision(txApp, request.category);
+    if (!categoryRevision) {
+      throw new BadRequestError(`the category ${request.category} is not in the Catalog`);
+    }
+    const categoryDetails = JSON.parse(categoryRevision.getString("snapshot"));
+    const refuse = (what, problem) => {
+      if (problem) {
+        throw new BadRequestError(`the ${what} of ${request.ipn} cannot be saved: ${problem}`);
+      }
+    };
+
+    // The documents, in the field order of crates/catalog PartDetails and
+    // PartRevision, so the stored bytes are their canonical JSON.
+    const detailsDocument = {
+      schema: PART_DETAILS_SCHEMA,
+      ipn: request.ipn,
+      category: request.category,
+      fields: createdFields(request.fields, categoryDetails.fields || []),
+      manufacturer_parts: editedManufacturerParts(request.manufacturerParts),
+    };
+    refuse("details", detailsProblem(detailsDocument));
+    const cadFields = createdCadFields(request.cadFields);
+    const prepared = preparedUploads(txApp, request.uploads);
+    const revisionDocument = {
+      schema: PART_REVISION_SCHEMA,
+      ipn: request.ipn,
+      cad_fields: cadFields,
+      cad_references: cadReferences(txApp, cadFields, { cad_fields: [], cad_references: [] }, prepared),
+    };
+    const stored = storedBomMarks(txApp);
+    const markOf = (target, role) => {
+      const sent = newUploadFor(prepared, target);
+      if (!sent) {
+        return stored(target, role);
+      }
+      return sent.kind === role ? bomMark(role, sent.upload.bytes) : null;
+    };
+    if (excludedFromBom(revisionDocument, markOf)) {
+      revisionDocument.excluded_from_bom = true;
+    }
+    refuse("revision", revisionProblem(revisionDocument));
+    const detailsSnapshot = JSON.stringify(detailsDocument);
+    const revisionSnapshot = JSON.stringify(revisionDocument);
+
+    const record = (name, id) => {
+      const made = new Record(txApp.findCollectionByNameOrId(name));
+      made.set("id", id);
+      return made;
+    };
+    const last = first("catalog_changes", "seq > 0", {}, "-seq");
+    const seq = last ? last.getInt("seq") + 1 : 1;
+    const changeId = deriveId("change", request.correlationId);
+    const newCadItemRevisions = newEntries(prepared);
+    const summary = JSON.stringify({
+      ipn: request.ipn,
+      parts: 1,
+      partDetails: 1,
+      partRevisions: 1,
+      cadItemRevisions: newCadItemRevisions.length,
+    });
+    const change = record("catalog_changes", changeId);
+    change.set("seq", seq);
+    change.set("kind", kind);
+    change.set("reason", request.reason);
+    change.set("correlation_id", request.correlationId);
+    change.set("actor", actor.id);
+    change.set("actor_name", actor.name);
+    change.set("sources", JSON.stringify({ parts: [request.ipn], from: request.from, files: request.files }));
+    change.set("summary", summary);
+    txApp.save(change);
+
+    saveNewCadItemRevisions(txApp, newCadItemRevisions, changeId, CREATE_SOURCE);
+
+    // Where the part came from: the site and the downloaded files.
+    const source = JSON.stringify({
+      schema: SOURCE_SCHEMA,
+      source: CREATE_SOURCE,
+      from: request.from,
+      files: request.files,
+    });
+    const part = record("catalog_parts", partId);
+    part.set("ipn", request.ipn);
+    part.set("ipn_prefix", request.ipn.substring(0, 3));
+    part.set("variant", request.ipn.substring(9));
+    part.set("current_revision_number", 1);
+    part.set("current_details_number", 1);
+    part.set("first_change", changeId);
+    txApp.save(part);
+    const detailsId = deriveId("part-details", partId + "\n1");
+    const details = record("catalog_part_details", detailsId);
+    details.set("part", partId);
+    details.set("number", 1);
+    details.set("predecessor", "");
+    details.set("change", changeId);
+    details.set("snapshot", detailsSnapshot);
+    details.set("snapshot_sha256", $security.sha256(detailsSnapshot));
+    details.set("source", source);
+    txApp.save(details);
+    const revisionId = deriveId("part-revision", partId + "\n1");
+    const bound = boundCadItemRevisions(revisionDocument);
+    const revision = record("catalog_part_revisions", revisionId);
+    revision.set("part", partId);
+    revision.set("number", 1);
+    revision.set("predecessor", "");
+    revision.set("change", changeId);
+    revision.set("snapshot", revisionSnapshot);
+    revision.set("snapshot_sha256", $security.sha256(revisionSnapshot));
+    revision.set("source", source);
+    revision.set("cad_item_revisions", bound);
+    txApp.save(revision);
+    part.set("current_details", detailsId);
+    part.set("current_revision", revisionId);
+    txApp.save(part);
+
+    const auditEntryId = deriveId("audit-entry", request.correlationId);
+    const audit = record("catalog_audit_entries", auditEntryId);
+    audit.set("action", "catalog." + kind);
+    audit.set("actor", actor.id);
+    audit.set("actor_name", actor.name);
+    audit.set("change", changeId);
+    audit.set("reason", request.reason);
+    audit.set("correlation_id", request.correlationId);
+    audit.set("summary", summary);
+    txApp.save(audit);
+
+    // The person confirmed the category: its clues are remembered.
+    const remembered = saveRememberedMatches(txApp, {
+      category: request.category,
+      details: detailsDocument,
+      revision: revisionDocument,
+      prepared: prepared,
+      partId: partId,
+      changeId: changeId,
+      seq: seq,
+      actor: actor,
+    });
+
+    const result = {
+      outcome: "applied",
+      correlationId: request.correlationId,
+      ipn: request.ipn,
+      changeId: changeId,
+      seq: seq,
+      auditEntryId: auditEntryId,
+      details: { id: detailsId, number: 1, snapshotSha256: $security.sha256(detailsSnapshot) },
+      revision: { id: revisionId, number: 1, snapshotSha256: $security.sha256(revisionSnapshot) },
+      rememberedMatches: remembered,
+      cadItemRevisions: bound,
+      newCadItemRevisions: newCadItemRevisions.map((entry) => ({
+        kind: entry.kind,
+        key: entry.key,
+        number: entry.number,
+        id: entry.id,
+        otherParts:
+          entry.kind === "model-3d"
+            ? null
+            : txApp.findRecordsByFilter(
+                "catalog_part_revisions",
+                "part.current_revision = id && part != {:part} && cad_item_revisions.cad_item ?= {:item}",
+                "",
+                0,
+                0,
+                { part: partId, item: entry.cadItemId },
+              ).length,
+      })),
+    };
+    const ledger = new Record(txApp.findCollectionByNameOrId("catalog_commands"));
+    ledger.set("correlation_id", request.correlationId);
+    ledger.set("actor", actor.id);
+    ledger.set("request_hash", requestHash);
+    ledger.set("status", 200);
+    ledger.set("result", JSON.stringify(result));
+    txApp.save(ledger);
+    reply = { status: 200, body: result };
   });
 
   if (reply.replayed) {
@@ -2847,6 +3228,7 @@ module.exports = {
   categoryDocument: categoryDocument,
   currentCategoryRevision: currentCategoryRevision,
   publishEdit: publishEdit,
+  publishCreate: publishCreate,
   modelReferences: modelReferences,
   classifyModelReference: classifyModelReference,
   publishArchive: publishArchive,

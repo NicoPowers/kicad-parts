@@ -22,15 +22,19 @@ pub enum ChangeKind {
     /// part, taking some of the CSV's values or keeping theirs, published by
     /// `POST /api/catalog/csv-reviews`.
     CsvReview,
+    /// A new part added in the app from downloaded CAD files, published by
+    /// `POST /api/catalog/parts`.
+    Create,
 }
 
 impl ChangeKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::CsvImport,
         Self::Edit,
         Self::Archive,
         Self::Unarchive,
         Self::CsvReview,
+        Self::Create,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -40,6 +44,7 @@ impl ChangeKind {
             Self::Archive => "archive",
             Self::Unarchive => "unarchive",
             Self::CsvReview => "csv-review",
+            Self::Create => "create",
         }
     }
 
@@ -70,7 +75,7 @@ mod tests {
             .map(|kind| format!("\"{}\"", kind.as_str()))
             .collect();
         // The latest migration that sets the kinds.
-        let migration = infra("pb_migrations/1792000000_csv_reviews.js");
+        let migration = infra("pb_migrations/1792400000_new_parts.js");
         assert!(
             migration.contains(&format!("const KINDS = [{}];", values.join(", "))),
             "the migration's kind values differ from ChangeKind"
@@ -82,6 +87,7 @@ mod tests {
             ("archive", ChangeKind::Archive),
             ("unarchive", ChangeKind::Unarchive),
             ("csvReview", ChangeKind::CsvReview),
+            ("create", ChangeKind::Create),
         ] {
             assert!(
                 library.contains(&format!("  {name}: \"{}\",", kind.as_str())),
@@ -105,7 +111,8 @@ mod tests {
             "const CATEGORY_SCHEMA = \"{}\";",
             crate::CATEGORY_SCHEMA
         )));
-        // A remembered match is made only by an edit (catalog_write_guards).
+        // A remembered match is made only by an edit or a new part
+        // (catalog_write_guards).
         assert!(library.contains("\"catalog_category_matches\""));
         assert!(!library.contains("restore"));
         assert!(library.contains(&format!(
