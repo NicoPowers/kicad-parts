@@ -1986,10 +1986,20 @@ fn CsvReviewForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView 
     let changes = ui.reviewing.get_untracked().unwrap_or_default();
     let open = move || ui.reviewing.get_untracked().unwrap_or_default();
     let files = csv_files(&changes);
-    let intro = format!(
-        "{} has new values for this part. Tick the ones to accept. The others stay as they are, and you are not asked about these CSV values again unless the CSV changes.",
-        files.join(" and ")
-    );
+    let only_kept_files = changes
+        .iter()
+        .all(|group| group.rows.iter().all(|row| row.keep_only));
+    let intro = if only_kept_files {
+        format!(
+            "{} has a changed file for a symbol or footprint this part uses. It cannot be accepted here, because that symbol or footprint was changed in this app: keep the current one, or choose the file in Edit part. You are not asked about this file again unless the CSV changes.",
+            files.join(" and ")
+        )
+    } else {
+        format!(
+            "{} has new values for this part. Tick the ones to accept. The others stay as they are, and you are not asked about these CSV values again unless the CSV changes.",
+            files.join(" and ")
+        )
+    };
     let prefilled = accept_reason(&files);
     let keep_reason = format!(
         "Keep the values edited in this app, not the CSV values from {}",
@@ -2014,8 +2024,10 @@ fn CsvReviewForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView 
     // open.
     let cad_hint = move || {
         let has_cad = ui.reviewing.with(|open| {
-            open.as_ref()
-                .is_some_and(|open| open.iter().any(|changes| changes.cad))
+            open.as_ref().is_some_and(|open| {
+                open.iter()
+                    .any(|changes| changes.cad && changes.rows.iter().any(|row| !row.keep_only))
+            })
         });
         has_cad.then(|| {
             let (newest, current) = part.with_untracked(|part| {
