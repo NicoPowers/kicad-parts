@@ -323,6 +323,20 @@ pub struct TeamPart {
     /// footprint.
     #[serde(default)]
     pub csv_changes: Vec<CsvChanges>,
+    /// Every category, by name, for the Category choice in Edit part.
+    #[serde(default)]
+    pub categories: Vec<TeamCategory>,
+}
+
+/// A category a part can be in: the only grouping people see.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamCategory {
+    /// Its code, such as `res`.
+    pub code: String,
+    /// Its plain name, such as `Resistors`.
+    pub name: String,
+    /// The fields a part in it has, in order.
+    pub fields: Vec<String>,
 }
 
 /// New CSV values the latest import found for a part that was edited in
@@ -346,7 +360,8 @@ pub struct CsvChanges {
 /// One field whose value in the CSV differs from the part's.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CsvChangeRow {
-    /// A details field name, `Manufacturer parts`, `Symbol` or `Footprint`.
+    /// A details field name, `Category`, `Manufacturer parts`, `Symbol` or
+    /// `Footprint`.
     pub field: String,
     pub now: String,
     pub csv: String,
@@ -395,6 +410,12 @@ pub struct RevisionStatus {
 pub struct CurrentDetails {
     /// Counts each save of the details; never shown as a revision.
     pub number: u32,
+    /// The code of the part's category, such as `res`.
+    #[serde(default)]
+    pub category: String,
+    /// Its plain name, such as `Resistors`.
+    #[serde(default)]
+    pub category_name: String,
     /// Every field, blanks included, in order.
     pub fields: Vec<Field>,
     /// The first is the main one.
@@ -524,6 +545,11 @@ pub struct TeamEditRequest {
     /// The revision the edit starts from.
     pub expected_revision: u32,
     pub reason: String,
+    /// The code of the part's category, changed or not; blank keeps it. A
+    /// new category keeps every field and the IPN, and adds the fields of
+    /// the new category the part lacks.
+    #[serde(default)]
+    pub category: String,
     pub fields: Vec<Field>,
     pub manufacturer_parts: Vec<ManufacturerPart>,
     pub cad_fields: Vec<Field>,

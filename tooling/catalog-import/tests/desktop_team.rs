@@ -120,6 +120,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         expected_details: 1,
         expected_revision: 1,
         reason: "Exact value".into(),
+        category: String::new(),
         fields: part.details.fields.clone(),
         manufacturer_parts: part.details.manufacturer_parts.clone(),
         cad_fields: part.revision.cad_fields.clone(),

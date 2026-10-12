@@ -182,6 +182,7 @@ fn opened(part: &TeamPart, reason: &str) -> TeamEditRequest {
         expected_details: part.details.number,
         expected_revision: part.revision.number,
         reason: reason.into(),
+        category: String::new(),
         fields: part.details.fields.clone(),
         manufacturer_parts: part.details.manufacturer_parts.clone(),
         cad_fields: part.revision.cad_fields.clone(),

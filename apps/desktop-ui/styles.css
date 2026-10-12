@@ -783,8 +783,14 @@ a {
 
 /* The line right under a section's heading, such as "Every revision of the
    part shares these details." */
-.team-toolbar + .hint {
+.team-toolbar + .hint,
+.part-category + .hint {
   margin: 0 0 0.5rem;
+}
+
+/* "Category: Resistors", right under the Part details heading. */
+.part-category {
+  margin: 0 0 0.25rem;
 }
 
 .part-fields h4 {
@@ -855,6 +861,21 @@ a {
 
 .edit-row input {
   padding: 0.25rem 0.5rem;
+}
+
+.edit-row select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  padding: 0.25rem 0.4rem;
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+}
+
+/* Says what choosing another category does, under the choice. */
+#edit-category-hint {
+  margin: 0.3rem 0 0.2rem;
+  font-size: 0.85rem;
 }
 
 .edit-part {

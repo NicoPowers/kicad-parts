@@ -13,8 +13,8 @@ use crate::backend;
 use desktop_contract::{
     CsvChangeRow, CsvChanges, DetailChange, Field, FileKind, FilePreviewRequest, HistoryEntry,
     LiveUpdates, ManufacturerPart, OlderUse, PreviewOutcome, PublishResult, SignInRequest,
-    TeamArchiveRequest, TeamConflict, TeamCsvReviewRequest, TeamEditRequest, TeamFile,
-    TeamFileRequest, TeamPart, TeamSession, TeamStatus,
+    TeamArchiveRequest, TeamCategory, TeamConflict, TeamCsvReviewRequest, TeamEditRequest,
+    TeamFile, TeamFileRequest, TeamPart, TeamSession, TeamStatus,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -222,6 +222,12 @@ pub struct Draft {
     pub base_details: u32,
     /// The revision the edit starts from.
     pub base_revision: u32,
+    /// The code of the category chosen.
+    pub category: String,
+    /// The category and fields of the details the edit starts from, so
+    /// choosing another category can add its fields to them.
+    pub start_category: String,
+    pub start_fields: Vec<Field>,
     pub fields: Vec<Field>,
     pub parts: Vec<ManufacturerPart>,
     /// The Symbol and Footprint fields.
@@ -243,6 +249,8 @@ pub struct TeamUi {
     pub parts_version: RwSignal<u32>,
     /// Bumped when a chosen file changes the Symbol or Footprint field.
     pub files_version: RwSignal<u32>,
+    /// Bumped when another category is chosen, which changes the fields.
+    pub category_version: RwSignal<u32>,
     pub conflict: RwSignal<Option<TeamConflict>>,
     pub notice: RwSignal<Option<Notice>>,
     /// The history entry selected, by its Change's number.
@@ -333,6 +341,7 @@ impl TeamUi {
             draft: StoredValue::new(Draft::default()),
             parts_version: RwSignal::new(0),
             files_version: RwSignal::new(0),
+            category_version: RwSignal::new(0),
             conflict: RwSignal::new(None),
             notice: RwSignal::new(None),
             selected: RwSignal::new(None),
@@ -405,6 +414,9 @@ fn draft_of(part: &TeamPart) -> Draft {
         ipn: part.ipn.clone(),
         base_details: part.details.number,
         base_revision: part.revision.number,
+        category: part.details.category.clone(),
+        start_category: part.details.category.clone(),
+        start_fields: part.details.fields.clone(),
         fields: part.details.fields.clone(),
         parts: part.details.manufacturer_parts.clone(),
         cad_fields: part.revision.cad_fields.clone(),
@@ -413,11 +425,19 @@ fn draft_of(part: &TeamPart) -> Draft {
     }
 }
 
-fn draft_from_request(request: &TeamEditRequest) -> Draft {
+/// The draft of `request`, an edit that starts from `part` as it is now.
+fn draft_from_request(request: &TeamEditRequest, part: &TeamPart) -> Draft {
     Draft {
         ipn: request.ipn.clone(),
         base_details: request.expected_details,
         base_revision: request.expected_revision,
+        category: if request.category.is_empty() {
+            part.details.category.clone()
+        } else {
+            request.category.clone()
+        },
+        start_category: part.details.category.clone(),
+        start_fields: part.details.fields.clone(),
         fields: request.fields.clone(),
         parts: request.manufacturer_parts.clone(),
         cad_fields: request.cad_fields.clone(),
@@ -433,11 +453,37 @@ fn request_of(draft: Draft) -> TeamEditRequest {
         expected_details: draft.base_details,
         expected_revision: draft.base_revision,
         reason: draft.reason,
+        category: draft.category,
         fields: draft.fields,
         manufacturer_parts: draft.parts,
         cad_fields: draft.cad_fields,
         files: draft.files,
     }
+}
+
+/// Moves the draft to `category`: the fields the edit started from, then,
+/// blank, the fields of the new category they lack. Values already typed
+/// are kept. Nothing is dropped, and the IPN never changes.
+fn choose_category(draft: &mut Draft, category: &TeamCategory) {
+    let mut wanted = draft.start_fields.clone();
+    if category.code != draft.start_category {
+        for name in &category.fields {
+            if !wanted.iter().any(|field| &field.name == name) {
+                wanted.push(Field {
+                    name: name.clone(),
+                    value: String::new(),
+                });
+            }
+        }
+    }
+    draft.fields = wanted
+        .into_iter()
+        .map(|field| {
+            let typed = draft.fields.iter().find(|typed| typed.name == field.name);
+            typed.cloned().unwrap_or(field)
+        })
+        .collect();
+    draft.category.clone_from(&category.code);
 }
 
 /// Scrolls the right-hand column to its top, where the notice or the
@@ -870,6 +916,11 @@ fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                         .into_any()
                 }}
             </div>
+            {(!details.category_name.is_empty()).then(|| view! {
+                <p class="part-category" id="part-category">
+                    "Category: "<strong>{details.category_name.clone()}</strong>
+                </p>
+            })}
             <p class="hint">"Every revision of the part shares these details."</p>
             <table aria-labelledby="fields-heading">
                 <thead>
@@ -983,14 +1034,59 @@ fn field_inputs(
 fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
     let draft = ui.draft.get_value();
     let (base_details, base_revision) = (draft.base_details, draft.base_revision);
-    let fields = field_inputs(
-        draft.fields.clone(),
-        "edit-field",
-        ui,
-        |draft, index, value| {
+    // The fields follow the category chosen.
+    let fields = move || {
+        ui.category_version.track();
+        let fields = ui.draft.with_value(|draft| draft.fields.clone());
+        field_inputs(fields, "edit-field", ui, |draft, index, value| {
             draft.fields[index].value = value;
-        },
-    );
+        })
+    };
+    let categories = part.with_untracked(|part| {
+        part.as_ref()
+            .map(|part| part.categories.clone())
+            .unwrap_or_default()
+    });
+    let category_choice = (!categories.is_empty()).then(|| {
+        let chosen = draft.category.clone();
+        let options = categories
+            .iter()
+            .map(|category| {
+                view! {
+                    <option value=category.code.clone() selected=category.code == chosen>
+                        {category.name.clone()}
+                    </option>
+                }
+            })
+            .collect_view();
+        view! {
+            <div class="edit-row">
+                <label for="edit-category">"Category"</label>
+                <select
+                    id="edit-category"
+                    on:change:target=move |event| {
+                        let code = event.target().value();
+                        if let Some(category) = categories.iter().find(|category| category.code == code) {
+                            ui.draft.update_value(|draft| choose_category(draft, category));
+                            ui.category_version.update(|version| *version += 1);
+                        }
+                    }
+                >
+                    {options}
+                </select>
+            </div>
+            {move || {
+                ui.category_version.track();
+                ui.draft
+                    .with_value(|draft| draft.category != draft.start_category)
+                    .then(|| view! {
+                        <p class="hint" id="edit-category-hint">
+                            "The IPN stays the same. Fields of the new category are added below."
+                        </p>
+                    })
+            }}
+        }
+    });
     let ipn = draft.ipn.clone();
     let cad_fields = draft
         .cad_fields
@@ -1055,6 +1151,7 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
             }}
             <fieldset>
                 <legend>"Part details"</legend>
+                {category_choice}
                 {fields}
             </fieldset>
             <fieldset>
@@ -2432,6 +2529,7 @@ fn ConflictView(
     let rows = conflict.rows.clone();
     let save_merged = conflict.merged.clone();
     let edit_merged = conflict.merged.clone();
+    let conflict_part = conflict.part.clone();
     let actions = view! {
         <div class="form-actions">
             <button
@@ -2444,7 +2542,7 @@ fn ConflictView(
             </button>
             <button
                 type="button"
-                on:click=move |_| ui.start_editing(draft_from_request(&edit_merged))
+                on:click=move |_| ui.start_editing(draft_from_request(&edit_merged, &conflict_part))
             >
                 "Edit again"
             </button>

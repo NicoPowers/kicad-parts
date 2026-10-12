@@ -22,21 +22,22 @@ use catalog::pocketbase::{
     MANUFACTURER_PARTS_FIELD, PublishOutcome, PublishReply, StoredArchiveEntry, StoredBlob,
     StoredCadItemRevision, StoredChange, StoredCsvReview, StoredPart, StoredPartRevision,
     archive_entries_of, archived_numbers, cad_item_revisions_by_id, cad_item_revisions_in_changes,
-    changes_by_id, csv_reviews_of, has_cad_item, latest_import_run, part_by_ipn, part_details_of,
-    part_revisions, problems_of, recorded_csv_document, submit_archive, submit_csv_review,
-    submit_edit,
+    changes_by_id, csv_reviews_of, current_categories, fields_for_category, has_cad_item,
+    latest_import_run, part_by_ipn, part_details_of, part_revisions, problems_of,
+    recorded_csv_document, submit_archive, submit_csv_review, submit_edit,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
-    CadItemDetails, CadItemId, CadItemKind, CadItemRevisionId, CadReference, CadReferenceRole,
-    CadReferenceTarget, DetailField, PartDetails, PartRevision, compare_details, compare_revisions,
+    CATEGORY_LABEL, CadItemDetails, CadItemId, CadItemKind, CadItemRevisionId, CadReference,
+    CadReferenceRole, CadReferenceTarget, CategoryDetails, DetailField, DifferenceKind,
+    PartDetails, PartRevision, compare_details, compare_revisions,
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
     ArchiveNote, CadItemUse, ConflictRow, CsvChangeRow, CsvChanges, CurrentDetails,
     CurrentRevision, DetailChange, Field, FileKind, HistoryEntry, LiveUpdates, ManufacturerPart,
     OlderUse, PreviewKind, PublishResult, RevisionStatus, SignInRequest, TeamArchiveRequest,
-    TeamConflict, TeamCsvReviewRequest, TeamEditRequest, TeamFile, TeamFileReading,
+    TeamCategory, TeamConflict, TeamCsvReviewRequest, TeamEditRequest, TeamFile, TeamFileReading,
     TeamFileRequest, TeamPart, TeamSession, TeamStatus,
 };
 use kicad_integration::library_file::{
@@ -385,11 +386,45 @@ impl TeamCatalog {
             Ok(uploads) => uploads,
             Err(message) => return Ok(PublishResult::Refused { message }),
         };
+        // A new category: the part keeps every field it had and gains the
+        // new category's fields it lacks (blank unless typed in the form).
+        let category = match request.category.as_str() {
+            "" => None,
+            code if code == base_details.category => None,
+            code => match started
+                .categories
+                .iter()
+                .find(|category| category.code == code)
+            {
+                Some(category) => Some(category),
+                None => {
+                    return Ok(PublishResult::Refused {
+                        message: format!("The category {code} is not in the team catalog."),
+                    });
+                }
+            },
+        };
+        let fields = match category {
+            Some(category) => fields_for_category(&base_details.fields, &category.fields)
+                .into_iter()
+                .map(|field| {
+                    let typed = fields.iter().find(|typed| typed.name == field.name);
+                    typed.cloned().unwrap_or(field)
+                })
+                .collect(),
+            None => fields,
+        };
         let mut command = EditCommand::new(&request.ipn, &request.reason);
         command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
-        if fields != base_details.fields || parts != base_details.manufacturer_parts {
+        if fields != base_details.fields
+            || parts != base_details.manufacturer_parts
+            || category.is_some()
+        {
             command = command.editing_details(base_details, request.expected_details);
             if let Some(details) = &mut command.details {
+                if let Some(category) = category {
+                    details.category.clone_from(&category.code);
+                }
                 details.fields = fields;
                 details.manufacturer_parts = parts;
             }
@@ -1251,6 +1286,24 @@ struct LoadedPart {
     details: BTreeMap<u32, PartDetails>,
     /// By number.
     revisions: BTreeMap<u32, PartRevision>,
+    /// Every category's current revision.
+    categories: Vec<CategoryDetails>,
+}
+
+/// The plain name of each category, by code.
+type CategoryNames = BTreeMap<String, String>;
+
+fn category_names(categories: &[CategoryDetails]) -> CategoryNames {
+    categories
+        .iter()
+        .map(|category| (category.code.clone(), category.name.clone()))
+        .collect()
+}
+
+/// A category's plain name, or its code when the Catalog has no such
+/// category.
+fn category_name(names: &CategoryNames, code: &str) -> String {
+    names.get(code).cloned().unwrap_or_else(|| code.to_owned())
 }
 
 fn load_part(client: &PocketBaseClient, part: &StoredPart) -> Result<TeamPart, String> {
@@ -1332,6 +1385,8 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
     let revisions = part_revisions(client, &part.id).map_err(fail)?;
     let archive_entries = archive_entries_of(client, &part.id).map_err(fail)?;
     let reviews = csv_reviews_of(client, &part.id).map_err(fail)?;
+    let categories = current_categories(client).map_err(fail)?;
+    let names = category_names(&categories);
     let change_ids: Vec<&str> = saved_details
         .iter()
         .map(|d| d.change.as_str())
@@ -1377,7 +1432,7 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
     for saved in &saved_details {
         let previous = saved.number.checked_sub(1).and_then(|n| details.get(&n));
         let changes = previous
-            .map(|previous| to_changes(compare_details(previous, &details[&saved.number])))
+            .map(|previous| to_changes(compare_details(previous, &details[&saved.number]), &names))
             .unwrap_or_default();
         if let Some(change) = change_records.get(&saved.change) {
             let entry = history_entry(&mut entries, change);
@@ -1392,11 +1447,10 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
         let previous = revision.number.checked_sub(1).and_then(|n| cad.get(&n));
         let changes = previous
             .map(|previous| {
-                to_changes(compare_revisions(
-                    previous,
-                    &cad[&revision.number],
-                    describe,
-                ))
+                to_changes(
+                    compare_revisions(previous, &cad[&revision.number], describe),
+                    &names,
+                )
             })
             .unwrap_or_default();
         if let Some(change) = change_records.get(&revision.change) {
@@ -1483,12 +1537,13 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
         current_revision,
         &reviews,
         &last_imported,
+        &names,
         describe,
     )?;
     let archived = archived_numbers(&archive_entries.iter().collect::<Vec<_>>());
     let view = TeamPart {
         ipn: part.ipn.clone(),
-        details: current_details_view(part.current_details_number, current_details),
+        details: current_details_view(part.current_details_number, current_details, &names),
         revision: current_revision_view(
             part.current_revision_number,
             current_revision,
@@ -1503,11 +1558,20 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
             .collect(),
         history: entries.into_values().rev().collect(),
         csv_changes,
+        categories: categories
+            .iter()
+            .map(|category| TeamCategory {
+                code: category.code.clone(),
+                name: category.name.clone(),
+                fields: category.fields.clone(),
+            })
+            .collect(),
     };
     Ok(LoadedPart {
         view,
         details,
         revisions: cad,
+        categories,
     })
 }
 
@@ -1580,6 +1644,7 @@ struct LastSeen {
 ///
 /// A recorded document that cannot be read is skipped, so the part still
 /// opens.
+#[allow(clippy::too_many_arguments)]
 fn open_csv_changes(
     client: &PocketBaseClient,
     part: &StoredPart,
@@ -1587,6 +1652,7 @@ fn open_csv_changes(
     revision: &PartRevision,
     reviews: &[StoredCsvReview],
     last_imported: &LastImported,
+    names: &CategoryNames,
     describe: impl Fn(&CadReference) -> String,
 ) -> Result<Vec<CsvChanges>, String> {
     let fail = |error: CollabError| error.to_string();
@@ -1691,7 +1757,7 @@ fn open_csv_changes(
                 continue;
             };
             let before = last_document.and_then(|text| serde_json::from_str(text).ok());
-            details_rows(details, &csv, before.as_ref())
+            details_rows(details, &csv, before.as_ref(), names)
         };
         // Values the CSV changed first; the rest keep their order.
         rows.sort_by_key(|row| !row.changed_in_csv);
@@ -1773,22 +1839,30 @@ fn details_rows(
     now: &PartDetails,
     csv: &PartDetails,
     before: Option<&PartDetails>,
+    names: &CategoryNames,
 ) -> Vec<CsvChangeRow> {
-    let mut rows: Vec<CsvChangeRow> = now
-        .fields
-        .iter()
-        .filter_map(|field| {
-            let theirs = csv.field(&field.name)?;
-            (theirs != field.value).then(|| CsvChangeRow {
-                field: field.name.clone(),
-                now: field.value.clone(),
-                csv: theirs.to_owned(),
-                changed_in_csv: before
-                    .is_none_or(|before| before.field(&field.name) != Some(theirs)),
-                keep_only: false,
-            })
+    let mut rows = Vec::new();
+    // The CSV file the row is in makes its category, so a row moved to
+    // another file has another category.
+    if now.category != csv.category {
+        rows.push(CsvChangeRow {
+            field: CATEGORY_LABEL.to_owned(),
+            now: category_name(names, &now.category),
+            csv: category_name(names, &csv.category),
+            changed_in_csv: before.is_none_or(|before| before.category != csv.category),
+            keep_only: false,
+        });
+    }
+    rows.extend(now.fields.iter().filter_map(|field| {
+        let theirs = csv.field(&field.name)?;
+        (theirs != field.value).then(|| CsvChangeRow {
+            field: field.name.clone(),
+            now: field.value.clone(),
+            csv: theirs.to_owned(),
+            changed_in_csv: before.is_none_or(|before| before.field(&field.name) != Some(theirs)),
+            keep_only: false,
         })
-        .collect();
+    }));
     if now.manufacturer_parts != csv.manufacturer_parts {
         rows.push(CsvChangeRow {
             field: MANUFACTURER_PARTS_FIELD.to_owned(),
@@ -1882,20 +1956,41 @@ fn archive_note(entry: &StoredArchiveEntry) -> ArchiveNote {
     }
 }
 
-fn to_changes(differences: Vec<catalog::DetailDifference>) -> Vec<DetailChange> {
+/// History rows, with categories by their plain names.
+fn to_changes(
+    differences: Vec<catalog::DetailDifference>,
+    names: &CategoryNames,
+) -> Vec<DetailChange> {
     differences
         .into_iter()
-        .map(|difference| DetailChange {
-            label: difference.label,
-            before: difference.before,
-            after: difference.after,
+        // A field added blank (with a new category) needs no row of its
+        // own: the category row says why it is there.
+        .filter(|difference| {
+            difference.what != DifferenceKind::Field || difference.before != difference.after
+        })
+        .map(|difference| {
+            let shown = |code: String| match difference.what {
+                DifferenceKind::Category => category_name(names, &code),
+                _ => code,
+            };
+            DetailChange {
+                label: difference.label,
+                before: shown(difference.before),
+                after: shown(difference.after),
+            }
         })
         .collect()
 }
 
-fn current_details_view(number: u32, details: &PartDetails) -> CurrentDetails {
+fn current_details_view(
+    number: u32,
+    details: &PartDetails,
+    names: &CategoryNames,
+) -> CurrentDetails {
     CurrentDetails {
         number,
+        category: details.category.clone(),
+        category_name: category_name(names, &details.category),
         fields: fields_of(&details.fields),
         manufacturer_parts: manufacturer_parts_of(details),
     }
@@ -2257,12 +2352,43 @@ fn edit_conflict(
         ),
     };
     let mut rows = Vec::new();
-    let merged_fields = field_rows(
+    let names = category_names(&part.categories);
+    let your_category = match request.category.as_str() {
+        "" => base_details.category.clone(),
+        code => code.to_owned(),
+    };
+    let you_changed_category = your_category != base_details.category;
+    let category_differs = if you_changed_category {
+        your_category != their_details.category
+    } else {
+        their_details.category != base_details.category
+    };
+    if category_differs {
+        rows.push(ConflictRow {
+            label: CATEGORY_LABEL.into(),
+            started_from: category_name(&names, &base_details.category),
+            theirs: category_name(&names, &their_details.category),
+            yours: category_name(&names, &your_category),
+            both_changed: you_changed_category
+                && their_details.category != base_details.category
+                && their_details.category != your_category,
+            you_changed: you_changed_category,
+        });
+    }
+    let mut merged_fields = field_rows(
         &base_details.fields,
         &their_details.fields,
         &request.fields,
         &mut rows,
     );
+    // Your new category's fields stay yours to save on top.
+    if you_changed_category {
+        for field in &request.fields {
+            if !merged_fields.iter().any(|merged| merged.name == field.name) {
+                merged_fields.push(field.clone());
+            }
+        }
+    }
     let started_parts = stored_lines(base_details);
     let their_parts = stored_lines(&their_details);
     let your_parts = manufacturer_lines(
@@ -2301,6 +2427,11 @@ fn edit_conflict(
         expected_details: their_details_number,
         expected_revision: their_revision_number,
         reason: request.reason.clone(),
+        category: if you_changed_category {
+            your_category
+        } else {
+            their_details.category.clone()
+        },
         fields: merged_fields,
         manufacturer_parts: if you_changed_parts {
             request.manufacturer_parts.clone()
@@ -2360,6 +2491,48 @@ fn save_settings(path: &Path, settings: &TeamSettings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_row_moved_to_another_csv_file_shows_its_new_category_by_name() {
+        let details = |category: &str| PartDetails {
+            schema: catalog::PART_DETAILS_SCHEMA.into(),
+            ipn: "RES-0000-0470".into(),
+            category: category.into(),
+            fields: vec![DetailField {
+                name: "Value".into(),
+                value: "47".into(),
+            }],
+            manufacturer_parts: Vec::new(),
+        };
+        let names: CategoryNames = [("res", "Resistors"), ("cap", "Capacitors")]
+            .into_iter()
+            .map(|(code, name)| (code.to_owned(), name.to_owned()))
+            .collect();
+        let rows = details_rows(&details("res"), &details("cap"), None, &names);
+        assert_eq!(
+            rows,
+            [CsvChangeRow {
+                field: "Category".into(),
+                now: "Resistors".into(),
+                csv: "Capacitors".into(),
+                changed_in_csv: true,
+                keep_only: false,
+            }]
+        );
+        // Already moved when last applied: not a CSV change, accepting it
+        // undoes the edit. An unknown code shows as it is.
+        let rows = details_rows(
+            &details("res"),
+            &details("xyz"),
+            Some(&details("xyz")),
+            &names,
+        );
+        assert_eq!(
+            (rows[0].csv.as_str(), rows[0].changed_in_csv),
+            ("xyz", false)
+        );
+        assert!(details_rows(&details("res"), &details("res"), None, &names).is_empty());
+    }
 
     #[test]
     fn each_kept_cad_item_choice_shows_its_own_csv_change() {
