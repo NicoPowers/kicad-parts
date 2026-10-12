@@ -1040,3 +1040,47 @@ fn an_import_never_replaces_a_cad_item_revision_made_in_the_app() {
     assert_eq!(detail["edited_revision"], 2);
     assert_eq!(detail["role"], "footprint");
 }
+
+#[test]
+fn part_details_columns_that_cannot_be_fields_are_refused_with_a_plain_message() {
+    let refused = |header: &str| {
+        let root = fixture(
+            &format!("{header}\nRES-0000-0470,MPN47,Yageo,47\n"),
+            "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n",
+        );
+        CsvCatalog::new(root.path())
+            .import("g-res", None)
+            .unwrap_err()
+            .0
+    };
+    // Category is the part's category in this app, in any case.
+    assert_eq!(
+        refused("IPN,MPN,Manufacturer,category"),
+        "rename the category column (column 4) in database/g-res.csv: Category is the part's category in this app"
+    );
+    // A trailing comma makes a column without a name.
+    assert_eq!(
+        refused("IPN,MPN,Manufacturer,Value,"),
+        "column 5 of database/g-res.csv has no name; give it one or remove it"
+    );
+    assert_eq!(
+        refused("IPN,MPN,Manufacturer,Value,Value"),
+        "database/g-res.csv has two columns named Value (columns 4 and 5); rename one"
+    );
+    let long = "x".repeat(501);
+    assert_eq!(
+        refused(&format!("IPN,MPN,Manufacturer,{long}")),
+        "the name of column 4 of database/g-res.csv is longer than 500 characters"
+    );
+    let many: Vec<String> = (0..201).map(|n| format!("F{n}")).collect();
+    assert_eq!(
+        refused(&format!("IPN,MPN,Manufacturer,{}", many.join(","))),
+        "database/g-res.csv has 201 part details columns; at most 200 can be fields"
+    );
+    // Two supplier columns with one name are no fields, so they stay.
+    let root = fixture(
+        "IPN,MPN,Manufacturer,Value,LCSC,LCSC\nRES-0000-0470,MPN47,Yageo,47,,\n",
+        "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n",
+    );
+    assert!(CsvCatalog::new(root.path()).import("g-res", None).is_ok());
+}

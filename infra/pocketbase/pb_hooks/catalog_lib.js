@@ -984,6 +984,10 @@ function detailsProblem(details) {
   if (cad) {
     return `it lists ${cad.name}, which belongs to the part's revision, not its details`;
   }
+  const named = fields.find((field) => isCategoryName(field.name));
+  if (named) {
+    return `it lists a field named ${named.name}, but Category is the part's category in this app`;
+  }
   const parts = details.manufacturer_parts;
   if (!Array.isArray(parts) || !parts.every((part) => isPair(part, ["manufacturer", "mpn"]))) {
     return "its manufacturer parts must each be a manufacturer and an MPN, both text";
@@ -1008,6 +1012,14 @@ function categoryCode(csvFile) {
 // The label of a category difference, and the name a CSV review accepts to
 // take the CSV's category (crates/catalog CATEGORY_LABEL).
 const CATEGORY_FIELD = "Category";
+
+// Whether a field name is Category in any case, with spaces around it
+// (crates/catalog part_details_columns refuses such a column). It is the
+// part's category in this app, never a field, so a CSV review's Category
+// always means the category.
+function isCategoryName(name) {
+  return typeof name === "string" && trimSpace(name).toLowerCase() === CATEGORY_FIELD.toLowerCase();
+}
 
 // A list of at most `max` distinct, non-empty texts of at most `length`
 // characters, or null.
@@ -1051,6 +1063,9 @@ function categoryDocument(parsed) {
   }
   if (fields.some((name) => CAD_FIELDS.indexOf(name) >= 0)) {
     return "its fields cannot include Symbol or Footprint, which belong to a part's revision";
+  }
+  if (fields.some((name) => isCategoryName(name))) {
+    return "its fields cannot include Category, which is the part's category in this app";
   }
   const rules = parsed.rules;
   if (

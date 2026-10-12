@@ -698,3 +698,41 @@ fn team_server_data_from_before_categories_is_refused_not_changed() {
         .unwrap();
     assert_eq!(kept, details as i64);
 }
+
+#[test]
+fn the_server_refuses_a_field_named_category_too() {
+    // The planner refuses such a CSV column; a request built some other
+    // way is refused by the route as well, and nothing is written.
+    let team = Team::start();
+    let stored = team.read();
+    let mut import = CsvCatalog::new(team.copy.path())
+        .import("g-ind", None)
+        .unwrap();
+    import.category.details.fields.push("category".into());
+    import.category.details_json = import.category.details.canonical_json();
+    import.category.details_sha256 = catalog::sha256_hex(&import.category.details_json);
+    for part in &mut import.parts {
+        part.details.fields.push(catalog::DetailField {
+            name: "category".into(),
+            value: "x".into(),
+        });
+        part.details_json = part.details.canonical_json();
+        part.details_sha256 = catalog::sha256_hex(&part.details_json);
+    }
+    let state = read_import_state(&team.admin).unwrap();
+    let command = ImportCommand::new(&import, "Import").expecting(&state);
+    let refused = team
+        .admin
+        .post_json(catalog::pocketbase::CSV_IMPORT_ROUTE, &command.body());
+    let refused = refused.unwrap();
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert!(
+        refused
+            .body
+            .contains("Category, which is the part's category in this app"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(team.read(), stored);
+    team.server.stop();
+}

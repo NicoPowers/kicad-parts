@@ -109,6 +109,54 @@ pub enum ColumnRoute {
     SupplierData,
 }
 
+/// The most part details columns a CSV file may have, and the longest name
+/// one may have; the team server keeps a category's fields within these.
+pub const MAX_FIELDS: usize = 200;
+pub const MAX_FIELD_NAME: usize = 500;
+
+/// The part details columns of a CSV file, in order: the fields its
+/// category gives a part. Refused, with a plain message naming the file and
+/// column, when one has no name, two have the same name, a name is too long
+/// or there are too many, or one is named Category (in any case), which is
+/// the part's category in this app.
+pub fn part_details_columns(path: &str, headers: &[String]) -> Result<Vec<String>, ImportError> {
+    let mut columns: Vec<(usize, &String)> = Vec::new();
+    for (index, header) in headers.iter().enumerate() {
+        if route_column(header) != ColumnRoute::PartDetails {
+            continue;
+        }
+        let column = index + 1;
+        if header.trim().is_empty() {
+            return Err(ImportError(format!(
+                "column {column} of {path} has no name; give it one or remove it"
+            )));
+        }
+        if header.trim().eq_ignore_ascii_case(crate::CATEGORY_LABEL) {
+            return Err(ImportError(format!(
+                "rename the {header} column (column {column}) in {path}: Category is the part's category in this app"
+            )));
+        }
+        if header.chars().count() > MAX_FIELD_NAME {
+            return Err(ImportError(format!(
+                "the name of column {column} of {path} is longer than {MAX_FIELD_NAME} characters"
+            )));
+        }
+        if let Some((first, _)) = columns.iter().find(|(_, name)| *name == header) {
+            return Err(ImportError(format!(
+                "{path} has two columns named {header} (columns {first} and {column}); rename one"
+            )));
+        }
+        columns.push((column, header));
+    }
+    if columns.len() > MAX_FIELDS {
+        return Err(ImportError(format!(
+            "{path} has {} part details columns; at most {MAX_FIELDS} can be fields",
+            columns.len()
+        )));
+    }
+    Ok(columns.into_iter().map(|(_, name)| name.clone()).collect())
+}
+
 /// The supplier part numbers and prices of the CSV catalog. `LCSC` holds
 /// LCSC supplier codes such as `C21189`.
 pub const SUPPLIER_DATA_COLUMNS: [&str; 7] = [
@@ -814,15 +862,8 @@ impl<'a> Planner<'a> {
         let table = parse_csv(&catalog_path, &bytes)?;
         self.record_csv_rows(&catalog_path, &table);
         let code = category_code(&self.csv_file).to_owned();
-        let category = CategoryDetails::starting(
-            &code,
-            table
-                .headers
-                .iter()
-                .filter(|header| route_column(header) == ColumnRoute::PartDetails)
-                .cloned()
-                .collect(),
-        );
+        let category =
+            CategoryDetails::starting(&code, part_details_columns(&catalog_path, &table.headers)?);
         let category_json = category.canonical_json();
 
         let (substitutes_csv_bytes, substitutes_csv_sha) =
