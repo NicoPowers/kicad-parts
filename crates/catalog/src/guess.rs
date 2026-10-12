@@ -82,7 +82,9 @@ impl ClueKind {
     }
 
     /// The most a remembered match of this kind adds, when every match for
-    /// the clue is for one category.
+    /// the clue is for one category and no existing part has the clue.
+    /// Otherwise it adds this times the category's matches over all matches
+    /// and existing parts with the clue.
     fn weight(self) -> u32 {
         match self {
             Self::SupplierCategory | Self::FootprintFamily => 150,
@@ -175,6 +177,14 @@ pub fn guess_category(
             .iter()
             .filter(|remembered| remembered.clue == kind && normalize(&remembered.value) == value)
             .collect();
+        // Existing parts with the same clue count in the share too, so a
+        // remembered match is evidence on top of the parts, never over them:
+        // one person's move of one resistor does not outweigh 28 others.
+        let parts_with_clue = examples
+            .iter()
+            .filter(|example| example_has(example, kind, &value))
+            .count() as u32;
+        let share_of = (matching.len() as u32 + parts_with_clue).max(1);
         let mut per_category: BTreeMap<&str, u32> = BTreeMap::new();
         for remembered in &matching {
             *per_category
@@ -189,7 +199,7 @@ pub fn guess_category(
                     format!("{count} times")
                 };
                 score.add(
-                    kind.weight() * count / matching.len() as u32,
+                    kind.weight() * count / share_of,
                     format!(
                         "people chose this category {times} for {} {}",
                         kind.words(),
@@ -393,6 +403,23 @@ impl ClueSet {
     }
 }
 
+/// Whether `example` has the clue of `kind` with the normalized `value`.
+/// Existing parts have no supplier category.
+fn example_has(example: &ExamplePart, kind: ClueKind, value: &str) -> bool {
+    match kind {
+        ClueKind::SupplierCategory => false,
+        ClueKind::FootprintFamily => example
+            .footprints
+            .iter()
+            .any(|footprint| normalize(&footprint_family(footprint)) == value),
+        ClueKind::ReferenceLetter => normalize(&reference_letter(&example.reference)) == value,
+        ClueKind::Manufacturer => example
+            .manufacturers
+            .iter()
+            .any(|manufacturer| normalize(manufacturer) == value),
+    }
+}
+
 /// How alike a new part and an existing one are, from 0 to about 100.
 fn similarity(clue: &ClueSet, example: &ExamplePart) -> u32 {
     let mut points = 0;
@@ -581,6 +608,77 @@ mod tests {
         );
         // The same inputs always give the same answer.
         assert_eq!(guess_category(&clues, &categories(), &[], &[]), ranked);
+    }
+
+    /// 29 Yageo resistors on R_0603 with reference R, the first moved to
+    /// `first_in`, and the clues recorded each time a person moved it.
+    fn resistors(first_in: &str) -> Vec<ExamplePart> {
+        (0..29)
+            .map(|n| ExamplePart {
+                ipn: format!("RES-0000-{n:04}"),
+                category: if n == 0 { first_in } else { "res" }.into(),
+                reference: "R".into(),
+                footprints: vec!["g-Resistor_SMD:R_0603_1608Metric".into()],
+                description: format!("RES {n}K OHM 1% 1/10W 0603"),
+                manufacturers: vec!["Yageo".into()],
+                mpns: vec![format!("RC0603FR-07{n}KL")],
+            })
+            .collect()
+    }
+
+    fn confirmed(category: &str) -> Vec<RememberedMatch> {
+        [
+            (ClueKind::FootprintFamily, "R"),
+            (ClueKind::ReferenceLetter, "R"),
+            (ClueKind::Manufacturer, "Yageo"),
+        ]
+        .into_iter()
+        .map(|(clue, value)| RememberedMatch {
+            category: category.into(),
+            clue,
+            value: value.into(),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn one_confirmation_is_evidence_on_top_of_the_parts_not_over_them() {
+        let clues = Clues {
+            reference: "R".into(),
+            footprints: vec!["R_0402_1005Metric".into()],
+            manufacturer: "Yageo".into(),
+            ..Clues::default()
+        };
+        let order = |ranked: Vec<Guess>| -> Vec<String> {
+            ranked
+                .into_iter()
+                .take(3)
+                .map(|guess| guess.category)
+                .collect()
+        };
+        let before = order(guess_category(
+            &clues,
+            &categories(),
+            &[],
+            &resistors("res"),
+        ));
+        assert_eq!(before[0], "res");
+        // One resistor moved to capacitors does not make every resistor a
+        // capacitor: 28 resistors still say otherwise.
+        let moved = guess_category(&clues, &categories(), &confirmed("cap"), &resistors("cap"));
+        assert_eq!(moved[0].category, "res", "{moved:?}");
+        let capacitors = moved.iter().find(|guess| guess.category == "cap").unwrap();
+        assert!(capacitors.score < moved[0].score / 4, "{moved:?}");
+        // Moving it back restores the guess.
+        let mut both = confirmed("cap");
+        both.extend(confirmed("res"));
+        let back = order(guess_category(
+            &clues,
+            &categories(),
+            &both,
+            &resistors("res"),
+        ));
+        assert_eq!(back, before);
     }
 
     #[test]
