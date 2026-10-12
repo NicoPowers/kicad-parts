@@ -501,33 +501,65 @@ pub fn link_model(footprint: &str, path: &str, model_file: &str) -> String {
 /// of each KiCad 5 path written without quotes, which that leaves out (so
 /// the app and the team server agree); linking quotes it.
 fn model_path_spans(footprint: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = footprint.as_bytes();
+    let space = |byte: u8| byte.is_ascii_whitespace();
     let mut spans = Vec::new();
-    let mut from = 0;
-    while let Some(found) = footprint[from..].find("(model") {
-        let after = from + found + "(model".len();
-        let rest = &footprint[after..];
-        let start = after + (rest.len() - rest.trim_start().len());
-        from = after;
-        if !footprint[start..].starts_with('"') {
-            // KiCad 5 writes the path without quotes, up to a space or `)`.
-            let end = footprint[start..]
-                .find(|ch: char| ch.is_whitespace() || ch == '(' || ch == ')')
-                .map_or(footprint.len(), |at| start + at);
-            if end > start {
-                spans.push(start..end);
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            // Quoted text, such as a description, is never a list.
+            b'"' => index = quoted_end(bytes, index),
+            b'(' => {
+                let mut head = index + 1;
+                while head < bytes.len() && space(bytes[head]) {
+                    head += 1;
+                }
+                let after = head + "model".len();
+                let is_model = footprint[head..].starts_with("model")
+                    && bytes
+                        .get(after)
+                        .is_some_and(|&byte| space(byte) || byte == b'"');
+                index += 1;
+                if !is_model {
+                    continue;
+                }
+                let mut start = after;
+                while start < bytes.len() && space(bytes[start]) {
+                    start += 1;
+                }
+                let end = if bytes.get(start) == Some(&b'"') {
+                    quoted_end(bytes, start)
+                } else {
+                    // KiCad 5 writes the path without quotes, up to a space
+                    // or a parenthesis.
+                    footprint[start..]
+                        .find(|ch: char| ch.is_whitespace() || ch == '(' || ch == ')')
+                        .map_or(footprint.len(), |at| start + at)
+                };
+                if end > start {
+                    spans.push(start..end);
+                }
+                index = end.max(index);
             }
-            continue;
-        }
-        let mut escaped = false;
-        for (offset, ch) in footprint[start + 1..].char_indices() {
-            if !escaped && ch == '"' {
-                spans.push(start..start + 1 + offset + 1);
-                break;
-            }
-            escaped = !escaped && ch == '\\';
+            _ => index += 1,
         }
     }
     spans
+}
+
+/// Where the quoted string starting at `start` (its `"`) ends, just past
+/// its closing `"`, with backslash escapes; the end of the text if it is
+/// not closed.
+fn quoted_end(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
 }
 
 /// The next free IPN for `prefix` (three capital letters): the number after
@@ -896,6 +928,27 @@ mod tests {
             [path]
         );
         assert_eq!(linked.matches("(model").count(), 1, "{linked}");
+        // `(model` inside a quoted string, or a head such as `(model_x`, is
+        // not a model.
+        let tricky = format!(
+            "(footprint \"F\"
+	(descr \"see (model 3) note\")
+	(model_x \"no.step\")
+	(model \"C:/x/SOT230.STEP\")
+)"
+        );
+        let linked = link_model(&tricky, path, "other.step");
+        assert!(
+            linked.contains("(descr \"see (model 3) note\")"),
+            "{linked}"
+        );
+        assert!(linked.contains("(model_x \"no.step\")"), "{linked}");
+        assert!(linked.contains(&format!("(model \"{path}\")")), "{linked}");
+        // Only quoted text mentioning a model: one is added.
+        let only_text = "(footprint \"F\" (descr \"(model x)\"))";
+        let linked = link_model(only_text, path, "x.step");
+        assert!(linked.contains("(descr \"(model x)\")"), "{linked}");
+        assert!(linked.contains(&format!("(model \"{path}\"")), "{linked}");
     }
 
     #[test]
