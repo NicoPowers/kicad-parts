@@ -352,9 +352,11 @@ impl TeamCatalog {
     /// from. Each is checked only against its own starting number.
     pub fn edit(&self, request: TeamEditRequest) -> Result<PublishResult, String> {
         let client = self.client()?;
-        let part = part_by_ipn(&client, &request.ipn)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("{} is no longer in the team catalog", request.ipn))?;
+        let part = match part_by_ipn(&client, &request.ipn) {
+            Ok(Some(part)) => part,
+            Ok(None) => return Err(format!("{} is no longer in the team catalog", request.ipn)),
+            Err(error) => return save_failed(error),
+        };
         let started = load(&client, &part)?;
         let base_details = started
             .details
@@ -364,6 +366,7 @@ impl TeamCatalog {
             .revisions
             .get(&request.expected_revision)
             .ok_or_else(|| format!("revision {} is missing", request.expected_revision))?;
+        let request = tidied(request, base_details, base_revision);
         let fields = detail_fields(&request.fields);
         let parts = catalog_parts(&request.manufacturer_parts);
         let cad_fields = detail_fields(&request.cad_fields);
@@ -441,7 +444,7 @@ impl TeamCatalog {
             Err(CollabError::Unauthorized(_)) => Ok(PublishResult::Refused {
                 message: "Your sign-in has ended. Sign in again, then save.".into(),
             }),
-            Err(error) => Err(error.to_string()),
+            Err(error) => save_failed(error),
         }
     }
 
@@ -501,7 +504,7 @@ impl TeamCatalog {
             Err(CollabError::Unauthorized(_)) => Ok(PublishResult::Refused {
                 message: "Your sign-in has ended. Sign in again, then save.".into(),
             }),
-            Err(error) => Err(error.to_string()),
+            Err(error) => save_failed(error),
         }
     }
 
@@ -552,7 +555,7 @@ impl TeamCatalog {
             Err(CollabError::Unauthorized(_)) => Ok(PublishResult::Refused {
                 message: "Your sign-in has ended. Sign in again, then save.".into(),
             }),
-            Err(error) => Err(error.to_string()),
+            Err(error) => save_failed(error),
         }
     }
 
@@ -808,6 +811,67 @@ fn plain_reason(error: &CollabError) -> String {
         }
         other => format!("the team server answered: {other}"),
     }
+}
+
+/// What to say when a save could not reach the team server. It does not
+/// claim that nothing was saved: the answer to a request that arrived may
+/// be what was lost. Saving again sends the same correlation ID, so the
+/// server replays its answer instead of saving twice.
+const SAVE_UNREACHABLE: &str =
+    "Could not reach the team server. Check that it is running, then save again.";
+
+/// A save that failed before the server answered it.
+fn save_failed(error: CollabError) -> Result<PublishResult, String> {
+    match error {
+        CollabError::Transport(_) => Ok(PublishResult::Refused {
+            message: SAVE_UNREACHABLE.into(),
+        }),
+        other => Err(other.to_string()),
+    }
+}
+
+/// The edit as the person meant it. Spaces typed or pasted around a value
+/// they changed are left out, so adding only spaces changes nothing and
+/// an MPN pasted with a space after it is still the same MPN. A value they
+/// did not change stays exactly as it is, spaces and all. A manufacturer
+/// row left blank is left out.
+fn tidied(
+    mut request: TeamEditRequest,
+    details: &PartDetails,
+    revision: &PartRevision,
+) -> TeamEditRequest {
+    let tidy = |fields: &mut Vec<Field>, before: &[DetailField]| {
+        for field in fields {
+            let unchanged = before
+                .iter()
+                .any(|old| old.name == field.name && old.value == field.value);
+            if !unchanged {
+                field.value = field.value.trim().to_owned();
+            }
+        }
+    };
+    tidy(&mut request.fields, &details.fields);
+    tidy(&mut request.cad_fields, &revision.cad_fields);
+    request.manufacturer_parts = request
+        .manufacturer_parts
+        .into_iter()
+        .filter_map(|part| {
+            let unchanged = details
+                .manufacturer_parts
+                .iter()
+                .any(|old| old.manufacturer == part.manufacturer && old.mpn == part.mpn);
+            if unchanged {
+                return Some(part);
+            }
+            let manufacturer = part.manufacturer.trim();
+            let mpn = part.mpn.trim();
+            (!manufacturer.is_empty() || !mpn.is_empty()).then(|| ManufacturerPart {
+                manufacturer: manufacturer.to_owned(),
+                mpn: mpn.to_owned(),
+            })
+        })
+        .collect();
+    request
 }
 
 /// The correlation ID the UI made for this save attempt, so that retrying
