@@ -1,8 +1,9 @@
 // Team catalog edge cases a team hits in daily use: unusual and very long
 // values (units, right-to-left text, emoji, an unbroken token) shown exactly
 // and kept inside the window at its narrowest width; a save that only adds
-// spaces; archiving a revision again after someone else unarchived it; and
-// a save while the team server is stopped.
+// spaces; archiving a revision again after someone else unarchived it; a
+// change someone else already saved; and a save while the team server is
+// stopped.
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -265,6 +266,24 @@ describe('team catalog: edge cases', () => {
     // The message is true: the server archived it again.
     await waitForHistory(6);
     await waitForRevision(1);
+  });
+
+  it('shows no conflict when someone else saved exactly the same change', async () => {
+    await clickButton(COLUMN, 'Details');
+    const count = await historyCount();
+    await clickButton(COLUMN, 'Edit part');
+    await waitForText(browser, '#edit-heading', 'Edit part');
+    await (await fieldInput('Tolerance')).setValue('0.25%');
+    await (await browser.$('#edit-reason')).setValue('Tighter tolerance');
+    // Meanwhile someone else makes the same fix.
+    await editAsSomeoneElse(server.url, otherToken, IPN, { Tolerance: '0.25%' }, 'Tighter tolerance');
+    await waitForHistory(count + 1);
+    await clickButton('.edit-form', 'Save');
+    await waitForText(browser, NOTICE, 'Someone else already saved the same changes, so nothing more was saved.');
+    assert.equal((await browser.$$('.conflict')).length, 0, 'no conflict is shown');
+    assert.equal((await browser.$$('.edit-form')).length, 0, 'the edit form closed');
+    assert.equal(await fieldValue('Tolerance'), '0.25%');
+    assert.equal(await historyCount(), count + 1, 'nothing more was saved');
   });
 
   it('says plainly when the team server has stopped', async () => {

@@ -440,6 +440,27 @@ fn published(ui: TeamUi, part: RwSignal<Option<TeamPart>>, result: Result<Publis
             // Several review requests are summed up by save_csv_review.
             part.set(Some(saved));
         }
+        Ok(PublishResult::AlreadySaved {
+            message,
+            part: saved,
+        }) => {
+            part.set(Some(saved));
+            ui.editing.set(None);
+            ui.conflict.set(None);
+            ui.selected.set(None);
+            ui.notice.set(Some(Notice::Done(message)));
+            scroll_column_to_top();
+        }
+        // Saving on top of their changes added nothing: theirs already
+        // hold yours, so the conflict closes instead of staying open.
+        Ok(PublishResult::NothingToSave { .. }) if ui.conflict.with_untracked(Option::is_some) => {
+            ui.editing.set(None);
+            ui.conflict.set(None);
+            ui.notice.set(Some(Notice::Done(
+                "Someone else already saved the same changes, so nothing more was saved.".into(),
+            )));
+            scroll_column_to_top();
+        }
         Ok(PublishResult::NothingToSave { message }) => ui.notice.set(Some(Notice::Done(message))),
         Ok(PublishResult::Conflict(conflict)) => {
             part.set(Some(conflict.part.clone()));

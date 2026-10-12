@@ -278,7 +278,6 @@ fn a_part_keeps_one_symbol_and_each_footprint_choice_once() {
 }
 
 #[test]
-#[ignore = "written up: a conflict where someone else saved exactly your changes still shows a conflict"]
 fn someone_else_saving_exactly_your_changes_is_not_a_conflict() {
     let desktop = start();
     let team = &desktop.team;
@@ -292,15 +291,77 @@ fn someone_else_saving_exactly_your_changes_is_not_a_conflict() {
         team.edit(theirs).unwrap(),
         PublishResult::Saved { .. }
     ));
-    // Today: a conflict whose only row shows theirs and yours the same,
-    // and saving on top then says "Nothing changed" while the conflict
-    // stays open.
+    let PublishResult::AlreadySaved { message, part } = team.edit(yours).unwrap() else {
+        panic!("not taken as already saved");
+    };
     assert_eq!(
-        team.edit(yours).unwrap(),
-        PublishResult::NothingToSave {
-            message: "Someone else already saved the same changes, so nothing more was saved."
-                .into()
-        }
+        message,
+        "Someone else already saved the same changes, so nothing more was saved."
     );
+    assert_eq!(part.details.number, 2);
+    assert_eq!(part.details.field("Value"), Some("47R"));
+    assert_eq!(part.history.len(), 2, "nothing more was saved");
+    desktop.server.stop();
+}
+
+#[test]
+fn a_conflict_lists_only_what_truly_differs() {
+    let desktop = start();
+    let team = &desktop.team;
+    let part = team.part(IPN).unwrap().unwrap();
+    // They change the value; you make the same change and also tighten the
+    // tolerance.
+    let mut theirs = opened(&part, "Exact value");
+    set(&mut theirs, "Value", "47R");
+    assert!(matches!(
+        team.edit(theirs).unwrap(),
+        PublishResult::Saved { .. }
+    ));
+    let mut yours = opened(&part, "Exact value and tolerance");
+    set(&mut yours, "Value", "47R");
+    set(&mut yours, "Tolerance", "0.5%");
+    let PublishResult::Conflict(conflict) = team.edit(yours).unwrap() else {
+        panic!("no conflict");
+    };
+    // The value you both set the same way is not a difference.
+    let rows: Vec<(&str, &str, &str)> = conflict
+        .rows
+        .iter()
+        .map(|row| (row.label.as_str(), row.theirs.as_str(), row.yours.as_str()))
+        .collect();
+    assert_eq!(rows, [("Tolerance", "1%", "0.5%")]);
+    // Saving on top adds only the tolerance.
+    let PublishResult::Saved { part, .. } = team.edit(conflict.merged.clone()).unwrap() else {
+        panic!("not saved on top");
+    };
+    assert_eq!(
+        (part.details.field("Value"), part.details.field("Tolerance")),
+        (Some("47R"), Some("0.5%"))
+    );
+    // If, before you save on top, they also save your tolerance, saving on
+    // top is not a second conflict either.
+    let part = team.part(IPN).unwrap().unwrap();
+    let mut theirs = opened(&part, "Thick film");
+    set(&mut theirs, "Description", "Thick film 47R");
+    assert!(matches!(
+        team.edit(theirs).unwrap(),
+        PublishResult::Saved { .. }
+    ));
+    let mut late = opened(&part, "Thick film too");
+    set(&mut late, "Description", "Thick film 47R");
+    set(&mut late, "Tolerance", "0.1%");
+    let PublishResult::Conflict(conflict) = team.edit(late).unwrap() else {
+        panic!("no conflict");
+    };
+    let mut same = opened(&team.part(IPN).unwrap().unwrap(), "Tighter");
+    set(&mut same, "Tolerance", "0.1%");
+    assert!(matches!(
+        team.edit(same).unwrap(),
+        PublishResult::Saved { .. }
+    ));
+    assert!(matches!(
+        team.edit(conflict.merged.clone()).unwrap(),
+        PublishResult::AlreadySaved { .. }
+    ));
     desktop.server.stop();
 }

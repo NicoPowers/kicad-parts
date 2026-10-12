@@ -391,8 +391,21 @@ impl TeamCatalog {
             });
         }
         let reply = submit_edit(&client, &command);
-        self.published(&client, &request.ipn, reply, |details, revision, part| {
+        let result = self.published(&client, &request.ipn, reply, |details, revision, part| {
             edit_conflict(&request, details, revision, part)
+        })?;
+        // Someone else already saved every change you made: nothing of
+        // yours is left to compare or to save on top.
+        Ok(match result {
+            PublishResult::Conflict(conflict)
+                if !conflict.rows.iter().any(|row| row.you_changed) =>
+            {
+                PublishResult::AlreadySaved {
+                    message: ALREADY_SAVED.into(),
+                    part: conflict.part,
+                }
+            }
+            other => other,
         })
     }
 
@@ -812,6 +825,10 @@ fn plain_reason(error: &CollabError) -> String {
         other => format!("the team server answered: {other}"),
     }
 }
+
+/// What to say when someone else already saved the same changes.
+const ALREADY_SAVED: &str =
+    "Someone else already saved the same changes, so nothing more was saved.";
 
 /// What to say when a save could not reach the team server. It does not
 /// claim that nothing was saved: the answer to a request that arrived may
@@ -1802,7 +1819,13 @@ fn field_rows(
             .find(|yours| yours.name == field.name)
             .map_or_else(|| started.clone(), |yours| yours.value.clone());
         let you_changed = mine != started;
-        if you_changed || field.value != started {
+        // A field you set just as they did is not a difference.
+        let differs = if you_changed {
+            mine != field.value
+        } else {
+            field.value != started
+        };
+        if differs {
             rows.push(ConflictRow {
                 label: field.name.clone(),
                 started_from: started.clone(),
@@ -1873,7 +1896,12 @@ fn edit_conflict(
             .map(|part| (part.manufacturer.as_str(), part.mpn.as_str())),
     );
     let you_changed_parts = your_parts != started_parts;
-    if you_changed_parts || their_parts != started_parts {
+    let parts_differ = if you_changed_parts {
+        your_parts != their_parts
+    } else {
+        their_parts != started_parts
+    };
+    if parts_differ {
         rows.push(ConflictRow {
             label: "Manufacturer parts".into(),
             started_from: started_parts.clone(),
