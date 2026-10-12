@@ -1403,3 +1403,110 @@ fn server_code_cannot_move_a_part_backwards_or_skip_a_revision() {
     );
     server.stop();
 }
+
+#[test]
+fn unusual_text_is_saved_exactly_and_limits_are_plain() {
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    let initial = team.read();
+    // Units, right-to-left text, emoji, a combining accent, characters
+    // JSON and HTML treat specially, a tab, a line break and the Unicode
+    // line separator: each value must come back exactly as typed.
+    let values = [
+        ("Value", "4.7 µΩ ±1%"),
+        (
+            "Description",
+            "נגד 47 אוהם, \u{1F50C} e\u{301}tage <b>&amp;</b> \"quoted\" back\u{5c}slash",
+        ),
+        ("Tolerance", "\t1%\nline two\u{2028}after the separator"),
+    ];
+    let mut command = edit(&initial, IPN, "Value", values[0].1);
+    for (name, value) in &values[1..] {
+        assert!(command.set_field(name, value));
+    }
+    details_edit(&mut command)
+        .manufacturer_parts
+        .push(ManufacturerPart {
+            manufacturer: "Ünïcödé Électronique".into(),
+            mpn: "Ω-47\u{1F600}".into(),
+        });
+    command.reason = "Unicode: µ Ω ± \u{1F50C} עברית".into();
+    let saved = applied(&submit_edit(&editor, &command).unwrap());
+    let after = team.read();
+    let now = current(&after, IPN);
+    assert_eq!(saved.details, Some(now.details_number));
+    for (name, value) in values {
+        assert_eq!(now.details.field(name), Some(value), "{name}");
+    }
+    assert_eq!(
+        now.details.manufacturer_parts.last().unwrap().mpn,
+        "Ω-47\u{1F600}"
+    );
+    // The stored bytes still match their hash, so every client can check
+    // them, and the Change keeps the reason exactly.
+    let part = after.part(IPN).unwrap();
+    let stored = after.part_details(&part.current_details).unwrap();
+    assert_eq!(
+        sha256_hex(stored.snapshot.as_bytes()),
+        stored.snapshot_sha256
+    );
+    let change = after
+        .changes
+        .iter()
+        .find(|change| change.id == saved.change_id)
+        .unwrap();
+    assert_eq!(change.reason, "Unicode: µ Ω ± \u{1F50C} עברית");
+
+    // A value of 10,000 characters is saved; one more is refused with a
+    // message that says the limit, and nothing is written. The same for a
+    // reason of 2,000 characters.
+    let long = "x".repeat(10_000);
+    applied(&submit_edit(&editor, &edit(&after, IPN, "Description", &long)).unwrap());
+    let with_long = team.read();
+    assert_eq!(
+        current(&with_long, IPN).details.field("Description"),
+        Some(long.as_str())
+    );
+    let too_long = format!("{long}x");
+    let refused = |result: Result<PublishReply, CollabError>, says: &str| match result {
+        Err(CollabError::Http {
+            status: 400,
+            message,
+        }) => assert!(
+            message.to_lowercase().contains(&says.to_lowercase()),
+            "{message}"
+        ),
+        other => panic!("expected 400 saying {says}, got {other:?}"),
+    };
+    refused(
+        submit_edit(&editor, &edit(&with_long, IPN, "Description", &too_long)),
+        "at most 10000 characters",
+    );
+    let mut long_reason = edit(&with_long, IPN, "Value", "47");
+    long_reason.reason = "r".repeat(2_001);
+    refused(
+        submit_edit(&editor, &long_reason),
+        "longer than 2000 characters",
+    );
+    long_reason.reason = "r".repeat(2_000);
+    applied(&submit_edit(&editor, &long_reason).unwrap());
+    // Blank and repeated manufacturer parts are refused in plain words.
+    let readback = team.read();
+    let mut blank = edit(&readback, IPN, "Value", "47R");
+    details_edit(&mut blank)
+        .manufacturer_parts
+        .push(ManufacturerPart {
+            manufacturer: " ".into(),
+            mpn: "X".into(),
+        });
+    refused(
+        submit_edit(&editor, &blank),
+        "every manufacturer part needs a manufacturer and an MPN",
+    );
+    let mut repeated = edit(&readback, IPN, "Value", "47R");
+    let first = details_edit(&mut repeated).manufacturer_parts[0].clone();
+    details_edit(&mut repeated).manufacturer_parts.push(first);
+    refused(submit_edit(&editor, &repeated), "is listed twice");
+    assert_eq!(team.read(), readback);
+    team.server.stop();
+}

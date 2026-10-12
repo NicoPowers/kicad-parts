@@ -640,3 +640,64 @@ fn a_details_edit_with_unchanged_cad_is_never_taken_for_archived_cad() {
     assert_eq!(after.part(IPN).unwrap().current_details_number, 2);
     team.server.stop();
 }
+
+#[test]
+fn editors_archiving_both_revisions_at_once_always_leave_one_in_use() {
+    // Two editors look at a part with revisions 1 and 2, both in use. Each
+    // archives a different one at the same moment. Alone, each request
+    // leaves one revision in use; together they must not archive both.
+    let team = Team::start();
+    let editors: Vec<PocketBaseClient> = (0..8)
+        .map(|n| team.member(&format!("Editor {n}"), true))
+        .collect();
+    change_symbol(&editors[0], &team.read(), IPN, "Device:R");
+    let before = team.read();
+    assert_eq!(revision_state(&before, IPN), (2, vec![]));
+    let barrier = std::sync::Barrier::new(editors.len());
+    let replies: Vec<Result<ArchiveReply, CollabError>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = editors
+            .iter()
+            .enumerate()
+            .map(|(n, client)| {
+                // Half archive revision 1, half revision 2.
+                let revision = 1 + (n as u32 % 2);
+                let command = ArchiveCommand::new(IPN, revision, true, &format!("Editor {n}"));
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    submit_archive(client, &command)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+    let mut applied_count = 0;
+    let mut noops = 0;
+    let mut refusals = 0;
+    for reply in &replies {
+        match reply {
+            Ok(reply) if matches!(reply.outcome, ArchiveOutcome::Applied { .. }) => {
+                applied_count += 1
+            }
+            Ok(reply) if matches!(reply.outcome, ArchiveOutcome::Noop { .. }) => noops += 1,
+            Err(CollabError::Http {
+                status: 400,
+                message,
+            }) if message.contains("only revision that is not archived") => refusals += 1,
+            other => panic!("unexpected answer: {other:?}"),
+        }
+    }
+    // The first archives its revision; the others asking for the same one
+    // find it already archived, and the others asking for the other one
+    // are refused, because it is now the only one in use.
+    assert_eq!((applied_count, noops, refusals), (1, 3, 4));
+    let after = team.read();
+    let (current, archived) = revision_state(&after, IPN);
+    assert_eq!(archived.len(), 1, "exactly one revision is archived");
+    assert_ne!(archived[0], current, "the current revision is in use");
+    assert_eq!(after.changes.len(), before.changes.len() + 1);
+    team.server.stop();
+}
