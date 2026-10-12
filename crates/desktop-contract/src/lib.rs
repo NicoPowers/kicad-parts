@@ -629,7 +629,7 @@ mod tests {
         let outcome = PreviewOutcome::Problem(PreviewProblem {
             kind: PreviewKind::Symbol,
             reason: PreviewProblemReason::ExportFailed,
-            reference: Some("g-pas:X".into()),
+            reference: Some("g-res:X".into()),
             message: "failed".into(),
             command: None,
             cli_message: Some("There is no symbol selected to save.".into()),

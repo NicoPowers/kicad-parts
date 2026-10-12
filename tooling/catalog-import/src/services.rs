@@ -526,10 +526,10 @@ mod tests {
     const RESISTOR_INPUTS: [&str; 4] = [
         "database/g-res.csv",
         "database/substitutes.csv",
-        "symbols/g-pas.kicad_sym",
+        "symbols/g-res.kicad_sym",
         FOOTPRINT,
     ];
-    const FOOTPRINT: &str = "footprints/g-res.pretty/R_0603_1608Metric.kicad_mod";
+    const FOOTPRINT: &str = "footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod";
 
     /// A throwaway git repository holding a committed copy of the resistor
     /// inputs, so tests can change files without touching this repository.
@@ -565,7 +565,7 @@ mod tests {
     fn uncommitted_changes_are_refused_before_anything_is_sent() {
         let (repository, _hooks) = committed_resistors();
         let root = repository.path();
-        let symbols = root.join("symbols/g-pas.kicad_sym");
+        let symbols = root.join("symbols/g-res.kicad_sym");
         let text = std::fs::read_to_string(&symbols).unwrap();
         std::fs::write(&symbols, format!("{text}\n")).unwrap();
         let substitutes = root.join("database/substitutes.csv");
@@ -583,7 +583,7 @@ mod tests {
             prepare_import(&nobody_listening(), root, &import, "r", Allow::default()).unwrap_err();
         assert!(
             refused.starts_with(
-                "database/substitutes.csv, symbols/g-pas.kicad_sym are changed, new or deleted, and not committed. Commit them first"
+                "database/substitutes.csv, symbols/g-res.kicad_sym are changed, new or deleted, and not committed. Commit them first"
             ) && refused.contains(
                 "(--allow-uncommitted-changes). Until you commit these changes and import again, a later import"
             ),
@@ -632,7 +632,7 @@ mod tests {
         );
         // Renamed only in its letter case: Windows would still open it under
         // the old name, but the import does not find it.
-        let renamed = root.join("footprints/g-res.pretty/r_0603_1608metric.kicad_mod");
+        let renamed = root.join("footprints/g-Resistor_SMD.pretty/r_0603_1608metric.kicad_mod");
         std::fs::write(&renamed, &bytes).unwrap();
         let import = plan(root, "g-res").unwrap();
         assert_eq!(import.missing_inputs, [FOOTPRINT]);

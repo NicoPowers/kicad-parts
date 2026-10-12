@@ -411,7 +411,7 @@ fn an_editor_publishes_details_and_cad_edits_separately() {
     bad(&|command| {
         details_edit(command).fields.push(DetailField {
             name: "Symbol".into(),
-            value: "g-pas:R_US".into(),
+            value: "g-res:R_US".into(),
         })
     });
     bad(&|command| {
@@ -441,7 +441,7 @@ fn an_editor_publishes_details_and_cad_edits_separately() {
     bad(&|command| command.reason = "  ".into());
     // A symbol the Catalog does not have cannot be used.
     bad(&|command| {
-        command.set_field("Symbol", "g-pas:NOT_A_SYMBOL");
+        command.set_field("Symbol", "g-res:NOT_A_SYMBOL");
     });
     assert_eq!(team.read(), moved);
 

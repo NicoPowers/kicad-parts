@@ -331,7 +331,7 @@ const ENTRY: &str = "(symbol \"R_US\"\n\t\t(property \"Reference\" \"R\")\n\t)";
 fn stored(name: &str, bytes: &[u8]) -> StoredItem {
     StoredItem {
         lib_ref: LibRef {
-            library: "g-pas".into(),
+            library: "g-res".into(),
             item: name.into(),
         },
         blob_sha256: sha256_hex(bytes),

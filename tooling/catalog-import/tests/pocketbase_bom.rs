@@ -26,7 +26,7 @@ const OTHER: &str = "RES-0000-1500";
 /// The test point, whose symbol g-art:TestPoint says (in_bom no).
 const TEST_POINT: &str = "ART-0000-0001";
 /// A footprint whose (attr ...) has exclude_from_bom.
-const NO_BOM_FOOTPRINT: &str = "g-no_bom:TestPoint_Pad_D1.0mm";
+const NO_BOM_FOOTPRINT: &str = "g-TestPoint:TestPoint_Pad_D1.0mm";
 
 struct Team {
     server: PocketBaseServer,
@@ -200,7 +200,7 @@ fn an_edit_recalculates_excluded_from_bom_from_the_new_cad() {
     );
 
     // Switching back clears it; revision 2 keeps it.
-    let (number, revision) = edit_cad(&team, EDITED, "Symbol", "g-pas:R_US");
+    let (number, revision) = edit_cad(&team, EDITED, "Symbol", "g-res:R_US");
     assert_eq!(number, 3);
     assert!(!revision.excluded_from_bom);
     let stored = team.read();
@@ -217,8 +217,8 @@ fn an_edit_recalculates_excluded_from_bom_from_the_new_cad() {
     // problem and leaves the setting unset...
     team.change_row(
         IMPORTED,
-        "\"g-res:R_0603_1608Metric\"",
-        &format!("\"g-res:R_0603_1608Metric;{NO_BOM_FOOTPRINT}\""),
+        "\"g-Resistor_SMD:R_0603_1608Metric\"",
+        &format!("\"g-Resistor_SMD:R_0603_1608Metric;{NO_BOM_FOOTPRINT}\""),
     );
     assert_eq!(team.import("g-res"), "applied");
     let stored = team.read();
@@ -235,7 +235,7 @@ fn an_edit_recalculates_excluded_from_bom_from_the_new_cad() {
         &team,
         EDITED,
         "Footprint",
-        &format!("g-res:R_0603_1608Metric;{NO_BOM_FOOTPRINT}"),
+        &format!("g-Resistor_SMD:R_0603_1608Metric;{NO_BOM_FOOTPRINT}"),
     );
     assert!(!revision.excluded_from_bom);
 
@@ -291,8 +291,8 @@ fn imports_and_csv_reviews_recalculate_it_the_same_way() {
     let (number, _) = edit_cad(&team, EDITED, "Symbol", "Device:R");
     assert_eq!(number, 2);
     // The CSV gives both resistors the test point symbol.
-    team.change_row(EDITED, "\"g-pas:R_US\"", "\"g-art:TestPoint\"");
-    team.change_row(IMPORTED, "\"g-pas:R_US\"", "\"g-art:TestPoint\"");
+    team.change_row(EDITED, "\"g-res:R_US\"", "\"g-art:TestPoint\"");
+    team.change_row(IMPORTED, "\"g-res:R_US\"", "\"g-art:TestPoint\"");
     assert_eq!(team.import("g-res"), "applied");
     let stored = team.read();
     // The import applies it to the resistor nobody edited, and sets it.
@@ -505,7 +505,7 @@ fn the_server_reads_bom_flags_exactly_as_the_importer_does() {
 #[test]
 fn non_utf8_and_unusual_whitespace_import_and_edit_as_the_importer_reads_them() {
     let team = Team::empty(None);
-    let pretty = team.copy.path().join("footprints/g-res.pretty");
+    let pretty = team.copy.path().join("footprints/g-Resistor_SMD.pretty");
     // Flagged, with a Latin-1 byte in its description.
     fs::write(
         pretty.join("NonUtf8.kicad_mod"),
@@ -518,8 +518,16 @@ fn non_utf8_and_unusual_whitespace_import_and_edit_as_the_importer_reads_them() 
         "(footprint \"Nbsp\"\n\t(version 20241229)\n\t(attr smd\u{a0}exclude_from_bom)\n)\n",
     )
     .unwrap();
-    team.change_row(IMPORTED, "\"g-res:R_0603_1608Metric\"", "\"g-res:NonUtf8\"");
-    team.change_row(OTHER, "\"g-res:R_0603_1608Metric\"", "\"g-res:Nbsp\"");
+    team.change_row(
+        IMPORTED,
+        "\"g-Resistor_SMD:R_0603_1608Metric\"",
+        "\"g-Resistor_SMD:NonUtf8\"",
+    );
+    team.change_row(
+        OTHER,
+        "\"g-Resistor_SMD:R_0603_1608Metric\"",
+        "\"g-Resistor_SMD:Nbsp\"",
+    );
     // The CSV catalog fixture's oracle reads only UTF-8 CAD, so the
     // zero-loss report is left out here.
     assert_eq!(team.import_only("g-art"), "applied");
@@ -528,9 +536,9 @@ fn non_utf8_and_unusual_whitespace_import_and_edit_as_the_importer_reads_them() 
     assert!(current(&stored, IMPORTED).1.excluded_from_bom);
     assert!(!current(&stored, OTHER).1.excluded_from_bom);
     // An edit reads the same stored bytes the same way.
-    let (_, revision) = edit_cad(&team, EDITED, "Footprint", "g-res:NonUtf8");
+    let (_, revision) = edit_cad(&team, EDITED, "Footprint", "g-Resistor_SMD:NonUtf8");
     assert!(revision.excluded_from_bom);
-    let (_, revision) = edit_cad(&team, EDITED, "Footprint", "g-res:Nbsp");
+    let (_, revision) = edit_cad(&team, EDITED, "Footprint", "g-Resistor_SMD:Nbsp");
     assert!(!revision.excluded_from_bom);
     team.server.stop();
 }

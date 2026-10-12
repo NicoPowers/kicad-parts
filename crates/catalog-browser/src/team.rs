@@ -2004,7 +2004,7 @@ mod tests {
             license: "unknown-needs-review".into(),
             source: String::new(),
         };
-        let symbol = details(CadItemKind::Symbol, "kicad-symbol-entry", "g-pas:R_US");
+        let symbol = details(CadItemKind::Symbol, "kicad-symbol-entry", "g-res:R_US");
         let good = record(&symbol);
         let symbol_sha256 = symbol.sha256();
         let check = |revision: &StoredCadItemRevision, cad_item: &str, kind: PreviewKind| {
@@ -2013,7 +2013,7 @@ mod tests {
                 number: 1,
                 snapshot_sha256: &symbol_sha256,
             };
-            checked_snapshot(revision, &named, "g-pas:R_US", kind)
+            checked_snapshot(revision, &named, "g-res:R_US", kind)
         };
         assert_eq!(
             check(&good, "item1", PreviewKind::Symbol),
@@ -2047,7 +2047,7 @@ mod tests {
                 .starts_with("its record is a symbol")
         );
         // A footprint record whose hash the part's details name for a symbol.
-        let footprint = details(CadItemKind::Footprint, "kicad-footprint", "g-pas:R_US");
+        let footprint = details(CadItemKind::Footprint, "kicad-footprint", "g-res:R_US");
         let wrong_kind = record(&footprint);
         assert!(
             checked_snapshot(
@@ -2057,7 +2057,7 @@ mod tests {
                     number: 1,
                     snapshot_sha256: &footprint.sha256(),
                 },
-                "g-pas:R_US",
+                "g-res:R_US",
                 PreviewKind::Symbol
             )
             .is_err()

@@ -435,7 +435,7 @@ fn taking_a_csv_symbol_adds_a_revision_unless_it_is_archived() {
     edit(&editor, &team.read(), IPN, &[("Symbol", "Device:R_Small")]);
     // The CSV now names revision 2's symbol; the import keeps the edited
     // revision 3 and records what differs.
-    team.change_row(IPN, "\"g-pas:R_US\"", "\"Device:R\"");
+    team.change_row(IPN, "\"g-res:R_US\"", "\"Device:R\"");
     assert_eq!(team.import(), "nothing_changed");
     let stored = team.read();
     let problem = found_problem(&stored, IPN, CSV_CAD_DIFFERS).unwrap();

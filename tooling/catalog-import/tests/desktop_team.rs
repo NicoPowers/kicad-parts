@@ -177,11 +177,11 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         .iter_mut()
         .find(|field| field.name == "Symbol")
         .unwrap()
-        .value = "g-pas:NOPE".into();
+        .value = "g-res:NOPE".into();
     let PublishResult::Refused { message } = team.edit(unknown).unwrap() else {
         panic!("not refused");
     };
-    assert!(message.contains("g-pas:NOPE"), "{message}");
+    assert!(message.contains("g-res:NOPE"), "{message}");
 
     // Someone else saves details 3 while this edit still starts from 2.
     let other_client = PocketBaseClient::new(&url)
@@ -482,8 +482,8 @@ fn the_desktop_shows_csv_changes_live_and_takes_them_field_by_field() {
     for path in [
         "database/g-res.csv",
         "database/substitutes.csv",
-        "symbols/g-pas.kicad_sym",
-        "footprints/g-res.pretty/R_0603_1608Metric.kicad_mod",
+        "symbols/g-res.kicad_sym",
+        "footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
     ] {
         let destination = copy.path().join(path);
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
@@ -644,8 +644,8 @@ fn the_desktop_shows_csv_changes_live_and_takes_them_field_by_field() {
     std::fs::write(
         &csv,
         text.replacen(
-            "\"47R\",\"g-pas:R_US\",\"g-res:R_0603_1608Metric\",\"1%\"",
-            "\"47R\",\"g-pas:R_US\",\"g-res:R_0603_1608Metric\",\"0.5%\"",
+            "\"47R\",\"g-res:R_US\",\"g-Resistor_SMD:R_0603_1608Metric\",\"1%\"",
+            "\"47R\",\"g-res:R_US\",\"g-Resistor_SMD:R_0603_1608Metric\",\"0.5%\"",
             1,
         ),
     )

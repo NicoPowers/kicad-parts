@@ -113,7 +113,7 @@ fn exports_project_and_bundled_footprints() {
     let cache = PreviewCache::new(cache_dir.path().to_path_buf());
     let resolver = resolver(&kicad);
     for (reference, origin) in [
-        ("g-res:R_0603_1608Metric", LibraryOrigin::Project),
+        ("g-Resistor_SMD:R_0603_1608Metric", LibraryOrigin::Project),
         (
             "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
             LibraryOrigin::KicadBundled,
@@ -149,7 +149,7 @@ fn a_failed_export_carries_the_kicad_cli_message_and_is_not_cached() {
     let kicad = installed_kicad();
     let cache_dir = tempfile::tempdir().unwrap();
     let cache = PreviewCache::new(cache_dir.path().to_path_buf());
-    let symbol = resolver(&kicad).symbol("g-pas:NO_SUCH_SYMBOL").unwrap();
+    let symbol = resolver(&kicad).symbol("g-res:NO_SUCH_SYMBOL").unwrap();
     for attempt in 1..=2 {
         match cache.symbol(&kicad, &symbol) {
             Err(PreviewError::ExportFailed {
@@ -176,7 +176,7 @@ fn editing_a_library_changes_the_cache_key() {
     fs::create_dir_all(&pretty).unwrap();
     let source = repo_root()
         .join("footprints")
-        .join("g-res.pretty")
+        .join("g-Resistor_SMD.pretty")
         .join("R_0603_1608Metric.kicad_mod");
     let target = pretty.join("R_0603_1608Metric.kicad_mod");
     fs::copy(&source, &target).unwrap();
@@ -344,14 +344,14 @@ fn stored_bytes_are_drawn_even_after_the_local_library_changes() {
     let kicad = installed_kicad();
     // What the team catalog stored: the R_US entry exactly as the
     // repository's library has it.
-    let original = fs::read(repo_root().join("symbols").join("g-pas.kicad_sym")).unwrap();
+    let original = fs::read(repo_root().join("symbols").join("g-res.kicad_sym")).unwrap();
     let library = SymbolLibrary::parse(&original).unwrap();
     let kicad_integration::library_file::SymbolLookup::Found(entry) = library.find("R_US") else {
-        panic!("g-pas has R_US");
+        panic!("g-res has R_US");
     };
     let stored_bytes = original[entry.span.clone()].to_vec();
     let item = StoredItem {
-        lib_ref: LibRef::parse("g-pas:R_US").unwrap(),
+        lib_ref: LibRef::parse("g-res:R_US").unwrap(),
         blob_sha256: sha256_hex(&stored_bytes),
         format_version: library.version.clone(),
     };
@@ -373,19 +373,19 @@ fn stored_bytes_are_drawn_even_after_the_local_library_changes() {
         &text[entry.span.end..]
     );
     assert_ne!(redrawn, text, "the test changes the drawing");
-    fs::write(symbols.join("g-pas.kicad_sym"), redrawn).unwrap();
+    fs::write(symbols.join("g-res.kicad_sym"), redrawn).unwrap();
 
     let cache_dir = tempfile::tempdir().unwrap();
     let cache = PreviewCache::new(cache_dir.path().to_path_buf());
     let changed_local = LibraryResolver::new(Some(project.path().to_path_buf()), None)
-        .symbol("g-pas:R_US")
+        .symbol("g-res:R_US")
         .unwrap();
     let local = cache.symbol(&kicad, &changed_local).unwrap();
     let stored = cache
         .stored_symbol(&kicad, &item, || Ok(stored_bytes.clone()), None)
         .unwrap();
     let unchanged = cache
-        .symbol(&kicad, &resolver(&kicad).symbol("g-pas:R_US").unwrap())
+        .symbol(&kicad, &resolver(&kicad).symbol("g-res:R_US").unwrap())
         .unwrap();
 
     assert_eq!(stored.library_sha256, item.blob_sha256);
@@ -407,11 +407,11 @@ fn stored_footprints_are_drawn_from_their_bytes() {
     let kicad = installed_kicad();
     let file = repo_root()
         .join("footprints")
-        .join("g-res.pretty")
+        .join("g-Resistor_SMD.pretty")
         .join("R_0603_1608Metric.kicad_mod");
     let bytes = fs::read(&file).unwrap();
     let item = StoredItem {
-        lib_ref: LibRef::parse("g-res:R_0603_1608Metric").unwrap(),
+        lib_ref: LibRef::parse("g-Resistor_SMD:R_0603_1608Metric").unwrap(),
         blob_sha256: sha256_hex(&bytes),
         format_version: None,
     };
@@ -424,7 +424,7 @@ fn stored_footprints_are_drawn_from_their_bytes() {
         .footprint(
             &kicad,
             &resolver(&kicad)
-                .footprint("g-res:R_0603_1608Metric")
+                .footprint("g-Resistor_SMD:R_0603_1608Metric")
                 .unwrap(),
         )
         .unwrap();

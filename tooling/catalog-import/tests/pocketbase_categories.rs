@@ -85,10 +85,15 @@ fn every_real_3d_model_imports_in_one_request_per_csv_file() {
     let stored = read_back(&admin).unwrap();
     server.stop();
 
-    // Every file in 3d-models/ is now a stored blob, byte for byte.
+    // Every file in 3d-models/ (one folder per footprint library) is now a
+    // stored blob, byte for byte.
     let mut models = 0;
-    for entry in fs::read_dir(root.join("3d-models")).unwrap() {
-        let bytes = fs::read(entry.unwrap().path()).unwrap();
+    let model_files = catalog_hashes(&root)
+        .into_iter()
+        .map(|(path, _)| path)
+        .filter(|path| path.starts_with(root.join("3d-models")));
+    for path in model_files {
+        let bytes = fs::read(path).unwrap();
         let sha = sha256_hex(&bytes);
         let blob = stored.blobs.iter().find(|blob| blob.sha256 == sha);
         assert_eq!(blob.map(|blob| &blob.bytes), Some(&bytes), "{sha}");
@@ -178,7 +183,7 @@ fn an_empty_3d_model_file_becomes_an_import_problem() {
     // that g-cpd's diode footprint uses; 3d-models/ itself is never edited.
     let copy = tempfile::tempdir().unwrap();
     copy_catalog(copy.path());
-    let model = "3d-models/D_SOD-923.step";
+    let model = "3d-models/g-Diode_SMD.3dshapes/D_SOD-923.step";
     fs::write(copy.path().join(model), "").unwrap();
     let oracle = csv_catalog_fixture::build_manifest(copy.path()).unwrap();
 
@@ -541,9 +546,14 @@ fn the_zero_loss_report_fails_when_its_new_checks_find_a_loss() {
     edit(
         "database/g-art.csv",
         ",Connector:Tag-Connect",
-        ",g-no_bom:Fiducial_1mm_Mask2mm;Connector:Tag-Connect",
+        ",g-Fiducial:Fiducial_1mm_Mask2mm;Connector:Tag-Connect",
     );
-    fs::write(copy.path().join("3d-models/D_SOD-923.step"), "").unwrap();
+    fs::write(
+        copy.path()
+            .join("3d-models/g-Diode_SMD.3dshapes/D_SOD-923.step"),
+        "",
+    )
+    .unwrap();
     let oracle = csv_catalog_fixture::build_manifest(copy.path()).unwrap();
 
     let csv_files = ["g-art", "g-cpd", "g-rfm", "g-rvr", "g-swi"];

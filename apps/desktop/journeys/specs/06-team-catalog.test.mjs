@@ -203,8 +203,8 @@ describe('team catalog: history, edits and conflicts', () => {
     assert.match(await textOf(browser, '.manufacturer-parts'), /Yageo RC0603FR-0747RL \(main\)/);
     assert.equal(await textOf(browser, '#cad-items-heading'), 'Symbol and footprint (revision 1 of this part)');
     // The symbol's and footprint's own revisions say which they are.
-    assert.match(await textOf(browser, COLUMN), /g-pas:R_US, symbol revision 1/);
-    assert.match(await textOf(browser, COLUMN), /g-res:R_0603_1608Metric, footprint revision 1/);
+    assert.match(await textOf(browser, COLUMN), /g-res:R_US, symbol revision 1/);
+    assert.match(await textOf(browser, COLUMN), /g-Resistor_SMD:R_0603_1608Metric, footprint revision 1/);
     await waitForText(browser, `${SYMBOL} .provenance`, /^team catalog, symbol revision 1 · /);
     const layout = await windowFits();
     record({ event: 'layout', state: 'team-details', ...layout });
@@ -406,7 +406,7 @@ describe('team catalog: history, edits and conflicts', () => {
         [...tr.children].map((cell) => cell.textContent.trim()),
       ),
     );
-    assert.deepEqual(rows, [['Symbol', 'g-pas:R_US', 'Device:R']]);
+    assert.deepEqual(rows, [['Symbol', 'g-res:R_US', 'Device:R']]);
     // The notice that a revision was added stays above the history.
     assert.equal(await textOf(browser, NOTICE), 'Saved as revision 2.');
     await assertAccessible(browser, '47-team-new-revision');

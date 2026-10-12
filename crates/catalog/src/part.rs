@@ -132,7 +132,7 @@ pub struct CadReference {
     /// Position among the references of this role; 0 is the default (KiCad
     /// database libraries list footprint choices separated by `;`).
     pub ordinal: u32,
-    /// The reference exactly as the source wrote it, such as `g-pas:R_US`.
+    /// The reference exactly as the source wrote it, such as `g-res:R_US`.
     pub reference: String,
     pub target: CadReferenceTarget,
 }

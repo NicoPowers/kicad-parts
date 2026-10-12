@@ -3,7 +3,7 @@
 //!
 //! - [`discovery`] finds kicad-cli (standard locations or a user override)
 //!   and records its version.
-//! - [`resolver`] turns catalog references such as `g-pas:R_US` into library
+//! - [`resolver`] turns catalog references such as `g-res:R_US` into library
 //!   files, searching project libraries before KiCad's bundled ones.
 //! - [`preview`] exports symbol and footprint SVGs with kicad-cli, from
 //!   library files or from a CAD item revision's stored bytes, and caches

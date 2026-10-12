@@ -361,7 +361,7 @@ fn a_second_client_follows_archive_only_changes() {
     assert_eq!(known.number, 1);
     assert_eq!(
         known.revision.as_ref().unwrap().field("Symbol"),
-        Some("g-pas:R_US")
+        Some("g-res:R_US")
     );
     // While disconnected, an unarchive happens; catching up from the
     // checkpoint applies it.
@@ -614,7 +614,7 @@ fn a_details_edit_with_unchanged_cad_is_never_taken_for_archived_cad() {
     let team = Team::start();
     let editor = team.member("Ada Editor", true);
     change_symbol(&editor, &team.read(), IPN, "Device:R");
-    change_symbol(&editor, &team.read(), IPN, "g-pas:R_US");
+    change_symbol(&editor, &team.read(), IPN, "g-res:R_US");
     applied(&submit_archive(&editor, &ArchiveCommand::new(IPN, 1, true, "Old drawing")).unwrap());
     let stored = team.read();
     assert_eq!(revision_state(&stored, IPN), (3, vec![1]));

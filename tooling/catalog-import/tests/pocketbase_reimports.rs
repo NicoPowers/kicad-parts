@@ -30,8 +30,8 @@ const SUBSTITUTES_CSV: &str = "database/substitutes.csv";
 const INPUTS: [&str; 4] = [
     "database/g-res.csv",
     "database/substitutes.csv",
-    "symbols/g-pas.kicad_sym",
-    "footprints/g-res.pretty/R_0603_1608Metric.kicad_mod",
+    "symbols/g-res.kicad_sym",
+    "footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
 ];
 
 fn repository() -> PathBuf {
@@ -378,14 +378,16 @@ fn re_imports_stay_lossless() {
         rerun.body
     );
 
-    // A neighbouring symbol in the same library changes. The resistor
-    // symbol keeps its revision (whose source names the old file hash and
-    // byte range), and the report checks it against the file as it is now.
+    // A neighbouring symbol appears in the same library, before the
+    // resistor symbol, so the file and the resistor's byte range change. The
+    // resistor symbol keeps its revision (whose source names the old file
+    // hash and byte range), and the report checks it against the file as it
+    // is now.
     replace_once(
         root,
-        "symbols/g-pas.kicad_sym",
-        "\t(symbol \"C\"\n",
-        "\t(symbol \"C\"\n\t\t(property \"Note\" \"a neighbouring change\"\n\t\t\t(at 0 0 0)\n\t\t)\n",
+        "symbols/g-res.kicad_sym",
+        "\t(symbol \"R_US\"\n",
+        "\t(symbol \"R_Neighbour\"\n\t\t(property \"Note\" \"a neighbouring change\"\n\t\t\t(at 0 0 0)\n\t\t)\n\t)\n\t(symbol \"R_US\"\n",
     );
     let reply = import_reading_first(&admin, &plan(root), "");
     assert_eq!(outcome(&reply), "nothing_changed", "{}", reply.body);
@@ -396,7 +398,7 @@ fn re_imports_stay_lossless() {
         report
             .cad_items
             .iter()
-            .any(|item| item.reference == "g-pas:R_US")
+            .any(|item| item.reference == "g-res:R_US")
     );
 
     // The report still detects a lost removal problem.
@@ -871,9 +873,9 @@ fn import_problems_of_earlier_runs_explain_no_rows() {
     server.stop();
 }
 
-const FOOTPRINT: &str = "footprints/g-res.pretty/R_0603_1608Metric.kicad_mod";
-const SYMBOLS: &str = "symbols/g-pas.kicad_sym";
-const MODEL: &str = "3d-models/D_SOD-923.step";
+const FOOTPRINT: &str = "footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod";
+const SYMBOLS: &str = "symbols/g-res.kicad_sym";
+const MODEL: &str = "3d-models/g-Diode_SMD.3dshapes/D_SOD-923.step";
 
 /// Every revision of the CAD item `kind` `key`, by number.
 fn revisions_of<'a>(
@@ -1085,15 +1087,15 @@ fn going_back_to_earlier_cad_content_adds_a_revision_that_parts_bind() {
         root,
         FOOTPRINT,
         "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
-        "${GITPLM_PARTS}/3d-models/D_SOD-923.step",
+        "${GITPLM_PARTS}/3d-models/g-Diode_SMD.3dshapes/D_SOD-923.step",
     );
     let footprint_a = fs::read_to_string(root.join(FOOTPRINT)).unwrap();
     let symbols_a = fs::read_to_string(root.join(SYMBOLS)).unwrap();
     let model_a = fs::read(root.join(MODEL)).unwrap();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
-    let footprint = "g-res:R_0603_1608Metric";
-    let symbol = "g-pas:R_US";
+    let footprint = "g-Resistor_SMD:R_0603_1608Metric";
+    let symbol = "g-res:R_US";
 
     import_step(&admin, root, "content A", "applied");
     // A person points one resistor's footprint elsewhere and back, so its

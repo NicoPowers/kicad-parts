@@ -23,10 +23,10 @@ fn loads_every_csv_catalog_category_and_row() {
     let resistor = catalog.find("RES-0000-0470").expect("known resistor");
     assert_eq!(resistor.category, "g-res");
     assert_eq!(resistor.mpn, "RC0603FR-0747RL");
-    assert_eq!(resistor.symbol.as_deref(), Some("g-pas:R_US"));
+    assert_eq!(resistor.symbol.as_deref(), Some("g-res:R_US"));
     assert_eq!(
         resistor.footprint.as_deref(),
-        Some("g-res:R_0603_1608Metric")
+        Some("g-Resistor_SMD:R_0603_1608Metric")
     );
 }
 

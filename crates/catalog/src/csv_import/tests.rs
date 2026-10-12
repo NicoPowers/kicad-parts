@@ -11,16 +11,16 @@ fn fixture(csv: &str, substitutes_csv_rows: &str) -> tempfile::TempDir {
     for directory in [
         "database",
         "symbols",
-        "footprints/g-res.pretty",
+        "footprints/g-Resistor_SMD.pretty",
         "3d-models",
     ] {
         fs::create_dir_all(path.join(directory)).unwrap();
     }
     fs::write(path.join("database/g-res.csv"), csv).unwrap();
     fs::write(path.join("database/substitutes.csv"), substitutes_csv_rows).unwrap();
-    fs::write(path.join("symbols/g-pas.kicad_sym"), SYMBOLS).unwrap();
+    fs::write(path.join("symbols/g-res.kicad_sym"), SYMBOLS).unwrap();
     fs::write(
-        path.join("footprints/g-res.pretty/R_0603.kicad_mod"),
+        path.join("footprints/g-Resistor_SMD.pretty/R_0603.kicad_mod"),
         FOOTPRINT,
     )
     .unwrap();
@@ -33,7 +33,7 @@ const HEADER: &str = "IPN,MPN,Manufacturer,Value,Symbol,Footprint,LCSC,DigiKey_P
 #[test]
 fn routes_every_field_and_binds_exact_cad_items() {
     let csv = format!(
-        "{HEADER}RES-0000-0470,MPN47,Yageo,47,g-pas:R_US,g-res:R_0603,C23182,0.10\nRES-0000-1000,MPN100,Yageo,100,Device:R,g-res:R_0603;g-res:Missing\n"
+        "{HEADER}RES-0000-0470,MPN47,Yageo,47,g-res:R_US,g-Resistor_SMD:R_0603,C23182,0.10\nRES-0000-1000,MPN100,Yageo,100,Device:R,g-Resistor_SMD:R_0603;g-Resistor_SMD:Missing\n"
     );
     let substitutes_csv_rows = "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\nRES-0000-0470,ALT47,Vishay,https://ds,DigiKey,541-47\nRES-0000-0470,MPN47,Yageo,,,\nRES-0000-9999,X,Y,,,\nCAP-0000-0001,C,D,,,\n";
     let root = fixture(&csv, substitutes_csv_rows);
@@ -147,8 +147,11 @@ fn routes_every_field_and_binds_exact_cad_items() {
             ("3d-model", "3d-models/local.step"),
             ("catalog-csv", "database/g-res.csv"),
             ("substitutes-csv", "database/substitutes.csv"),
-            ("footprint", "footprints/g-res.pretty/R_0603.kicad_mod"),
-            ("symbol-library", "symbols/g-pas.kicad_sym"),
+            (
+                "footprint",
+                "footprints/g-Resistor_SMD.pretty/R_0603.kicad_mod"
+            ),
+            ("symbol-library", "symbols/g-res.kicad_sym"),
         ]
     );
     let header = import.sources[1].header_raw.clone().unwrap();
@@ -177,9 +180,9 @@ fn routes_every_field_and_binds_exact_cad_items() {
     assert_eq!(
         kinds,
         [
-            (CadItemKind::Symbol, "g-pas:R_US"),
+            (CadItemKind::Symbol, "g-res:R_US"),
             (CadItemKind::Model3d, "3d-models/local.step"),
-            (CadItemKind::Footprint, "g-res:R_0603"),
+            (CadItemKind::Footprint, "g-Resistor_SMD:R_0603"),
         ]
     );
     let symbol = &import.cad_item_revisions[0];
@@ -243,7 +246,7 @@ fn routes_every_field_and_binds_exact_cad_items() {
         ),
         (
             "missing-member-local-footprint-reference",
-            "Footprint=g-res:Missing",
+            "Footprint=g-Resistor_SMD:Missing",
         ),
     ] {
         assert!(codes.contains(&expected), "{expected:?} not in {codes:?}");
@@ -261,7 +264,7 @@ fn routes_every_field_and_binds_exact_cad_items() {
 
 #[test]
 fn an_empty_3d_model_file_is_an_import_problem_and_stays_a_source() {
-    let csv = format!("{HEADER}RES-0000-0470,MPN47,Yageo,47,g-pas:R_US,g-res:R_0603,,\n");
+    let csv = format!("{HEADER}RES-0000-0470,MPN47,Yageo,47,g-res:R_US,g-Resistor_SMD:R_0603,,\n");
     let root = fixture(&csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
     fs::write(root.path().join("3d-models/local.step"), "").unwrap();
     let import = CsvCatalog::new(root.path()).import("g-res", None).unwrap();
@@ -311,9 +314,9 @@ fn an_empty_3d_model_file_is_an_import_problem_and_stays_a_source() {
             problem.subject.as_str()
         ),
         (
-            "footprints/g-res.pretty/R_0603.kicad_mod",
+            "footprints/g-Resistor_SMD.pretty/R_0603.kicad_mod",
             "model=${GITPLM_PARTS}/3d-models/local.step",
-            "g-res:R_0603"
+            "g-Resistor_SMD:R_0603"
         )
     );
     assert!(
@@ -363,8 +366,8 @@ fn the_resistor_csv_file_imports_deterministically_without_writing() {
     let inputs = [
         "database/g-res.csv",
         "database/substitutes.csv",
-        "symbols/g-pas.kicad_sym",
-        "footprints/g-res.pretty/R_0603_1608Metric.kicad_mod",
+        "symbols/g-res.kicad_sym",
+        "footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
     ];
     let before: Vec<_> = inputs
         .iter()
@@ -519,13 +522,13 @@ fn extra_mpns_and_mpns_to_be_confirmed_are_import_problems() {
 #[test]
 fn excluded_from_bom_is_set_only_by_a_marked_symbol_or_footprint() {
     let csv = format!(
-        "{HEADER}RES-0000-0001,M1,Yageo,1,g-pas:TP,g-res:R_0603,,\nRES-0000-0002,M2,Yageo,2,g-pas:R_US,g-res:NoBom,,\nRES-0000-0003,M3,Yageo,3,g-pas:R_US,g-res:R_0603,,\nRES-0000-0004,M4,Yageo,does not appear in BOM,Device:R,g-res:R_0603,,\n"
+        "{HEADER}RES-0000-0001,M1,Yageo,1,g-res:TP,g-Resistor_SMD:R_0603,,\nRES-0000-0002,M2,Yageo,2,g-res:R_US,g-Resistor_SMD:NoBom,,\nRES-0000-0003,M3,Yageo,3,g-res:R_US,g-Resistor_SMD:R_0603,,\nRES-0000-0004,M4,Yageo,does not appear in BOM,Device:R,g-Resistor_SMD:R_0603,,\n"
     );
     let root = fixture(&csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
     let symbols = SYMBOLS.replace("\n)\n", "\n\t(symbol \"TP\"\n\t\t(in_bom no)\n\t)\n)\n");
-    fs::write(root.path().join("symbols/g-pas.kicad_sym"), symbols).unwrap();
+    fs::write(root.path().join("symbols/g-res.kicad_sym"), symbols).unwrap();
     fs::write(
-        root.path().join("footprints/g-res.pretty/NoBom.kicad_mod"),
+        root.path().join("footprints/g-Resistor_SMD.pretty/NoBom.kicad_mod"),
         "(footprint \"NoBom\"\n\t(version 20241229)\n\t(attr smd exclude_from_pos_files exclude_from_bom)\n)\n",
     )
     .unwrap();
@@ -557,13 +560,13 @@ fn excluded_from_bom_is_set_only_by_a_marked_symbol_or_footprint() {
 #[test]
 fn footprint_choices_that_disagree_on_the_bom_are_an_import_problem() {
     let csv = format!(
-        "{HEADER}RES-0000-0001,M1,Yageo,1,g-pas:R_US,g-res:NoBom;g-res:R_0603,,\nRES-0000-0002,M2,Yageo,2,g-pas:R_US,g-res:NoBom;Resistor_SMD:R_0402,,\nRES-0000-0003,M3,Yageo,3,g-pas:R_US,g-res:NoBom;g-res:NoBom2,,\n"
+        "{HEADER}RES-0000-0001,M1,Yageo,1,g-res:R_US,g-Resistor_SMD:NoBom;g-Resistor_SMD:R_0603,,\nRES-0000-0002,M2,Yageo,2,g-res:R_US,g-Resistor_SMD:NoBom;Resistor_SMD:R_0402,,\nRES-0000-0003,M3,Yageo,3,g-res:R_US,g-Resistor_SMD:NoBom;g-Resistor_SMD:NoBom2,,\n"
     );
     let root = fixture(&csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
     for name in ["NoBom", "NoBom2"] {
         fs::write(
             root.path()
-                .join(format!("footprints/g-res.pretty/{name}.kicad_mod")),
+                .join(format!("footprints/g-Resistor_SMD.pretty/{name}.kicad_mod")),
             format!("(footprint \"{name}\"\n\t(attr smd exclude_from_bom)\n)\n"),
         )
         .unwrap();
@@ -593,7 +596,7 @@ fn footprint_choices_that_disagree_on_the_bom_are_an_import_problem() {
     assert_eq!(disagree.len(), 2, "{disagree:?}");
     assert!(disagree.contains(&(
         "RES-0000-0001",
-        r#"{"footprints":[{"exclude_from_bom":true,"reference":"g-res:NoBom"},{"exclude_from_bom":false,"reference":"g-res:R_0603"}]}"#
+        r#"{"footprints":[{"exclude_from_bom":true,"reference":"g-Resistor_SMD:NoBom"},{"exclude_from_bom":false,"reference":"g-Resistor_SMD:R_0603"}]}"#
     )));
 }
 
@@ -724,7 +727,7 @@ fn current_after(import: &CsvImport) -> CurrentCad {
 
 #[test]
 fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
-    let csv = format!("{HEADER}RES-0000-0470,MPN47,Yageo,47,g-pas:R_US,g-res:R_0603,,\n");
+    let csv = format!("{HEADER}RES-0000-0470,MPN47,Yageo,47,g-res:R_US,g-Resistor_SMD:R_0603,,\n");
     let root = fixture(&csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
     let plan = || CsvCatalog::new(root.path()).import("g-res", None).unwrap();
     let footprint_target = |import: &CsvImport| {
@@ -744,9 +747,9 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
     assert_eq!(
         numbers(&first),
         [
-            ("g-pas:R_US", 0, 1),
+            ("g-res:R_US", 0, 1),
             ("3d-models/local.step", 0, 1),
-            ("g-res:R_0603", 0, 1)
+            ("g-Resistor_SMD:R_0603", 0, 1)
         ]
     );
     let after_a = current_after(&first);
@@ -756,26 +759,28 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
     assert_eq!(
         numbers(&again),
         [
-            ("g-pas:R_US", 1, 1),
+            ("g-res:R_US", 1, 1),
             ("3d-models/local.step", 1, 1),
-            ("g-res:R_0603", 1, 1)
+            ("g-Resistor_SMD:R_0603", 1, 1)
         ]
     );
     assert!(again.parts[0].revision_json == first.parts[0].revision_json);
 
     // Footprint content B: revision 2. Then A again: revision 3, not 1.
-    let path = root.path().join("footprints/g-res.pretty/R_0603.kicad_mod");
+    let path = root
+        .path()
+        .join("footprints/g-Resistor_SMD.pretty/R_0603.kicad_mod");
     fs::write(
         &path,
         FOOTPRINT.replace("R_0603\"\n", "R_0603\"\n\t(descr \"B\")\n"),
     )
     .unwrap();
     let second = plan().numbered_against(&after_a);
-    assert_eq!(numbers(&second)[2], ("g-res:R_0603", 1, 2));
+    assert_eq!(numbers(&second)[2], ("g-Resistor_SMD:R_0603", 1, 2));
     let after_b = current_after(&second);
     fs::write(&path, FOOTPRINT).unwrap();
     let third = plan().numbered_against(&after_b);
-    assert_eq!(numbers(&third)[2], ("g-res:R_0603", 2, 3));
+    assert_eq!(numbers(&third)[2], ("g-Resistor_SMD:R_0603", 2, 3));
     // Same content as revision 1, so the same blob, but a new revision. The
     // part bound revision 2 (other content), so it now binds revision 3.
     assert_eq!(
@@ -805,7 +810,7 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
     let mut missed = after_b.clone();
     missed.parts = after_a.parts.clone();
     let kept = plan().numbered_against(&missed);
-    assert_eq!(numbers(&kept)[2], ("g-res:R_0603", 2, 3));
+    assert_eq!(numbers(&kept)[2], ("g-Resistor_SMD:R_0603", 2, 3));
     let CadReferenceTarget::CadItemRevision { number, .. } = footprint_target(&kept) else {
         panic!("the footprint is bound");
     };
@@ -822,7 +827,10 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
     let fourth = plan().numbered_against(&after_third);
     assert_eq!(
         numbers(&fourth)[1..],
-        [("3d-models/local.step", 1, 2), ("g-res:R_0603", 3, 4)]
+        [
+            ("3d-models/local.step", 1, 2),
+            ("g-Resistor_SMD:R_0603", 3, 4)
+        ]
     );
     let model_number = |import: &CsvImport| {
         import.cad_item_revisions[2]
@@ -844,7 +852,10 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
     let fifth = plan().numbered_against(&after_fourth);
     assert_eq!(
         numbers(&fifth)[1..],
-        [("3d-models/local.step", 2, 3), ("g-res:R_0603", 4, 5)]
+        [
+            ("3d-models/local.step", 2, 3),
+            ("g-Resistor_SMD:R_0603", 4, 5)
+        ]
     );
     assert_eq!(model_number(&fifth), 3);
     // A footprint that still binds model revision 1 keeps it, so it is
@@ -858,7 +869,10 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
     let unchanged = plan().numbered_against(&model_missed);
     assert_eq!(
         numbers(&unchanged)[1..],
-        [("3d-models/local.step", 2, 3), ("g-res:R_0603", 3, 3)]
+        [
+            ("3d-models/local.step", 2, 3),
+            ("g-Resistor_SMD:R_0603", 3, 3)
+        ]
     );
     assert_eq!(model_number(&unchanged), 1);
     // A part that still binds footprint revision 3 (model revision 1) keeps
@@ -876,7 +890,7 @@ fn going_back_to_earlier_cad_content_is_numbered_as_a_new_revision() {
 
 #[test]
 fn a_revision_keeps_symbol_before_footprint_whatever_the_column_order() {
-    let csv = "IPN,Footprint,Value,Symbol\nRES-0000-0470,g-res:R_0603,47,g-pas:R_US\n";
+    let csv = "IPN,Footprint,Value,Symbol\nRES-0000-0470,g-Resistor_SMD:R_0603,47,g-res:R_US\n";
     let root = fixture(csv, "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n");
     let import = CsvCatalog::new(root.path()).import("g-res", None).unwrap();
     let revision = &import.parts[0].revision;
@@ -887,7 +901,10 @@ fn a_revision_keeps_symbol_before_footprint_whatever_the_column_order() {
         .collect();
     assert_eq!(
         fields,
-        [("Symbol", "g-pas:R_US"), ("Footprint", "g-res:R_0603")]
+        [
+            ("Symbol", "g-res:R_US"),
+            ("Footprint", "g-Resistor_SMD:R_0603")
+        ]
     );
     // The references follow the same order: symbol, then footprint.
     let roles: Vec<CadReferenceRole> = revision

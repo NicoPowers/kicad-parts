@@ -49,7 +49,7 @@ function changedCatalog(value, tolerance, others = []) {
   }
   const file = path.join(root, 'database', 'g-res.csv');
   const text = fs.readFileSync(file, 'utf8');
-  const row = (v, t) => `"${v}","g-pas:R_US","g-res:R_0603_1608Metric","${t}"`;
+  const row = (v, t) => `"${v}","g-res:R_US","g-Resistor_SMD:R_0603_1608Metric","${t}"`;
   assert.equal(text.split(row('47', '1%')).length, 2, 'the row of the part is found once');
   let changed = text.replace(row('47', '1%'), row(value, tolerance));
   for (const [from, to] of others) {
@@ -295,7 +295,7 @@ describe('team catalog: reviewing new CSV values that were not applied', () => {
     // The CSV now says 100R and revision 2's symbol; then revision 2 is
     // archived, so accepting that symbol will be refused.
     const both = changedCatalog('47R', '0.5%', [
-      ['"100","g-pas:R_US","g-res:R_0603_1608Metric","1%"', '"100R","Device:R","g-res:R_0603_1608Metric","1%"'],
+      ['"100","g-res:R_US","g-Resistor_SMD:R_0603_1608Metric","1%"', '"100R","Device:R","g-Resistor_SMD:R_0603_1608Metric","1%"'],
     ]);
     assert.equal(await server.reimport(both), 'nothing_changed');
     const archived = await fetch(`${server.url}/api/catalog/archives`, {

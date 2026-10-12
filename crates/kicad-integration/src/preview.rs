@@ -122,7 +122,7 @@ impl std::error::Error for PreviewError {}
 /// One CAD item revision's stored bytes, as the team catalog keeps them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredItem {
-    /// The reference the part uses, such as `g-pas:R_US`.
+    /// The reference the part uses, such as `g-res:R_US`.
     pub lib_ref: LibRef,
     /// The SHA-256 of the stored bytes. The bytes are checked against it.
     pub blob_sha256: String,

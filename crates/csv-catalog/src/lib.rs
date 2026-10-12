@@ -44,9 +44,9 @@ pub struct CatalogPart {
     pub manufacturer: String,
     pub description: String,
     pub value: String,
-    /// Library reference such as `g-pas:R_US`, if the row assigns one.
+    /// Library reference such as `g-res:R_US`, if the row assigns one.
     pub symbol: Option<String>,
-    /// Library reference such as `g-res:R_0603_1608Metric`, if assigned.
+    /// Library reference such as `g-Resistor_SMD:R_0603_1608Metric`, if assigned.
     pub footprint: Option<String>,
     pub datasheet: String,
     pub fields: Vec<(String, String)>,

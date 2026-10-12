@@ -140,7 +140,7 @@ fn binding_label(reference: &CadReference) -> String {
     }
 }
 
-/// `g-pas:R_US` with what it is bound to, without looking anything up:
+/// `g-res:R_US` with what it is bound to, without looking anything up:
 /// the number of the exact CAD item revision, `KiCad library` for an
 /// external one, or why it did not resolve.
 pub fn describe_binding(reference: &CadReference) -> String {
@@ -230,9 +230,9 @@ mod tests {
 
     #[test]
     fn lists_changed_cad_fields_excluded_from_bom_and_bindings() {
-        let before = revision("g-pas:R_US", 1);
+        let before = revision("g-res:R_US", 1);
         assert!(compare_revisions(&before, &before, describe_binding).is_empty());
-        let mut after = revision("g-pas:R_US", 3);
+        let mut after = revision("g-res:R_US", 3);
         after.excluded_from_bom = true;
         let rows = |differences: Vec<DetailDifference>| {
             differences
@@ -252,8 +252,8 @@ mod tests {
                 (
                     DifferenceKind::CadBinding,
                     "Symbol revision".to_owned(),
-                    "g-pas:R_US (revision 1)".to_owned(),
-                    "g-pas:R_US (revision 3)".to_owned()
+                    "g-res:R_US (revision 1)".to_owned(),
+                    "g-res:R_US (revision 3)".to_owned()
                 ),
             ]
         );
@@ -264,7 +264,7 @@ mod tests {
             [(
                 DifferenceKind::Field,
                 "Symbol".to_owned(),
-                "g-pas:R_US".to_owned(),
+                "g-res:R_US".to_owned(),
                 "Device:R".to_owned()
             )]
         );

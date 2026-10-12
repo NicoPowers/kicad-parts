@@ -19,7 +19,7 @@
 //!   from KiCad and the app. The **current revision** is the newest
 //!   revision that is not archived.
 //! - A **CAD item** is one symbol, footprint or 3D model, identified by its
-//!   kind and library reference (for example the symbol `g-pas:R_US`). A
+//!   kind and library reference (for example the symbol `g-res:R_US`). A
 //!   revision of a CAD item saves its [`CadItemDetails`]: the exact
 //!   [`Blob`] it uses, its format and its [`License`]. CAD item revisions
 //!   are numbered from 1 per CAD item, like part revisions, and the

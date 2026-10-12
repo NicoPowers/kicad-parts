@@ -22,8 +22,8 @@ const REASON: &str = "Import the resistors from database/g-res.csv";
 const INPUTS: [&str; 4] = [
     "database/g-res.csv",
     "database/substitutes.csv",
-    "symbols/g-pas.kicad_sym",
-    "footprints/g-res.pretty/R_0603_1608Metric.kicad_mod",
+    "symbols/g-res.kicad_sym",
+    "footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
 ];
 
 fn repository() -> PathBuf {
@@ -762,7 +762,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
                 details["fields"]
                     .as_array_mut()
                     .unwrap()
-                    .push(serde_json::json!({ "name": "Symbol", "value": "g-pas:R_US" }))
+                    .push(serde_json::json!({ "name": "Symbol", "value": "g-res:R_US" }))
             })
         },
         "it lists Symbol, which belongs to the part's revision",
@@ -826,7 +826,7 @@ fn changed_rows_get_new_revisions_or_import_problems_and_bad_requests_write_noth
         "references-not-the-fields",
         &|body| {
             rewrite(body, "revision", &|revision| {
-                revision["cad_references"][0]["reference"] = "g-pas:OTHER".into()
+                revision["cad_references"][0]["reference"] = "g-res:OTHER".into()
             })
         },
         "not the ones its Symbol and Footprint fields name",
@@ -2129,7 +2129,7 @@ fn an_edit_never_saves_a_field_in_the_wrong_document() {
     let mut wrong: PartDetails = serde_json::from_str(&saved.snapshot).unwrap();
     wrong.fields.push(catalog::DetailField {
         name: "Symbol".into(),
-        value: "g-pas:R_US".into(),
+        value: "g-res:R_US".into(),
     });
     let snapshot = wrong.canonical_json();
     // Stop the server before touching data.db, then start it again on the

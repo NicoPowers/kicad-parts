@@ -1,4 +1,4 @@
-//! Turns a catalog library reference such as `g-pas:R_US` into a concrete
+//! Turns a catalog library reference such as `g-res:R_US` into a concrete
 //! library on disk. Callers pass the reference; this module owns where
 //! libraries live and in which order they are searched.
 
@@ -217,12 +217,12 @@ mod tests {
 
     #[test]
     fn parses_and_rejects_references() {
-        let lib_ref = LibRef::parse(" g-pas:R_US ").unwrap();
-        assert_eq!(lib_ref.library, "g-pas");
+        let lib_ref = LibRef::parse(" g-res:R_US ").unwrap();
+        assert_eq!(lib_ref.library, "g-res");
         assert_eq!(lib_ref.item, "R_US");
         assert_eq!(LibRef::parse(""), Err(ResolveError::Unassigned));
         for bad in [
-            "R_US", "g-pas:", ":R", "../x:R", "lib:a/b", "lib:..", "a:b:c",
+            "R_US", "g-res:", ":R", "../x:R", "lib:a/b", "lib:..", "a:b:c",
         ] {
             assert!(
                 matches!(LibRef::parse(bad), Err(ResolveError::Malformed(_))),
@@ -257,21 +257,24 @@ mod tests {
     #[test]
     fn footprint_must_exist_inside_its_library() {
         let project = tempfile::tempdir().unwrap();
-        let pretty = project.path().join("footprints").join("g-res.pretty");
+        let pretty = project
+            .path()
+            .join("footprints")
+            .join("g-Resistor_SMD.pretty");
         fs::create_dir_all(&pretty).unwrap();
         fs::write(pretty.join("R_0603.kicad_mod"), b"").unwrap();
         let resolver = LibraryResolver::new(Some(project.path().to_path_buf()), None);
-        let found = resolver.footprint("g-res:R_0603").unwrap();
+        let found = resolver.footprint("g-Resistor_SMD:R_0603").unwrap();
         assert_eq!(found.file, pretty.join("R_0603.kicad_mod"));
         let listed = resolver
-            .footprint(" g-res:R_0603 ; g-res:R_0603_Hand")
+            .footprint(" g-Resistor_SMD:R_0603 ; g-Resistor_SMD:R_0603_Hand")
             .unwrap();
         assert_eq!(listed.lib_ref.item, "R_0603");
         assert_eq!(footprint_choices("a:b;;c:d ;"), vec!["a:b", "c:d"]);
         // Names match case-sensitively, as in KiCad, even where the file
         // system does not.
         assert!(matches!(
-            resolver.footprint("g-res:r_0603"),
+            resolver.footprint("g-Resistor_SMD:r_0603"),
             Err(ResolveError::FootprintNotFound { .. })
         ));
         assert!(matches!(
@@ -279,7 +282,7 @@ mod tests {
             Err(ResolveError::LibraryNotFound { .. })
         ));
         assert!(matches!(
-            resolver.footprint("g-res:R_0402"),
+            resolver.footprint("g-Resistor_SMD:R_0402"),
             Err(ResolveError::FootprintNotFound { .. })
         ));
     }

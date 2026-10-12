@@ -29,13 +29,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 const REASON: &str = "Import the resistors from database/g-res.csv";
-const FOOTPRINT: &str = "footprints/g-res.pretty/R_0603_1608Metric.kicad_mod";
-const MODEL: &str = "3d-models/D_SOD-923.step";
+const FOOTPRINT: &str = "footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod";
+const MODEL: &str = "3d-models/g-Diode_SMD.3dshapes/D_SOD-923.step";
 /// Every file the resistor import reads, once its footprint names `MODEL`.
 const INPUTS: [&str; 5] = [
     "database/g-res.csv",
     "database/substitutes.csv",
-    "symbols/g-pas.kicad_sym",
+    "symbols/g-res.kicad_sym",
     FOOTPRINT,
     MODEL,
 ];
@@ -60,7 +60,7 @@ fn the_import_state_is_read_from_current_records_only() {
         root,
         FOOTPRINT,
         "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
-        "${GITPLM_PARTS}/3d-models/D_SOD-923.step",
+        "${GITPLM_PARTS}/3d-models/g-Diode_SMD.3dshapes/D_SOD-923.step",
     );
     let state = tempfile::tempdir().unwrap();
     let (server, admin, superuser) =

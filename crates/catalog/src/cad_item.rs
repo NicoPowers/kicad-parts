@@ -40,7 +40,8 @@ pub struct CadItem {
     pub id: CadItemId,
     pub kind: CadItemKind,
     /// `LIBRARY:NAME` for symbols and footprints; the repository path under
-    /// `3d-models/` for 3D models.
+    /// `3d-models/` for 3D models, such as
+    /// `3d-models/g-Diode_SMD.3dshapes/D_SOD-923.step`.
     pub key: String,
 }
 
@@ -191,7 +192,7 @@ mod tests {
         let snapshot = CadItemDetails {
             schema: CAD_ITEM_DETAILS_SCHEMA.into(),
             kind: CadItemKind::Footprint,
-            key: "g-res:R_0603_1608Metric".into(),
+            key: "g-Resistor_SMD:R_0603_1608Metric".into(),
             format: "kicad-footprint".into(),
             format_version: Some("20240108".into()),
             blob_sha256: "ab".into(),

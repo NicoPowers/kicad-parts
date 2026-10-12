@@ -43,12 +43,12 @@ function changedCatalog() {
     fs.writeFileSync(file, changed);
   };
   edit(
-    path.join(root, 'symbols', 'g-pas.kicad_sym'),
+    path.join(root, 'symbols', 'g-res.kicad_sym'),
     '(symbol "R_US_0_1"',
     '(symbol "R_US_0_1"\n\t\t\t(circle (center 0 0) (radius 5) (stroke (width 0.5) (type default)) (fill (type none)))',
   );
   edit(
-    path.join(root, 'footprints', 'g-res.pretty', 'R_0603_1608Metric.kicad_mod'),
+    path.join(root, 'footprints', 'g-Resistor_SMD.pretty', 'R_0603_1608Metric.kicad_mod'),
     '\t(fp_line',
     '\t(fp_circle (center 0 0) (end 2 0) (stroke (width 0.3) (type solid)) (fill no) (layer "F.SilkS"))\n\t(fp_line',
   );
@@ -142,7 +142,7 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
       assert.equal(shown.note, null, name);
       assert.notEqual(drawing(shown.src), local[name], `the ${name} is not the changed local file`);
     }
-    assert.match(await textOf(browser, '.part-fields'), /g-pas:R_US, symbol revision 1/);
+    assert.match(await textOf(browser, '.part-fields'), /g-res:R_US, symbol revision 1/);
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 0);
     await assertAccessible(browser, '51-team-preview-stored-revision');
     await screenshot(browser, '51-team-preview-stored-revision');
@@ -162,8 +162,8 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
       }
     }
     for (const [section, what, reference] of [
-      [SYMBOL, 'Symbol', 'g-pas:R_US'],
-      [FOOTPRINT, 'Footprint', 'g-res:R_0603_1608Metric'],
+      [SYMBOL, 'Symbol', 'g-res:R_US'],
+      [FOOTPRINT, 'Footprint', 'g-Resistor_SMD:R_0603_1608Metric'],
     ]) {
       await waitForText(
         browser,

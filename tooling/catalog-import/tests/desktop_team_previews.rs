@@ -73,7 +73,7 @@ fn changed_catalog(root: &Path, into: &Path) {
     for folder in ["database", "symbols", "footprints"] {
         copy_folder(&root.join(folder), &into.join(folder));
     }
-    let symbols = into.join("symbols").join("g-pas.kicad_sym");
+    let symbols = into.join("symbols").join("g-res.kicad_sym");
     let text = fs::read_to_string(&symbols).unwrap();
     let changed = text.replacen(
         "(symbol \"R_US_0_1\"",
@@ -84,7 +84,7 @@ fn changed_catalog(root: &Path, into: &Path) {
     fs::write(&symbols, changed).unwrap();
     let footprint = into
         .join("footprints")
-        .join("g-res.pretty")
+        .join("g-Resistor_SMD.pretty")
         .join("R_0603_1608Metric.kicad_mod");
     let text = fs::read_to_string(&footprint).unwrap();
     let changed = text.replacen(
@@ -145,7 +145,7 @@ fn a_stored_revision_record_that_does_not_match_its_hash_is_not_drawn() {
     let cad_item = readback
         .cad_items
         .iter()
-        .find(|item| item.kind == "symbol" && item.key == "g-pas:R_US")
+        .find(|item| item.kind == "symbol" && item.key == "g-res:R_US")
         .unwrap();
     let revision = readback
         .cad_item_revisions
@@ -180,7 +180,7 @@ fn a_stored_revision_record_that_does_not_match_its_hash_is_not_drawn() {
     assert_eq!(
         symbol.note.as_deref(),
         Some(
-            "The team catalog's revision of g-pas:R_US could not be used because its record \
+            "The team catalog's revision of g-res:R_US could not be used because its record \
              does not match its SHA-256. This drawing is from your local library, which may \
              differ from the revision this part uses."
         )
@@ -231,8 +231,8 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     let revision = team.part(IPN).unwrap().unwrap().revision.number;
 
     for (kind, reference) in [
-        (PreviewKind::Symbol, "g-pas:R_US"),
-        (PreviewKind::Footprint, "g-res:R_0603_1608Metric"),
+        (PreviewKind::Symbol, "g-res:R_US"),
+        (PreviewKind::Footprint, "g-Resistor_SMD:R_0603_1608Metric"),
     ] {
         let local = ready(browser.preview_request(&request(kind, None), Some(&team)));
         let stored = ready(browser.preview_request(&request(kind, Some(revision)), Some(&team)));
@@ -268,7 +268,7 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     let note = fallback.note.unwrap();
     assert_eq!(
         note,
-        "Symbol revision 1 of g-pas:R_US could not be fetched because the team server could not be \
+        "Symbol revision 1 of g-res:R_US could not be fetched because the team server could not be \
          reached. This drawing is from your local library, which differs from that revision."
     );
     // With an unchanged local library, the note says the bytes match.
@@ -284,7 +284,7 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     // A revision this app never fetched cannot be looked up at all.
     let unknown = ready(fresh.preview_request(
         &PreviewRequest {
-            field: Some("g-pas:R_US".into()),
+            field: Some("g-res:R_US".into()),
             ..request(PreviewKind::Symbol, Some(revision + 1))
         },
         Some(&team),

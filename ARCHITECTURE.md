@@ -82,14 +82,16 @@ kicad-parts/
 │   ├── update_db.sh            # Shell script for SQLite generation
 │   └── parts.sqlite            # Generated SQLite database (gitignored)
 │
-├── symbols/                    # Local KiCad symbol libraries (.kicad_sym)
-│   └── g-*.kicad_sym
+├── symbols/                    # Team symbols, one library per category
+│   └── g-<category>.kicad_sym  # e.g. g-res.kicad_sym
 │
-├── footprints/                 # Local KiCad footprint libraries (.pretty/)
-│   └── g-*.pretty/
+├── footprints/                 # Team footprints, grouped by package
+│   └── g-<KiCad library>.pretty/   # e.g. g-Resistor_SMD.pretty
 │       └── *.kicad_mod
 │
-├── 3d-models/                  # Local 3D models (.step files)
+├── 3d-models/                  # 3D models, next to their footprint library
+│   └── g-<KiCad library>.3dshapes/
+│       └── <footprint name>.step
 │
 ├── libs/                       # Git submodules (reference libraries)
 │   ├── kicad-symbols/          # KiCad official symbol libraries
@@ -293,9 +295,16 @@ fetched on-demand when copying a footprint to local.
 
 ### Local Libraries
 
-- **Symbols**: `symbols/*.kicad_sym`
-- **Footprints**: `footprints/*.pretty/*.kicad_mod`
-- **3D Models**: `3d-models/*.step`
+- **Symbols**: `symbols/g-<category>.kicad_sym`, one library per part
+  category (`g-res`, `g-cap`, `g-dio` and so on), such as `g-res:R_US`.
+- **Footprints**: `footprints/g-<KiCad library>.pretty/*.kicad_mod`, grouped
+  by package with the name of the KiCad library where that kind of footprint
+  lives, such as `g-Resistor_SMD:R_0603_1608Metric`.
+- **3D Models**: `3d-models/g-<KiCad library>.3dshapes/<footprint name>.step`,
+  referenced from the footprint as
+  `${GITPLM_PARTS}/3d-models/g-<KiCad library>.3dshapes/<footprint name>.step`.
+
+The legacy Python GUI below still assumes the older flat layout.
 
 Local libraries take priority over reference (submodule) libraries during
 resolution. The intent is that parts always reference local copies, ensuring
@@ -312,7 +321,7 @@ libraries. It provides:
 - `fuzzy_match(tokens, kind)` -- multi-keyword scored search
 - `resolve(name, kind)` -- exact `lib:name` lookup returning file path
 
-Each `LibraryEntry` has: `name` (e.g. `"g-pas:R_US"`), `source` (`"local"` or
+Each `LibraryEntry` has: `name` (e.g. `"g-res:R_US"`), `source` (`"local"` or
 `"kicad"`), `kind`, `lib_path`, `file_path`.
 
 ### Copy-to-Local Flow

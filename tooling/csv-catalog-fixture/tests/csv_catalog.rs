@@ -54,7 +54,7 @@ fn inventories_substitutes_assets_and_references() {
         ]
     );
     assert!(manifest.substitutes.rows.is_empty());
-    assert_eq!(manifest.assets.symbols.len(), 18);
+    assert_eq!(manifest.assets.symbols.len(), 19);
     assert_eq!(manifest.assets.footprints.len(), 76);
     assert_eq!(manifest.assets.models_3d.len(), 13);
     assert!(
