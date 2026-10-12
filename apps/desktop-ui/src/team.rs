@@ -1049,6 +1049,17 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
     });
     let category_choice = (!categories.is_empty()).then(|| {
         let chosen = draft.category.clone();
+        let start = draft.start_category.clone();
+        // A category the list does not have (renamed or gone) shows as its
+        // code, rather than silently choosing another.
+        let missing = (!start.is_empty() && !categories.iter().any(|category| category.code == start))
+            .then(|| {
+                view! {
+                    <option value=start.clone() selected=chosen == start>
+                        {format!("{start} (not in the list)")}
+                    </option>
+                }
+            });
         let options = categories
             .iter()
             .map(|category| {
@@ -1059,32 +1070,50 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
                 }
             })
             .collect_view();
+        // What the hint says, or nothing while the category is the one the
+        // edit started from.
+        let hint = move || {
+            ui.category_version.track();
+            ui.draft.with_value(|draft| {
+                (draft.category != draft.start_category).then_some({
+                    if draft.fields.len() > draft.start_fields.len() {
+                        "The IPN stays the same. Fields of the new category are added below."
+                    } else {
+                        "The IPN stays the same."
+                    }
+                })
+            })
+        };
         view! {
             <div class="edit-row">
                 <label for="edit-category">"Category"</label>
                 <select
                     id="edit-category"
+                    aria-describedby=move || hint().map(|_| "edit-category-hint")
                     on:change:target=move |event| {
                         let code = event.target().value();
-                        if let Some(category) = categories.iter().find(|category| category.code == code) {
-                            ui.draft.update_value(|draft| choose_category(draft, category));
+                        let category = categories
+                            .iter()
+                            .find(|category| category.code == code)
+                            .cloned()
+                            .or_else(|| {
+                                (code == start).then(|| TeamCategory {
+                                    code: code.clone(),
+                                    name: code.clone(),
+                                    fields: Vec::new(),
+                                })
+                            });
+                        if let Some(category) = category {
+                            ui.draft.update_value(|draft| choose_category(draft, &category));
                             ui.category_version.update(|version| *version += 1);
                         }
                     }
                 >
+                    {missing}
                     {options}
                 </select>
             </div>
-            {move || {
-                ui.category_version.track();
-                ui.draft
-                    .with_value(|draft| draft.category != draft.start_category)
-                    .then(|| view! {
-                        <p class="hint" id="edit-category-hint">
-                            "The IPN stays the same. Fields of the new category are added below."
-                        </p>
-                    })
-            }}
+            {move || hint().map(|text| view! { <p class="hint" id="edit-category-hint">{text}</p> })}
         }
     });
     let ipn = draft.ipn.clone();

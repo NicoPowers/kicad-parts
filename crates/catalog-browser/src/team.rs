@@ -414,6 +414,7 @@ impl TeamCatalog {
                 .collect(),
             None => fields,
         };
+        let moved = category.is_some();
         let mut command = EditCommand::new(&request.ipn, &request.reason);
         command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
         if fields != base_details.fields
@@ -465,6 +466,9 @@ impl TeamCatalog {
                     part: conflict.part,
                 }
             }
+            PublishResult::Refused { message } => PublishResult::Refused {
+                message: plain_refusal(message, moved),
+            },
             other => other,
         })
     }
@@ -1956,6 +1960,22 @@ fn archive_note(entry: &StoredArchiveEntry) -> ArchiveNote {
     }
 }
 
+/// Says plainly why the server refused a category change because the new
+/// category's fields changed while the person was editing (an import
+/// changed them), instead of the server's "field 7 must be X".
+fn plain_refusal(message: String, moved: bool) -> String {
+    let fields_differ = message.contains("an edit cannot add, remove, rename or reorder fields")
+        || message.contains("fields as now, in the same order");
+    if moved && fields_differ {
+        CATEGORY_FIELDS_CHANGED.to_owned()
+    } else {
+        message
+    }
+}
+
+const CATEGORY_FIELDS_CHANGED: &str =
+    "The category's fields changed while you were editing. Open Edit part again.";
+
 /// History rows, with categories by their plain names.
 fn to_changes(
     differences: Vec<catalog::DetailDifference>,
@@ -2497,6 +2517,21 @@ fn save_settings(path: &Path, settings: &TeamSettings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_category_whose_fields_changed_while_editing_is_said_plainly() {
+        let server =
+            "Field 7 must be Voltage; an edit cannot add, remove, rename or reorder fields.";
+        assert_eq!(plain_refusal(server.into(), true), CATEGORY_FIELDS_CHANGED);
+        let count = "Fields must list the same 6 fields as now, in the same order.";
+        assert_eq!(plain_refusal(count.into(), true), CATEGORY_FIELDS_CHANGED);
+        // Without a category change, the server's words stay.
+        assert_eq!(plain_refusal(server.into(), false), server);
+        assert_eq!(
+            plain_refusal("No edit access.".into(), true),
+            "No edit access."
+        );
+    }
 
     #[test]
     fn only_a_category_change_hides_the_fields_it_added_blank() {
