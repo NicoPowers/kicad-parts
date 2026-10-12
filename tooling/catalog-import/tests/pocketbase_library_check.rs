@@ -126,3 +126,60 @@ fn old_problems_import_and_a_new_bad_3d_model_link_is_refused_before_sending() {
     );
     server.stop();
 }
+
+/// Copies the CSV catalog's folders into `target`.
+fn copy_catalog(target: &Path) {
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let destination = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &destination);
+            } else {
+                fs::copy(entry.path(), destination).unwrap();
+            }
+        }
+    }
+    for tree in ["database", "symbols", "footprints", "3d-models"] {
+        copy_tree(&services::repository_root().join(tree), &target.join(tree));
+    }
+}
+
+/// Today's CSV catalog, imported one CSV file at a time into one team
+/// catalog: no import stops, because a CSV file's first import takes the
+/// footprints it uses as they are (their old problems are clean-up).
+#[test]
+fn todays_csv_files_import_one_by_one() {
+    let copy = tempfile::tempdir().unwrap();
+    let root = copy.path();
+    copy_catalog(root);
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) =
+        services::start(&services::repository_root(), state.path()).unwrap();
+    let mut clean_up = 0;
+    for csv_file in services::csv_files(root).unwrap() {
+        let import = CsvCatalog::new(root).import(&csv_file, None).unwrap();
+        let reason = format!("Import the parts from database/{csv_file}.csv");
+        let (command, check) =
+            services::prepare_checked_import(&admin, root, &import, &reason, Allow::default())
+                .unwrap_or_else(|refusal| panic!("{csv_file}: {refusal}"));
+        assert_eq!(
+            check.count(Group::ToFix),
+            0,
+            "{csv_file}: {}",
+            check.report()
+        );
+        clean_up = clean_up.max(check.count(Group::CleanUp));
+        let reply = submit_import(&admin, &command).unwrap();
+        assert!(
+            matches!(reply.outcome, ImportOutcome::Applied { .. }),
+            "{csv_file}: {}",
+            reply.body
+        );
+    }
+    // Today's old problems: 3D model links outside the library, and two
+    // missing model files.
+    assert!(clean_up >= 14, "{clean_up}");
+    server.stop();
+}

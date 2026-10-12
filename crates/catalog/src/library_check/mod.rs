@@ -25,13 +25,15 @@
 //!   works on one computer.
 //!
 //! A problem is an error (to fix) only for a footprint that is new or
-//! changed since the last import: not in the Catalog while a CSV row uses
-//! it, or with bytes that are not those of its newest imported revision.
-//! The same problem on a footprint the Catalog has unchanged is clean-up,
-//! so today's CSV catalog still imports. On a footprint that no part uses
-//! and the Catalog does not have, it is a warning until something brings
-//! the footprint into the Catalog. Before the first import there is no last
-//! import to compare with, so every problem is clean-up.
+//! changed since the last import: with bytes that are not those of its
+//! newest imported revision, or not in the Catalog while a row of a CSV
+//! file imported before uses it. The same problem on a footprint the
+//! Catalog has unchanged is clean-up, so today's CSV catalog still imports.
+//! A CSV file never imported has no last import to compare with: its first
+//! import takes the footprints it uses as they are, so their problems are
+//! clean-up too, and importing the CSV files one by one never stops on old
+//! problems. On a footprint that no part uses and the Catalog does not
+//! have, a problem is a warning until something brings the footprint in.
 
 pub mod read;
 
@@ -349,9 +351,9 @@ pub struct KnownCad {
     /// For each CAD item the Catalog has, by CAD item ID, the SHA-256 of
     /// the bytes of its current revision and of its newest imported one.
     pub items: BTreeMap<String, BTreeSet<String>>,
-    /// Whether any CSV import has run. Before the first one there is no
-    /// last import to compare with, so every problem is clean-up.
-    pub imported_before: bool,
+    /// The CSV files imported at least once, such as `database/g-res.csv`.
+    /// A file not imported yet has no last import to compare with.
+    pub imported_csv_files: BTreeSet<String>,
 }
 
 impl KnownCad {
@@ -359,7 +361,11 @@ impl KnownCad {
     pub fn from_state(state: &crate::pocketbase::ImportState) -> Self {
         Self {
             items: state.cad_item_bytes.clone(),
-            imported_before: !state.latest_imports.is_empty(),
+            imported_csv_files: state
+                .latest_imports
+                .iter()
+                .map(|run| format!("database/{}.csv", run.csv_file))
+                .collect(),
         }
     }
 
@@ -394,10 +400,13 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
         kicad_footprints,
     } = inputs;
     let mut findings = Vec::new();
-    let used: BTreeSet<(CadItemKind, &str)> = csv
-        .iter()
-        .map(|reference| (reference.kind, reference.reference.as_str()))
-        .collect();
+    // Each symbol and footprint the CSV files name, with the files.
+    let mut used: BTreeMap<(CadItemKind, &str), BTreeSet<&str>> = BTreeMap::new();
+    for reference in csv {
+        used.entry((reference.kind, reference.reference.as_str()))
+            .or_default()
+            .insert(reference.file.as_str());
+    }
     let footprint_names: BTreeSet<String> = libraries
         .footprints
         .iter()
@@ -407,7 +416,7 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
     // Symbols nobody uses yet, and symbols naming a footprint nobody has.
     for symbol in &libraries.symbols {
         let reference = symbol.reference();
-        if !used.contains(&(CadItemKind::Symbol, reference.as_str()))
+        if !used.contains_key(&(CadItemKind::Symbol, reference.as_str()))
             && !known.has(CadItemKind::Symbol, &reference)
         {
             findings.push(not_in_catalog(&reference, symbol.file(), "part"));
@@ -438,12 +447,18 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
     let mut linked_models: BTreeSet<String> = BTreeSet::new();
     for footprint in &libraries.footprints {
         let reference = footprint.reference();
-        let in_csv = used.contains(&(CadItemKind::Footprint, reference.as_str()));
+        let files = used.get(&(CadItemKind::Footprint, reference.as_str()));
+        let in_csv = files.is_some();
+        let imported_file_uses_it = files.is_some_and(|files| {
+            files
+                .iter()
+                .any(|file| known.imported_csv_files.contains(*file))
+        });
         let state = match known.bytes_of(CadItemKind::Footprint, &reference) {
-            _ if !known.imported_before => FootprintState::BeforeFirstImport,
             Some(bytes) if bytes.contains(&footprint.sha256) => FootprintState::Unchanged,
             Some(_) => FootprintState::Changed,
-            None if in_csv => FootprintState::New,
+            None if imported_file_uses_it => FootprintState::New,
+            None if in_csv => FootprintState::BeforeFirstImport,
             None => FootprintState::Unused,
         };
         if !in_csv && !known.has(CadItemKind::Footprint, &reference) {
@@ -541,15 +556,15 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
 /// Where a footprint stands against the last import.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FootprintState {
-    /// Nothing was imported yet, so there is no last import to compare
-    /// with: the first import takes the libraries as they are.
+    /// Not in the Catalog, and only CSV files never imported use it: their
+    /// first import takes it as it is.
     BeforeFirstImport,
     /// The Catalog has these bytes.
     Unchanged,
     /// The Catalog has the footprint with other bytes.
     Changed,
-    /// Not in the Catalog, but a CSV row uses it: the next import brings
-    /// it in.
+    /// Not in the Catalog, but a row of a CSV file imported before uses
+    /// it: the next import of that file brings it in.
     New,
     /// Not in the Catalog and no part uses it.
     Unused,

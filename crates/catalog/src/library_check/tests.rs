@@ -46,12 +46,14 @@ const CSV_HEADER: &str = "IPN,MPN,Manufacturer,Description,Symbol,Footprint\n";
 fn imported(root: &Path) -> KnownCad {
     let catalog = CsvCatalog::new(root);
     let mut items: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut imported_csv_files = BTreeSet::new();
     for entry in fs::read_dir(root.join("database")).unwrap().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(csv_file) = name.strip_suffix(".csv").filter(|n| n.starts_with("g-")) else {
             continue;
         };
         let import = catalog.import(csv_file, None).unwrap();
+        imported_csv_files.insert(format!("database/{name}"));
         for revision in &import.cad_item_revisions {
             items
                 .entry(revision.cad_item.id.as_str().to_owned())
@@ -61,7 +63,7 @@ fn imported(root: &Path) -> KnownCad {
     }
     KnownCad {
         items,
-        imported_before: true,
+        imported_csv_files,
     }
 }
 
@@ -244,11 +246,12 @@ fn every_kind_of_3d_model_link_is_judged() {
         "{}",
         first.report()
     );
-    // Every footprint is new to a Catalog that has had an import: a
-    // problem is an error.
+    assert_eq!(first.count(Group::CleanUp), 7, "{}", first.report());
+    // g-ics.csv was imported before, and none of these footprints is in
+    // the Catalog: each is new, so a problem is an error.
     let after_an_import = KnownCad {
         items: BTreeMap::new(),
-        imported_before: true,
+        imported_csv_files: ["database/g-ics.csv".to_owned()].into(),
     };
     let found = check_folder(root.path(), &after_an_import, None).unwrap();
     let models: Vec<(Severity, &str, &str)> = found
@@ -336,8 +339,22 @@ fn only_new_or_changed_footprints_have_errors() {
     assert_eq!(severity_of(&changed, "Old"), Some(Severity::Error));
     assert_eq!(changed.count(Group::ToFix), 2, "{}", changed.report());
 
-    // A CSV row now uses the unused footprint: the next import would
-    // bring it in, so its problem is an error.
+    // A CSV file never imported uses the unused footprint: its first
+    // import takes it as it is, so its problem is clean-up.
+    fs::write(
+        root.path().join("database/g-new.csv"),
+        format!("{CSV_HEADER}NEW-0001-0001,X,Y,New part,,g-Package_SO:Unused\n"),
+    )
+    .unwrap();
+    let first_import = check_folder(root.path(), &known, None).unwrap();
+    assert_eq!(
+        severity_of(&first_import, "Unused"),
+        Some(Severity::CleanUp)
+    );
+    fs::remove_file(root.path().join("database/g-new.csv")).unwrap();
+
+    // A row of a CSV file imported before now uses it: the next import
+    // would bring it in, so its problem is an error.
     fs::write(
         root.path().join("database/g-old.csv"),
         format!("{CSV_HEADER}OLD-0001-0001,X,Y,Old part,,g-Package_SO:Old;g-Package_SO:Unused\n"),

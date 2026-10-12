@@ -1754,8 +1754,18 @@ fn editors_see_the_library_check_of_the_folder_the_app_reads() {
         .iter()
         .map(|group| group.title.as_str())
         .collect();
-    // The resistors' and capacitors' footprints have no old problems.
-    assert_eq!(titles, ["To fix", "Not in the Catalog yet", "Worth a look"]);
+    // The other CSV files were never imported: their first import takes
+    // their footprints as they are, so their old problems are clean-up.
+    assert_eq!(
+        titles,
+        [
+            "To fix",
+            "Not in the Catalog yet",
+            "Worth a look",
+            "Clean-up"
+        ]
+    );
+    assert_eq!(group("To fix"), ["g-Resistor_SMD:R_0603_1608Metric"]);
 
     // Fixed in the folder: the app keeps its answer until the team catalog
     // changes (it is not worked out per keystroke), then works it out again.
