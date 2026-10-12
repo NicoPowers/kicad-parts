@@ -14,6 +14,11 @@ kicad-integration = { path = "../kicad-integration" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+# Reads downloaded ZIP files in memory (kicad-parts-9693). Deflate through
+# flate2 only, as in native-services, so the lock file gains no new crate;
+# flate2 is named for its default (pure Rust) backend.
+flate2 = "1"
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 
 [dev-dependencies]
 tempfile = "3.10"

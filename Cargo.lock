@@ -353,11 +353,13 @@ dependencies = [
  "base64 0.22.1",
  "collaboration",
  "csv",
+ "flate2",
  "kicad-integration",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "zip",
 ]
 
 [[package]]

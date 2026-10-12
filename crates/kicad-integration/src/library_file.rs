@@ -352,9 +352,208 @@ pub fn model_references(content: &str) -> Vec<String> {
     paths
 }
 
+/// One node of a KiCad s-expression: a list, or a word (an atom or a quoted
+/// string, unescaped).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Sexp {
+    List(Vec<Sexp>),
+    Word(String),
+}
+
+impl Sexp {
+    /// Reads `bytes` as exactly one list.
+    pub fn parse(bytes: &[u8]) -> Result<Self, LibraryFileError> {
+        let tokens = tokens(bytes)?;
+        let mut stack: Vec<Vec<Sexp>> = Vec::new();
+        let mut done = None;
+        for token in tokens {
+            if done.is_some() {
+                return Err(LibraryFileError("content after the root list".into()));
+            }
+            match token {
+                Token::Open(_) => stack.push(Vec::new()),
+                Token::Close(_) => {
+                    let list = stack
+                        .pop()
+                        .ok_or_else(|| LibraryFileError("unbalanced `)`".into()))?;
+                    match stack.last_mut() {
+                        Some(parent) => parent.push(Sexp::List(list)),
+                        None => done = Some(Sexp::List(list)),
+                    }
+                }
+                Token::Atom(range) => stack
+                    .last_mut()
+                    .ok_or_else(|| LibraryFileError("the file does not start with a list".into()))?
+                    .push(Sexp::Word(
+                        String::from_utf8_lossy(&bytes[range]).into_owned(),
+                    )),
+                Token::Text(text) => stack
+                    .last_mut()
+                    .ok_or_else(|| LibraryFileError("the file does not start with a list".into()))?
+                    .push(Sexp::Word(text)),
+            }
+        }
+        done.ok_or_else(|| LibraryFileError("unbalanced `(`".into()))
+    }
+
+    /// The word, if this is one.
+    pub fn word(&self) -> Option<&str> {
+        match self {
+            Self::Word(word) => Some(word),
+            Self::List(_) => None,
+        }
+    }
+
+    /// The items of a list; empty for a word.
+    pub fn items(&self) -> &[Sexp] {
+        match self {
+            Self::List(items) => items,
+            Self::Word(_) => &[],
+        }
+    }
+
+    /// The list's head word, such as `pad` for `(pad "1" smd ...)`.
+    pub fn head(&self) -> Option<&str> {
+        self.items().first().and_then(Sexp::word)
+    }
+
+    /// The word at `index` of a list (0 is the head).
+    pub fn word_at(&self, index: usize) -> Option<&str> {
+        self.items().get(index).and_then(Sexp::word)
+    }
+
+    /// The direct child lists whose head is `head`.
+    pub fn children<'a>(&'a self, head: &'a str) -> impl Iterator<Item = &'a Sexp> + 'a {
+        self.items()
+            .iter()
+            .filter(move |item| item.head() == Some(head))
+    }
+
+    /// Every list at any depth below this one whose head is `head`.
+    pub fn descendants<'a>(&'a self, head: &str, found: &mut Vec<&'a Sexp>) {
+        for item in self.items() {
+            if item.head() == Some(head) {
+                found.push(item);
+            }
+            item.descendants(head, found);
+        }
+    }
+}
+
+/// The `(property "NAME" "VALUE" ...)` pairs of one top-level `(symbol ...)`
+/// entry, in file order. Empty when the bytes are not a symbol.
+pub fn symbol_properties(entry: &[u8]) -> Vec<(String, String)> {
+    let Ok(tree) = Sexp::parse(entry) else {
+        return Vec::new();
+    };
+    if tree.head() != Some("symbol") {
+        return Vec::new();
+    }
+    tree.children("property")
+        .filter_map(|property| {
+            Some((
+                property.word_at(1)?.to_owned(),
+                property.word_at(2)?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// The distinct pin numbers of one top-level `(symbol ...)` entry, across
+/// all its units and body styles. Pins without a number are left out.
+pub fn symbol_pin_numbers(entry: &[u8]) -> std::collections::BTreeSet<String> {
+    let mut numbers = std::collections::BTreeSet::new();
+    let Ok(tree) = Sexp::parse(entry) else {
+        return numbers;
+    };
+    let mut pins = Vec::new();
+    tree.descendants("pin", &mut pins);
+    for pin in pins {
+        if let Some(number) = pin.children("number").find_map(|number| number.word_at(1)) {
+            if !number.trim().is_empty() {
+                numbers.insert(number.to_owned());
+            }
+        }
+    }
+    numbers
+}
+
+/// One `(pad ...)` of a footprint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pad {
+    /// Blank for an unnumbered pad, such as a mechanical one.
+    pub number: String,
+    /// `smd`, `thru_hole`, `np_thru_hole` or `connect`.
+    pub kind: String,
+    /// `rect`, `roundrect`, `circle`, `oval`, `trapezoid` or `custom`.
+    pub shape: String,
+    /// The pad's position, in millimetres.
+    pub at: (f64, f64),
+    /// The pad's size, in millimetres.
+    pub size: (f64, f64),
+}
+
+/// Every pad of a footprint (a whole `.kicad_mod`), in file order. Empty
+/// when the bytes are not a footprint.
+pub fn footprint_pads(bytes: &[u8]) -> Vec<Pad> {
+    let Ok(tree) = Sexp::parse(bytes) else {
+        return Vec::new();
+    };
+    if !matches!(tree.head(), Some("footprint" | "module")) {
+        return Vec::new();
+    }
+    let pair = |pad: &Sexp, head: &str| {
+        pad.children(head)
+            .next()
+            .map(|item| {
+                let number = |index| {
+                    item.word_at(index)
+                        .and_then(|word| word.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                };
+                (number(1), number(2))
+            })
+            .unwrap_or((0.0, 0.0))
+    };
+    tree.children("pad")
+        .map(|pad| Pad {
+            number: pad.word_at(1).unwrap_or_default().to_owned(),
+            kind: pad.word_at(2).unwrap_or_default().to_owned(),
+            shape: pad.word_at(3).unwrap_or_default().to_owned(),
+            at: pair(pad, "at"),
+            size: pair(pad, "size"),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_properties_pins_and_pads() {
+        let entry = "(symbol \"U\" (property \"Reference\" \"U\") (property \"MPN\" \"LM317\")\n\t(symbol \"U_1_1\" (pin input line (at 0 0 0) (number \"1\")) (pin input line (number \"2\")))\n\t(symbol \"U_2_1\" (pin power_in line (number \"2\")) (pin passive line (number \"\"))))";
+        assert_eq!(
+            symbol_properties(entry.as_bytes()),
+            [
+                ("Reference".to_owned(), "U".to_owned()),
+                ("MPN".to_owned(), "LM317".to_owned())
+            ]
+        );
+        let pins: Vec<String> = symbol_pin_numbers(entry.as_bytes()).into_iter().collect();
+        assert_eq!(pins, ["1", "2"]);
+        let footprint = "(footprint \"F\" (pad \"1\" smd roundrect (at -0.8 0) (size 0.9 0.95)) (pad \"\" np_thru_hole circle (at 0 2) (size 1 1)) (pad 2 smd rect (at 0.8 0 90) (size 0.9 0.95)))";
+        let pads = footprint_pads(footprint.as_bytes());
+        assert_eq!(pads.len(), 3);
+        assert_eq!(pads[0].number, "1");
+        assert_eq!(pads[0].shape, "roundrect");
+        assert_eq!(pads[0].at, (-0.8, 0.0));
+        assert_eq!(pads[1].kind, "np_thru_hole");
+        assert_eq!(pads[2].number, "2");
+        assert_eq!(pads[2].size, (0.9, 0.95));
+        assert!(footprint_pads(b"(kicad_symbol_lib)").is_empty());
+        assert!(symbol_pin_numbers(b"(symbol").is_empty());
+    }
 
     const LIBRARY: &str = "(kicad_symbol_lib\n\t(version 20241209)\n\t(generator \"x\")\n\t(symbol \"C\"\n\t\t(property \"Value\" \"a (b\\\" c\")\n\t)\n\t(symbol \"R_US\"\n\t\t(symbol \"R_US_0_1\")\n\t)\n\t(symbol \"R_Child\"\n\t\t(extends \"R_US\")\n\t)\n)\n";
 

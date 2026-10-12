@@ -54,6 +54,7 @@ pub mod category;
 mod change;
 mod compare;
 pub mod csv_import;
+pub mod download;
 pub mod guess;
 mod hash;
 mod ids;

@@ -251,19 +251,20 @@ fn check_name(reference: &str, name: &str, what: &str) -> Result<(), String> {
 /// when the name does not say, so the person chooses.
 pub fn suggested_footprint_library(name: &str) -> Option<&'static str> {
     let starts = |prefixes: &[&str]| prefixes.iter().any(|prefix| name.starts_with(prefix));
-    let library = if starts(&["R_"]) {
+    // KiCad's names (R_0603_1608Metric) and IPC-7351 names (RESC1608X55N).
+    let library = if starts(&["R_", "RESC"]) {
         "g-Resistor_SMD"
-    } else if starts(&["C_"]) {
+    } else if starts(&["C_", "CAPC"]) {
         "g-Capacitor_SMD"
-    } else if starts(&["LED_"]) {
+    } else if starts(&["LED_", "LEDC"]) {
         "g-LED_SMD"
-    } else if starts(&["L_"]) {
+    } else if starts(&["L_", "INDC", "INDM"]) {
         "g-Inductor_SMD"
-    } else if starts(&["D_"]) {
+    } else if starts(&["D_", "SOD", "DIOM"]) {
         "g-Diode_SMD"
-    } else if starts(&["SOT-", "SC-70", "TSOT"]) {
+    } else if starts(&["SOT", "SC-70", "TSOT"]) {
         "g-Package_TO_SOT_SMD"
-    } else if starts(&["SOIC", "SSOP", "TSSOP", "SO-", "SO_"]) {
+    } else if starts(&["SOIC", "SSOP", "TSSOP", "SO-", "SO_", "SOP"]) {
         "g-Package_SO"
     } else if starts(&["QFN", "DFN"]) {
         "g-Package_DFN_QFN"
@@ -432,6 +433,12 @@ mod tests {
             ("QFN-32-1EP_5x5mm_P0.5mm", Some("g-Package_DFN_QFN")),
             ("DFN-8_2x2mm_P0.5mm", Some("g-Package_DFN_QFN")),
             ("BGA-64_9x9mm", Some("g-Package_BGA")),
+            ("RESC1608X55N", Some("g-Resistor_SMD")),
+            ("CAPC1608X90N", Some("g-Capacitor_SMD")),
+            ("INDM2520X120N", Some("g-Inductor_SMD")),
+            ("SOD3716X145N", Some("g-Diode_SMD")),
+            ("SOT95P280X145-5N", Some("g-Package_TO_SOT_SMD")),
+            ("SOP65P640X120-20N", Some("g-Package_SO")),
             ("PinHeader_1x02_P2.54mm_Vertical", None),
         ] {
             assert_eq!(suggested_footprint_library(name), library, "{name}");
