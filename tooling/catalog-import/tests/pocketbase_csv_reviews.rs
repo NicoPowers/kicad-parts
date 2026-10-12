@@ -681,7 +681,7 @@ fn a_csv_value_changed_back_asks_again_unless_already_reviewed() {
         found_problem(&stored, IPN, CSV_DETAILS_DIFFER)
             .filter(|problem| !covered(&stored, IPN, problem))
     };
-    let keep = |team: &Team, problem: &StoredImportProblem| {
+    let keep = |problem: &StoredImportProblem| {
         let reply = submit_csv_review(&editor, &review(IPN, problem, &[], 2)).unwrap();
         assert_eq!(applied(&reply), (None, None));
     };
@@ -689,7 +689,7 @@ fn a_csv_value_changed_back_asks_again_unless_already_reviewed() {
     team.change_row(IPN, "\"47\"", "\"47.0\"");
     assert_eq!(team.import(), "nothing_changed");
     let first = notice(&team).expect("the CSV changed, so the app asks");
-    keep(&team, &first);
+    keep(&first);
     assert!(notice(&team).is_none());
     // Back to 47, what the CSV said before the edit: that is a change of
     // the CSV, never reviewed, so the app asks again.
@@ -697,7 +697,7 @@ fn a_csv_value_changed_back_asks_again_unless_already_reviewed() {
     assert_eq!(team.import(), "nothing_changed");
     let second = notice(&team).expect("the CSV changed back, so the app asks again");
     assert_ne!(second.id, first.id);
-    keep(&team, &second);
+    keep(&second);
     // And to 47.0 again: those exact values were already reviewed, so the
     // app does not ask about them a second time.
     team.change_row(IPN, "\"47\"", "\"47.0\"");
