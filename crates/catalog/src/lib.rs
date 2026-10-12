@@ -48,6 +48,7 @@
 //! with the server; [`compare_details`] and [`compare_revisions`] list what
 //! differs between two saved part details or two revisions.
 
+pub mod cad_file;
 mod cad_item;
 mod change;
 mod compare;

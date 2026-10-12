@@ -1505,16 +1505,18 @@ impl<'a> Planner<'a> {
     }
 }
 
-struct ClassifiedModel {
-    scope: &'static str,
-    status: &'static str,
+pub(crate) struct ClassifiedModel {
+    pub(crate) scope: &'static str,
+    pub(crate) status: &'static str,
     /// The repository path to look for, for a local reference.
-    candidate: Option<String>,
+    pub(crate) candidate: Option<String>,
 }
 
 /// The oracle's lexical, host-independent classification of a 3D model
-/// reference (`tooling/csv-catalog-fixture`).
-fn classify_model_reference(reference: &str) -> ClassifiedModel {
+/// reference (`tooling/csv-catalog-fixture`). The team server's
+/// catalog_lib.js classifyModelReference reads uploaded footprints the same
+/// way.
+pub(crate) fn classify_model_reference(reference: &str) -> ClassifiedModel {
     let strip = |variable: &str| {
         reference
             .strip_prefix(variable)

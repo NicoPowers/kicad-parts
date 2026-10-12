@@ -712,6 +712,11 @@ pub fn submit_import(
 /// footprint.
 pub const EDIT_ROUTE: &str = "/api/catalog/edits";
 
+/// The largest edit request the route accepts, in bytes (32 MiB, set by
+/// `EDIT_BODY_LIMIT` in `catalog_edits.pb.js`), files included.
+/// [`submit_edit`] refuses a bigger one before sending it.
+pub const EDIT_BODY_LIMIT: usize = 32 * 1024 * 1024;
+
 /// A change to one part: its details, its Symbol and Footprint, or both.
 /// Each section carries the number it started from and is sent only when
 /// something in it changed, so a details edit never conflicts with someone
@@ -737,13 +742,85 @@ pub struct DetailsEdit {
 }
 
 /// A new Symbol or Footprint: the CAD fields of the current revision (the
-/// same names in the same order, with new values). The server binds exact
-/// CAD item revisions and adds a revision.
+/// same names in the same order, with new values), and any files they use.
+/// The server binds exact CAD item revisions and adds a revision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CadEdit {
     /// The number of the revision the edit starts from.
     pub expected_revision: u32,
     pub fields: Vec<DetailField>,
+    /// Files that make new CAD items or CAD item revisions; see
+    /// [`crate::cad_file`].
+    pub uploads: Vec<CadUpload>,
+}
+
+/// What an uploaded file is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadRole {
+    Symbol,
+    Footprint,
+    Model3d,
+}
+
+impl UploadRole {
+    /// The role as the edit route names it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Symbol => "symbol",
+            Self::Footprint => "footprint",
+            Self::Model3d => "3d-model",
+        }
+    }
+}
+
+/// One file sent with an edit: a symbol (the exact bytes of one top-level
+/// `(symbol ...)` entry, with the `(version ...)` of its library), a whole
+/// footprint file, or a whole 3D model file. The server reads and hashes
+/// the bytes itself.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CadUpload {
+    pub role: UploadRole,
+    /// `LIB:NAME` for a symbol or footprint; for a 3D model, the
+    /// `3d-models/...` path a footprint sent with it names.
+    pub reference: String,
+    /// The name of the file it came from, shown as its source.
+    pub file_name: String,
+    /// For a symbol, the `(version ...)` of the library it came from.
+    pub format_version: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for CadUpload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CadUpload")
+            .field("role", &self.role)
+            .field("reference", &self.reference)
+            .field("file_name", &self.file_name)
+            .field("format_version", &self.format_version)
+            .field("size", &self.bytes.len())
+            .finish()
+    }
+}
+
+impl CadUpload {
+    /// The upload as the edit route takes it: its bytes as `text` when
+    /// they are UTF-8, otherwise as `base64`, like an import's blobs.
+    fn body(&self) -> Value {
+        let mut body = json!({
+            "role": self.role.as_str(),
+            "reference": self.reference,
+            "fileName": self.file_name,
+        });
+        if let Some(version) = &self.format_version {
+            body["formatVersion"] = json!(version);
+        }
+        match std::str::from_utf8(&self.bytes) {
+            Ok(text) => body["text"] = json!(text),
+            Err(_) => body["base64"] = json!(base64(&self.bytes)),
+        }
+        body
+    }
 }
 
 impl EditCommand {
@@ -776,6 +853,7 @@ impl EditCommand {
         self.cad = Some(CadEdit {
             expected_revision,
             fields: current.cad_fields.clone(),
+            uploads: Vec::new(),
         });
         self
     }
@@ -822,6 +900,10 @@ impl EditCommand {
                 "expectedRevision": cad.expected_revision,
                 "fields": fields(&cad.fields),
             });
+            if !cad.uploads.is_empty() {
+                body["cad"]["uploads"] =
+                    Value::Array(cad.uploads.iter().map(CadUpload::body).collect());
+            }
         }
         body
     }
@@ -855,6 +937,9 @@ pub enum PublishOutcome {
         revision: Option<PublishedRecord>,
         /// The exact CAD item revisions the part's current revision binds.
         cad_item_revisions: Vec<String>,
+        /// The CAD item revisions the edit's files made.
+        #[serde(default)]
+        new_cad_item_revisions: Vec<NewCadItemRevision>,
     },
     /// 422: nothing would change; nothing was written.
     #[serde(rename_all = "camelCase")]
@@ -881,6 +966,21 @@ pub enum PublishOutcome {
         correlation_id: String,
         message: String,
     },
+}
+
+/// A CAD item revision a file sent with an edit made.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NewCadItemRevision {
+    /// `symbol`, `footprint` or `model-3d`.
+    pub kind: String,
+    pub key: String,
+    pub number: u32,
+    pub id: String,
+    /// For a symbol or footprint, how many other parts still use an older
+    /// revision of it; they keep their exact binding.
+    #[serde(default)]
+    pub other_parts: Option<u32>,
 }
 
 /// A record an edit saved.
@@ -1179,11 +1279,19 @@ impl ConflictingRecord {
 /// are `Ok`; inspect the outcome. Bad input (400), 401, 403 and 404 are
 /// errors.
 pub fn submit_edit(client: &PocketBaseClient, command: &EditCommand) -> CollabResult<PublishReply> {
-    publish(client, EDIT_ROUTE, &command.body())
+    let body = command.body().to_string();
+    if body.len() > EDIT_BODY_LIMIT {
+        return Err(CollabError::Protocol(format!(
+            "the edit of {} is {} bytes, more than the {EDIT_BODY_LIMIT} bytes the edit route accepts in one request; nothing was sent",
+            command.ipn,
+            body.len()
+        )));
+    }
+    let reply = client.post_json_text(EDIT_ROUTE, &body)?;
+    publish_reply(reply)
 }
 
-fn publish(client: &PocketBaseClient, route: &str, body: &Value) -> CollabResult<PublishReply> {
-    let reply = client.post_json(route, body)?;
+fn publish_reply(reply: collaboration::HttpReply) -> CollabResult<PublishReply> {
     match reply.status {
         200 | 409 | 422 => {
             let outcome: PublishOutcome = serde_json::from_str(&reply.body)

@@ -401,9 +401,448 @@ function editRequest(body) {
     if (!Array.isArray(cad.fields)) {
       fail("cad needs fields");
     }
-    cad = { expected: number(cad, "expectedRevision", "revision"), fields: cad.fields };
+    cad = {
+      expected: number(cad, "expectedRevision", "revision"),
+      fields: cad.fields,
+      uploads: editUploads(cad.uploads),
+    };
   }
   return { correlationId: correlationId, reason: reason, ipn: ipn, details: details, cad: cad };
+}
+
+// ---- Files uploaded with an edit -------------------------------------------
+//
+// The cad section of an edit may carry files (kicad-parts-3b8b): a symbol,
+// a footprint or a 3D model, each with the reference it is for and its
+// bytes, sent as text or base64 exactly like the blobs of a CSV import.
+// The server reads every file itself: a symbol must be one top-level
+// (symbol "NAME" ...) whose NAME is the reference's name, a footprint a
+// whole .kicad_mod whose (footprint "NAME" ...) is, and a 3D model any
+// bytes that a footprint uploaded with it names. It hashes the bytes, and
+// saves blobs and CAD item revisions in the shape, numbering and IDs of the
+// import (catalog_csv_imports.pb.js).
+
+// Each upload role and the CAD item kind it makes.
+const UPLOAD_KINDS = Object.freeze({ symbol: "symbol", footprint: "footprint", "3d-model": "model-3d" });
+
+// How the bytes of each kind are read, as crates/catalog CadItemDetails
+// names it.
+const CAD_FORMATS = Object.freeze({
+  symbol: "kicad-symbol-entry",
+  footprint: "kicad-footprint",
+  "model-3d": "3d-model",
+});
+
+const CAD_ITEM_DETAILS_SCHEMA = "kicad-parts/cad-item-details/1";
+
+// The license every CAD item revision without stated terms records.
+const UNKNOWN_LICENSE = "unknown-needs-review";
+
+// The `source` of CAD item revisions an edit uploads.
+const UPLOAD_SOURCE = "edit";
+
+// The checked uploads of a cad section: role, CAD item kind, reference,
+// file name, KiCad format version (symbols only) and bytes with their
+// SHA-256, each hashed here.
+function editUploads(list) {
+  if (list === undefined || list === null) {
+    return [];
+  }
+  if (!Array.isArray(list)) {
+    fail("cad uploads must be a list");
+  }
+  if (list.length > 20) {
+    fail("an edit can upload at most 20 files");
+  }
+  const uploads = list.map((upload, index) => {
+    const which = `upload ${index + 1}`;
+    if (!upload || typeof upload !== "object" || Array.isArray(upload)) {
+      fail(`${which} must be an object`);
+    }
+    const role = upload.role;
+    if (typeof role !== "string" || !Object.prototype.hasOwnProperty.call(UPLOAD_KINDS, role)) {
+      fail(`${which} has the role ${String(role)}; the role must be symbol, footprint or 3d-model`);
+    }
+    const reference = upload.reference;
+    if (typeof reference !== "string" || reference.length === 0 || reference.length > 500) {
+      fail(`${which} needs the reference it is for, of at most 500 characters`);
+    }
+    const fileName = upload.fileName;
+    if (typeof fileName !== "string" || trimSpace(fileName).length === 0 || fileName.length > 255) {
+      fail(`${which} needs the name of the file it came from, of at most 255 characters`);
+    }
+    let formatVersion = null;
+    if (role === "symbol") {
+      formatVersion = upload.formatVersion;
+      if (typeof formatVersion !== "string" || !/^[0-9]{1,20}$/.test(formatVersion)) {
+        fail(`the symbol ${reference} needs the (version ...) of the KiCad file it came from`);
+      }
+    } else if (upload.formatVersion !== undefined && upload.formatVersion !== null) {
+      fail(`only a symbol has a format version, not the ${role} ${reference}`);
+    }
+    const hasText = upload.text !== undefined && upload.text !== null;
+    const hasBase64 = upload.base64 !== undefined && upload.base64 !== null;
+    if (hasText === hasBase64) {
+      fail(`the file for the ${role} ${reference} must be sent as either text or base64`);
+    }
+    let bytes;
+    let sha256;
+    if (hasText) {
+      if (typeof upload.text !== "string") {
+        fail(`the text of the file for the ${role} ${reference} must be a string`);
+      }
+      bytes = toBytes(upload.text);
+      sha256 = $security.sha256(upload.text);
+    } else {
+      if (role !== "3d-model") {
+        // KiCad saves symbols and footprints as UTF-8 text.
+        fail(`the file for the ${role} ${reference} must be text, as KiCad saves it`);
+      }
+      bytes = base64Decode(upload.base64);
+      if (bytes === null) {
+        fail(`the file for the ${role} ${reference} is not base64`);
+      }
+      sha256 = sha256Bytes(bytes);
+    }
+    if (bytes.length === 0) {
+      fail(`the file for the ${role} ${reference} is empty`);
+    }
+    return {
+      role: role,
+      kind: UPLOAD_KINDS[role],
+      reference: reference,
+      fileName: fileName,
+      formatVersion: formatVersion,
+      text: hasText ? upload.text : null,
+      bytes: bytes,
+      sha256: sha256,
+    };
+  });
+  const seen = {};
+  for (const upload of uploads) {
+    const key = upload.kind + "\n" + upload.reference;
+    if (seen[key]) {
+      fail(`two files were sent for the ${upload.role} ${upload.reference}; send one`);
+    }
+    seen[key] = true;
+  }
+  return uploads;
+}
+
+// The 3D model references of a footprint, in file order, exactly as
+// crates/kicad-integration library_file.rs model_references (and the CSV
+// catalog fixture) extract them from the file's text.
+function modelReferences(content) {
+  const paths = [];
+  const pieces = content.split("(model");
+  for (let i = 1; i < pieces.length; i++) {
+    const value = pieces[i].replace(LEADING_SPACE, "");
+    if (value.charAt(0) !== '"') {
+      continue;
+    }
+    let escaped = false;
+    let output = "";
+    for (const ch of value.substring(1)) {
+      if (!escaped && ch === '"') {
+        break;
+      }
+      escaped = !escaped && ch === "\\";
+      output += ch;
+      if (ch !== "\\") {
+        escaped = false;
+      }
+    }
+    paths.push(output);
+  }
+  return paths;
+}
+
+// `relative` as a clean `/`-separated path, or null if it could escape,
+// as crates/catalog csv_import safe_relative.
+function safeRelative(relative) {
+  const drive = relative.length >= 2 && /^[A-Za-z]$/.test(relative.charAt(0)) && relative.charAt(1) === ":";
+  if (relative.length === 0 || relative.charAt(0) === "/" || relative.charAt(0) === "\\" || drive) {
+    return null;
+  }
+  const parts = [];
+  for (const component of relative.split(/[/\\]/)) {
+    if (component === "" || component === ".") {
+      continue;
+    }
+    if (component === ".." || component.indexOf(":") >= 0) {
+      return null;
+    }
+    parts.push(component);
+  }
+  return parts.length > 0 ? parts.join("/") : null;
+}
+
+// The lexical classification of a 3D model reference, as crates/catalog
+// csv_import classify_model_reference: { scope, status, candidate }, where
+// candidate is the repository path under 3d-models/ for a local reference.
+function classifyModelReference(reference) {
+  const strip = (variable) => {
+    if (!reference.startsWith(variable)) {
+      return null;
+    }
+    const rest = reference.substring(variable.length);
+    return rest.charAt(0) === "/" || rest.charAt(0) === "\\" ? rest.substring(1) : null;
+  };
+  const local = (relative) => {
+    const clean = safeRelative(relative);
+    return clean === null
+      ? { scope: "local", status: "unsafe-path", candidate: null }
+      : { scope: "local", status: "missing", candidate: "3d-models/" + clean };
+  };
+  const parts = strip("${GITPLM_PARTS}");
+  if (parts !== null) {
+    const separator = parts.charAt("3d-models".length);
+    if (parts.startsWith("3d-models") && (separator === "/" || separator === "\\")) {
+      return local(parts.substring("3d-models".length + 1));
+    }
+    return { scope: "local", status: "unsafe-path", candidate: null };
+  }
+  const models = strip("${GITPLM_3DMODELS}");
+  if (models !== null) {
+    return local(models);
+  }
+  const drive = reference.length >= 2 && /^[A-Za-z]$/.test(reference.charAt(0)) && reference.charAt(1) === ":";
+  let scope;
+  if (reference.startsWith("\\\\") || reference.startsWith("//")) {
+    scope = "unc-absolute";
+  } else if (drive && (reference.charAt(2) === "/" || reference.charAt(2) === "\\")) {
+    scope = "windows-drive-absolute";
+  } else if (reference.startsWith("/")) {
+    scope = "posix-absolute";
+  } else if (reference.startsWith("\\")) {
+    scope = "windows-rooted";
+  } else if (drive) {
+    scope = "windows-drive-relative";
+  } else if (reference.startsWith("${")) {
+    scope = "external-variable";
+  } else {
+    scope = "relative";
+  }
+  return { scope: scope, status: "unresolved", candidate: null };
+}
+
+// The name after the colon of LIB:NAME, or null.
+function referenceName(reference) {
+  const colon = reference.indexOf(":");
+  return colon > 0 && colon < reference.length - 1 ? reference.substring(colon + 1) : null;
+}
+
+// Reads an uploaded symbol: one top-level (symbol "NAME" ...) list, alone,
+// whose NAME is the reference's name. Throws a plain BadRequestError.
+function readUploadedSymbol(upload) {
+  const text = bytesText(upload.bytes);
+  const tokens = sexpTokens(text);
+  const name = referenceName(upload.reference);
+  const one = tokens !== null && sexpChildren(tokens) !== null;
+  if (!one || text.charAt(0) !== "(" || text.charAt(text.length - 1) !== ")" || sexpWord(tokens[1]) !== "symbol") {
+    fail(
+      `the file for the symbol ${upload.reference} must hold exactly one symbol, (symbol "NAME" ...), and nothing else`,
+    );
+  }
+  if (name === null || sexpWord(tokens[2]) !== bytesText(toBytes(name))) {
+    fail(`the symbol in the file is not named ${name === null ? upload.reference : name}, the name in ${upload.reference}`);
+  }
+  if (sexpChildren(tokens).some((child) => sexpWord(child[1]) === "extends")) {
+    fail(`the symbol ${upload.reference} extends another symbol; choose a symbol that does not`);
+  }
+}
+
+// Reads an uploaded footprint: a whole .kicad_mod whose (footprint "NAME"
+// ...) (or older (module ...)) is the reference's name. Gives its format
+// version and its 3D model references, each classified.
+function readUploadedFootprint(upload) {
+  const text = bytesText(upload.bytes);
+  const tokens = sexpTokens(text);
+  const children = tokens === null ? null : sexpChildren(tokens);
+  const head = tokens === null ? null : sexpWord(tokens[1]);
+  if (children === null || (head !== "footprint" && head !== "module")) {
+    fail(`the file for the footprint ${upload.reference} is not a KiCad footprint (.kicad_mod)`);
+  }
+  const name = referenceName(upload.reference);
+  if (name === null || sexpWord(tokens[2]) !== bytesText(toBytes(name))) {
+    fail(
+      `the footprint in the file is not named ${name === null ? upload.reference : name}, the name in ${upload.reference}`,
+    );
+  }
+  const version = children.find((child) => sexpWord(child[1]) === "version");
+  return {
+    formatVersion: version ? sexpWord(version[2]) : null,
+    models: modelReferences(upload.text).map((reference) => {
+      const classified = classifyModelReference(reference);
+      return { reference: reference, scope: classified.scope, status: classified.status, candidate: classified.candidate };
+    }),
+  };
+}
+
+// A new CAD item revision's snapshot document, with keys in the order
+// crates/catalog CadItemDetails writes them.
+function cadItemSnapshot(kind, key, formatVersion, sha256, size, modelReferences) {
+  return JSON.stringify({
+    schema: CAD_ITEM_DETAILS_SCHEMA,
+    kind: kind,
+    key: key,
+    format: CAD_FORMATS[kind],
+    format_version: formatVersion,
+    blob_sha256: sha256,
+    blob_size: size,
+    model_references: modelReferences,
+    license: { status: UNKNOWN_LICENSE },
+  });
+}
+
+// What each upload of an edit becomes, read and checked against what is
+// stored: by "kind\nkey", { kind, key, cadItemId, cadItemIsNew, isNew,
+// number, id, predecessor, snapshot, snapshotSha256, content, upload } for a
+// new revision, or { isNew: false, current, content } when the content is
+// the CAD item's current revision's. 3D models come first, so a footprint
+// names their revisions; a footprint reference into the Catalog's
+// 3d-models folder binds the 3D model uploaded with it, or the Catalog's
+// own, or stays unresolved ("missing") when neither has it. Every 3D model
+// upload must be one that an uploaded footprint names.
+function preparedUploads(txApp, uploads) {
+  const prepared = {};
+  const named = {};
+  const footprints = {};
+  for (const upload of uploads) {
+    if (upload.kind === "model-3d") {
+      continue;
+    }
+    if (referenceName(upload.reference) === null) {
+      fail(`${upload.reference} is not a reference such as g-Resistor_SMD:R_0603_1608Metric`);
+    }
+    const library = upload.reference.substring(0, upload.reference.indexOf(":"));
+    if (!library.startsWith("g-")) {
+      fail(`a file can only be added to the Catalog's own libraries, whose names start with g-, not ${library}`);
+    }
+    if (upload.kind === "symbol") {
+      readUploadedSymbol(upload);
+    } else {
+      footprints[upload.reference] = readUploadedFootprint(upload);
+      for (const model of footprints[upload.reference].models) {
+        if (model.candidate) {
+          named[model.candidate] = true;
+        }
+      }
+    }
+  }
+  for (const upload of uploads) {
+    if (upload.kind === "model-3d" && !named[upload.reference]) {
+      fail(`no footprint uploaded with the 3D model ${upload.reference} names it`);
+    }
+  }
+  const cadItem = (kind, key) => {
+    const id = deriveId("cad-item", kind + "\n" + key);
+    const stored = recordById(txApp, "catalog_cad_items", id);
+    if (stored && (stored.getString("kind") !== kind || stored.getString("key") !== key)) {
+      throw new BadRequestError(`the stored CAD item ${id} is not the ${kind} ${key}`);
+    }
+    return { id: id, stored: stored };
+  };
+  const prepare = (upload, formatVersion, modelTargets) => {
+    const item = cadItem(upload.kind, upload.reference);
+    const current = item.stored ? currentCadItemRevision(txApp, item.id) : null;
+    const snapshot = cadItemSnapshot(
+      upload.kind,
+      upload.reference,
+      formatVersion,
+      upload.sha256,
+      upload.bytes.length,
+      modelTargets,
+    );
+    const content = cadContent(snapshot);
+    if (current && cadContent(current.getString("snapshot")) === content) {
+      return { isNew: false, current: current, cadItemId: item.id, content: content };
+    }
+    const number = current ? current.getInt("number") + 1 : 1;
+    return {
+      isNew: true,
+      kind: upload.kind,
+      key: upload.reference,
+      cadItemId: item.id,
+      cadItemIsNew: !item.stored,
+      number: number,
+      id: deriveId("cad-item-revision", item.id + "\n" + number),
+      predecessor: current ? current.id : "",
+      snapshot: snapshot,
+      snapshotSha256: $security.sha256(snapshot),
+      content: content,
+      upload: upload,
+    };
+  };
+  // The revision a binding to `entry` names.
+  const bindingOf = (entry) =>
+    entry.isNew
+      ? { kind: "cad-item-revision", cad_item: entry.cadItemId, number: entry.number, snapshot_sha256: entry.snapshotSha256 }
+      : bindingTo(entry.cadItemId, entry.current);
+  for (const upload of uploads) {
+    if (upload.kind === "model-3d") {
+      prepared[upload.kind + "\n" + upload.reference] = prepare(upload, null, []);
+    }
+  }
+  for (const upload of uploads) {
+    if (upload.kind === "symbol") {
+      prepared[upload.kind + "\n" + upload.reference] = prepare(upload, upload.formatVersion, []);
+    } else if (upload.kind === "footprint") {
+      const read = footprints[upload.reference];
+      // The 3D model revisions the footprint's current revision binds,
+      // kept while their content is the 3D model's current content.
+      const item = cadItem("footprint", upload.reference);
+      const currentFootprint = item.stored ? currentCadItemRevision(txApp, item.id) : null;
+      const kept = {};
+      if (currentFootprint) {
+        for (const model of JSON.parse(currentFootprint.getString("snapshot")).model_references || []) {
+          if (model && model.target && model.target.kind === "cad-item-revision") {
+            kept[model.target.cad_item] = model.target;
+          }
+        }
+      }
+      const targets = read.models.map((model) => {
+        let target;
+        const sent = model.candidate ? prepared["model-3d\n" + model.candidate] : undefined;
+        if (sent) {
+          target = bindingOf(sent);
+        } else if (model.candidate) {
+          const stored = cadItem("model-3d", model.candidate);
+          const current = stored.stored ? currentCadItemRevision(txApp, stored.id) : null;
+          if (current) {
+            const before = kept[stored.id];
+            const keptRecord = before
+              ? recordById(txApp, "catalog_cad_item_revisions", deriveId("cad-item-revision", stored.id + "\n" + before.number))
+              : null;
+            target =
+              keptRecord &&
+              keptRecord.getString("snapshot_sha256") === before.snapshot_sha256 &&
+              cadContent(keptRecord.getString("snapshot")) === cadContent(current.getString("snapshot"))
+                ? bindingTo(stored.id, keptRecord)
+                : bindingTo(stored.id, current);
+          } else {
+            target = { kind: "unresolved", status: "missing" };
+          }
+        } else {
+          target = { kind: "unresolved", status: model.status };
+        }
+        return { reference: model.reference, scope: model.scope, target: target };
+      });
+      prepared[upload.kind + "\n" + upload.reference] = prepare(upload, read.formatVersion, targets);
+    }
+  }
+  return prepared;
+}
+
+// The upload's new CAD item revision that `target` names, or undefined.
+function newUploadFor(prepared, target) {
+  for (const key of Object.keys(prepared)) {
+    const entry = prepared[key];
+    if (entry.isNew && entry.cadItemId === target.cad_item && entry.number === target.number) {
+      return entry;
+    }
+  }
+  return undefined;
 }
 
 // New field values checked against the current ones: an edit may change
@@ -737,10 +1176,16 @@ function bindingTo(cadItemId, revision) {
 // - any other reference binds the current revision of the CAD item with
 //   exactly that library reference;
 // - a reference that the current revision kept as unresolved stays so;
+// - a reference with a file uploaded for it (`prepared`, from
+//   preparedUploads) binds the new CAD item revision the file makes, or,
+//   when the file has the content of the CAD item's current revision,
+//   keeps the revision it binds now if that has the same content and
+//   otherwise binds the current one, as the import does;
 // - anything else is refused: an edit can only use CAD items the Catalog
-//   already has.
+//   already has, or files sent with it.
 // Other libraries (such as KiCad's own) are external, as in the import.
-function cadReferences(txApp, fields, currentRevision) {
+function cadReferences(txApp, fields, currentRevision, prepared) {
+  prepared = prepared || {};
   const value = (name) => {
     const field = fields.find((item) => item.name === name);
     return field ? field.value : null;
@@ -786,7 +1231,30 @@ function cadReferences(txApp, fields, currentRevision) {
           throw new BadRequestError(`the stored CAD item ${cadItemId} is not the ${role} ${reference}`);
         }
         const same = previous.find((item) => item.role === role && item.reference === reference);
-        if (cadItem && same && same.target.kind === "cad-item-revision" && same.target.cad_item === cadItemId) {
+        const uploaded = prepared[role + "\n" + reference];
+        if (uploaded) {
+          uploaded.used = true;
+        }
+        const keptRecord =
+          same && same.target.kind === "cad-item-revision" && same.target.cad_item === cadItemId
+            ? recordById(txApp, "catalog_cad_item_revisions", deriveId("cad-item-revision", cadItemId + "\n" + same.target.number))
+            : null;
+        if (uploaded && uploaded.isNew) {
+          target = {
+            kind: "cad-item-revision",
+            cad_item: uploaded.cadItemId,
+            number: uploaded.number,
+            snapshot_sha256: uploaded.snapshotSha256,
+          };
+        } else if (uploaded) {
+          // The file has the content of the CAD item's current revision.
+          target =
+            keptRecord &&
+            keptRecord.getString("snapshot_sha256") === same.target.snapshot_sha256 &&
+            cadContent(keptRecord.getString("snapshot")) === uploaded.content
+              ? bindingTo(cadItemId, keptRecord)
+              : bindingTo(cadItemId, uploaded.current);
+        } else if (cadItem && same && same.target.kind === "cad-item-revision" && same.target.cad_item === cadItemId) {
           target = {
             kind: "cad-item-revision",
             cad_item: cadItemId,
@@ -803,12 +1271,21 @@ function cadReferences(txApp, fields, currentRevision) {
           target = { kind: "unresolved", status: same.target.status };
         } else {
           throw new BadRequestError(
-            `the ${role} ${reference} is not in the Catalog; an edit can only use symbols and footprints the Catalog already has`,
+            `the ${role} ${reference} is not in the Catalog; choose a file for it, or use a ${role} the Catalog already has`,
           );
         }
       }
       references.push({ role: role, ordinal: ordinal, reference: reference, target: target });
     });
+  }
+  for (const key of Object.keys(prepared)) {
+    const entry = prepared[key];
+    const [kind, reference] = [key.substring(0, key.indexOf("\n")), key.substring(key.indexOf("\n") + 1)];
+    if (kind !== "model-3d" && !entry.used) {
+      throw new BadRequestError(
+        `the file sent for the ${kind} ${reference} is not used: the ${kind === "symbol" ? "Symbol" : "Footprint"} field does not name ${reference}`,
+      );
+    }
   }
   return references;
 }
@@ -1093,7 +1570,19 @@ function publishEdit(e) {
             request.details.manufacturerParts.map((part) => [part && part.manufacturer, part && part.mpn]),
           ]
         : null,
-      request.cad ? [request.cad.expected, pairs(request.cad.fields)] : null,
+      request.cad
+        ? [
+            request.cad.expected,
+            pairs(request.cad.fields),
+            request.cad.uploads.map((upload) => [
+              upload.role,
+              upload.reference,
+              upload.fileName,
+              upload.formatVersion,
+              upload.sha256,
+            ]),
+          ]
+        : null,
     ]),
   );
 
@@ -1199,18 +1688,30 @@ function publishEdit(e) {
       }
     }
     let revision = null;
+    // The CAD item revisions the uploaded files make, by "kind\nkey".
+    let prepared = {};
     if (request.cad) {
       const fields = editedFields(request.cad.fields, storedRevision.cad_fields || []);
+      prepared = preparedUploads(txApp, request.cad.uploads);
       const document = {
         schema: PART_REVISION_SCHEMA,
         ipn: request.ipn,
         cad_fields: fields,
-        cad_references: cadReferences(txApp, fields, storedRevision),
+        cad_references: cadReferences(txApp, fields, storedRevision, prepared),
       };
       // Excluded from BOM follows the CAD the new revision binds, read by
-      // the server from the stored bytes (kicad-parts-ccc0). Like
-      // PartRevision, the snapshot names it only when it is set.
-      if (excludedFromBom(document, storedBomMarks(txApp))) {
+      // the server from the stored bytes (kicad-parts-ccc0), or from the
+      // bytes uploaded for a new CAD item revision. Like PartRevision, the
+      // snapshot names it only when it is set.
+      const stored = storedBomMarks(txApp);
+      const markOf = (target, role) => {
+        const sent = newUploadFor(prepared, target);
+        if (!sent) {
+          return stored(target, role);
+        }
+        return sent.kind === role ? bomMark(role, sent.upload.bytes) : null;
+      };
+      if (excludedFromBom(document, markOf)) {
         document.excluded_from_bom = true;
       }
       refuse("revision", revisionProblem(document));
@@ -1219,10 +1720,14 @@ function publishEdit(e) {
       // Only CAD that really changes can bring an archived design back; an
       // unchanged CAD section (sent with a details edit) never does.
       if (sha !== currentRevision.getString("snapshot_sha256")) {
+        const storedContent = storedCadContent(txApp);
         const archived = archivedRevisionWithContent(
           txApp,
           partId,
-          partRevisionContent(document, storedCadContent(txApp)),
+          partRevisionContent(document, (target) => {
+            const sent = newUploadFor(prepared, target);
+            return sent ? sent.content : storedContent(target);
+          }),
         );
         if (archived > 0) {
           throw new BadRequestError(
@@ -1262,10 +1767,20 @@ function publishEdit(e) {
       // A new revision comes after the newest one, which may be archived.
       const newest = newestRevision(txApp, partId);
       const revisionNumber = revision ? newest.getInt("number") + 1 : null;
+      // The new CAD item revisions the uploaded files make, 3D models
+      // first, as their footprints name them. A new CAD item revision is
+      // only ever saved with the part revision that binds it.
+      const newCadItemRevisions = revision
+        ? Object.keys(prepared)
+            .map((key) => prepared[key])
+            .filter((entry) => entry.isNew)
+            .sort((a, b) => (a.kind === "model-3d" ? 0 : 1) - (b.kind === "model-3d" ? 0 : 1))
+        : [];
       const summary = JSON.stringify({
         ipn: request.ipn,
         partDetails: details ? 1 : 0,
         partRevisions: revision ? 1 : 0,
+        cadItemRevisions: newCadItemRevisions.length,
         details: detailsNumber,
         revision: revisionNumber,
       });
@@ -1280,6 +1795,45 @@ function publishEdit(e) {
       change.set("sources", JSON.stringify({ parts: [request.ipn] }));
       change.set("summary", summary);
       txApp.save(change);
+
+      // Blobs and CAD items are shared by content and identity, so one
+      // that is already stored is reused once it is shown to be the same.
+      for (const entry of newCadItemRevisions) {
+        const blobId = deriveId("blob", entry.upload.sha256);
+        const storedBlob = recordById(txApp, "catalog_blobs", blobId);
+        if (storedBlob && storedBlob.getString("sha256") !== entry.upload.sha256) {
+          throw new Error(`the stored blob ${blobId} is not the bytes with SHA-256 ${entry.upload.sha256}`);
+        }
+        if (!storedBlob) {
+          const blob = record("catalog_blobs", blobId);
+          blob.set("sha256", entry.upload.sha256);
+          blob.set("size", entry.upload.bytes.length);
+          blob.set("file", $filesystem.fileFromBytes(entry.upload.bytes, entry.upload.sha256 + ".bin"));
+          blob.set("first_change", changeId);
+          txApp.save(blob);
+        }
+        if (entry.cadItemIsNew) {
+          const cadItem = record("catalog_cad_items", entry.cadItemId);
+          cadItem.set("kind", entry.kind);
+          cadItem.set("key", entry.key);
+          cadItem.set("first_change", changeId);
+          txApp.save(cadItem);
+        }
+        const made = record("catalog_cad_item_revisions", entry.id);
+        made.set("cad_item", entry.cadItemId);
+        made.set("number", entry.number);
+        made.set("predecessor", entry.predecessor);
+        made.set("change", changeId);
+        made.set("blob", blobId);
+        made.set("snapshot_sha256", entry.snapshotSha256);
+        made.set("snapshot", entry.snapshot);
+        made.set("license", UNKNOWN_LICENSE);
+        made.set(
+          "source",
+          JSON.stringify({ schema: SOURCE_SCHEMA, source: UPLOAD_SOURCE, file_name: entry.upload.fileName }),
+        );
+        txApp.save(made);
+      }
 
       let savedDetails = null;
       if (details) {
@@ -1346,6 +1900,26 @@ function publishEdit(e) {
         details: savedDetails,
         revision: savedRevision,
         cadItemRevisions: bound,
+        // Each new CAD item revision, with how many other parts still use
+        // an older revision of that symbol or footprint (they keep their
+        // exact binding; kicad-parts-10a7 offers to move them).
+        newCadItemRevisions: newCadItemRevisions.map((entry) => ({
+          kind: entry.kind,
+          key: entry.key,
+          number: entry.number,
+          id: entry.id,
+          otherParts:
+            entry.kind === "model-3d"
+              ? null
+              : txApp.findRecordsByFilter(
+                  "catalog_part_revisions",
+                  "part.current_revision = id && part != {:part} && cad_item_revisions.cad_item ?= {:item}",
+                  "",
+                  0,
+                  0,
+                  { part: partId, item: entry.cadItemId },
+                ).length,
+        })),
       };
     }
 
@@ -1924,6 +2498,8 @@ module.exports = {
   PART_REVISION_SCHEMA: PART_REVISION_SCHEMA,
   SOURCE_SCHEMA: SOURCE_SCHEMA,
   publishEdit: publishEdit,
+  modelReferences: modelReferences,
+  classifyModelReference: classifyModelReference,
   publishArchive: publishArchive,
   publishCsvReview: publishCsvReview,
   excludedFromBom: excludedFromBom,

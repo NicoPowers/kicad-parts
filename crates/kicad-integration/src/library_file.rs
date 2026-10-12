@@ -107,6 +107,8 @@ impl SymbolLibrary {
 /// A `.kicad_mod` footprint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FootprintFile {
+    /// The footprint's own name, the first word after `footprint`.
+    pub name: Option<String>,
     /// The footprint's `(version ...)`.
     pub version: Option<String>,
     /// Every `(model "...")` path, in file order, exactly as written.
@@ -131,7 +133,15 @@ impl FootprintFile {
                 matches!(token, Token::Atom(range) if &text[range.clone()] == b"exclude_from_bom")
             });
         }
+        let name = match tokens(bytes)?.get(2) {
+            Some(Token::Atom(range)) => {
+                Some(String::from_utf8_lossy(&bytes[range.clone()]).into_owned())
+            }
+            Some(Token::Text(value)) => Some(value.clone()),
+            _ => None,
+        };
         Ok(Self {
+            name,
             version: file_version(&children),
             model_references: model_references(&String::from_utf8_lossy(bytes)),
             exclude_from_bom,
@@ -373,6 +383,7 @@ mod tests {
     fn reads_footprint_versions_and_model_references_like_the_oracle() {
         let footprint = "(footprint \"R\"\n (version 20241229)\n (model \"${KICAD9_3DMODEL_DIR}/R.step\"\n (offset)) (model \"${GITPLM_PARTS}/3d-models/x.step\"))";
         let file = FootprintFile::parse(footprint.as_bytes()).unwrap();
+        assert_eq!(file.name.as_deref(), Some("R"));
         assert_eq!(file.version.as_deref(), Some("20241229"));
         assert!(!file.exclude_from_bom);
         assert_eq!(
