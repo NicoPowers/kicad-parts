@@ -1178,3 +1178,160 @@ fn ipns_an_engineer_types() {
     assert!(!yours);
     assert_eq!(next_free, "CAP-0006-0001");
 }
+
+/// Files saved on Windows with CRLF line endings (a vendor ZIP made there,
+/// or a copy through git with autocrlf): Add part and Edit part take them.
+#[test]
+fn files_with_crlf_line_endings() {
+    let team = Team::start();
+    let crlf = |text: String| text.replace('\n', "\r\n");
+    let zip = zip_of(&[
+        (
+            "KiCad/C_Crlf.kicad_sym",
+            crlf(symbol_named("C_Crlf", "CRLF-1")).as_bytes(),
+        ),
+        (
+            "KiCad/C_0603_Crlf.kicad_mod",
+            crlf(footprint_named("C_0603_Crlf")).as_bytes(),
+        ),
+        ("3D/C_0603_Crlf.stp", MODEL),
+    ]);
+    let reading = team.read(&zip);
+    assert_eq!(reading.symbol_name, "C_Crlf", "{:?}", reading.notes);
+    assert_eq!((reading.pins, reading.pads), (Some(2), Some(2)));
+    let saved = team.add(&team.team, new_part(&reading, "CAP-0004-0001", "cap"));
+    let PublishResult::Added { part } = saved else {
+        panic!("not added: {saved:?}");
+    };
+    // Edit part: a CRLF footprint file for an imported resistor.
+    let resistor = team.team.part("RES-0000-0470").unwrap().unwrap();
+    let footprint = crlf(repository_text(
+        "footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
+    ))
+    .replacen("(tags", "(descr \"CRLF copy\")\r\n\t(tags", 1);
+    let mut edit = opened(&resistor, "A CRLF footprint");
+    edit.files = vec![team_file(
+        FileKind::Footprint,
+        "R_0603_1608Metric.kicad_mod",
+        footprint.as_bytes(),
+        None,
+    )];
+    let saved = team.team.edit(edit).unwrap();
+    assert!(
+        matches!(
+            saved,
+            PublishResult::Saved {
+                revision: Some(2),
+                ..
+            }
+        ),
+        "{saved:?}"
+    );
+    // And a CRLF symbol file in Edit part, for the part just added.
+    let mut edit = opened(&part, "A CRLF symbol");
+    edit.cad_fields[0].value = "g-cap:C_Crlf2".into();
+    edit.files = vec![team_file(
+        FileKind::Symbol,
+        "C_Crlf2.kicad_sym",
+        crlf(symbol_named("C_Crlf2", "CRLF-2")).as_bytes(),
+        Some("C_Crlf2"),
+    )];
+    let saved = team.team.edit(edit).unwrap();
+    assert!(
+        matches!(
+            saved,
+            PublishResult::Saved {
+                revision: Some(2),
+                ..
+            }
+        ),
+        "{saved:?}"
+    );
+}
+
+/// Edit part with a file chosen, while someone else saves the part. Their
+/// details change and my file are separate, so both are kept without a
+/// conflict. When they changed the footprint too, the conflict keeps my
+/// chosen file, and saving on top of theirs uses it.
+#[test]
+fn a_conflict_while_a_file_is_chosen() {
+    let team = Team::start();
+    let second = team.second("Bea Editor", "bea@example.test", true);
+    let part = team.add_capacitor("CAP-0004-0001");
+    wait_until("Bea sees it", || {
+        second.current_values().contains_key("CAP-0004-0001")
+    });
+    let with_file = |part: &TeamPart, descr: &str| {
+        let mut request = opened(part, descr);
+        request.files = vec![team_file(
+            FileKind::Footprint,
+            "C_0603_New.kicad_mod",
+            footprint_named("C_0603_New")
+                .replacen(
+                    "(tags",
+                    &format!(
+                        "(descr \"{descr}\")
+	(tags"
+                    ),
+                    1,
+                )
+                .as_bytes(),
+            None,
+        )];
+        request
+    };
+    let mine = with_file(&part, "mine");
+    let theirs_part = second.part("CAP-0004-0001").unwrap().unwrap();
+    let mut theirs = opened(&theirs_part, "Voltage");
+    set_field(&mut theirs.fields, "Voltage", "25V");
+    assert!(matches!(
+        second.edit(theirs).unwrap(),
+        PublishResult::Saved { .. }
+    ));
+    let saved = team.team.edit(mine).unwrap();
+    let PublishResult::Saved { revision, part, .. } = saved else {
+        panic!("not saved: {saved:?}");
+    };
+    assert_eq!(revision, Some(2));
+    assert_eq!(part.details.field("Voltage"), Some("25V"));
+
+    // Both change the footprint.
+    wait_until("Bea sees revision 2", || {
+        second
+            .part("CAP-0004-0001")
+            .unwrap()
+            .is_some_and(|part| part.revision.number == 2)
+    });
+    let mine = with_file(&part, "mine again");
+    let theirs = with_file(&second.part("CAP-0004-0001").unwrap().unwrap(), "theirs");
+    assert!(matches!(
+        second.edit(theirs).unwrap(),
+        PublishResult::Saved { .. }
+    ));
+    let answer = team.team.edit(mine).unwrap();
+    let PublishResult::Conflict(conflict) = answer else {
+        panic!("no conflict: {answer:?}");
+    };
+    assert_eq!(conflict.merged.files.len(), 1, "the chosen file is kept");
+    // The conflict shows the file: theirs is a newer footprint revision.
+    let row = conflict
+        .rows
+        .iter()
+        .find(|row| row.label == "Footprint file")
+        .unwrap_or_else(|| panic!("{:?}", conflict.rows));
+    assert!(row.you_changed && row.both_changed, "{row:?}");
+    assert_eq!(
+        row.started_from,
+        "g-Capacitor_SMD:C_0603_New, footprint revision 2"
+    );
+    assert_eq!(
+        row.theirs,
+        "g-Capacitor_SMD:C_0603_New, footprint revision 3"
+    );
+    assert_eq!(row.yours, "C_0603_New.kicad_mod");
+    let saved = team.team.edit(conflict.merged.clone()).unwrap();
+    let PublishResult::Saved { revision, .. } = saved else {
+        panic!("not saved: {saved:?}");
+    };
+    assert_eq!(revision, Some(4));
+}

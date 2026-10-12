@@ -2704,6 +2704,37 @@ fn edit_conflict(
         &request.cad_fields,
         &mut rows,
     );
+    // A file you chose is a change of yours even when the reference stays
+    // the same (a new revision of the same symbol or footprint), so the
+    // edit is never taken for already saved.
+    for file in &request.files {
+        let (label, role) = match file.kind {
+            FileKind::Symbol => ("Symbol file", CadReferenceRole::Symbol),
+            FileKind::Footprint => ("Footprint file", CadReferenceRole::Footprint),
+            FileKind::Model3d => continue,
+        };
+        let bound = |revision: &PartRevision| {
+            revision
+                .cad_references
+                .iter()
+                .filter(|reference| reference.role == role)
+                .map(|reference| format!("{}, {}", reference.reference, binding(reference)))
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                )
+        };
+        let (started, theirs) = (bound(base_revision), bound(&their_revision));
+        rows.push(ConflictRow {
+            label: label.into(),
+            both_changed: theirs != started,
+            started_from: started,
+            theirs,
+            yours: file.label.clone().unwrap_or_else(|| file.file_name.clone()),
+            you_changed: true,
+        });
+    }
     let merged = TeamEditRequest {
         correlation_id: None,
         ipn: request.ipn.clone(),
