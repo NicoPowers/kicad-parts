@@ -639,16 +639,15 @@ pub fn AddPartView(
                 }
                 Ok(PublishResult::IpnTaken {
                     message,
+                    next_free,
                     ipn,
-                    yours: true,
-                    ..
+                    yours,
                 }) => {
-                    form.already.set(Some(ipn));
-                    problem.set(Some(message));
-                }
-                Ok(PublishResult::IpnTaken {
-                    message, next_free, ..
-                }) => {
+                    // Open the part you already added, or use the next
+                    // free IPN for another part.
+                    if yours {
+                        form.already.set(Some(ipn));
+                    }
                     form.ipn.set(next_free.clone());
                     form.offered_ipn.set_value(next_free);
                     form.check_ipn();

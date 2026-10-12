@@ -717,17 +717,7 @@ impl TeamCatalog {
                     self.wait_for_change(seq);
                     saved_then(reload(&client, &ipn), |part| PublishResult::Added { part })
                 }
-                CreateOutcome::IpnTaken {
-                    added_by_you: true, ..
-                } => Ok(PublishResult::IpnTaken {
-                    message: format!(
-                        "You already added {ipn}, so nothing more was saved. Open it to check it, or change it with Edit part."
-                    ),
-                    next_free: String::new(),
-                    ipn: ipn.clone(),
-                    yours: true,
-                }),
-                CreateOutcome::IpnTaken { .. } => {
+                CreateOutcome::IpnTaken { added_by_you, .. } => {
                     let mut taken: BTreeSet<String> = known.clone();
                     taken.extend(
                         self.current_parts()
@@ -740,13 +730,23 @@ impl TeamCatalog {
                         taken.iter().map(String::as_str),
                     )
                     .unwrap_or_default();
-                    Ok(PublishResult::IpnTaken {
-                        message: format!(
+                    // A part you added yourself (a save whose answer was
+                    // lost) is offered to open; another part with this IPN
+                    // is someone else's.
+                    let message = if added_by_you {
+                        format!(
+                            "You already added {ipn}, so nothing more was saved. Open it to check it, or, for another part, use the next free IPN, {next_free}."
+                        )
+                    } else {
+                        format!(
                             "Someone added a part with the IPN {ipn} first, so nothing was saved. The next free IPN is {next_free}."
-                        ),
+                        )
+                    };
+                    Ok(PublishResult::IpnTaken {
+                        message,
                         next_free,
                         ipn: ipn.clone(),
-                        yours: false,
+                        yours: added_by_you,
                     })
                 }
                 CreateOutcome::CorrelationReused { message, .. } => refused(message),

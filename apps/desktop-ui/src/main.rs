@@ -597,6 +597,8 @@ fn PartPanel(
         let now = signed_in_as.get();
         if previous.is_some_and(|previous| previous != now) {
             ui.reset();
+            // Nothing typed for Add part by one person is kept for another.
+            add_form.reset();
         }
         now
     });

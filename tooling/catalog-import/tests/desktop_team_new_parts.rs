@@ -415,7 +415,7 @@ fn the_desktop_adds_a_part_from_a_download() {
         yours,
         ipn: taken,
         message,
-        ..
+        next_free,
     } = again
     else {
         panic!("not refused: {again:?}");
@@ -426,5 +426,8 @@ fn the_desktop_adds_a_part_from_a_download() {
         message.starts_with(&format!("You already added {ipn}")),
         "{message}"
     );
+    // The next free IPN is offered too, for another part.
+    assert_eq!(next_free, "CAP-0005-0001");
+    assert!(message.contains("CAP-0005-0001"), "{message}");
     drop(server);
 }
