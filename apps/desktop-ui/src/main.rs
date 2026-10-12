@@ -120,9 +120,14 @@ fn App() -> impl IntoView {
     // The position the shown check was worked out for, so the journeys
     // can wait until it is current.
     let checked_at = RwSignal::new(None::<(String, u64, u64)>);
-    Effect::new(move |_| {
-        let Some(position) = check_position.get() else {
+    // Why the check could not run, said in place of its line.
+    let check_problem = RwSignal::new(None::<String>);
+    // Asks for the check for what the app follows now; the backend works
+    // it out again only when the team catalog or the folder changed.
+    let refresh_check = move || {
+        let Some(position) = check_position.get_untracked() else {
             library_check.set(None);
+            check_problem.set(None);
             checked_at.set(None);
             return;
         };
@@ -133,11 +138,19 @@ fn App() -> impl IntoView {
             if check_position.get_untracked().as_ref() != Some(&position) {
                 return;
             }
-            if let Ok(found) = result {
-                library_check.set(found);
+            match result {
+                Ok(found) => {
+                    check_problem.set(None);
+                    library_check.set(found);
+                }
+                Err(message) => check_problem.set(Some(message)),
             }
             checked_at.set(Some(position));
         });
+    };
+    Effect::new(move |_| {
+        let _ = check_position.get();
+        refresh_check();
     });
     let check_state = move || match check_position.get() {
         None => "off",
@@ -230,9 +243,13 @@ fn App() -> impl IntoView {
                     />
                     <LibraryCheckLine
                         check=library_check
+                        problem=check_problem
                         open=Callback::new(move |_| {
                             adding.set(false);
                             checking.set(true);
+                            // The folder may have changed since (a fix
+                            // made in KiCad), so look again.
+                            refresh_check();
                         })
                     />
                     <ResultList results=results selected=selected adding=adding checking=checking />

@@ -793,7 +793,6 @@ pub struct TeamKnownFootprint {
     pub why: String,
 }
 
-/// Is this IPN free for a new part?
 /// What the library check found (kicad-parts-da65): the CSV catalog's own
 /// libraries compared with the team catalog. Shown to people who can edit.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -806,6 +805,9 @@ pub struct LibraryCheckView {
     pub worth_a_look: usize,
     /// Old problems of footprints the Catalog has unchanged.
     pub clean_up: usize,
+    /// Whether KiCad's own libraries were found, so symbols naming one of
+    /// KiCad's footprints were checked too.
+    pub kicad_footprints_checked: bool,
     /// The groups that have items, in order: To fix, Not in the Catalog
     /// yet, Worth a look, Clean-up.
     pub groups: Vec<LibraryCheckGroup>,
@@ -829,15 +831,18 @@ pub struct LibraryCheckGroup {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LibraryCheckItem {
-    /// Such as `g-ics`, or a 3D model's folder.
+    /// Such as `g-ics`; blank for a 3D model or a file that could not be
+    /// read, which `name` names by its path.
     pub library: String,
-    /// Such as `IC_TP4333`, or a 3D model's file name.
+    /// Such as `IC_TP4333`, or a repository path such as
+    /// `3d-models/g-Crystal.3dshapes/X.step`.
     pub name: String,
     /// The repository file, such as `symbols/g-ics.kicad_sym`.
     pub file: String,
     pub message: String,
 }
 
+/// Is this IPN free for a new part?
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamIpnRequest {
     pub ipn: String,

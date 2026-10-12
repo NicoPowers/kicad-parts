@@ -506,6 +506,7 @@ fn the_report_lists_errors_then_warnings_then_new_items_then_counts_clean_up() {
             ),
             finding(Severity::CleanUp, FindingKind::MissingModel, "g-a:Old"),
         ],
+        ..LibraryCheck::default()
     };
     assert_eq!(
         check.report(),

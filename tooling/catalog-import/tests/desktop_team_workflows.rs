@@ -1767,11 +1767,17 @@ fn editors_see_the_library_check_of_the_folder_the_app_reads() {
     );
     assert_eq!(group("To fix"), ["g-Resistor_SMD:R_0603_1608Metric"]);
 
-    // Fixed in the folder: the app keeps its answer until the team catalog
-    // changes (it is not worked out per keystroke), then works it out again.
+    // Fixed in the folder (in KiCad, then committed): the app sees it at
+    // once, without anyone saving a Change, because the folder changed.
     fs::write(&r0603, &original).unwrap();
-    let kept = team.browser.library_check(&team.team).unwrap().unwrap();
-    assert_eq!(kept, view);
+    let fixed = team.browser.library_check(&team.team).unwrap().unwrap();
+    assert_eq!(fixed.to_fix, 0, "{fixed:#?}");
+    // Nothing changed since: the same answer, from what the app kept.
+    assert_eq!(
+        team.browser.library_check(&team.team).unwrap().unwrap(),
+        fixed
+    );
+    // A Change saved by someone is a new team catalog position too.
     let part = team.team.part("RES-0000-0470").unwrap().unwrap();
     let mut edit = opened(&part, "A note");
     set_field(
@@ -1783,16 +1789,10 @@ fn editors_see_the_library_check_of_the_folder_the_app_reads() {
         team.team.edit(edit).unwrap(),
         PublishResult::Saved { .. }
     ));
-    wait_until("the change is followed", || {
-        let again = team.browser.library_check(&team.team).unwrap().unwrap();
-        !again.groups.iter().any(|group| {
-            group.title == "To fix"
-                && group
-                    .items
-                    .iter()
-                    .any(|item| item.name == "R_0603_1608Metric")
-        })
-    });
+    assert_eq!(
+        team.browser.library_check(&team.team).unwrap().unwrap(),
+        fixed
+    );
 
     // Someone who can only view sees no library check.
     let viewer = team.second("Vic Viewer", "vic@example.test", false);

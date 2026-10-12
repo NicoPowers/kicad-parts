@@ -40,25 +40,40 @@ pub(crate) fn line_text(view: &LibraryCheckView) -> Option<String> {
 #[component]
 pub(crate) fn LibraryCheckLine(
     check: RwSignal<Option<LibraryCheckView>>,
+    /// Why the check could not run, if it could not.
+    problem: RwSignal<Option<String>>,
     open: Callback<()>,
 ) -> impl IntoView {
     move || {
+        if let Some(message) = problem.get() {
+            return Some(
+                view! {
+                    <p class="library-check-line library-check-problem" role="status">
+                        {format!("Library check could not run: {message}")}
+                    </p>
+                }
+                .into_any(),
+            );
+        }
         let view = check.get()?;
         let text = line_text(&view)?;
         let urgent = view.to_fix > 0;
-        Some(view! {
-            <p class="library-check-line">
-                <button
-                    type="button"
-                    id="library-check-open"
-                    class="link-button"
-                    class:urgent=urgent
-                    on:click=move |_| open.run(())
-                >
-                    {text}
-                </button>
-            </p>
-        })
+        Some(
+            view! {
+                <p class="library-check-line">
+                    <button
+                        type="button"
+                        id="library-check-open"
+                        class="link-button"
+                        class:urgent=urgent
+                        on:click=move |_| open.run(())
+                    >
+                        {text}
+                    </button>
+                </p>
+            }
+            .into_any(),
+        )
     }
 }
 
@@ -85,13 +100,20 @@ pub(crate) fn LibraryCheckPanel(
             </header>
             <div class="library-check-body" role="region" aria-label="What the library check found" tabindex="0">
                 {move || match check.get() {
-                    Some(view) if !view.is_empty() => view
-                        .groups
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, group)| view! { <GroupView group=group index=index /> })
-                        .collect_view()
-                        .into_any(),
+                    Some(view) if !view.is_empty() => {
+                        let unchecked = (!view.kicad_footprints_checked).then(|| view! {
+                            <p class="hint">
+                                "KiCad's own libraries were not found, so symbols naming one of KiCad's footprints were not checked."
+                            </p>
+                        });
+                        let groups = view
+                            .groups
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, group)| view! { <GroupView group=group index=index /> })
+                            .collect_view();
+                        view! { {unchecked}{groups} }.into_any()
+                    }
                     Some(_) => view! { <p class="hint">"The library check found nothing."</p> }.into_any(),
                     None => view! { <p class="hint">"Sign in as someone who can edit to see the library check."</p> }.into_any(),
                 }}
@@ -134,10 +156,10 @@ fn GroupView(group: LibraryCheckGroup, index: usize) -> impl IntoView {
 
 #[component]
 fn ItemView(item: LibraryCheckItem) -> impl IntoView {
-    // A 3D model is named by its folder and file; a symbol or footprint by
-    // its library reference.
-    let name = if item.library.ends_with(".3dshapes") {
-        format!("{}/{}", item.library, item.name).into_any()
+    // A symbol or footprint is named by its library reference; a 3D model
+    // or a file that could not be read by its path.
+    let name = if item.library.is_empty() {
+        item.name.clone().into_any()
     } else {
         cad_reference(&format!("{}:{}", item.library, item.name))
     };
@@ -160,6 +182,7 @@ mod tests {
             not_in_catalog: new,
             worth_a_look: look,
             clean_up,
+            kicad_footprints_checked: true,
             groups: Vec::new(),
         }
     }

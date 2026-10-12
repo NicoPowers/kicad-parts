@@ -185,6 +185,9 @@ impl Finding {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LibraryCheck {
     pub findings: Vec<Finding>,
+    /// Whether KiCad's own libraries were found, so symbols naming one of
+    /// KiCad's footprints were checked too.
+    pub kicad_footprints_checked: bool,
 }
 
 impl LibraryCheck {
@@ -566,7 +569,10 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
         ))
     });
     findings.dedup();
-    LibraryCheck { findings }
+    LibraryCheck {
+        findings,
+        kicad_footprints_checked: kicad_footprints.is_some(),
+    }
 }
 
 /// Where a footprint stands against the last import.
