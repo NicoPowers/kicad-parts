@@ -276,3 +276,31 @@ fn a_part_keeps_one_symbol_and_each_footprint_choice_once() {
     ));
     desktop.server.stop();
 }
+
+#[test]
+#[ignore = "written up: a conflict where someone else saved exactly your changes still shows a conflict"]
+fn someone_else_saving_exactly_your_changes_is_not_a_conflict() {
+    let desktop = start();
+    let team = &desktop.team;
+    let part = team.part(IPN).unwrap().unwrap();
+    // Two people fix the same value the same way at the same time.
+    let mut theirs = opened(&part, "Exact value");
+    set(&mut theirs, "Value", "47R");
+    let mut yours = theirs.clone();
+    yours.reason = "Write the value as the BOM does".into();
+    assert!(matches!(
+        team.edit(theirs).unwrap(),
+        PublishResult::Saved { .. }
+    ));
+    // Today: a conflict whose only row shows theirs and yours the same,
+    // and saving on top then says "Nothing changed" while the conflict
+    // stays open.
+    assert_eq!(
+        team.edit(yours).unwrap(),
+        PublishResult::NothingToSave {
+            message: "Someone else already saved the same changes, so nothing more was saved."
+                .into()
+        }
+    );
+    desktop.server.stop();
+}
