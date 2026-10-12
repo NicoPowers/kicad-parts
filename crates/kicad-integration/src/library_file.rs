@@ -360,8 +360,14 @@ pub enum Sexp {
     Word(String),
 }
 
+/// The deepest nesting [`Sexp::parse`] reads. KiCad's files nest a few
+/// levels; a downloaded file nested deeper is refused, because walking or
+/// dropping a deeper tree could overflow the stack.
+pub const MAX_DEPTH: usize = 256;
+
 impl Sexp {
-    /// Reads `bytes` as exactly one list.
+    /// Reads `bytes` as exactly one list, nested at most [`MAX_DEPTH`]
+    /// deep.
     pub fn parse(bytes: &[u8]) -> Result<Self, LibraryFileError> {
         let tokens = tokens(bytes)?;
         let mut stack: Vec<Vec<Sexp>> = Vec::new();
@@ -371,6 +377,11 @@ impl Sexp {
                 return Err(LibraryFileError("content after the root list".into()));
             }
             match token {
+                Token::Open(_) if stack.len() >= MAX_DEPTH => {
+                    return Err(LibraryFileError(format!(
+                        "the file is nested too deeply (more than {MAX_DEPTH} levels) to be a KiCad file"
+                    )));
+                }
                 Token::Open(_) => stack.push(Vec::new()),
                 Token::Close(_) => {
                     let list = stack
@@ -529,6 +540,28 @@ pub fn footprint_pads(bytes: &[u8]) -> Vec<Pad> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_nesting_is_refused_not_overflowed() {
+        // A hostile file nested far deeper than any KiCad file.
+        let deep = |head: &str| {
+            let mut text = format!("({head} \"X\" ");
+            text.push_str(&"(a ".repeat(100_000));
+            text.push_str(&")".repeat(100_000));
+            text.push(')');
+            text
+        };
+        let footprint = deep("footprint");
+        let error = Sexp::parse(footprint.as_bytes()).unwrap_err();
+        assert!(error.0.contains("nested too deeply"), "{error}");
+        assert!(footprint_pads(footprint.as_bytes()).is_empty());
+        let symbol = deep("symbol");
+        assert!(symbol_pin_numbers(symbol.as_bytes()).is_empty());
+        assert!(symbol_properties(symbol.as_bytes()).is_empty());
+        // KiCad's own depth is fine.
+        let normal = format!("(footprint \"X\" {}{})", "(a ".repeat(200), ")".repeat(200));
+        assert!(Sexp::parse(normal.as_bytes()).is_ok());
+    }
 
     #[test]
     fn reads_properties_pins_and_pads() {
