@@ -190,7 +190,7 @@ describe('catalog search with exact KiCad previews', () => {
     await screenshot(browser, '05-export-failed');
   });
 
-  it('explains a footprint whose library entry is missing', async () => {
+  it('explains a footprint whose library is missing', async () => {
     await searchFor(browser, 'jetson nano', '1 matching part');
     await selectResult(browser, '2309413-1');
     await waitForPreview(browser, SYMBOL);

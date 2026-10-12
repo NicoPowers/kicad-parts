@@ -417,6 +417,12 @@ a {
   min-height: 14rem;
 }
 
+/* An alert, such as a missing library with both folders it looked in,
+   makes its section as tall as it needs instead of spilling out of it. */
+.preview:has(.problem:not(.quiet)) {
+  min-height: auto;
+}
+
 .preview + .preview {
   padding-top: 1rem;
   border-top: 1px solid var(--line);
