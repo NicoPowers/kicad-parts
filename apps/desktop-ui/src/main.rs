@@ -615,8 +615,23 @@ fn PartPanel(
             let result = backend::team_part(&ipn).await;
             if team_seq.get_value() == current && selected.get_untracked().as_deref() == Some(&ipn)
             {
-                // Keep showing the last good view if a refresh fails.
-                if let Ok(part) = result {
+                // Keep showing the last good view if a refresh fails, and a
+                // newer one than this answer: a refresh started before a
+                // save of this app's own can arrive after the save's own
+                // view, with older history.
+                let newest =
+                    |p: &TeamPart| (p.ipn.clone(), p.history.first().map(|entry| entry.seq));
+                let older = match &result {
+                    Ok(Some(fetched)) => team_part.with_untracked(|shown| {
+                        shown.as_ref().is_some_and(|shown| {
+                            let ((shown_ipn, shown_seq), (fetched_ipn, fetched_seq)) =
+                                (newest(shown), newest(fetched));
+                            shown_ipn == fetched_ipn && fetched_seq < shown_seq
+                        })
+                    }),
+                    _ => false,
+                };
+                if let (Ok(part), false) = (result, older) {
                     // A change someone else saved makes an earlier "saved"
                     // message out of date.
                     let numbers = |p: &TeamPart| (p.details.number, p.revision.number);

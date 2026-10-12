@@ -344,9 +344,8 @@ describe('team catalog: reviewing new CSV values that were not applied', () => {
     assert.ok(await noCsvNotice());
     assert.equal(await fieldValue('Value'), '100R');
     assert.equal(await sourceFact(), 'Team catalog, revision 3 of this part');
-    assert.match(
-      await browser.execute(() => document.querySelector('#team-tab-history').textContent.trim()),
-      /^History \(7\)$/,
-    );
+    // The review's own view, or a live update right after it, shows the
+    // new history entry.
+    await waitForText(browser, '#team-tab-history', 'History (7)');
   });
 });
