@@ -623,11 +623,21 @@ impl TeamCatalog {
         ))
     }
 
+    /// The parts that already have `mpn` (without regard to case), from what
+    /// the app follows; no request.
+    pub fn same_mpn(&self, mpn: &str, manufacturer: &str) -> Vec<desktop_contract::TeamSameMpn> {
+        crate::add_part::same_mpn(mpn, manufacturer, &self.current_parts())
+    }
+
     /// Whether `ipn` can be a new part's IPN: written as an IPN, and not
     /// one the team catalog (or `known`, such as the CSV catalog's) has.
-    pub fn check_ipn(&self, ipn: &str, known: &BTreeSet<String>) -> TeamIpnCheck {
+    pub fn check_ipn(&self, ipn: &str, prefix: &str, known: &BTreeSet<String>) -> TeamIpnCheck {
         let problem = if catalog::Ipn::parse(ipn).is_err() {
             Some("Write the IPN as three capital letters, four digits and four letters or digits, such as RES-0001-0001.".to_owned())
+        } else if !prefix.is_empty() && !ipn.starts_with(&format!("{prefix}-")) {
+            Some(format!(
+                "A part in this category has an IPN starting with {prefix}-."
+            ))
         } else if known.contains(ipn)
             || self
                 .current_parts()
@@ -659,7 +669,7 @@ impl TeamCatalog {
         }
         // A taken IPN is the server's to say: someone may take it any time.
         if catalog::Ipn::parse(request.ipn.trim()).is_err() {
-            if let Some(problem) = self.check_ipn(request.ipn.trim(), known).problem {
+            if let Some(problem) = self.check_ipn(request.ipn.trim(), "", known).problem {
                 return refused(problem);
             }
         }
@@ -707,6 +717,16 @@ impl TeamCatalog {
                     self.wait_for_change(seq);
                     saved_then(reload(&client, &ipn), |part| PublishResult::Added { part })
                 }
+                CreateOutcome::IpnTaken {
+                    added_by_you: true, ..
+                } => Ok(PublishResult::IpnTaken {
+                    message: format!(
+                        "You already added {ipn}, so nothing more was saved. Open it to check it, or change it with Edit part."
+                    ),
+                    next_free: String::new(),
+                    ipn: ipn.clone(),
+                    yours: true,
+                }),
                 CreateOutcome::IpnTaken { .. } => {
                     let mut taken: BTreeSet<String> = known.clone();
                     taken.extend(
@@ -725,6 +745,8 @@ impl TeamCatalog {
                             "Someone added a part with the IPN {ipn} first, so nothing was saved. The next free IPN is {next_free}."
                         ),
                         next_free,
+                        ipn: ipn.clone(),
+                        yours: false,
                     })
                 }
                 CreateOutcome::CorrelationReused { message, .. } => refused(message),

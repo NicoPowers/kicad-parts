@@ -10,7 +10,8 @@ use desktop_contract::{
     AppStatus, FilePreviewRequest, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
     SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
     TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest,
-    TeamIpnCheck, TeamIpnRequest, TeamNewPartRequest, TeamPart, TeamStatus,
+    TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamSameMpn,
+    TeamStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -264,7 +265,13 @@ async fn part_detail(
     let (browser, team) = (browser.inner().clone(), team.inner().clone());
     // A part only the team catalog has, such as one added in the app, is
     // found there.
-    blocking(move || browser.part_with(&ipn, &team.current_values())).await
+    // The team catalog's values are read only when the CSV catalog lacks it.
+    blocking(move || {
+        browser
+            .part(&ipn)
+            .or_else(|| browser.part_with(&ipn, &team.current_values()))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -365,7 +372,16 @@ async fn team_check_ipn(
     request: TeamIpnRequest,
 ) -> Result<TeamIpnCheck, String> {
     let (browser, team) = (browser.inner().clone(), team.inner().clone());
-    blocking(move || browser.check_ipn(&request.ipn, &team)).await
+    blocking(move || browser.check_ipn(&request.ipn, &request.prefix, &team)).await
+}
+
+#[tauri::command]
+async fn team_check_mpn(
+    team: State<'_, Team>,
+    request: TeamMpnRequest,
+) -> Result<Vec<TeamSameMpn>, String> {
+    let team = team.inner().clone();
+    blocking(move || team.same_mpn(&request.mpn, &request.manufacturer)).await
 }
 
 #[tauri::command]
@@ -456,6 +472,7 @@ fn main() {
             team_read_download,
             team_check_ipn,
             team_add_part,
+            team_check_mpn,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -564,6 +581,7 @@ mod tests {
             command::TEAM_READ_DOWNLOAD,
             command::TEAM_CHECK_IPN,
             command::TEAM_ADD_PART,
+            command::TEAM_CHECK_MPN,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

@@ -164,10 +164,29 @@ pub(crate) fn read(
     }
     if footprint.is_none() {
         notes.push("The download has no KiCad footprint (.kicad_mod).".into());
+        if let Some(model) = models.first() {
+            notes.push(format!(
+                "A 3D model goes with a footprint, so {} is not used.",
+                model.file_name
+            ));
+        }
     }
 
     // What the symbol says.
     let entry = symbol.and_then(|symbol| symbol_entry(&symbol.file.bytes, &symbol.name));
+    // A symbol drawn from another one in its file has the other's pins.
+    let pins = match symbol {
+        Some(symbol) => match symbol_pins(&symbol.file.bytes, &symbol.name) {
+            Ok(pins) => Some(pins as u32),
+            Err(parent) => {
+                notes.push(format!(
+                    "The symbol is drawn from {parent}, which is not in the file, so its pins were not counted."
+                ));
+                None
+            }
+        },
+        None => None,
+    };
     let properties = entry.as_deref().map(symbol_fields).unwrap_or_default();
     let (mpn, manufacturer) = manufacturer_part(&properties);
     let footprint_info = footprint.and_then(|file| read_footprint_file(&file.bytes).ok());
@@ -218,6 +237,7 @@ pub(crate) fn read(
             TeamNewCategory {
                 code: category.code.clone(),
                 name: category.name.clone(),
+                ipn_prefix: category.ipn_prefix.clone(),
                 next_ipn: next_free_ipn(
                     &category.ipn_prefix,
                     context.ipns.iter().map(String::as_str),
@@ -274,10 +294,16 @@ pub(crate) fn read(
             label: Some(shortened(&symbol.file.label)),
         }),
         footprint_file: footprint.map(|file| team_file(file, FileKind::Footprint)),
-        model_files: models
-            .iter()
-            .map(|file| team_file(file, FileKind::Model3d))
-            .collect(),
+        // The 3D models never change with the symbol or footprint chosen, so
+        // a read again may leave them out.
+        model_files: if request.without_models {
+            Vec::new()
+        } else {
+            models
+                .iter()
+                .map(|file| team_file(file, FileKind::Model3d))
+                .collect()
+        },
         symbol_name: symbol.map(|symbol| symbol.name.clone()).unwrap_or_default(),
         footprint_name,
         footprint_library,
@@ -287,7 +313,7 @@ pub(crate) fn read(
         categories,
         guesses,
         known_footprints,
-        pins: entry.as_deref().map(|entry| pin_count(entry) as u32),
+        pins,
         pads: footprint.map(|file| pad_count(&file.bytes) as u32),
         notes,
     })
@@ -329,6 +355,27 @@ fn symbol_choices<'a>(download: &'a Download, notes: &mut Vec<String>) -> Vec<Sy
     choices
 }
 
+/// How many distinct pins the symbol `name` has, using the symbol it is
+/// drawn from (`extends`) when that is in the same file; otherwise the
+/// name of the missing symbol.
+fn symbol_pins(library: &[u8], name: &str) -> Result<usize, String> {
+    let Ok(parsed) = SymbolLibrary::parse(library) else {
+        return Ok(0);
+    };
+    let mut current = name.to_owned();
+    // A chain of symbols drawn from others, at most a few long.
+    for _ in 0..8 {
+        let Some(entry) = parsed.entries.iter().find(|entry| entry.name == current) else {
+            return Err(current);
+        };
+        match &entry.extends {
+            Some(parent) => current.clone_from(parent),
+            None => return Ok(pin_count(&library[entry.span.clone()])),
+        }
+    }
+    Err(current)
+}
+
 /// The bytes of the top-level symbol named `name` in a library file.
 fn symbol_entry(library: &[u8], name: &str) -> Option<Vec<u8>> {
     let parsed = SymbolLibrary::parse(library).ok()?;
@@ -363,7 +410,7 @@ fn example((details, revision): &(PartDetails, PartRevision)) -> ExamplePart {
 }
 
 /// Parts whose manufacturer parts have `mpn`, without regard to case.
-fn same_mpn(
+pub(crate) fn same_mpn(
     mpn: &str,
     manufacturer: &str,
     parts: &[(PartDetails, PartRevision)],
@@ -503,6 +550,7 @@ pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, St
         .unwrap_or_default();
     if let Some(file) = of_kind(FileKind::Footprint) {
         let mut bytes = decoded(file)?;
+        let mut linked = false;
         if let Some(model) = of_kind(FileKind::Model3d) {
             let library = footprint
                 .split_once(':')
@@ -523,8 +571,18 @@ pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, St
             })?;
             bytes = link_model(&text, &format!("${{GITPLM_PARTS}}/{key}"), &name).into_bytes();
             uploads.push(model_upload(&decoded(model)?, &key, &source(model))?);
+            linked = true;
         }
-        uploads.push(footprint_upload(&bytes, &footprint, &source(file))?);
+        // The history says the file was changed this one way.
+        let label = if linked {
+            shortened(&format!(
+                "{} (3D model path set to the Catalog's)",
+                source(file)
+            ))
+        } else {
+            source(file)
+        };
+        uploads.push(footprint_upload(&bytes, &footprint, &label)?);
     }
     Ok(uploads)
 }
@@ -532,6 +590,14 @@ pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_derived_symbol_counts_its_parents_pins() {
+        let library = b"(kicad_symbol_lib (version 20241209) (symbol \"Base\" (symbol \"Base_1_1\" (pin passive line (number \"1\")) (pin passive line (number \"2\")) (pin passive line (number \"3\")))) (symbol \"Child\" (extends \"Base\")) (symbol \"Orphan\" (extends \"Missing\")))";
+        assert_eq!(symbol_pins(library, "Base"), Ok(3));
+        assert_eq!(symbol_pins(library, "Child"), Ok(3));
+        assert_eq!(symbol_pins(library, "Orphan"), Err("Missing".to_owned()));
+    }
 
     #[test]
     fn long_labels_are_cut_to_what_the_server_keeps() {

@@ -25,6 +25,7 @@ pub mod command {
     pub const TEAM_READ_DOWNLOAD: &str = "team_read_download";
     pub const TEAM_CHECK_IPN: &str = "team_check_ipn";
     pub const TEAM_ADD_PART: &str = "team_add_part";
+    pub const TEAM_CHECK_MPN: &str = "team_check_mpn";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -668,6 +669,17 @@ pub struct TeamDownloadRequest {
     pub symbol: Option<usize>,
     #[serde(default)]
     pub footprint: Option<usize>,
+    /// Leave out [`TeamDownload::model_files`], which a read again with
+    /// another symbol or footprint chosen does not change.
+    #[serde(default)]
+    pub without_models: bool,
+}
+
+/// Which parts already have an MPN, for Add part.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamMpnRequest {
+    pub mpn: String,
+    pub manufacturer: String,
 }
 
 /// What a download holds and what the app makes of it.
@@ -729,6 +741,9 @@ pub struct TeamDownload {
 pub struct TeamNewCategory {
     pub code: String,
     pub name: String,
+    /// Its IPN prefix, such as `CAP`; blank when it has none.
+    #[serde(default)]
+    pub ipn_prefix: String,
     /// The next free IPN for its IPN prefix, such as `ICS-0047-0001`; blank
     /// when it has no prefix.
     pub next_ipn: String,
@@ -776,6 +791,10 @@ pub struct TeamKnownFootprint {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamIpnRequest {
     pub ipn: String,
+    /// The IPN prefix of the category chosen, such as `CAP`; blank when it
+    /// has none.
+    #[serde(default)]
+    pub prefix: String,
 }
 
 /// The answer: `None` when the IPN can be used, otherwise why not.
@@ -873,8 +892,17 @@ pub enum PublishResult {
     /// A new part was saved as `part`.
     Added { part: TeamPart },
     /// Someone took the new part's IPN first; nothing was saved.
-    /// `next_free` is the next free IPN for its prefix.
-    IpnTaken { message: String, next_free: String },
+    /// `next_free` is the next free IPN for its prefix. When `yours`, you
+    /// added that part yourself (a save whose answer was lost, sent again
+    /// with changes): open `ipn` rather than adding the part twice.
+    IpnTaken {
+        message: String,
+        next_free: String,
+        #[serde(default)]
+        ipn: String,
+        #[serde(default)]
+        yours: bool,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

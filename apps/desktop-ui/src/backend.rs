@@ -4,7 +4,8 @@ use desktop_contract::{
     AppStatus, FilePreviewRequest, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
     SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
     TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest,
-    TeamIpnCheck, TeamIpnRequest, TeamNewPartRequest, TeamPart, TeamStatus, command,
+    TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamSameMpn,
+    TeamStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -172,11 +173,11 @@ pub async fn team_read_download(request: TeamDownloadRequest) -> Result<TeamDown
 }
 
 /// Whether an IPN can be a new part's.
-pub async fn team_check_ipn(ipn: String) -> Result<TeamIpnCheck, String> {
+pub async fn team_check_ipn(ipn: String, prefix: String) -> Result<TeamIpnCheck, String> {
     call(
         command::TEAM_CHECK_IPN,
         &IpnArgs {
-            request: TeamIpnRequest { ipn },
+            request: TeamIpnRequest { ipn, prefix },
         },
     )
     .await
@@ -185,4 +186,20 @@ pub async fn team_check_ipn(ipn: String) -> Result<TeamIpnCheck, String> {
 /// Saves a new part.
 pub async fn team_add_part(request: TeamNewPartRequest) -> Result<PublishResult, String> {
     call(command::TEAM_ADD_PART, &NewPartArgs { request }).await
+}
+
+#[derive(Serialize)]
+struct MpnArgs {
+    request: TeamMpnRequest,
+}
+
+/// The parts that already have an MPN.
+pub async fn team_check_mpn(mpn: String, manufacturer: String) -> Result<Vec<TeamSameMpn>, String> {
+    call(
+        command::TEAM_CHECK_MPN,
+        &MpnArgs {
+            request: TeamMpnRequest { mpn, manufacturer },
+        },
+    )
+    .await
 }

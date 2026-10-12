@@ -142,6 +142,7 @@ fn request(zip: &[u8], name: &str) -> TeamDownloadRequest {
         }],
         symbol: None,
         footprint: None,
+        without_models: false,
     }
 }
 
@@ -343,7 +344,7 @@ fn the_desktop_adds_a_part_from_a_download() {
     );
     assert!(
         rows.iter().any(|(label, after)| label == "Footprint file"
-            && after.starts_with("CL10B104/KiCad/C_0603_New.kicad_mod in CL10B104.zip")),
+            && after.starts_with("CL10B104/KiCad/C_0603_New.kicad_mod in CL10B104.zip (3D model path set to the Catalog's)")),
         "{rows:?}"
     );
     let found = browser.search_with(MPN, 10, &team.current_values());
@@ -351,6 +352,10 @@ fn the_desktop_adds_a_part_from_a_download() {
     assert_eq!(found.hits[0].ipn, ipn);
     assert_eq!(found.hits[0].csv_file, "Team catalog");
     let detail = browser.part_with(&ipn, &team.current_values()).unwrap();
+    // The MPN an engineer types is checked too, without regard to case.
+    let typed = team.same_mpn("cl10c020cb8nnnc", "Someone Else");
+    assert_eq!(typed.len(), 1);
+    assert!(!typed[0].listed);
     assert_eq!(detail.summary.mpn, MPN);
 
     // The footprint names its 3D model in the Catalog's folder.
@@ -375,19 +380,51 @@ fn the_desktop_adds_a_part_from_a_download() {
     // The confirmed category's clues are remembered.
     assert_eq!(stored.category_matches.len(), 3);
 
-    // Someone took the IPN first: nothing saved, the next free one offered.
+    // An IPN someone else has (here an imported part's): nothing saved,
+    // the next free one offered.
     let again = browser
-        .add_part(new_part(&reading, &ipn, "cap"), &team)
+        .add_part(new_part(&reading, "CAP-0000-0020", "cap"), &team)
         .unwrap();
-    let PublishResult::IpnTaken { next_free, message } = again else {
+    let PublishResult::IpnTaken {
+        next_free, message, ..
+    } = again
+    else {
         panic!("not refused: {again:?}");
     };
     assert_eq!(next_free, "CAP-0005-0001");
     assert!(message.contains("first"), "{message}");
     // A malformed IPN is refused before sending.
-    let check = browser.check_ipn("cap-1", &team);
+    let check = browser.check_ipn("cap-1", "CAP", &team);
     assert!(check.problem.unwrap().contains("such as RES-0001-0001"));
-    assert!(browser.check_ipn(&ipn, &team).problem.is_some());
-    assert!(browser.check_ipn("CAP-0005-0001", &team).problem.is_none());
+    assert!(browser.check_ipn(&ipn, "CAP", &team).problem.is_some());
+    assert!(
+        browser
+            .check_ipn("CAP-0005-0001", "CAP", &team)
+            .problem
+            .is_none()
+    );
+    // An IPN must start with the category's prefix.
+    let check = browser.check_ipn("RES-0005-0001", "CAP", &team);
+    assert!(check.problem.unwrap().contains("starting with CAP-"));
+
+    // A save whose answer was lost, sent again with changes: you added it.
+    let mut changed = new_part(&reading, &ipn, "cap");
+    changed.reason = "A new 100n capacitor, X7R".into();
+    let again = browser.add_part(changed, &team).unwrap();
+    let PublishResult::IpnTaken {
+        yours,
+        ipn: taken,
+        message,
+        ..
+    } = again
+    else {
+        panic!("not refused: {again:?}");
+    };
+    assert!(yours, "{message}");
+    assert_eq!(taken, ipn);
+    assert!(
+        message.starts_with(&format!("You already added {ipn}")),
+        "{message}"
+    );
     drop(server);
 }

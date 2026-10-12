@@ -183,6 +183,11 @@ describe('team catalog: add a part from a download', () => {
     });
     await (await browser.$('#add-part-open')).click();
     await waitForText(browser, '#add-heading', 'Add part');
+    // The form takes the keyboard focus.
+    await browser.waitUntil(async () => (await browser.execute(() => document.activeElement?.id)) === 'add-files', {
+      timeout: 5_000,
+      timeoutMsg: 'focus did not move into the form',
+    });
   });
 
   it('reads a ZIP file, guesses the category with its reason and offers the next free IPN', async () => {
@@ -214,6 +219,14 @@ describe('team catalog: add a part from a download', () => {
     });
     await assertAccessible(browser, '61-team-add-part');
     await screenshot(browser, '61-team-add-part');
+    // An MPN typed by hand is checked too.
+    await (await browser.$('#add-mpn')).setValue(KNOWN_MPN);
+    await waitForText(browser, '#add-same-mpn p', `The MPN ${KNOWN_MPN} is already in the Catalog:`);
+    await (await browser.$('#add-mpn')).setValue(MPN);
+    await browser.waitUntil(async () => !(await browser.$('#add-same-mpn').isExisting()), {
+      timeout: 10_000,
+      timeoutMsg: 'the MPN check never cleared',
+    });
   });
 
   it('saves the part, which the search finds with its drawings and history', async () => {

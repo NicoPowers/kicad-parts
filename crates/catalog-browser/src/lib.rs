@@ -67,6 +67,8 @@ pub struct CatalogBrowser {
     /// The CSV catalog's footprints with their pads, read the first time
     /// Add part needs them.
     footprints: OnceLock<Vec<add_part::LocalFootprint>>,
+    /// The CSV catalog's IPNs, read the first time they are needed.
+    csv_ipns: OnceLock<BTreeSet<String>>,
 }
 
 impl CatalogBrowser {
@@ -86,6 +88,7 @@ impl CatalogBrowser {
         }
         Self {
             footprints: OnceLock::new(),
+            csv_ipns: OnceLock::new(),
             previews,
             catalog,
             kicad: RwLock::new(KicadState {
@@ -217,28 +220,28 @@ impl CatalogBrowser {
     /// The parts in `current` (the team catalog's) that the CSV catalog
     /// does not have, in IPN order.
     fn team_only_parts(&self, current: &BTreeMap<String, PartValues>) -> Vec<CatalogPart> {
-        let Ok(catalog) = &self.catalog else {
-            return Vec::new();
-        };
+        let csv = self.csv_ipns();
         current
             .iter()
-            .filter(|(ipn, _)| catalog.find(ipn).is_none())
+            .filter(|(ipn, _)| !csv.contains(*ipn))
             .map(|(ipn, values)| values.part(ipn))
             .collect()
     }
 
-    /// Every IPN the CSV catalog has.
-    pub fn csv_ipns(&self) -> BTreeSet<String> {
-        self.catalog
-            .as_ref()
-            .map(|catalog| {
-                catalog
-                    .parts()
-                    .iter()
-                    .map(|part| part.ipn.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// Every IPN the CSV catalog has, read once.
+    pub fn csv_ipns(&self) -> &BTreeSet<String> {
+        self.csv_ipns.get_or_init(|| {
+            self.catalog
+                .as_ref()
+                .map(|catalog| {
+                    catalog
+                        .parts()
+                        .iter()
+                        .map(|part| part.ipn.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
     }
 
     /// Like [`Self::part`], but a part only the team catalog has (in
@@ -264,7 +267,7 @@ impl CatalogBrowser {
     ) -> Result<TeamDownload, String> {
         let (categories, remembered) = team.categories_and_matches()?;
         let parts = team.current_parts();
-        let mut ipns = self.csv_ipns();
+        let mut ipns = self.csv_ipns().clone();
         ipns.extend(parts.iter().map(|(details, _)| details.ipn.clone()));
         let kicad_share = {
             let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
@@ -290,8 +293,8 @@ impl CatalogBrowser {
     }
 
     /// Whether `ipn` can be a new part's IPN.
-    pub fn check_ipn(&self, ipn: &str, team: &TeamCatalog) -> TeamIpnCheck {
-        team.check_ipn(ipn, &self.csv_ipns())
+    pub fn check_ipn(&self, ipn: &str, prefix: &str, team: &TeamCatalog) -> TeamIpnCheck {
+        team.check_ipn(ipn, prefix, self.csv_ipns())
     }
 
     /// Saves a new part from Add part.
@@ -300,7 +303,7 @@ impl CatalogBrowser {
         request: TeamNewPartRequest,
         team: &TeamCatalog,
     ) -> Result<PublishResult, String> {
-        team.add_part(request, &self.csv_ipns())
+        team.add_part(request, self.csv_ipns())
     }
 
     pub fn part(&self, ipn: &str) -> Option<PartDetail> {

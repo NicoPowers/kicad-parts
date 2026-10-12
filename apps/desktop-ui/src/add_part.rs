@@ -8,11 +8,11 @@
 //! the right, like Edit part.
 
 use crate::backend;
-use crate::team::{FilePreview, MAX_FILE_BYTES, RetrySlot, base64, shown};
+use crate::team::{FilePreview, MAX_FILE_BYTES, RetrySlot, base64, focus_later, shown};
 use desktop_contract::{
     DownloadedFile, Field, FileKind, FilePreviewRequest, ManufacturerPart, PreviewKind,
     PreviewOutcome, PreviewRequest, PublishResult, TeamDownload, TeamDownloadRequest, TeamFile,
-    TeamNewCategory, TeamNewPartRequest,
+    TeamNewCategory, TeamNewPartRequest, TeamSameMpn,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -24,10 +24,40 @@ type Drawing = RwSignal<Option<Result<PreviewOutcome, String>>>;
 
 /// What is chosen and typed in the form. Values the app changes by itself
 /// (the IPN offered, the references) are signals; the fields are kept here
-/// so typing never redraws them.
+/// so typing never redraws them. The part panel keeps one, so selecting a
+/// part while adding one keeps the form as it was; Add part shows it again.
+///
+/// For each value the app fills in, it remembers what it offered: reading
+/// the download again (another symbol chosen) replaces only a value that
+/// is still the app's own, never one the engineer typed or chose.
 #[derive(Clone, Copy)]
-struct Form {
+pub struct Form {
     reading: RwSignal<Option<TeamDownload>>,
+    downloads: StoredValue<Vec<DownloadedFile>>,
+    reading_files: RwSignal<bool>,
+    read_problem: RwSignal<Option<String>>,
+    problem: RwSignal<Option<String>>,
+    /// A part you already added with this IPN (a save whose answer was
+    /// lost), which the form offers to open.
+    already: RwSignal<Option<String>>,
+    saving: RwSignal<bool>,
+    attempt: RetrySlot<TeamNewPartRequest>,
+    symbol_drawing: Drawing,
+    footprint_drawing: Drawing,
+    symbol_busy: RwSignal<bool>,
+    footprint_busy: RwSignal<bool>,
+    /// Only the newest drawing asked for is shown.
+    draws: StoredValue<u64>,
+    /// Parts that already have the MPN, and the MPN they were shown for.
+    same_mpn: RwSignal<Vec<TeamSameMpn>>,
+    mpn_shown: StoredValue<String>,
+    mpn_checks: StoredValue<u64>,
+    offered_manufacturer: StoredValue<String>,
+    offered_mpn: StoredValue<String>,
+    offered_from: StoredValue<String>,
+    offered_footprint: StoredValue<String>,
+    /// The fields of the chosen category as the app filled them.
+    offered_fields: StoredValue<Vec<Field>>,
     category: RwSignal<String>,
     ipn: RwSignal<String>,
     /// The IPN the app offered for the category, so choosing another
@@ -51,10 +81,36 @@ struct Form {
     reason: RwSignal<String>,
 }
 
+impl Default for Form {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Form {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             reading: RwSignal::new(None),
+            downloads: StoredValue::new(Vec::new()),
+            reading_files: RwSignal::new(false),
+            read_problem: RwSignal::new(None),
+            problem: RwSignal::new(None),
+            already: RwSignal::new(None),
+            saving: RwSignal::new(false),
+            attempt: RetrySlot::new(),
+            symbol_drawing: RwSignal::new(None),
+            footprint_drawing: RwSignal::new(None),
+            symbol_busy: RwSignal::new(false),
+            footprint_busy: RwSignal::new(false),
+            draws: StoredValue::new(0),
+            same_mpn: RwSignal::new(Vec::new()),
+            mpn_shown: StoredValue::new(String::new()),
+            mpn_checks: StoredValue::new(0),
+            offered_manufacturer: StoredValue::new(String::new()),
+            offered_mpn: StoredValue::new(String::new()),
+            offered_from: StoredValue::new(String::new()),
+            offered_footprint: StoredValue::new(String::new()),
+            offered_fields: StoredValue::new(Vec::new()),
             category: RwSignal::new(String::new()),
             ipn: RwSignal::new(String::new()),
             offered_ipn: StoredValue::new(String::new()),
@@ -71,6 +127,90 @@ impl Form {
             from: RwSignal::new(String::new()),
             reason: RwSignal::new(String::new()),
         }
+    }
+
+    /// Empties the form, after a save or Cancel.
+    pub fn reset(&self) {
+        self.reading.set(None);
+        self.downloads.set_value(Vec::new());
+        self.read_problem.set(None);
+        self.problem.set(None);
+        self.already.set(None);
+        self.symbol_drawing.set(None);
+        self.footprint_drawing.set(None);
+        self.same_mpn.set(Vec::new());
+        self.category.set(String::new());
+        for value in [
+            self.ipn,
+            self.manufacturer,
+            self.mpn,
+            self.symbol,
+            self.footprint,
+            self.from,
+            self.reason,
+        ] {
+            value.set(String::new());
+        }
+        for offered in [
+            self.offered_ipn,
+            self.offered_symbol,
+            self.offered_manufacturer,
+            self.offered_mpn,
+            self.offered_from,
+            self.offered_footprint,
+            self.mpn_shown,
+        ] {
+            offered.set_value(String::new());
+        }
+        self.fields.set_value(Vec::new());
+        self.offered_fields.set_value(Vec::new());
+        self.known_footprint.set(None);
+        self.model.set(None);
+        self.attempt.open();
+    }
+
+    /// Starts again for newly chosen files: nothing typed for the earlier
+    /// files is kept, but the files themselves are.
+    fn reset_for_new_files(&self) {
+        let downloads = self.downloads.get_value();
+        self.reset();
+        self.downloads.set_value(downloads);
+    }
+
+    /// Sets `value` to `new` if it is still what the app offered before (or
+    /// blank), and remembers `new` as the app's offer.
+    fn offer(value: RwSignal<String>, offered: StoredValue<String>, new: &str) {
+        let now = value.get_untracked();
+        if now == offered.get_value() || now.is_empty() {
+            value.set(new.to_owned());
+        }
+        offered.set_value(new.to_owned());
+    }
+
+    /// Asks, a moment after the last key, which parts already have the MPN
+    /// typed.
+    fn check_mpn_soon(&self) {
+        let form = *self;
+        form.mpn_checks.update_value(|number| *number += 1);
+        let asked = form.mpn_checks.get_value();
+        set_timeout(
+            move || {
+                if form.mpn_checks.get_value() != asked {
+                    return;
+                }
+                let mpn = form.mpn.get_untracked();
+                let manufacturer = form.manufacturer.get_untracked();
+                spawn_local(async move {
+                    if let Ok(parts) = backend::team_check_mpn(mpn.clone(), manufacturer).await {
+                        if form.mpn.get_untracked() == mpn {
+                            form.mpn_shown.set_value(mpn);
+                            form.same_mpn.set(parts);
+                        }
+                    }
+                });
+            },
+            std::time::Duration::from_millis(300),
+        );
     }
 
     fn category(&self, code: &str) -> Option<TeamNewCategory> {
@@ -93,8 +233,12 @@ impl Form {
             form.ipn_problem.set(None);
             return;
         }
+        let prefix = form
+            .category(&form.category.get_untracked())
+            .map(|category| category.ipn_prefix)
+            .unwrap_or_default();
         spawn_local(async move {
-            let answer = backend::team_check_ipn(ipn.trim().to_owned()).await;
+            let answer = backend::team_check_ipn(ipn.trim().to_owned(), prefix).await;
             if form.ipn.get_untracked() == ipn {
                 form.ipn_problem.set(match answer {
                     Ok(check) => check.problem,
@@ -104,9 +248,10 @@ impl Form {
         });
     }
 
-    /// Moves the form to the category `code`: its fields (keeping a value
-    /// typed for a field of the same name), its next free IPN and the
-    /// symbol's library, unless the person typed their own.
+    /// Moves the form to the category `code`: its fields as the download
+    /// fills them (keeping a value typed for a field of the same name), its
+    /// next free IPN and the symbol's library, unless the person typed their
+    /// own.
     fn choose_category(&self, code: String) {
         let category = self.category(&code);
         let symbol_name = self.reading.with_untracked(|reading| {
@@ -115,6 +260,7 @@ impl Form {
                 .map(|reading| reading.symbol_name.clone())
                 .unwrap_or_default()
         });
+        let offered = self.offered_fields.get_value();
         self.fields.update_value(|fields| {
             let before = std::mem::take(fields);
             *fields = category
@@ -124,16 +270,27 @@ impl Form {
                         .fields
                         .iter()
                         .map(|field| {
-                            before
-                                .iter()
-                                .find(|typed| typed.name == field.name && !typed.value.is_empty())
-                                .cloned()
-                                .unwrap_or_else(|| field.clone())
+                            // A value the person typed is one that is not
+                            // blank and not what the app filled in.
+                            let typed = before.iter().find(|typed| {
+                                typed.name == field.name
+                                    && !typed.value.is_empty()
+                                    && !offered.iter().any(|offer| {
+                                        offer.name == typed.name && offer.value == typed.value
+                                    })
+                            });
+                            typed.cloned().unwrap_or_else(|| field.clone())
                         })
                         .collect()
                 })
                 .unwrap_or_default();
         });
+        self.offered_fields.set_value(
+            category
+                .as_ref()
+                .map(|category| category.fields.clone())
+                .unwrap_or_default(),
+        );
         let offer = category
             .as_ref()
             .map(|category| category.next_ipn.clone())
@@ -216,23 +373,27 @@ fn guess_words(name: &str, reasons: &[String]) -> String {
 /// with a manufacturer part to add to it in Edit part, if any.
 #[component]
 pub fn AddPartView(
+    form: Form,
     close: Callback<()>,
     done: Callback<String>,
     open_part: Callback<(String, Option<ManufacturerPart>)>,
 ) -> impl IntoView {
-    let form = Form::new();
-    let downloads = StoredValue::new(Vec::<DownloadedFile>::new());
-    let reading_files = RwSignal::new(false);
-    let read_problem = RwSignal::new(None::<String>);
-    let problem = RwSignal::new(None::<String>);
-    let saving = RwSignal::new(false);
-    let attempt = RetrySlot::<TeamNewPartRequest>::new();
-    let symbol_drawing: Drawing = RwSignal::new(None);
-    let footprint_drawing: Drawing = RwSignal::new(None);
-    let symbol_busy = RwSignal::new(false);
-    let footprint_busy = RwSignal::new(false);
-    // Only the newest drawing asked for is shown.
-    let draws = StoredValue::new(0u64);
+    let Form {
+        downloads,
+        reading_files,
+        read_problem,
+        problem,
+        saving,
+        attempt,
+        symbol_drawing,
+        footprint_drawing,
+        symbol_busy,
+        footprint_busy,
+        draws,
+        ..
+    } = form;
+    // Keyboard and screen reader users land in the form.
+    focus_later("add-files");
 
     // Draws the chosen symbol, and the footprint: the download's, or the
     // one the Catalog or KiCad already has.
@@ -307,6 +468,8 @@ pub fn AddPartView(
             files: downloads.get_value(),
             symbol,
             footprint,
+            // The 3D models do not change with the symbol or footprint.
+            without_models: !first,
         };
         spawn_local(async move {
             let result = backend::team_read_download(request).await;
@@ -318,23 +481,52 @@ pub fn AddPartView(
                     return;
                 }
             };
+            let mut found = found;
             if first {
-                form.manufacturer.set(found.manufacturer.clone());
-                form.mpn.set(found.mpn.clone());
-                form.from.set(found.from.clone());
-                form.ipn.set(String::new());
-                form.offered_ipn.set_value(String::new());
-                form.fields.set_value(Vec::new());
+                form.reset_for_new_files();
+            } else if let Some(before) = form.reading.get_untracked() {
+                found.model_files = before.model_files;
             }
-            form.symbol.set(found.symbol_name.clone());
-            form.offered_symbol.set_value(found.symbol_name.clone());
-            form.footprint.set(if found.footprint_library.is_empty() {
+            // Only values that are still the app's own are replaced.
+            Form::offer(
+                form.manufacturer,
+                form.offered_manufacturer,
+                &found.manufacturer,
+            );
+            Form::offer(form.mpn, form.offered_mpn, &found.mpn);
+            Form::offer(form.from, form.offered_from, &found.from);
+            Form::offer(form.symbol, form.offered_symbol, &found.symbol_name);
+            let footprint = if found.footprint_library.is_empty() {
                 found.footprint_name.clone()
             } else {
                 format!("{}:{}", found.footprint_library, found.footprint_name)
-            });
-            form.known_footprint.set(None);
-            form.model.set(found.model);
+            };
+            Form::offer(form.footprint, form.offered_footprint, &footprint);
+            // A known footprint chosen stays while it still matches.
+            if form.known_footprint.with_untracked(|known| {
+                known.as_ref().is_some_and(|known| {
+                    !found
+                        .known_footprints
+                        .iter()
+                        .any(|offer| &offer.reference == known)
+                })
+            }) {
+                form.known_footprint.set(None);
+            }
+            if first
+                || form
+                    .model
+                    .get_untracked()
+                    .is_none_or(|at| at >= found.models.len())
+            {
+                form.model.set(found.model);
+            }
+            form.mpn_shown.set_value(form.mpn.get_untracked());
+            if form.mpn.get_untracked() == found.mpn {
+                form.same_mpn.set(found.same_mpn.clone());
+            } else {
+                form.check_mpn_soon();
+            }
             let category = if first {
                 found
                     .guesses
@@ -356,6 +548,7 @@ pub fn AddPartView(
                 match read_files(input).await {
                     Ok(chosen) if chosen.is_empty() => {}
                     Ok(chosen) => {
+                        form.reset();
                         downloads.set_value(
                             chosen
                                 .into_iter()
@@ -365,8 +558,6 @@ pub fn AddPartView(
                                 })
                                 .collect(),
                         );
-                        problem.set(None);
-                        attempt.open();
                         read(None, None, true);
                     }
                     Err(message) => read_problem.set(Some(message)),
@@ -419,12 +610,45 @@ pub fn AddPartView(
         request.correlation_id = Some(attempt.id_for(request.clone()));
         saving.set(true);
         problem.set(None);
+        form.already.set(None);
         spawn_local(async move {
+            // Once more just before saving: a part with this MPN may be new,
+            // or the MPN typed was not checked yet. Saving again goes on.
+            let mpn = form.mpn.get_untracked().trim().to_owned();
+            if !mpn.is_empty() && form.mpn_shown.get_value().trim() != mpn {
+                let manufacturer = form.manufacturer.get_untracked();
+                if let Ok(parts) = backend::team_check_mpn(mpn.clone(), manufacturer).await {
+                    form.mpn_shown.set_value(mpn.clone());
+                    if !parts.is_empty() {
+                        form.same_mpn.set(parts);
+                        saving.set(false);
+                        problem.set(Some(format!(
+                            "The MPN {mpn} is already in the Catalog; see Before you save. To add this part anyway, save again."
+                        )));
+                        return;
+                    }
+                    form.same_mpn.set(parts);
+                }
+            }
             let result = backend::team_add_part(request).await;
             saving.set(false);
             match result {
-                Ok(PublishResult::Added { part }) => done.run(part.ipn),
-                Ok(PublishResult::IpnTaken { message, next_free }) => {
+                Ok(PublishResult::Added { part }) => {
+                    form.reset();
+                    done.run(part.ipn);
+                }
+                Ok(PublishResult::IpnTaken {
+                    message,
+                    ipn,
+                    yours: true,
+                    ..
+                }) => {
+                    form.already.set(Some(ipn));
+                    problem.set(Some(message));
+                }
+                Ok(PublishResult::IpnTaken {
+                    message, next_free, ..
+                }) => {
                     form.ipn.set(next_free.clone());
                     form.offered_ipn.set_value(next_free);
                     form.check_ipn();
@@ -508,6 +732,23 @@ pub fn AddPartView(
                             />
                         })}
                         {move || problem.get().map(|message| view! { <p class="problem team-problem" role="alert">{message}</p> })}
+                        {move || form.already.get().map(|ipn| {
+                            let to_open = ipn.clone();
+                            view! {
+                                <p>
+                                    <button
+                                        type="button"
+                                        id="add-open-already"
+                                        on:click=move |_| {
+                                            form.reset();
+                                            open_part.run((to_open.clone(), None));
+                                        }
+                                    >
+                                        {format!("Open {ipn}")}
+                                    </button>
+                                </p>
+                            }
+                        })}
                         <div class="form-actions">
                             <button
                                 type="submit"
@@ -516,7 +757,15 @@ pub fn AddPartView(
                             >
                                 {move || if saving.get() { "Saving…" } else { "Save" }}
                             </button>
-                            <button type="button" on:click=move |_| close.run(())>"Cancel"</button>
+                            <button
+                                type="button"
+                                on:click=move |_| {
+                                    form.reset();
+                                    close.run(());
+                                }
+                            >
+                                "Cancel"
+                            </button>
                         </div>
                     </form>
                 </section>
@@ -619,14 +868,18 @@ fn DownloadForm(
     });
 
     // The checks before saving.
-    let same_mpn = (!found.same_mpn.is_empty()).then(|| {
-        let mpn = found.mpn.clone();
-        let manufacturer = found.manufacturer.clone();
+    let same_mpn = move || {
+        let parts = form.same_mpn.get();
+        if parts.is_empty() {
+            return ().into_any();
+        }
+        let mpn = form.mpn.get_untracked().trim().to_owned();
+        let manufacturer = form.manufacturer.get_untracked().trim().to_owned();
         view! {
             <li class="check check-warn" id="add-same-mpn">
                 <p>{format!("The MPN {mpn} is already in the Catalog:")}</p>
                 <ul>
-                    {found.same_mpn.iter().map(|part| {
+                    {parts.iter().map(|part| {
                         let ipn = part.ipn.clone();
                         let to_open = ipn.clone();
                         let to_add = ipn.clone();
@@ -653,7 +906,8 @@ fn DownloadForm(
                 </ul>
             </li>
         }
-    });
+        .into_any()
+    };
     let known = found.known_footprints.clone();
     let footprint_check = (!known.is_empty() && found.footprint_file.is_some()).then_some({
         move || match form.known_footprint.get() {
@@ -890,8 +1144,32 @@ fn DownloadForm(
         </fieldset>
         <fieldset>
             <legend>"Manufacturer part"</legend>
-            {text_row("add-manufacturer", "Manufacturer", form.manufacturer)}
-            {text_row("add-mpn", "MPN", form.mpn)}
+            <div class="edit-row">
+                <label for="add-manufacturer">"Manufacturer"</label>
+                <input
+                    id="add-manufacturer"
+                    type="text"
+                    spellcheck="false"
+                    prop:value=move || form.manufacturer.get()
+                    on:input:target=move |event| {
+                        form.manufacturer.set(event.target().value());
+                        form.check_mpn_soon();
+                    }
+                />
+            </div>
+            <div class="edit-row">
+                <label for="add-mpn">"MPN"</label>
+                <input
+                    id="add-mpn"
+                    type="text"
+                    spellcheck="false"
+                    prop:value=move || form.mpn.get()
+                    on:input:target=move |event| {
+                        form.mpn.set(event.target().value());
+                        form.check_mpn_soon();
+                    }
+                />
+            </div>
         </fieldset>
         <fieldset>
             <legend>"Symbol and footprint"</legend>

@@ -157,7 +157,6 @@ fn App() -> impl IntoView {
                                 type="button"
                                 id="add-part-open"
                                 class="add-part-open"
-                                aria-pressed=move || if adding.get() { "true" } else { "false" }
                                 on:click=move |_| adding.set(true)
                             >
                                 "Add part"
@@ -569,6 +568,8 @@ fn PartPanel(
     // and a manufacturer part to add to it in Edit part.
     let pending_notice = StoredValue::new(None::<String>);
     let pending_part = StoredValue::new(None::<(String, ManufacturerPart)>);
+    // Add part's form, kept while another part is looked at.
+    let add_form = add_part::Form::new();
     // Changes whenever someone saves a Change, a CSV import run finishes
     // (it may find CSV changes to review), or on sign-in and sign-out.
     let team_checkpoint = Memo::new(move |_| {
@@ -788,7 +789,7 @@ fn PartPanel(
     view! {
         <section class="part-panel" aria-label=move || if adding.get() { "New part" } else { "Selected part" }>
             {move || adding.get().then(|| view! {
-                <AddPartView close=close_adding done=added open_part=open_part />
+                <AddPartView form=add_form close=close_adding done=added open_part=open_part />
             })}
             {move || if adding.get() { ().into_any() } else { match detail.get() {
                 None => view! {
