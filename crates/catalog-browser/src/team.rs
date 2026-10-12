@@ -1713,15 +1713,26 @@ fn open_csv_changes(
             },
         ));
     }
-    // Details first; one import run finds at most one of each of the first
-    // two kinds, and one CAD item made in the app per symbol or footprint.
+    Ok(in_order(open))
+}
+
+/// Open CSV changes, details first, each with its import problem's code.
+/// One import run finds at most one problem of each of the first two kinds,
+/// so a second one of those is left out; a CAD item made in the app gives
+/// one problem per symbol or footprint choice, so each of those shows.
+fn in_order(mut open: Vec<(String, CsvChanges)>) -> Vec<CsvChanges> {
     open.sort_by(|(a_code, a), (b_code, b)| {
-        (a.cad, a_code, &a.rows[0].field).cmp(&(b.cad, b_code, &b.rows[0].field))
+        (a.cad, a_code, &a.rows[0].field, &a.rows[0].now).cmp(&(
+            b.cad,
+            b_code,
+            &b.rows[0].field,
+            &b.rows[0].now,
+        ))
     });
     open.dedup_by(|(a_code, a), (b_code, b)| {
-        a_code == b_code && (a_code != CSV_CAD_ITEM_KEPT || a.rows[0].field == b.rows[0].field)
+        a_code == b_code && (a_code != CSV_CAD_ITEM_KEPT || a.problem == b.problem)
     });
-    Ok(open.into_iter().map(|(_, changes)| changes).collect())
+    open.into_iter().map(|(_, changes)| changes).collect()
 }
 
 /// The row of a [`CSV_CAD_ITEM_KEPT`] problem: the Symbol or Footprint, the
@@ -2349,6 +2360,38 @@ fn save_settings(path: &Path, settings: &TeamSettings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_kept_cad_item_choice_shows_its_own_csv_change() {
+        let changes = |problem: &str, now: &str| CsvChanges {
+            problem: problem.into(),
+            csv_file: "g-res.csv".into(),
+            cad: true,
+            expected: 2,
+            rows: vec![CsvChangeRow {
+                field: "Footprint".into(),
+                now: now.into(),
+                csv: "A changed file".into(),
+                changed_in_csv: true,
+                keep_only: true,
+            }],
+        };
+        let open = in_order(vec![
+            (
+                CSV_CAD_ITEM_KEPT.to_owned(),
+                changes("b", "g-a:Second, footprint revision 1"),
+            ),
+            (
+                CSV_CAD_ITEM_KEPT.to_owned(),
+                changes("a", "g-a:First, footprint revision 2"),
+            ),
+        ]);
+        let problems: Vec<&str> = open
+            .iter()
+            .map(|changes| changes.problem.as_str())
+            .collect();
+        assert_eq!(problems, ["a", "b"]);
+    }
 
     #[test]
     fn excluded_from_bom_is_said_plainly_and_honestly() {
