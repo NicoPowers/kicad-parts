@@ -111,6 +111,32 @@ function download(folder) {
   return file;
 }
 
+/** A download whose footprint has no package group in its name and pads no Catalog footprint has. */
+function oddPads(folder) {
+  const read = (file) => fs.readFileSync(path.join(repoRoot, file), 'utf8');
+  const symbol = read('symbols/g-cap.kicad_sym')
+    .replaceAll('(symbol "C_', '(symbol "C_OddPads_')
+    .replace('(symbol "C"', '(symbol "C_OddPads"')
+    .replace(
+      '\t\t(property "Reference"',
+      `\t\t(property "Manufacturer" "Acme" (at 0 0 0) (effects (hide yes)))\n` +
+        `\t\t(property "MPN" "ODD-PADS-1" (at 0 0 0) (effects (hide yes)))\n` +
+        '\t\t(property "Reference"',
+    );
+  const footprint = read('footprints/g-Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod')
+    .replace('(footprint "C_0603_1608Metric"', '(footprint "CAP_ODD_PADS"')
+    .replaceAll('(at -0.775 0)', '(at -0.9 0)');
+  const file = path.join(folder, 'odd-pads.zip');
+  fs.writeFileSync(
+    file,
+    zipOf([
+      ['C_OddPads.kicad_sym', Buffer.from(symbol, 'utf8')],
+      ['CAP_ODD_PADS.kicad_mod', Buffer.from(footprint, 'utf8')],
+    ]),
+  );
+  return file;
+}
+
 describe('team catalog: Add part in real workflows', () => {
   let server;
   let browser;
@@ -215,13 +241,10 @@ describe('team catalog: Add part in real workflows', () => {
     await browser.keys(['Control']);
     await browser.keys('g-cap:C'.split(''));
     assert.equal(await valueOf('#add-symbol'), 'g-cap:C');
-    // The vendor's footprint name says no package group: the form asks for
-    // one, and the engineer types it before the name.
-    await waitForText(browser, '.add-form', /Type the footprint's library \(its package group\) before its name/);
-    await tabUntil((id) => id === 'add-footprint');
-    await browser.keys(['Home']);
-    await browser.keys('g-Capacitor_SMD:'.split(''));
+    // The vendor's footprint name says no package group; the Catalog's
+    // footprint with the same pads gives one.
     assert.equal(await valueOf('#add-footprint'), 'g-Capacitor_SMD:CAP_GRM18_MUR_0603_Long_Vendor_Name');
+    assert.doesNotMatch(await textOf(browser, '.add-form'), /Type the footprint's library/);
     await tabUntil((id) => id === 'add-reason');
     await browser.keys('Same part, our symbol'.split(''));
     const toSave = await tabUntil((id) => id === 'button:Save');
@@ -245,5 +268,23 @@ describe('team catalog: Add part in real workflows', () => {
       { timeout: 20_000, interval: 100, timeoutMsg: 'the new part never showed the other change' },
     );
     assert.match(await textOf(browser, '.part-fields'), /50V/);
+  });
+
+  it("suggests the footprint's group from the category chosen when its name says none", async () => {
+    await (await browser.$('#add-part-open')).click();
+    await waitForText(browser, '#add-heading', 'Add part');
+    await (await browser.$('#add-files')).addValue(oddPads(files));
+    await waitForText(browser, '#add-guess', /^Best guess: Capacitors/);
+    assert.equal(await valueOf('#add-footprint'), 'g-Capacitor_SMD:CAP_ODD_PADS');
+    // Another category, another group; a group typed by hand stays.
+    await (await browser.$('#add-category')).selectByAttribute('value', 'res');
+    await browser.waitUntil(async () => (await valueOf('#add-footprint')) === 'g-Resistor_SMD:CAP_ODD_PADS', {
+      timeout: 5_000,
+      timeoutMsg: `the footprint group did not follow the category: ${await valueOf('#add-footprint')}`,
+    });
+    await (await browser.$('#add-footprint')).setValue('g-Package_SO:CAP_ODD_PADS');
+    await (await browser.$('#add-category')).selectByAttribute('value', 'cap');
+    await waitForText(browser, '#add-ipn-hint', 'The next free IPN in this category. An IPN is never reused.');
+    assert.equal(await valueOf('#add-footprint'), 'g-Package_SO:CAP_ODD_PADS');
   });
 });

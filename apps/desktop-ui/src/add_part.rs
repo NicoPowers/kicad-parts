@@ -250,14 +250,14 @@ impl Form {
 
     /// Moves the form to the category `code`: its fields as the download
     /// fills them (keeping a value typed for a field of the same name), its
-    /// next free IPN and the symbol's library, unless the person typed their
-    /// own.
+    /// next free IPN, the symbol's library and the footprint's group,
+    /// unless the person typed their own.
     fn choose_category(&self, code: String) {
         let category = self.category(&code);
-        let symbol_name = self.reading.with_untracked(|reading| {
+        let (symbol_name, footprint_name) = self.reading.with_untracked(|reading| {
             reading
                 .as_ref()
-                .map(|reading| reading.symbol_name.clone())
+                .map(|reading| (reading.symbol_name.clone(), reading.footprint_name.clone()))
                 .unwrap_or_default()
         });
         let offered = self.offered_fields.get_value();
@@ -308,6 +308,21 @@ impl Form {
             self.symbol.set(symbol.clone());
         }
         self.offered_symbol.set_value(symbol);
+        // The download's footprint group, else the one the category
+        // suggests.
+        let library = category
+            .as_ref()
+            .map(|category| category.footprint_library.clone())
+            .unwrap_or_default();
+        let footprint = if library.is_empty() || footprint_name.is_empty() {
+            footprint_name
+        } else {
+            format!("{library}:{footprint_name}")
+        };
+        if self.footprint.get_untracked() == self.offered_footprint.get_value() {
+            self.footprint.set(footprint.clone());
+        }
+        self.offered_footprint.set_value(footprint);
         self.category.set(code);
         self.fields_version.update(|version| *version += 1);
         self.check_ipn();
@@ -1100,9 +1115,15 @@ fn DownloadForm(
             </table>
         })
     };
-    let library_hint = found.footprint_library.is_empty().then(|| view! {
-        <p class="hint">"Type the footprint's library (its package group) before its name, such as g-Package_SO:NAME."</p>
-    });
+    let has_footprint = found.footprint_file.is_some();
+    let library_hint = move || {
+        (has_footprint
+            && form.known_footprint.with(Option::is_none)
+            && !form.footprint.with(|footprint| footprint.contains(':')))
+        .then(|| view! {
+            <p class="hint">"Type the footprint's library (its package group) before its name, such as g-Package_SO:NAME."</p>
+        })
+    };
     let text_row = move |id: &'static str, label: &'static str, value: RwSignal<String>| {
         view! {
             <div class="edit-row">
