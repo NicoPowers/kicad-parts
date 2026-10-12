@@ -203,14 +203,19 @@ fn read_zip(
         return Err(too_big());
     }
     for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|error| unreadable(error.to_string()))?;
-        if entry.is_dir() {
+        // Name, kind and flags first, without unpacking: a file the app
+        // leaves out may be protected or packed in a way it cannot read,
+        // and that must not stop it.
+        let (name, is_dir, encrypted) = {
+            let raw = archive
+                .by_index_raw(index)
+                .map_err(|error| unreadable(error.to_string()))?;
+            (raw.name().to_owned(), raw.is_dir(), raw.encrypted())
+        };
+        if is_dir {
             continue;
         }
         // Only a label: never joined to a folder.
-        let name = entry.name().to_owned();
         if download.vendor.is_none() {
             download.vendor = vendor_of(&name);
         }
@@ -219,11 +224,14 @@ fn read_zip(
             download.ignored += 1;
             continue;
         };
-        if entry.encrypted() {
+        if encrypted {
             return Err(format!(
                 "{name} in {shown} is protected by a password, so it cannot be read."
             ));
         }
+        let mut entry = archive.by_index(index).map_err(|error| {
+            format!("{name} in {shown} is packed in a way this app cannot read ({error}). Unpack the ZIP file and choose the KiCad files instead.")
+        })?;
         // An entry may hold more than it says; read at most what is left.
         let left = limits.total_bytes - *total;
         let mut kept = Vec::new();
@@ -417,25 +425,39 @@ pub fn pad_count(footprint: &[u8]) -> usize {
         .len()
 }
 
-/// One pad as [`pad_signature`] compares it: number, shape, and position
-/// and size in hundredths of a millimetre.
-pub type PadKey = (String, String, i64, i64, i64, i64);
+/// One pad as [`pad_signature`] compares it: number, type, shape, then
+/// position, rotation, size and drill rounded to hundredths (of a
+/// millimetre, or of a degree), written out as one text.
+pub type PadKey = String;
 
 /// What two footprints with "the same pads" share: the set of numbered pads,
-/// each with its number, shape, size and position rounded to 0.01 mm.
-/// `None` for a footprint without numbered pads, which matches nothing.
+/// each with its number, type (`smd`, `thru_hole`, ...), shape, position,
+/// rotation, size and drill, rounded to 0.01. `None` for a footprint without
+/// numbered pads, which matches nothing.
 pub fn pad_signature(footprint: &[u8]) -> Option<BTreeSet<PadKey>> {
     let hundredths = |value: f64| (value * 100.0).round() as i64;
     let pads: BTreeSet<PadKey> = numbered_pads(footprint)
         .into_iter()
         .map(|pad| {
-            (
+            let drill: Vec<String> = pad
+                .drill
+                .iter()
+                .map(|word| match word.parse::<f64>() {
+                    Ok(size) => hundredths(size).to_string(),
+                    Err(_) => word.clone(),
+                })
+                .collect();
+            format!(
+                "{}|{}|{}|{}|{}|{}|{}|{}|{}",
                 pad.number,
+                pad.kind,
                 pad.shape,
                 hundredths(pad.at.0),
                 hundredths(pad.at.1),
+                hundredths(pad.rotation),
                 hundredths(pad.size.0),
                 hundredths(pad.size.1),
+                drill.join(" ")
             )
         })
         .collect();
@@ -453,7 +475,9 @@ pub fn link_model(footprint: &str, path: &str, model_file: &str) -> String {
     let wanted = model_file.to_lowercase();
     let chosen = spans
         .iter()
-        .find(|span| last_part(&footprint[span.start + 1..span.end - 1]).to_lowercase() == wanted)
+        .find(|span| {
+            last_part(footprint[(*span).clone()].trim_matches('"')).to_lowercase() == wanted
+        })
         .or_else(|| spans.first());
     if let Some(span) = chosen {
         return format!(
@@ -473,7 +497,9 @@ pub fn link_model(footprint: &str, path: &str, model_file: &str) -> String {
 }
 
 /// The byte span of each `(model "...")` path, quotes included, found the
-/// way [`kicad_integration::library_file::model_references`] finds them.
+/// way [`kicad_integration::library_file::model_references`] finds them, and
+/// of each KiCad 5 path written without quotes, which that leaves out (so
+/// the app and the team server agree); linking quotes it.
 fn model_path_spans(footprint: &str) -> Vec<std::ops::Range<usize>> {
     let mut spans = Vec::new();
     let mut from = 0;
@@ -483,6 +509,13 @@ fn model_path_spans(footprint: &str) -> Vec<std::ops::Range<usize>> {
         let start = after + (rest.len() - rest.trim_start().len());
         from = after;
         if !footprint[start..].starts_with('"') {
+            // KiCad 5 writes the path without quotes, up to a space or `)`.
+            let end = footprint[start..]
+                .find(|ch: char| ch.is_whitespace() || ch == '(' || ch == ')')
+                .map_or(footprint.len(), |at| start + at);
+            if end > start {
+                spans.push(start..end);
+            }
             continue;
         }
         let mut escaped = false;
@@ -563,6 +596,84 @@ mod tests {
         assert_eq!(download.vendor, Some(Vendor::SamacSys));
         // Two other CAD tools' files and the ZIP inside the ZIP.
         assert_eq!(download.ignored, 3);
+    }
+
+    /// A stored ZIP whose entry `name` has the general-purpose `flag` bits
+    /// and compression `method` patched in its local and central headers,
+    /// as a password-protected or oddly packed entry would.
+    fn patched(entries: &[(&str, &[u8])], name: &str, flag: u16, method: Option<u16>) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (entry, bytes) in entries {
+            writer.start_file(*entry, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        let mut zip = writer.finish().unwrap().into_inner();
+        let needle = name.as_bytes();
+        let mut at = 0;
+        while let Some(found) = zip[at..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+        {
+            let start = at + found;
+            // A local header puts the name 30 bytes in, a central one 46.
+            for (signature, offset, flags, methods) in [
+                (0x04034b50u32, 30usize, 6usize, 8usize),
+                (0x02014b50u32, 46, 8, 10),
+            ] {
+                if start >= offset {
+                    let header = start - offset;
+                    if zip[header..header + 4] == signature.to_le_bytes() {
+                        let old =
+                            u16::from_le_bytes([zip[header + flags], zip[header + flags + 1]]);
+                        zip[header + flags..header + flags + 2]
+                            .copy_from_slice(&(old | flag).to_le_bytes());
+                        if let Some(method) = method {
+                            zip[header + methods..header + methods + 2]
+                                .copy_from_slice(&method.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            at = start + needle.len();
+        }
+        zip
+    }
+
+    #[test]
+    fn a_protected_or_oddly_packed_file_matters_only_if_it_is_needed() {
+        let entries: [(&str, &[u8]); 3] = [
+            ("x/KiCad/F.kicad_mod", b"(footprint \"F\")"),
+            ("x/Altium/F.PcbLib", b"secret"),
+            ("x/Eagle/F.lbr", b"packed"),
+        ];
+        // Password-protected and oddly packed files the app leaves out
+        // anyway do not stop it.
+        let zip = patched(&entries, "x/Altium/F.PcbLib", 1, None);
+        let download = read_download(&[("x.zip".into(), zip)]).unwrap();
+        assert_eq!(download.files.len(), 1);
+        assert_eq!(download.ignored, 2);
+        let zip = patched(&entries, "x/Eagle/F.lbr", 0, Some(12));
+        assert_eq!(
+            read_download(&[("x.zip".into(), zip)]).unwrap().files.len(),
+            1
+        );
+        // A needed KiCad file that cannot be read says so plainly.
+        let zip = patched(&entries, "x/KiCad/F.kicad_mod", 1, None);
+        let error = read_download(&[("x.zip".into(), zip)]).unwrap_err();
+        assert_eq!(
+            error,
+            "x/KiCad/F.kicad_mod in x.zip is protected by a password, so it cannot be read."
+        );
+        let zip = patched(&entries, "x/KiCad/F.kicad_mod", 0, Some(12));
+        let error = read_download(&[("x.zip".into(), zip)]).unwrap_err();
+        assert!(
+            error.starts_with(
+                "x/KiCad/F.kicad_mod in x.zip is packed in a way this app cannot read"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
@@ -728,6 +839,28 @@ mod tests {
         let c = b"(footprint \"C\" (pad \"1\" smd rect (at -0.775 0) (size 0.9 0.95)) (pad \"2\" smd roundrect (at 0.775 0) (size 0.9 0.95)))";
         assert_eq!(pad_signature(a), pad_signature(b));
         assert_ne!(pad_signature(a), pad_signature(c));
+        // The pad type, the rotation and the drill count too.
+        let thru = b"(footprint \"T\" (pad \"1\" thru_hole roundrect (at -0.775 0) (size 0.9 0.95) (drill 0.4)) (pad \"2\" smd roundrect (at 0.775 0) (size 0.9 0.95)))";
+        let turned = b"(footprint \"T\" (pad \"1\" smd roundrect (at -0.775 0 90) (size 0.9 0.95)) (pad \"2\" smd roundrect (at 0.775 0) (size 0.9 0.95)))";
+        assert_ne!(pad_signature(a), pad_signature(thru));
+        assert_ne!(pad_signature(a), pad_signature(turned));
+        let drilled = |drill: &str| {
+            format!(
+                "(footprint \"D\" (pad \"1\" thru_hole circle (at 0 0) (size 1.6 1.6) (drill {drill})))"
+            )
+        };
+        assert_eq!(
+            pad_signature(drilled("0.8").as_bytes()),
+            pad_signature(drilled("0.8001").as_bytes())
+        );
+        assert_ne!(
+            pad_signature(drilled("0.8").as_bytes()),
+            pad_signature(drilled("1.0").as_bytes())
+        );
+        assert_ne!(
+            pad_signature(drilled("0.8").as_bytes()),
+            pad_signature(drilled("oval 0.8 1.2").as_bytes())
+        );
         assert_eq!(pad_signature(b"(footprint \"E\")"), None);
     }
 
@@ -754,6 +887,15 @@ mod tests {
             [path]
         );
         assert!(kicad_integration::library_file::FootprintFile::parse(added.as_bytes()).is_ok());
+        // A KiCad 5 footprint writes its model path without quotes: it is
+        // rewritten in place, not given a second model.
+        let old = "(module F (layer F.Cu)\n  (model ${KISYS3DMOD}/Package_SO.3dshapes/SOT230.step\n    (at (xyz 0 0 0))))";
+        let linked = link_model(old, path, "SOT230.step");
+        assert_eq!(
+            kicad_integration::library_file::model_references(&linked),
+            [path]
+        );
+        assert_eq!(linked.matches("(model").count(), 1, "{linked}");
     }
 
     #[test]

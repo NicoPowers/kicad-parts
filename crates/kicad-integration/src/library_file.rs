@@ -500,8 +500,13 @@ pub struct Pad {
     pub shape: String,
     /// The pad's position, in millimetres.
     pub at: (f64, f64),
+    /// The pad's rotation, in degrees (the third number of `at`).
+    pub rotation: f64,
     /// The pad's size, in millimetres.
     pub size: (f64, f64),
+    /// The drill, as written: its shape (`oval`) if any, then its sizes in
+    /// millimetres; empty for a pad without a hole.
+    pub drill: Vec<String>,
 }
 
 /// Every pad of a footprint (a whole `.kicad_mod`), in file order. Empty
@@ -532,6 +537,23 @@ pub fn footprint_pads(bytes: &[u8]) -> Vec<Pad> {
             kind: pad.word_at(2).unwrap_or_default().to_owned(),
             shape: pad.word_at(3).unwrap_or_default().to_owned(),
             at: pair(pad, "at"),
+            rotation: pad
+                .children("at")
+                .next()
+                .and_then(|at| at.word_at(3))
+                .and_then(|word| word.parse::<f64>().ok())
+                .unwrap_or(0.0),
+            drill: pad
+                .children("drill")
+                .next()
+                .map(|drill| {
+                    drill.items()[1..]
+                        .iter()
+                        .filter_map(Sexp::word)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             size: pair(pad, "size"),
         })
         .collect()
@@ -584,6 +606,8 @@ mod tests {
         assert_eq!(pads[1].kind, "np_thru_hole");
         assert_eq!(pads[2].number, "2");
         assert_eq!(pads[2].size, (0.9, 0.95));
+        assert_eq!(pads[2].rotation, 90.0);
+        assert!(pads[0].drill.is_empty());
         assert!(footprint_pads(b"(kicad_symbol_lib)").is_empty());
         assert!(symbol_pin_numbers(b"(symbol").is_empty());
     }
