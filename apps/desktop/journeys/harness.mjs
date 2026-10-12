@@ -562,6 +562,17 @@ export async function waitForPreview(browser, section, timeout = 60_000) {
  * waitForPreview also accepts a problem card as finished.
  */
 export async function waitForPreviewImages(browser, section, timeout = 60_000) {
+  // What the section shows when it gives up, so a failure says why.
+  const shown = async () =>
+    browser.execute((s) => document.querySelector(s)?.innerText.replace(/\s+/g, ' ').trim() ?? '(no section)', section);
+  try {
+    await waitForDrawnImages(browser, section, timeout);
+  } catch (error) {
+    throw new Error(`${error.message}; it shows: ${await shown()}`);
+  }
+}
+
+async function waitForDrawnImages(browser, section, timeout) {
   await browser.waitUntil(
     async () =>
       browser.execute(
