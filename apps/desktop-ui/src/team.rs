@@ -1806,17 +1806,22 @@ fn ConflictView(
                 <tbody>
                     {rows
                         .into_iter()
-                        .map(|row| view! {
-                            <tr class:both-changed=row.both_changed>
-                                <th scope="row">{row.label}</th>
-                                <td class:blank=row.started_from.is_empty()>{shown(&row.started_from)}</td>
-                                <td class:blank=row.theirs.is_empty()>{shown(&row.theirs)}</td>
-                                {if row.you_changed {
-                                    view! { <td class:blank=row.yours.is_empty()>{shown(&row.yours)}</td> }.into_any()
-                                } else {
-                                    view! { <td class="blank">"not changed"</td> }.into_any()
-                                }}
-                            </tr>
+                        .map(|row| {
+                            let started_from = value_view(&row.label, &row.started_from);
+                            let theirs = value_view(&row.label, &row.theirs);
+                            let yours = value_view(&row.label, &row.yours);
+                            view! {
+                                <tr class:both-changed=row.both_changed>
+                                    <th scope="row">{row.label}</th>
+                                    <td class:blank=row.started_from.is_empty()>{started_from}</td>
+                                    <td class:blank=row.theirs.is_empty()>{theirs}</td>
+                                    {if row.you_changed {
+                                        view! { <td class:blank=row.yours.is_empty()>{yours}</td> }.into_any()
+                                    } else {
+                                        view! { <td class="blank">"not changed"</td> }.into_any()
+                                    }}
+                                </tr>
+                            }
                         })
                         .collect_view()}
                 </tbody>

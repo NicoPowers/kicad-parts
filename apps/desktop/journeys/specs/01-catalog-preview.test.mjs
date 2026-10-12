@@ -260,4 +260,26 @@ describe('catalog search with exact KiCad previews', () => {
     await assertAccessible(browser, '08-no-results');
     await screenshot(browser, '08-no-results');
   });
+
+  it('keeps each library name whole in a value with several footprint choices', async () => {
+    const value = 'g-Package_DFN_QFN:WQFN20_RUK_TEX-L;WQFN20_RUK_TEX;WQFN20_RUK_TEX-M';
+    await searchFor(browser, 'TPD6S300ARUKR', '1 matching part');
+    await selectResult(browser, 'TPD6S300ARUKR');
+    await waitForText(browser, '#part-title', 'TPD6S300ARUKR');
+    const cell = await browser.execute(() => {
+      const row = [...document.querySelectorAll('.part-fields tbody tr')].find(
+        (tr) => tr.querySelector('th')?.textContent.trim() === 'Footprint',
+      );
+      const td = row.querySelector('td');
+      return {
+        text: td.textContent,
+        libraries: [...td.querySelectorAll('.lib')].map((lib) => lib.textContent),
+        breaks: td.querySelectorAll('wbr').length,
+      };
+    });
+    // Copying gives the exact value: the spans and <wbr> add no characters.
+    assert.equal(cell.text, value);
+    assert.deepEqual(cell.libraries, ['g-Package_DFN_QFN:']);
+    assert.equal(cell.breaks, 3, 'one break after the colon and one after each ";"');
+  });
 });

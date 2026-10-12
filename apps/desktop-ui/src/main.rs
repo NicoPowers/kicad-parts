@@ -887,9 +887,24 @@ fn PartView(
 
 /// A CAD reference such as `g-Resistor_SMD:R_0603_1608Metric`. The library
 /// part up to the colon never breaks across lines (not even after its `g-`),
-/// and the line may break right after the colon. The spans and `<wbr>` add no
-/// characters, so copying gives the exact reference.
+/// and the line may break right after the colon. A value with several
+/// choices, such as `g-Resistor_SMD:R_0603;g-TestPoint:TP`, shows each choice
+/// this way and may also break after each `;`. The spans and `<wbr>` add no
+/// characters, so copying gives the exact value.
 pub(crate) fn cad_reference(reference: &str) -> AnyView {
+    let mut choices = reference.split(';').peekable();
+    let mut parts = Vec::new();
+    while let Some(choice) = choices.next() {
+        parts.push(one_reference(choice));
+        if choices.peek().is_some() {
+            parts.push(view! { ";"<wbr/> }.into_any());
+        }
+    }
+    parts.collect_view().into_any()
+}
+
+/// One choice of [`cad_reference`].
+fn one_reference(reference: &str) -> AnyView {
     match reference.split_once(':') {
         Some((library, name)) if !library.is_empty() && !name.is_empty() => view! {
             <span class="lib">{format!("{library}:")}</span><wbr/><span>{name.to_owned()}</span>
@@ -914,9 +929,10 @@ pub(crate) fn text_with_reference(text: &str, reference: Option<&str>) -> AnyVie
     }
 }
 
-/// Whether a field holds a symbol or footprint reference.
+/// Whether a field holds a symbol or footprint reference: its label starts
+/// with `Symbol` or `Footprint`, as in `Footprint revision (choice 2)`.
 pub(crate) fn is_cad_field(name: &str) -> bool {
-    matches!(name, "Symbol" | "Footprint")
+    matches!(name.split_whitespace().next(), Some("Symbol" | "Footprint"))
 }
 
 fn kind_title(kind: PreviewKind) -> &'static str {
@@ -1020,7 +1036,17 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
         {note.map(|note| view! { <p class="preview-note">{text_with_reference(&note, Some(&set.reference))}</p> })}
         {(!alternates.is_empty())
             .then(|| view! {
-                <p class="alternates">{format!("Also listed: {}", alternates.join(", "))}</p>
+                <p class="alternates">
+                    "Also listed: "
+                    {alternates
+                        .iter()
+                        .enumerate()
+                        .map(|(index, alternate)| {
+                            let separator = if index == 0 { "" } else { ", " };
+                            view! { {separator}{cad_reference(alternate)} }
+                        })
+                        .collect_view()}
+                </p>
             })}
         <div class={if total > 1 { "preview-grid multi" } else { "preview-grid" }}>
             {set
