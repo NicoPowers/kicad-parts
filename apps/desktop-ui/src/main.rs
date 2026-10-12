@@ -711,6 +711,10 @@ fn PartPanel(
 
     Effect::new(move |_| {
         kicad_epoch.track();
+        // Signing in again (or as someone else) refetches the same revision,
+        // so the source is unchanged; draw again anyway, so a "Sign in to see
+        // this symbol" card from the signed-out moment never stays.
+        signed_in_as.track();
         let source = preview_source.get();
         let Some(ipn) = selected.get() else {
             return;
