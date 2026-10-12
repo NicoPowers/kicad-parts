@@ -474,7 +474,7 @@ function editUploads(list) {
     let formatVersion = null;
     if (role === "symbol") {
       formatVersion = upload.formatVersion;
-      if (typeof formatVersion !== "string" || !/^[0-9]{1,20}$/.test(formatVersion)) {
+      if (typeof formatVersion !== "string" || !/^20[0-9]{6}$/.test(formatVersion)) {
         fail(`the symbol ${reference} needs the (version ...) of the KiCad file it came from`);
       }
     } else if (upload.formatVersion !== undefined && upload.formatVersion !== null) {

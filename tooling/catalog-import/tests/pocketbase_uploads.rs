@@ -569,7 +569,7 @@ fn wrong_or_unused_files_are_refused_plainly_and_nothing_is_written() {
         ),
         // Only the Catalog's own libraries take files.
         (
-            json!([{ "role": "symbol", "reference": "Device:R_X", "fileName": "x.kicad_sym", "formatVersion": "1", "text": "(symbol \"R_X\")" }]),
+            json!([{ "role": "symbol", "reference": "Device:R_X", "fileName": "x.kicad_sym", "formatVersion": "20241209", "text": "(symbol \"R_X\")" }]),
             with_symbol("Device:R_X"),
             "start with g-",
         ),
@@ -613,6 +613,15 @@ fn wrong_or_unused_files_are_refused_plainly_and_nothing_is_written() {
             json!([{ "role": "symbol", "reference": reference, "fileName": "x.kicad_sym", "formatVersion": "20241209", "text": "(symbol \"x\")" }]),
             with_symbol(reference),
             "cannot be used as a reference",
+        ));
+    }
+    // The version a symbol came from is a KiCad file version: 20 and six
+    // more digits.
+    for version in ["1", "123456789", "19991231", "2024120"] {
+        cases.push((
+            json!([{ "role": "symbol", "reference": "g-res:R_X", "fileName": "x.kicad_sym", "formatVersion": version, "text": "(symbol \"R_X\")" }]),
+            with_symbol("g-res:R_X"),
+            "needs the (version ...)",
         ));
     }
     for key in [

@@ -96,6 +96,15 @@ pub fn symbol_upload(
     let Some(version) = library.version.clone() else {
         return Err("The file does not say which KiCad version saved it.".into());
     };
+    // KiCad file versions are dates, such as 20241209.
+    if version.len() != 8
+        || !version.starts_with("20")
+        || !version.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(format!(
+            "The file says it was saved in KiCad file version {version}, which is not one KiCad writes."
+        ));
+    }
     Ok(CadUpload {
         role: UploadRole::Symbol,
         reference: reference.to_owned(),
@@ -298,6 +307,12 @@ mod tests {
             assert!(error.contains(says), "{error}");
         }
         assert!(read_symbol_file(b"(kicad_symbol_lib (version 1))").is_err());
+        let old = TWO.replace("20241209", "1");
+        assert!(
+            symbol_upload(old.as_bytes(), "B", "g-res:B", "f")
+                .unwrap_err()
+                .contains("not one KiCad writes")
+        );
         assert!(
             read_symbol_file(&[0xff, 0xfe])
                 .unwrap_err()
