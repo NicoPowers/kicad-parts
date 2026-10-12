@@ -930,14 +930,12 @@ mod tests {
         assert_eq!(linked.matches("(model").count(), 1, "{linked}");
         // `(model` inside a quoted string, or a head such as `(model_x`, is
         // not a model.
-        let tricky = format!(
-            "(footprint \"F\"
+        let tricky = "(footprint \"F\"
 	(descr \"see (model 3) note\")
 	(model_x \"no.step\")
 	(model \"C:/x/SOT230.STEP\")
-)"
-        );
-        let linked = link_model(&tricky, path, "other.step");
+)";
+        let linked = link_model(tricky, path, "other.step");
         assert!(
             linked.contains("(descr \"see (model 3) note\")"),
             "{linked}"
