@@ -173,6 +173,9 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
         60_000,
       );
       await waitForPreview(browser, section);
+      // The reference in the note keeps its library part whole; its text,
+      // checked above, is still exactly the reference.
+      assert.equal(await textOf(browser, `${section} .preview-note .lib`), `${reference.split(':')[0]}:`);
     }
     const fits = await browser.execute(() => {
       const previews = document.querySelector('.part-previews');

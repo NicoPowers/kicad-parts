@@ -861,10 +861,15 @@ fn PartView(
                                             let is_url = field.value.starts_with("http://")
                                                 || field.value.starts_with("https://");
                                             let title = is_url.then(|| field.value.clone());
+                                            let value = if is_cad_field(&field.name) {
+                                                cad_reference(&field.value)
+                                            } else {
+                                                field.value.into_any()
+                                            };
                                             view! {
                                                 <tr>
                                                     <th scope="row">{field.name}</th>
-                                                    <td class:field-url=is_url title=title>{field.value}</td>
+                                                    <td class:field-url=is_url title=title>{value}</td>
                                                 </tr>
                                             }
                                         })
@@ -878,6 +883,40 @@ fn PartView(
             </div>
         </div>
     }
+}
+
+/// A CAD reference such as `g-Resistor_SMD:R_0603_1608Metric`. The library
+/// part up to the colon never breaks across lines (not even after its `g-`),
+/// and the line may break right after the colon. The spans and `<wbr>` add no
+/// characters, so copying gives the exact reference.
+pub(crate) fn cad_reference(reference: &str) -> AnyView {
+    match reference.split_once(':') {
+        Some((library, name)) if !library.is_empty() && !name.is_empty() => view! {
+            <span class="lib">{format!("{library}:")}</span><wbr/><span>{name.to_owned()}</span>
+        }
+        .into_any(),
+        _ => reference.to_owned().into_any(),
+    }
+}
+
+/// `text` with the first copy of `reference` in it shown by [`cad_reference`].
+pub(crate) fn text_with_reference(text: &str, reference: Option<&str>) -> AnyView {
+    match reference
+        .filter(|r| !r.is_empty())
+        .and_then(|r| text.find(r).map(|at| (r, at)))
+    {
+        Some((reference, at)) => {
+            let before = text[..at].to_owned();
+            let after = text[at + reference.len()..].to_owned();
+            view! { {before}{cad_reference(reference)}{after} }.into_any()
+        }
+        None => text.to_owned().into_any(),
+    }
+}
+
+/// Whether a field holds a symbol or footprint reference.
+pub(crate) fn is_cad_field(name: &str) -> bool {
+    matches!(name, "Symbol" | "Footprint")
 }
 
 fn kind_title(kind: PreviewKind) -> &'static str {
@@ -975,10 +1014,10 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
     };
     view! {
         <p class="preview-meta">
-            <code class="reference">{set.reference.clone()}</code>
+            <code class="reference">{cad_reference(&set.reference)}</code>
             <span class="provenance" title=drawn_from>{provenance}</span>
         </p>
-        {note.map(|note| view! { <p class="preview-note">{note}</p> })}
+        {note.map(|note| view! { <p class="preview-note">{text_with_reference(&note, Some(&set.reference))}</p> })}
         {(!alternates.is_empty())
             .then(|| view! {
                 <p class="alternates">{format!("Also listed: {}", alternates.join(", "))}</p>
@@ -1092,8 +1131,8 @@ fn PreviewProblemView(problem: PreviewProblem) -> impl IntoView {
     view! {
         <div class={if quiet { "problem quiet" } else { "problem" }} role={(!quiet).then_some("alert")}>
             <p class="problem-title">{headline}</p>
-            {problem.reference.map(|reference| view! { <p><code class="reference">{reference}</code></p> })}
-            {message.map(|message| view! { <p>{message}</p> })}
+            {problem.reference.clone().map(|reference| view! { <p><code class="reference">{cad_reference(&reference)}</code></p> })}
+            {message.map(|message| view! { <p>{text_with_reference(&message, problem.reference.as_deref())}</p> })}
             {problem
                 .cli_message
                 .map(|message| view! {

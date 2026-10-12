@@ -452,6 +452,12 @@ a {
   border-radius: 4px;
 }
 
+/* The library part of a symbol or footprint reference, up to its colon,
+   stays on one line; the line may break right after the colon. */
+.lib {
+  white-space: nowrap;
+}
+
 .provenance,
 .alternates {
   color: var(--muted);

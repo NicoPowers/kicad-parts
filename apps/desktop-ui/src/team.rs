@@ -673,6 +673,16 @@ fn shown(value: &str) -> String {
     }
 }
 
+/// A field's value as [`shown`] gives it, with a symbol or footprint
+/// reference kept whole up to its colon ([`crate::cad_reference`]).
+fn value_view(field: &str, value: &str) -> AnyView {
+    if crate::is_cad_field(field) && !value.is_empty() {
+        crate::cad_reference(value)
+    } else {
+        shown(value).into_any()
+    }
+}
+
 fn is_url(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
 }
@@ -685,11 +695,12 @@ fn field_rows(fields: Vec<Field>) -> impl IntoView {
         .map(|field| {
             let url = is_url(&field.value);
             let title = url.then(|| field.value.clone());
+            let value = value_view(&field.name, &field.value);
             view! {
                 <tr>
                     <th scope="row">{field.name}</th>
                     <td class:field-url=url class:blank=field.value.is_empty() title=title>
-                        {shown(&field.value)}
+                        {value}
                     </td>
                 </tr>
             }
@@ -794,7 +805,7 @@ fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                                 .map(|item| view! {
                                     <tr>
                                         <th scope="row">{item.role.clone()}</th>
-                                        <td><code>{item.reference.clone()}</code>", "<span class="binding">{item.binding.clone()}</span></td>
+                                        <td><code>{crate::cad_reference(&item.reference)}</code>", "<span class="binding">{item.binding.clone()}</span></td>
                                     </tr>
                                 })
                                 .collect_view()}
@@ -1038,12 +1049,16 @@ fn changes_table(
             <tbody>
                 {changes
                     .into_iter()
-                    .map(|change| view! {
-                        <tr>
-                            <th scope="row">{change.label}</th>
-                            <td class="before" class:blank=change.before.is_empty()>{shown(&change.before)}</td>
-                            <td class="after" class:blank=change.after.is_empty()>{shown(&change.after)}</td>
-                        </tr>
+                    .map(|change| {
+                        let before = value_view(&change.label, &change.before);
+                        let after = value_view(&change.label, &change.after);
+                        view! {
+                            <tr>
+                                <th scope="row">{change.label}</th>
+                                <td class="before" class:blank=change.before.is_empty()>{before}</td>
+                                <td class="after" class:blank=change.after.is_empty()>{after}</td>
+                            </tr>
+                        }
                     })
                     .collect_view()}
             </tbody>
@@ -1532,9 +1547,9 @@ fn review_row(
                 />
             </td>
             <th scope="row">{row.field.clone()}</th>
-            <td class:blank=row.now.is_empty()>{shown(&row.now)}</td>
+            <td class:blank=row.now.is_empty()>{value_view(&row.field, &row.now)}</td>
             <td>
-                <span class="csv-value" class:blank=row.csv.is_empty()>{shown(&row.csv)}</span>
+                <span class="csv-value" class:blank=row.csv.is_empty()>{value_view(&row.field, &row.csv)}</span>
                 {(!row.changed_in_csv).then(|| view! {
                     <span class="csv-same">"(not changed in the CSV)"</span>
                 })}

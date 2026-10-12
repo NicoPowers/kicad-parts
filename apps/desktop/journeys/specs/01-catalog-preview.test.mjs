@@ -199,6 +199,10 @@ describe('catalog search with exact KiCad previews', () => {
     const alert = `${FOOTPRINT} [role="alert"]`;
     assert.equal(await textOf(browser, `${alert} .problem-title`), 'The footprint library was not found');
     assert.match(await textOf(browser, alert), /Jetson_Nano_260_SODIMM/);
+    // The library part stays whole on one line, and copying still gives the
+    // exact reference: the spans and <wbr> add no characters.
+    assert.equal(await textOf(browser, `${alert} code`), 'g-Connector_PCBEdge:Jetson_Nano_260_SODIMM');
+    assert.equal(await textOf(browser, `${alert} code .lib`), 'g-Connector_PCBEdge:');
     await browser.execute((s) => document.querySelector(s).scrollIntoView(), FOOTPRINT);
     await assertAccessible(browser, '06-footprint-unresolved');
     await screenshot(browser, '06-footprint-unresolved');
