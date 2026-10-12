@@ -256,12 +256,62 @@ pub struct TeamUi {
     /// same one again replays the server's answer.
     pub review_attempts: StoredValue<Vec<(TeamCsvReviewRequest, String)>>,
     pub busy: RwSignal<bool>,
-    /// The last save sent and its correlation ID: sending the same save
-    /// again (after a lost answer) reuses the ID, so the server replays its
-    /// answer instead of reporting a conflict with yourself.
-    pub attempt: StoredValue<Option<(Attempt, String)>>,
-    /// The ID made when the edit form opened, for its first save.
-    pub opened_id: StoredValue<String>,
+    /// Edits and archives each keep their own retry slot, so opening or
+    /// cancelling one form never changes what the other's retry sends.
+    pub edit_attempt: RetrySlot<TeamEditRequest>,
+    pub archive_attempt: RetrySlot<TeamArchiveRequest>,
+}
+
+/// One kind of save's retry slot: the last request sent and its
+/// correlation ID, and the ID made when its form opened. Sending the same
+/// request again (after a lost answer) reuses the ID, so the server replays
+/// its answer instead of reporting a conflict with yourself.
+pub struct RetrySlot<T: Send + Sync + 'static> {
+    last: StoredValue<Option<(T, String)>>,
+    opened_id: StoredValue<String>,
+}
+
+impl<T: Send + Sync + 'static> Clone for RetrySlot<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: Send + Sync + 'static> Copy for RetrySlot<T> {}
+
+impl<T: Clone + PartialEq + Send + Sync + 'static> RetrySlot<T> {
+    fn new() -> Self {
+        Self {
+            last: StoredValue::new(None),
+            opened_id: StoredValue::new(new_correlation_id()),
+        }
+    }
+
+    /// Starts afresh, as when its form opens: the next save gets a new ID.
+    fn open(&self) {
+        self.last.set_value(None);
+        self.opened_id.set_value(new_correlation_id());
+    }
+
+    /// The correlation ID for `request`: the previous one if this is the
+    /// same save sent again, the form's own ID for its first save,
+    /// otherwise new.
+    fn id_for(&self, request: T) -> String {
+        let repeated = self.last.with_value(|last| match last {
+            Some((previous, id)) if *previous == request => Some(id.clone()),
+            _ => None,
+        });
+        if let Some(id) = repeated {
+            return id;
+        }
+        let id = if self.last.with_value(Option::is_none) {
+            self.opened_id.get_value()
+        } else {
+            new_correlation_id()
+        };
+        self.last.set_value(Some((request, id.clone())));
+        id
+    }
 }
 
 impl Default for TeamUi {
@@ -287,14 +337,14 @@ impl TeamUi {
             review_reason: RwSignal::new(String::new()),
             review_attempts: StoredValue::new(Vec::new()),
             busy: RwSignal::new(false),
-            attempt: StoredValue::new(None),
-            opened_id: StoredValue::new(new_correlation_id()),
+            edit_attempt: RetrySlot::new(),
+            archive_attempt: RetrySlot::new(),
         }
     }
 
     pub fn reset(&self) {
-        self.attempt.set_value(None);
-        self.opened_id.set_value(new_correlation_id());
+        self.edit_attempt.open();
+        self.archive_attempt.open();
         self.tab.set(Tab::Details);
         self.editing.set(None);
         self.conflict.set(None);
@@ -326,16 +376,14 @@ impl TeamUi {
     /// archiving the same revision for the same reason as an earlier save
     /// (after someone else unarchived it) is not taken for that save.
     fn start_archiving(&self, number: u32, archived: bool, current: u32) {
-        self.attempt.set_value(None);
-        self.opened_id.set_value(new_correlation_id());
+        self.archive_attempt.open();
         self.notice.set(None);
         self.archive_reason.set(String::new());
         self.archiving.set(Some((number, archived, current)));
     }
 
     fn start_editing(&self, draft: Draft) {
-        self.attempt.set_value(None);
-        self.opened_id.set_value(new_correlation_id());
+        self.edit_attempt.open();
         self.draft.set_value(draft);
         self.close_review();
         self.conflict.set(None);
@@ -474,37 +522,11 @@ fn published(ui: TeamUi, part: RwSignal<Option<TeamPart>>, result: Result<Publis
     }
 }
 
-/// One save as sent, without its correlation ID.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Attempt {
-    Edit(TeamEditRequest),
-    Archive(TeamArchiveRequest),
-}
-
 /// A new correlation ID: letters, digits and dashes, as the server needs.
 fn new_correlation_id() -> String {
     let now = js_sys::Date::now() as u64;
     let random = (js_sys::Math::random() * 1e15) as u64;
     format!("desktop-{now:x}-{random:x}")
-}
-
-/// The correlation ID for `attempt`: the previous one if this is the same
-/// save sent again, the form's own ID for its first save, otherwise new.
-fn attempt_id(ui: TeamUi, attempt: Attempt) -> String {
-    let repeated = ui.attempt.with_value(|last| match last {
-        Some((previous, id)) if *previous == attempt => Some(id.clone()),
-        _ => None,
-    });
-    if let Some(id) = repeated {
-        return id;
-    }
-    let id = if ui.attempt.with_value(Option::is_none) {
-        ui.opened_id.get_value()
-    } else {
-        new_correlation_id()
-    };
-    ui.attempt.set_value(Some((attempt, id.clone())));
-    id
 }
 
 fn save_edit(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamEditRequest) {
@@ -516,7 +538,7 @@ fn save_edit(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamEditRequ
     }
     let mut request = request;
     request.correlation_id = None;
-    request.correlation_id = Some(attempt_id(ui, Attempt::Edit(request.clone())));
+    request.correlation_id = Some(ui.edit_attempt.id_for(request.clone()));
     ui.busy.set(true);
     spawn_local(async move {
         let result = backend::team_edit(request).await;
@@ -1766,7 +1788,7 @@ fn save_archive(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamArchi
     }
     let mut request = request;
     request.correlation_id = None;
-    request.correlation_id = Some(attempt_id(ui, Attempt::Archive(request.clone())));
+    request.correlation_id = Some(ui.archive_attempt.id_for(request.clone()));
     ui.busy.set(true);
     spawn_local(async move {
         let result = backend::team_archive(request).await;
