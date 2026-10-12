@@ -188,16 +188,23 @@ fn measure(
             ..Clues::default()
         };
         let ranked = guess_category(&clues, categories, &[], &others);
+        // Ties count against the guess: the right category's place is how
+        // many other categories score at least as much.
+        let right = ranked
+            .iter()
+            .find(|guess| guess.category == part.category)
+            .unwrap()
+            .score;
         let position = ranked
             .iter()
-            .position(|guess| guess.category == part.category)
-            .unwrap();
+            .filter(|guess| guess.category != part.category && guess.score >= right)
+            .count();
         let entry = tally.entry(part.category.clone()).or_default();
         entry.0 += 1;
-        if position == 0 && ranked[0].score > 0 {
+        if position == 0 && right > 0 {
             entry.1 += 1;
         }
-        if position < 3 && ranked[position].score > 0 {
+        if position < 3 && right > 0 {
             entry.2 += 1;
         } else {
             misses.push(format!(
