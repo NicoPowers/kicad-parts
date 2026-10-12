@@ -6,6 +6,7 @@
 //
 //   { correlationId, reason, csvFile, sourceCommit, allowOlderCheckout,
 //     allowUncommittedChanges, expectedCsvImport,
+//     category: { id, code, snapshot, snapshotSha256 },
 //     sources: [{ role, path, byteSha256, size, headerRaw, rows }],
 //     blobs: [{ sha256, size, text | base64 }],
 //     cadItemRevisions: [{ id, cadItemId, kind, key, expectedRevision,
@@ -18,6 +19,13 @@
 // `csvFile` is a plain name of at most 64 characters: a letter or digit,
 // then letters, digits and . _ - (such as g-res); anything else is refused
 // (400), so importers can put it in a filter as it is.
+// `category` is the category the CSV file makes (g-res makes res; crates/
+// catalog CategoryDetails as canonical JSON): every part's details must be
+// in it and list exactly its fields. A new category is saved as its
+// revision 1. For a category the Catalog has, only the fields are taken
+// from the request, with the stored name, IPN prefix and rules kept, and a
+// new revision is saved only when the fields differ, so an import changes a
+// category only when the CSV file's part details columns change.
 // Every run sends exactly one catalog-csv source (database/<csvFile>.csv)
 // and one substitutes-csv source (database/substitutes.csv). `rows` is
 // given for these two only: every row's exact bytes, in file order, none
@@ -301,6 +309,32 @@ routerAdd(
     const catalogCsv = onlySource("catalog-csv", `database/${csvFile}.csv`);
     const substitutesCsv = onlySource("substitutes-csv", "database/substitutes.csv");
 
+    // The category this CSV file makes.
+    const categoryEntry = body.category;
+    if (!categoryEntry || typeof categoryEntry !== "object" || Array.isArray(categoryEntry)) {
+      fail("category is required");
+    }
+    const categoryCode = lib.categoryCode(csvFile);
+    const categoryId = lib.deriveId("category", categoryCode);
+    if (categoryEntry.code !== categoryCode || categoryEntry.id !== categoryId) {
+      fail(`the category of ${csvFile} must have the code ${categoryCode} and the ID ${categoryId}`);
+    }
+    const categorySnapshot = text(categoryEntry, "snapshot", DOCUMENT, true);
+    const categorySha = $security.sha256(categorySnapshot);
+    if (categoryEntry.snapshotSha256 !== categorySha) {
+      fail(`the snapshotSha256 of the category ${categoryCode} does not match its snapshot`);
+    }
+    const categoryDocument = lib.categoryDocument(parse(categorySnapshot, "the category"));
+    if (typeof categoryDocument === "string") {
+      fail(`the category ${categoryCode} cannot be saved: ${categoryDocument}`);
+    }
+    if (categoryDocument.code !== categoryCode) {
+      fail(`the category of ${csvFile} must have the code ${categoryCode}`);
+    }
+    if (JSON.stringify(categoryDocument) !== categorySnapshot) {
+      fail(`the snapshot of the category ${categoryCode} is not in canonical form`);
+    }
+
     // A blob comes as `text` when its bytes are UTF-8 (every real CAD file
     // so far) and as `base64` otherwise. Text is hashed and stored by
     // PocketBase's own Go code: $security.sha256(text) and toBytes(text)
@@ -459,6 +493,15 @@ routerAdd(
         fail(`part ID for ${ipn} must be ${id}`);
       }
       const details = document(part, "details", lib.PART_DETAILS_SCHEMA, ipn);
+      // Every part of a CSV file is in the category it makes, with exactly
+      // that category's fields.
+      if (details.parsed.category !== categoryCode) {
+        fail(`the details of ${ipn} must be in the category ${categoryCode}, which ${csvFile} makes`);
+      }
+      const detailNames = details.parsed.fields.map((field) => field.name);
+      if (JSON.stringify(detailNames) !== JSON.stringify(categoryDocument.fields)) {
+        fail(`the details of ${ipn} must list exactly the fields of the category ${categoryCode}, in order`);
+      }
       const revision = document(part, "revision", lib.PART_REVISION_SCHEMA, ipn);
       const source = text(part, "source", DOCUMENT, true);
       const targets = [];
@@ -559,6 +602,7 @@ routerAdd(
         allowOlderCheckout,
         allowUncommittedChanges,
         expectedCsvImport,
+        categorySha,
         // A CSV file's rows are fixed by its byte hash, checked above.
         sources.map((source) => [source.role, source.path, source.byte_sha256, source.size, source.header_raw]),
         blobs.map((blob) => blob.sha256),
@@ -734,6 +778,41 @@ routerAdd(
         (blob) => !reuse("catalog_blobs", blob.id, (r) => r.getString("sha256") === blob.sha256, `blob ${blob.sha256}`),
       );
       const blobExists = (sha) => !!requestBlobs[sha] || !!byId("catalog_blobs", lib.deriveId("blob", sha));
+
+      // The category: new, or its stored revision with this CSV file's
+      // fields. The name, IPN prefix and rules of a stored category are
+      // kept, so an import changes only its fields.
+      const storedCategory = reuse(
+        "catalog_categories",
+        categoryId,
+        (r) => r.getString("code") === categoryCode,
+        `the category ${categoryCode}`,
+      );
+      const currentCategory = lib.currentCategoryRevision(txApp, categoryCode);
+      let newCategoryRevision = null;
+      if (!currentCategory) {
+        newCategoryRevision = { number: 1, predecessor: "", snapshot: categorySnapshot, sha: categorySha };
+      } else {
+        const stored = lib.categoryDocument(JSON.parse(currentCategory.getString("snapshot")));
+        if (typeof stored === "string") {
+          throw new Error(`the stored category ${categoryCode} cannot be read: ${stored}`);
+        }
+        stored.fields = categoryDocument.fields;
+        const snapshot = JSON.stringify(stored);
+        const sha = $security.sha256(snapshot);
+        if (sha !== currentCategory.getString("snapshot_sha256")) {
+          const number = currentCategory.getInt("number") + 1;
+          newCategoryRevision = { number: number, predecessor: currentCategory.id, snapshot: snapshot, sha: sha };
+        }
+      }
+      if (newCategoryRevision) {
+        reuse(
+          "catalog_category_revisions",
+          lib.deriveId("category-revision", categoryId + "\n" + newCategoryRevision.number),
+          () => false,
+          `a new revision ${newCategoryRevision.number} of the category ${categoryCode}`,
+        );
+      }
 
       // A hash of a CAD item revision's content: its snapshot with the
       // numbers of its 3D model bindings left out. Revisions with the same
@@ -1201,6 +1280,7 @@ routerAdd(
         cadItemRevisions: cadItemRevisions.length - newCadItemRevisions.length,
         parts: unchangedParts,
         problems: Object.keys(seenProblems).length - newProblems.length,
+        categoryRevisions: newCategoryRevision ? 0 : 1,
       };
       const withNewRevision = updatedParts.filter((part) => part.newRevision).length;
       const withNewDetails = updatedParts.filter((part) => part.newDetails).length;
@@ -1214,9 +1294,13 @@ routerAdd(
         partDetails: newParts.length + withNewDetails,
         updatedDetails: withNewDetails,
         problems: newProblems.length,
+        categories: storedCategory ? 0 : 1,
+        categoryRevisions: newCategoryRevision ? 1 : 0,
       };
-      // New blobs and CAD items only ever arrive with a new CAD item revision.
-      const revisionCount = created.partRevisions + created.partDetails + created.cadItemRevisions;
+      // New blobs and CAD items only ever arrive with a new CAD item
+      // revision, and a new category with its first revision.
+      const revisionCount =
+        created.partRevisions + created.partDetails + created.cadItemRevisions + created.categoryRevisions;
 
       // Whether the previous import run of this CSV file read exactly these
       // files. If not, this run is recorded even when it adds nothing else,
@@ -1326,6 +1410,39 @@ routerAdd(
           }),
         );
         txApp.save(audit);
+
+        if (!storedCategory) {
+          const made = record("catalog_categories", categoryId);
+          made.set("code", categoryCode);
+          made.set("first_change", changeId);
+          txApp.save(made);
+        }
+        if (newCategoryRevision) {
+          const made = record(
+            "catalog_category_revisions",
+            lib.deriveId("category-revision", categoryId + "\n" + newCategoryRevision.number),
+          );
+          made.set("category", categoryId);
+          made.set("number", newCategoryRevision.number);
+          made.set("predecessor", newCategoryRevision.predecessor);
+          made.set("change", changeId);
+          made.set("snapshot", newCategoryRevision.snapshot);
+          made.set("snapshot_sha256", newCategoryRevision.sha);
+          // The CSV file whose header line made it.
+          made.set(
+            "source",
+            JSON.stringify({
+              schema: lib.SOURCE_SCHEMA,
+              source: lib.CSV_CATALOG_SOURCE,
+              csv_file: csvFile,
+              path: catalogCsv.path,
+              byte_sha256: catalogCsv.byte_sha256,
+              source_commit: sourceCommit,
+              header_raw: catalogCsv.header_raw,
+            }),
+          );
+          txApp.save(made);
+        }
 
         for (const blob of newBlobs) {
           const made = record("catalog_blobs", blob.id);

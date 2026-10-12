@@ -5,15 +5,15 @@ use crate::hash::sha256_hex;
 use serde::{Deserialize, Serialize};
 
 /// The schema tag of [`PartDetails`].
-pub const PART_DETAILS_SCHEMA: &str = "kicad-parts/part-details/2";
+pub const PART_DETAILS_SCHEMA: &str = "kicad-parts/part-details/3";
 /// The schema tag of [`PartRevision`].
 pub const PART_REVISION_SCHEMA: &str = "kicad-parts/part-revision/1";
 /// The CSV columns whose values are CAD references, in the order a part
 /// revision keeps them. Every other describing column is part details.
 pub const CAD_COLUMNS: [&str; 2] = ["Symbol", "Footprint"];
 
-/// What a part is: every field that describes it and its manufacturer
-/// parts. Every revision of the part shares them, so changing them saves
+/// What a part is: its category, every field that describes it and its
+/// manufacturer parts. Every revision of the part shares them, so changing them saves
 /// the part's next details but adds no revision.
 ///
 /// Serialization is canonical: fields serialize in declaration order and
@@ -28,6 +28,9 @@ pub const CAD_COLUMNS: [&str; 2] = ["Symbol", "Footprint"];
 pub struct PartDetails {
     pub schema: String,
     pub ipn: String,
+    /// The code of the part's category, such as `res` (see
+    /// [`crate::CategoryDetails`]). Changing it never changes the IPN.
+    pub category: String,
     /// Every source column that describes the part, in source order, blanks
     /// included, under its exact source name; never Symbol or Footprint.
     pub fields: Vec<DetailField>,
@@ -163,6 +166,7 @@ mod tests {
         PartDetails {
             schema: PART_DETAILS_SCHEMA.into(),
             ipn: "RES-0000-0470".into(),
+            category: "res".into(),
             fields: vec![
                 DetailField {
                     name: "Value".into(),
@@ -204,7 +208,7 @@ mod tests {
         let json = details.canonical_json();
         assert_eq!(
             json,
-            r#"{"schema":"kicad-parts/part-details/2","ipn":"RES-0000-0470","fields":[{"name":"Value","value":"47"},{"name":"Tolerance","value":""}],"manufacturer_parts":[{"manufacturer":"Yageo","mpn":"RC0603FR-0747RL"}]}"#
+            r#"{"schema":"kicad-parts/part-details/3","ipn":"RES-0000-0470","category":"res","fields":[{"name":"Value","value":"47"},{"name":"Tolerance","value":""}],"manufacturer_parts":[{"manufacturer":"Yageo","mpn":"RC0603FR-0747RL"}]}"#
         );
         let parsed: PartDetails = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, details);

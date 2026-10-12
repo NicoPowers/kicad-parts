@@ -4,8 +4,9 @@
 //! collections (`infra/pocketbase/pb_migrations/1791500000_catalog_init.js`
 //! `1791600000_catalog_edits.js`, `1791800000_shared_part_details.js`,
 //! `1791900000_archived_revisions.js`, `1792000000_csv_reviews.js`,
-//! `1792100000_uncommitted_changes.js` and
-//! `1792200000_cad_item_revision_successor.js`).
+//! `1792100000_uncommitted_changes.js`,
+//! `1792200000_cad_item_revision_successor.js` and
+//! `1792300000_categories.js`).
 
 use crate::cad_item::Blob;
 use crate::cad_item::{CadItemDetails, CadItemKind, ModelTarget};
@@ -30,7 +31,7 @@ pub const CSV_IMPORT_ROUTE: &str = "/api/catalog/csv-imports";
 pub const IMPORT_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Every Catalog collection, in dependency order.
-pub const COLLECTIONS: [&str; 12] = [
+pub const COLLECTIONS: [&str; 15] = [
     "catalog_changes",
     "catalog_blobs",
     "catalog_cad_items",
@@ -40,6 +41,9 @@ pub const COLLECTIONS: [&str; 12] = [
     "catalog_part_revisions",
     "catalog_archive_entries",
     "catalog_csv_reviews",
+    "catalog_categories",
+    "catalog_category_revisions",
+    "catalog_category_matches",
     "catalog_audit_entries",
     "catalog_import_problems",
     "catalog_commands",
@@ -219,6 +223,12 @@ impl<'a> ImportCommand<'a> {
             "allowOlderCheckout": self.allow_older_checkout,
             "allowUncommittedChanges": self.allow_uncommitted_changes,
             "expectedCsvImport": self.expected_csv_import,
+            "category": {
+                "id": import.category.id,
+                "code": import.category.details.code,
+                "snapshot": import.category.details_json,
+                "snapshotSha256": import.category.details_sha256,
+            },
             "sources": import.sources.iter().map(|source| {
                 let mut file = json!({
                     "role": source.role,
@@ -735,6 +745,13 @@ pub struct Counts {
     /// Existing parts whose details were saved again.
     pub updated_details: u64,
     pub problems: u64,
+    /// 1 when the import made its category.
+    #[serde(default)]
+    pub categories: u64,
+    /// 1 when the import saved a revision of its category: the first, or
+    /// one with the CSV file's new part details columns.
+    #[serde(default)]
+    pub category_revisions: u64,
 }
 
 /// Submits `command`. Every answer in [`ImportOutcome`] is `Ok`; inspect it.
@@ -790,13 +807,19 @@ pub struct EditCommand {
     pub cad: Option<CadEdit>,
 }
 
-/// New part details: every field of the current details (the same names in
-/// the same order, with new values) and the full list of manufacturer
-/// parts. Saving them adds no revision.
+/// New part details: the category, every field of the current details
+/// (the same names in the same order, with new values) and the full list of
+/// manufacturer parts. Saving them adds no revision.
+///
+/// A new category keeps every field and adds, after them, the fields of the
+/// new category the part lacks (see [`fields_for_category`]); the server
+/// refuses any other list. The IPN never changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetailsEdit {
     /// The number of the part details the edit starts from.
     pub expected_details: u32,
+    /// The code of the part's category, changed or not.
+    pub category: String,
     pub fields: Vec<DetailField>,
     pub manufacturer_parts: Vec<ManufacturerPart>,
 }
@@ -901,6 +924,7 @@ impl EditCommand {
     pub fn editing_details(mut self, current: &PartDetails, expected_details: u32) -> Self {
         self.details = Some(DetailsEdit {
             expected_details,
+            category: current.category.clone(),
             fields: current.fields.clone(),
             manufacturer_parts: current.manufacturer_parts.clone(),
         });
@@ -916,6 +940,29 @@ impl EditCommand {
             uploads: Vec::new(),
         });
         self
+    }
+
+    /// Moves the part to `category`, starting from the details `current`
+    /// (the ones [`EditCommand::editing_details`] started from): the fields
+    /// become [`fields_for_category`], keeping any value already set in
+    /// this edit. Does nothing without a details section.
+    pub fn choose_category(&mut self, current: &PartDetails, category: &crate::CategoryDetails) {
+        let Some(details) = self.details.as_mut() else {
+            return;
+        };
+        let fields = if category.code == current.category {
+            current.fields.clone()
+        } else {
+            fields_for_category(&current.fields, &category.fields)
+        };
+        details.fields = fields
+            .into_iter()
+            .map(|field| {
+                let typed = details.fields.iter().find(|typed| typed.name == field.name);
+                typed.cloned().unwrap_or(field)
+            })
+            .collect();
+        details.category.clone_from(&category.code);
     }
 
     /// Sets the value of the field named exactly `name`, in the details or
@@ -948,6 +995,7 @@ impl EditCommand {
         if let Some(details) = &self.details {
             body["details"] = json!({
                 "expectedDetails": details.expected_details,
+                "category": details.category,
                 "fields": fields(&details.fields),
                 "manufacturerParts": details.manufacturer_parts.iter().map(|part| json!({
                     "manufacturer": part.manufacturer,
@@ -967,6 +1015,22 @@ impl EditCommand {
         }
         body
     }
+}
+
+/// The fields a part has in a new category: every field it has, then,
+/// blank, the fields of the new category it lacks, in the category's order.
+/// Nothing is dropped.
+pub fn fields_for_category(fields: &[DetailField], category_fields: &[String]) -> Vec<DetailField> {
+    let mut result = fields.to_vec();
+    for name in category_fields {
+        if !fields.iter().any(|field| &field.name == name) {
+            result.push(DetailField {
+                name: name.clone(),
+                value: String::new(),
+            });
+        }
+    }
+    result
 }
 
 /// What the edit route answered.
@@ -1000,6 +1064,9 @@ pub enum PublishOutcome {
         /// The CAD item revisions the edit's files made.
         #[serde(default)]
         new_cad_item_revisions: Vec<NewCadItemRevision>,
+        /// The clues remembered with a new category.
+        #[serde(default)]
+        remembered_matches: Vec<RememberedClue>,
     },
     /// 422: nothing would change; nothing was written.
     #[serde(rename_all = "camelCase")]
@@ -1026,6 +1093,14 @@ pub enum PublishOutcome {
         correlation_id: String,
         message: String,
     },
+}
+
+/// A clue remembered with the category a person chose.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct RememberedClue {
+    /// See [`crate::guess::ClueKind::as_str`].
+    pub clue: String,
+    pub value: String,
 }
 
 /// A CAD item revision a file sent with an edit made.
@@ -1669,6 +1744,93 @@ pub fn archived_numbers(entries: &[&StoredArchiveEntry]) -> std::collections::BT
         .collect()
 }
 
+/// A category: its code gives its ID.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct StoredCategory {
+    pub id: String,
+    pub code: String,
+    pub first_change: String,
+}
+
+/// One revision of a category; the newest is the current one.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct StoredCategoryRevision {
+    pub id: String,
+    pub category: String,
+    pub number: u32,
+    pub predecessor: String,
+    pub change: String,
+    /// [`crate::CategoryDetails`] as canonical JSON.
+    pub snapshot: String,
+    pub snapshot_sha256: String,
+    pub source: String,
+}
+
+/// A person confirmed a category for a part with this clue (a remembered
+/// match), in an edit.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct StoredCategoryMatch {
+    pub id: String,
+    pub category: String,
+    /// See [`crate::guess::ClueKind::as_str`].
+    pub clue: String,
+    pub value: String,
+    pub part: String,
+    pub change: String,
+    pub seq: u64,
+    pub actor: String,
+    pub actor_name: String,
+    #[serde(default)]
+    pub created: String,
+}
+
+/// The current revision of every category, by name. Each is the newest
+/// revision of its category.
+pub fn current_categories(client: &PocketBaseClient) -> CollabResult<Vec<crate::CategoryDetails>> {
+    let revisions: Vec<StoredCategoryRevision> =
+        client.list_records("catalog_category_revisions", "", "category,-number")?;
+    let mut seen = BTreeSet::new();
+    let mut categories = Vec::new();
+    for revision in revisions {
+        if !seen.insert(revision.category.clone()) {
+            continue;
+        }
+        let details: crate::CategoryDetails = serde_json::from_str(&revision.snapshot)
+            .map_err(|error| CollabError::Protocol(format!("category {}: {error}", revision.id)))?;
+        categories.push(details);
+    }
+    categories.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then(a.code.cmp(&b.code))
+    });
+    Ok(categories)
+}
+
+/// Every remembered match, oldest first, with its category's code.
+pub fn remembered_matches(
+    client: &PocketBaseClient,
+) -> CollabResult<Vec<crate::guess::RememberedMatch>> {
+    let categories: Vec<StoredCategory> = client.list_records("catalog_categories", "", "code")?;
+    let code_of: BTreeMap<String, String> = categories
+        .into_iter()
+        .map(|category| (category.id, category.code))
+        .collect();
+    let matches: Vec<StoredCategoryMatch> =
+        client.list_records("catalog_category_matches", "", "seq,clue")?;
+    Ok(matches
+        .into_iter()
+        .filter_map(|stored| {
+            Some(crate::guess::RememberedMatch {
+                category: code_of.get(&stored.category)?.clone(),
+                clue: crate::guess::ClueKind::parse(&stored.clue)?,
+                value: stored.value,
+            })
+        })
+        .collect())
+}
+
 /// One saved copy of a part's details.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct StoredPartDetails {
@@ -1847,6 +2009,9 @@ pub struct CatalogReadback {
     pub part_revisions: Vec<StoredPartRevision>,
     pub archive_entries: Vec<StoredArchiveEntry>,
     pub csv_reviews: Vec<StoredCsvReview>,
+    pub categories: Vec<StoredCategory>,
+    pub category_revisions: Vec<StoredCategoryRevision>,
+    pub category_matches: Vec<StoredCategoryMatch>,
     pub cad_items: Vec<StoredCadItem>,
     pub cad_item_revisions: Vec<StoredCadItemRevision>,
     pub blobs: Vec<StoredBlob>,
@@ -1895,7 +2060,7 @@ impl CatalogReadback {
 
     /// The number of records in each Catalog collection (blobs counted
     /// once each), for idempotency checks.
-    pub fn counts(&self) -> [usize; 11] {
+    pub fn counts(&self) -> [usize; 14] {
         [
             self.changes.len(),
             self.parts.len(),
@@ -1903,6 +2068,9 @@ impl CatalogReadback {
             self.part_revisions.len(),
             self.archive_entries.len(),
             self.csv_reviews.len(),
+            self.categories.len(),
+            self.category_revisions.len(),
+            self.category_matches.len(),
             self.cad_items.len(),
             self.cad_item_revisions.len(),
             self.blobs.len(),
@@ -1922,6 +2090,13 @@ pub fn read_back(client: &PocketBaseClient) -> CollabResult<CatalogReadback> {
         part_revisions: client.list_records("catalog_part_revisions", "", "part,number")?,
         archive_entries: client.list_records("catalog_archive_entries", "", "seq")?,
         csv_reviews: client.list_records("catalog_csv_reviews", "", "seq")?,
+        categories: client.list_records("catalog_categories", "", "code")?,
+        category_revisions: client.list_records(
+            "catalog_category_revisions",
+            "",
+            "category,number",
+        )?,
+        category_matches: client.list_records("catalog_category_matches", "", "seq,clue")?,
         cad_items: client.list_records("catalog_cad_items", "", "kind,key")?,
         cad_item_revisions: client.list_records(
             "catalog_cad_item_revisions",
@@ -2103,7 +2278,7 @@ mod tests {
             part["details"]["snapshot"]
                 .as_str()
                 .unwrap()
-                .contains("part-details/2")
+                .contains("part-details/3")
         );
         assert!(
             part["revision"]["snapshot"]

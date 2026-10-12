@@ -20,9 +20,12 @@ const CSV_CATALOG_SOURCE = "csv-catalog";
 
 // Schema tags shared with crates/catalog (PART_DETAILS_SCHEMA,
 // PART_REVISION_SCHEMA and SOURCE_SCHEMA); a test there keeps them in step.
-const PART_DETAILS_SCHEMA = "kicad-parts/part-details/2";
+const PART_DETAILS_SCHEMA = "kicad-parts/part-details/3";
 const PART_REVISION_SCHEMA = "kicad-parts/part-revision/1";
 const SOURCE_SCHEMA = "kicad-parts/source/1";
+// The schema tag of a category revision's snapshot, shared with
+// crates/catalog (CATEGORY_SCHEMA); a test there keeps it in step.
+const CATEGORY_SCHEMA = "kicad-parts/category/1";
 
 // Trims the characters Rust's str::trim removes (Unicode White_Space), so
 // the server reads Symbol and Footprint references exactly as the CSV import
@@ -391,8 +394,13 @@ function editRequest(body) {
     if (!Array.isArray(details.fields) || !Array.isArray(details.manufacturerParts)) {
       fail("details need fields and manufacturerParts");
     }
+    const category = details.category === undefined || details.category === null ? null : details.category;
+    if (category !== null && (typeof category !== "string" || !CATEGORY_CODE.test(category))) {
+      fail("details.category must be the code of a category, such as res");
+    }
     details = {
       expected: number(details, "expectedDetails", "details"),
+      category: category,
       fields: details.fields,
       manufacturerParts: details.manufacturerParts,
     };
@@ -961,10 +969,13 @@ function isPair(value, keys) {
   );
 }
 
-// Why `details` (parsed part details) cannot be saved, or "": its fields
-// and manufacturer parts must be pairs of text, and no field may be
-// Symbol or Footprint.
+// Why `details` (parsed part details) cannot be saved, or "": its category
+// must be a category code, its fields and manufacturer parts must be pairs
+// of text, and no field may be Symbol or Footprint.
 function detailsProblem(details) {
+  if (typeof details.category !== "string" || !CATEGORY_CODE.test(details.category)) {
+    return "its category must be the code of a category, such as res";
+  }
   const fields = details.fields;
   if (!Array.isArray(fields) || !fields.every((field) => isPair(field, ["name", "value"]))) {
     return "its fields must each be a name and a value, both text";
@@ -978,6 +989,161 @@ function detailsProblem(details) {
     return "its manufacturer parts must each be a manufacturer and an MPN, both text";
   }
   return "";
+}
+
+// ---- Categories ---------------------------------------------------------------
+//
+// A category is made by the CSV import, one per CSV file (g-res makes res),
+// and saved as numbered revisions like a CAD item; its current revision is
+// its newest. A part's category is the code in its part details.
+
+// A category code: the CSV file name without g-, such as res.
+const CATEGORY_CODE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+// The category a CSV file makes, as crates/catalog category_code does.
+function categoryCode(csvFile) {
+  return csvFile.indexOf("g-") === 0 ? csvFile.substring(2) : csvFile;
+}
+
+// The label of a category difference, and the name a CSV review accepts to
+// take the CSV's category (crates/catalog CATEGORY_LABEL).
+const CATEGORY_FIELD = "Category";
+
+// A list of at most `max` distinct, non-empty texts of at most `length`
+// characters, or null.
+function textList(value, max, length) {
+  if (!Array.isArray(value) || value.length > max) {
+    return null;
+  }
+  const seen = {};
+  for (const item of value) {
+    if (typeof item !== "string" || trimSpace(item).length === 0 || item.length > length || seen["#" + item]) {
+      return null;
+    }
+    seen["#" + item] = true;
+  }
+  return value.slice();
+}
+
+// A category revision's snapshot rebuilt in the key order of crates/catalog
+// CategoryDetails, so its JSON is the canonical text; or a string saying
+// why `parsed` is not a category.
+function categoryDocument(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return "it is not a category";
+  }
+  const keys = Object.keys(parsed).sort().join(",");
+  if (keys !== "code,fields,ipn_prefix,name,rules,schema" || parsed.schema !== CATEGORY_SCHEMA) {
+    return `it must be ${CATEGORY_SCHEMA} with code, name, ipn_prefix, fields and rules`;
+  }
+  if (typeof parsed.code !== "string" || !CATEGORY_CODE.test(parsed.code)) {
+    return "its code must be a plain name, such as res";
+  }
+  if (typeof parsed.name !== "string" || trimSpace(parsed.name).length === 0 || parsed.name.length > 200) {
+    return "its name must be text of 1 to 200 characters";
+  }
+  if (typeof parsed.ipn_prefix !== "string" || !/^([A-Z]{3})?$/.test(parsed.ipn_prefix)) {
+    return "its IPN prefix must be three capital letters, or blank";
+  }
+  const fields = textList(parsed.fields, 200, 500);
+  if (!fields) {
+    return "its fields must be a list of different names";
+  }
+  if (fields.some((name) => CAD_FIELDS.indexOf(name) >= 0)) {
+    return "its fields cannot include Symbol or Footprint, which belong to a part's revision";
+  }
+  const rules = parsed.rules;
+  if (
+    !rules ||
+    typeof rules !== "object" ||
+    Array.isArray(rules) ||
+    Object.keys(rules).sort().join(",") !== "footprint_patterns,keywords,reference_letters"
+  ) {
+    return "its rules must be reference letters, footprint patterns and keywords";
+  }
+  const letters = textList(rules.reference_letters, 100, 50);
+  const patterns = textList(rules.footprint_patterns, 200, 200);
+  const keywords = textList(rules.keywords, 200, 200);
+  if (!letters || !patterns || !keywords) {
+    return "each of its rules must be a list of different texts";
+  }
+  return {
+    schema: CATEGORY_SCHEMA,
+    code: parsed.code,
+    name: parsed.name,
+    ipn_prefix: parsed.ipn_prefix,
+    fields: fields,
+    rules: { reference_letters: letters, footprint_patterns: patterns, keywords: keywords },
+  };
+}
+
+// The newest (current) revision of the category with `code`, or null.
+function currentCategoryRevision(txApp, code) {
+  const found = txApp.findRecordsByFilter("catalog_category_revisions", "category = {:category}", "-number", 1, 0, {
+    category: deriveId("category", code),
+  });
+  return found.length > 0 ? found[0] : null;
+}
+
+// A footprint's family, as crates/catalog footprint_family works it out:
+// its name without the library, up to the first digit, without trailing
+// _ - . or space. g-Resistor_SMD:R_0603_1608Metric gives R.
+function footprintFamily(footprint) {
+  const at = footprint.lastIndexOf(":");
+  const name = trimSpace(at >= 0 ? footprint.substring(at + 1) : footprint);
+  const digit = name.search(/[0-9]/);
+  return (digit >= 0 ? name.substring(0, digit) : name).replace(/[_\-. ]+$/, "");
+}
+
+// Reference letters that mean the same as another (crates/catalog
+// REFERENCE_ALIASES).
+const REFERENCE_ALIASES = Object.freeze(
+  Object.assign(Object.create(null), { IC: "U", S: "SW", X: "Y", XTAL: "Y", VR: "RV", POT: "RV", CN: "J" }),
+);
+
+// The letters of a symbol reference in capitals, aliases applied, as
+// crates/catalog reference_letter: U5 gives U, s1 gives SW.
+function referenceLetter(reference) {
+  const letters = /^[A-Za-z#]*/.exec(trimSpace(reference))[0].toUpperCase();
+  return REFERENCE_ALIASES[letters] || letters;
+}
+
+// The value of a symbol's own (property "Reference" "...") in the bytes
+// of a symbol CAD item revision (text from bytesText), or "".
+function symbolReference(text) {
+  const children = sexpChildren(sexpTokens("(kicad_symbol_lib " + text + ")"));
+  const entry = children ? children.find((child) => sexpWord(child[1]) === "symbol") : null;
+  const inner = entry ? sexpChildren(entry) : null;
+  const property = inner
+    ? inner.find((item) => sexpWord(item[1]) === "property" && sexpWord(item[2]) === "Reference")
+    : null;
+  const value = property ? sexpWord(property[3]) : null;
+  return typeof value === "string" ? value : "";
+}
+
+// The clues a person confirms with a part's category: its footprint family
+// (from the first footprint choice), its reference letter (from its symbol,
+// when the Catalog has the symbol's bytes) and its main manufacturer. Each
+// is { clue, value }, blanks left out. `bytesOf(target)` gives the bytes of
+// a bound symbol CAD item revision, or null.
+function categoryClues(details, revision, bytesOf) {
+  const clues = [];
+  const add = (clue, value) => {
+    const text = trimSpace(value || "").substring(0, 500);
+    if (text.length > 0) {
+      clues.push({ clue: clue, value: text });
+    }
+  };
+  const references = revision.cad_references || [];
+  const footprint = references.find((item) => item && item.role === "footprint");
+  add("footprint-family", footprint ? footprintFamily(footprint.reference) : "");
+  const symbol = references.find((item) => item && item.role === "symbol");
+  const target = symbol && symbol.target && symbol.target.kind === "cad-item-revision" ? symbol.target : null;
+  const bytes = target ? bytesOf(target) : null;
+  add("reference-letter", bytes ? referenceLetter(symbolReference(bytesText(bytes))) : "");
+  const main = (details.manufacturer_parts || [])[0];
+  add("manufacturer", main ? main.manufacturer : "");
+  return clues;
 }
 
 // The references a CAD field names, read the way the CSV import reads them:
@@ -1619,6 +1785,7 @@ function publishEdit(e) {
       request.details
         ? [
             request.details.expected,
+            request.details.category,
             pairs(request.details.fields),
             request.details.manufacturerParts.map((part) => [part && part.manufacturer, part && part.mpn]),
           ]
@@ -1726,11 +1893,36 @@ function publishEdit(e) {
       }
     };
     let details = null;
+    // Set when the edit changes the part's category: the clues a person
+    // confirmed with it are remembered.
+    let newCategory = null;
     if (request.details) {
+      const storedFields = storedDetails.fields || [];
+      let category = storedDetails.category;
+      let expectedFields = storedFields;
+      if (request.details.category !== null && request.details.category !== storedDetails.category) {
+        // A new category keeps every field the part has and adds, blank, the
+        // fields of the new category the part lacks, in the category's
+        // order; the IPN never changes.
+        const categoryRevision = currentCategoryRevision(txApp, request.details.category);
+        if (!categoryRevision) {
+          throw new BadRequestError(`the category ${request.details.category} is not in the Catalog`);
+        }
+        const categoryDetails = JSON.parse(categoryRevision.getString("snapshot"));
+        const have = storedFields.map((field) => field.name);
+        expectedFields = storedFields.concat(
+          (categoryDetails.fields || [])
+            .filter((name) => have.indexOf(name) < 0)
+            .map((name) => ({ name: name, value: "" })),
+        );
+        category = request.details.category;
+        newCategory = category;
+      }
       const document = {
         schema: PART_DETAILS_SCHEMA,
         ipn: request.ipn,
-        fields: editedFields(request.details.fields, storedDetails.fields || []),
+        category: category,
+        fields: editedFields(request.details.fields, expectedFields),
         manufacturer_parts: editedManufacturerParts(request.details.manufacturerParts),
       };
       refuse("details", detailsProblem(document));
@@ -1942,6 +2134,42 @@ function publishEdit(e) {
       audit.set("summary", summary);
       txApp.save(audit);
 
+      // The category the person chose is remembered with the part's clues,
+      // from the details and revision it has after this edit.
+      const remembered = [];
+      if (newCategory !== null && details) {
+        const afterRevision = revision ? JSON.parse(revision.snapshot) : storedRevision;
+        const bytesOf = (target) => {
+          const sent = newUploadFor(prepared, target);
+          if (sent) {
+            return sent.kind === "symbol" ? sent.upload.bytes : null;
+          }
+          const stored = recordById(
+            txApp,
+            "catalog_cad_item_revisions",
+            deriveId("cad-item-revision", target.cad_item + "\n" + target.number),
+          );
+          if (!stored || !isCadItemRevision(stored, target.cad_item, target.number)) {
+            return null;
+          }
+          const blob = recordById(txApp, "catalog_blobs", stored.getString("blob"));
+          return blob ? blobBytes(blob) : null;
+        };
+        for (const clue of categoryClues(JSON.parse(details.snapshot), afterRevision, bytesOf)) {
+          const made = record("catalog_category_matches", deriveId("category-match", changeId + "\n" + clue.clue));
+          made.set("category", deriveId("category", newCategory));
+          made.set("clue", clue.clue);
+          made.set("value", clue.value);
+          made.set("part", partId);
+          made.set("change", changeId);
+          made.set("seq", seq);
+          made.set("actor", actor.id);
+          made.set("actor_name", actor.name);
+          txApp.save(made);
+          remembered.push(clue);
+        }
+      }
+
       status = 200;
       result = {
         outcome: "applied",
@@ -1952,6 +2180,8 @@ function publishEdit(e) {
         auditEntryId: auditEntryId,
         details: savedDetails,
         revision: savedRevision,
+        // The clues remembered with a new category, each { clue, value }.
+        rememberedMatches: remembered,
         cadItemRevisions: bound,
         // Each new CAD item revision, with how many other parts still use
         // an older revision of that symbol or footprint (they keep their
@@ -2335,7 +2565,18 @@ function publishCsvReview(e) {
         const stored = JSON.parse(currentDetails.getString("snapshot"));
         const fields = stored.fields.map((field) => ({ name: field.name, value: field.value }));
         let manufacturerParts = stored.manufacturer_parts;
+        let category = stored.category;
         for (const name of accept) {
+          if (name === CATEGORY_FIELD) {
+            if (csv.category === stored.category) {
+              fail(`the CSV's ${CATEGORY_FIELD} is the same as the part's`);
+            }
+            if (!currentCategoryRevision(txApp, csv.category)) {
+              fail(`the category ${csv.category} is not in the Catalog`);
+            }
+            category = csv.category;
+            continue;
+          }
           if (name === MANUFACTURER_PARTS) {
             if (JSON.stringify(csv.manufacturer_parts) === JSON.stringify(stored.manufacturer_parts)) {
               fail(`the CSV's ${MANUFACTURER_PARTS} are the same as the part's`);
@@ -2353,9 +2594,19 @@ function publishCsvReview(e) {
           }
           fields[index] = { name: name, value: fromCsv.value };
         }
+        // A new category keeps every field the part has and takes, with the
+        // CSV's values, the CSV's fields the part lacks.
+        if (category !== stored.category) {
+          for (const field of csv.fields || []) {
+            if (!fields.some((existing) => existing.name === field.name)) {
+              fields.push({ name: field.name, value: field.value });
+            }
+          }
+        }
         const document = {
           schema: PART_DETAILS_SCHEMA,
           ipn: request.ipn,
+          category: category,
           fields: fields,
           manufacturer_parts: manufacturerParts,
         };
@@ -2576,6 +2827,10 @@ module.exports = {
   PART_DETAILS_SCHEMA: PART_DETAILS_SCHEMA,
   PART_REVISION_SCHEMA: PART_REVISION_SCHEMA,
   SOURCE_SCHEMA: SOURCE_SCHEMA,
+  CATEGORY_SCHEMA: CATEGORY_SCHEMA,
+  categoryCode: categoryCode,
+  categoryDocument: categoryDocument,
+  currentCategoryRevision: currentCategoryRevision,
   publishEdit: publishEdit,
   modelReferences: modelReferences,
   classifyModelReference: classifyModelReference,

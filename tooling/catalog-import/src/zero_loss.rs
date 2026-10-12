@@ -18,6 +18,13 @@
 //! | `supplier-data`                   | the latest import run's row (supplier data never makes a revision) |
 //! | `import-problem`                  | a stored import problem's detail                            |
 //!
+//! The CSV file itself makes the part's category: `database/g-res.csv`
+//! makes `res`. The report checks that every part the latest run left
+//! (unless an import problem keeps its details) is in that category, and
+//! that the category's current revision lists exactly the file's
+//! part-details columns as its fields, so nothing the file name says is lost
+//! either.
+//!
 //! Manufacturer parts are part of the part details; the report names them
 //! separately only to show where each `MPN` and `Manufacturer` went. A part
 //! that an earlier import run of the file made, but that the file no longer
@@ -108,7 +115,8 @@ use catalog::pocketbase::{
 };
 use catalog::{
     CadItemDetails, CadItemId, CadItemRevisionId, CadReference, CadReferenceRole,
-    CadReferenceTarget, License, ModelTarget, PartDetails, PartRevision, sha256_hex,
+    CadReferenceTarget, CategoryDetails, License, ModelTarget, PartDetails, PartRevision,
+    sha256_hex,
 };
 use csv_catalog_fixture::Manifest;
 use kicad_integration::library_file::{
@@ -150,6 +158,8 @@ pub struct ZeroLossReport {
     pub oracle_byte_sha256: String,
     /// The latest import run of the CSV file, which the report checks.
     pub import_run: Option<ImportRunAccount>,
+    /// The category the CSV file makes, as the Catalog holds it now.
+    pub category: Option<CategoryAccount>,
     /// The CSV's byte hash as that run recorded it.
     pub recorded_byte_sha256: String,
     /// The hash of the CSV rebuilt from PocketBase alone: the header line
@@ -208,6 +218,15 @@ pub struct ImportRunAccount {
     pub source_commit: String,
     pub allowed_older_checkout: bool,
     pub allowed_uncommitted_changes: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CategoryAccount {
+    pub code: String,
+    pub name: String,
+    /// Its current revision's number.
+    pub revision: u32,
+    pub fields: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -734,6 +753,13 @@ impl<'a> Reporter<'a> {
                     "row {row_number} ({ipn}): part-details fields {stored_fields:?} are not the part-details columns {part_detail_columns:?}"
                 ));
             }
+            // The CSV file the row is in makes the part's category.
+            if details_kept.is_none() && details.category != table {
+                self.problem(format!(
+                    "row {row_number} ({ipn}): the part is in the category {:?}, but {source_path} makes the category {table:?}",
+                    details.category
+                ));
+            }
             let cad_columns: Vec<&String> = headers
                 .iter()
                 .filter(|header| route_column(header) == ColumnRoute::Cad)
@@ -798,6 +824,12 @@ impl<'a> Reporter<'a> {
                 ));
             }
         }
+        let part_detail_columns: Vec<String> = headers
+            .iter()
+            .filter(|header| route_column(header) == ColumnRoute::PartDetails)
+            .cloned()
+            .collect();
+        let category_account = self.check_category(&table, &part_detail_columns);
         let removed_parts = self.removed_parts(&source_path, &part_rows, &mut explained);
         if csv.rebuilt_byte_sha256 != document.byte_sha256 {
             self.problem(format!(
@@ -858,6 +890,7 @@ impl<'a> Reporter<'a> {
             source_path,
             oracle_byte_sha256: document.byte_sha256.clone(),
             import_run: Some(import_run),
+            category: category_account,
             recorded_byte_sha256: csv.recorded_byte_sha256,
             rebuilt_byte_sha256: csv.rebuilt_byte_sha256,
             rows: document.rows.len(),
@@ -901,6 +934,7 @@ impl<'a> Reporter<'a> {
             source_path: String::new(),
             oracle_byte_sha256: String::new(),
             import_run: None,
+            category: None,
             recorded_byte_sha256: String::new(),
             rebuilt_byte_sha256: String::new(),
             rows: 0,
@@ -963,10 +997,15 @@ impl<'a> Reporter<'a> {
                     .csv_reviews
                     .iter()
                     .filter(|review| review.change == change.id)
+                    .count()
+                + readback
+                    .category_revisions
+                    .iter()
+                    .filter(|revision| revision.change == change.id)
                     .count();
             if revisions == 0 {
                 self.problem(format!(
-                    "Change {} has no revisions, no part details, no archive entry and no CSV review",
+                    "Change {} has no revisions, no part details, no archive entry, no CSV review and no category revision",
                     change.seq
                 ));
             }
@@ -983,6 +1022,57 @@ impl<'a> Reporter<'a> {
             });
         }
         changes
+    }
+
+    /// The category `code` exists, its current (newest) revision matches its
+    /// hash, is that category, and lists exactly `fields`: the part-details
+    /// columns of the CSV file that makes it.
+    fn check_category(&mut self, code: &str, fields: &[String]) -> Option<CategoryAccount> {
+        let readback = self.readback;
+        let id = catalog::category::category_id(code);
+        if !readback
+            .categories
+            .iter()
+            .any(|category| category.id == id && category.code == code)
+        {
+            self.problem(format!("the category {code} is not in the Catalog"));
+            return None;
+        }
+        let Some(current) = readback
+            .category_revisions
+            .iter()
+            .filter(|revision| revision.category == id)
+            .max_by_key(|revision| revision.number)
+        else {
+            self.problem(format!("the category {code} has no revision"));
+            return None;
+        };
+        if sha256_hex(&current.snapshot) != current.snapshot_sha256 {
+            self.problem(format!("the category {code} does not match its hash"));
+        }
+        let details = match serde_json::from_str::<CategoryDetails>(&current.snapshot) {
+            Ok(details) if details.code == code => details,
+            Ok(details) => {
+                self.problem(format!("the category {code} names {}", details.code));
+                return None;
+            }
+            Err(error) => {
+                self.problem(format!("the category {code} does not parse: {error}"));
+                return None;
+            }
+        };
+        if details.fields != fields {
+            self.problem(format!(
+                "the category {code} lists the fields {:?}, not the part-details columns {fields:?}",
+                details.fields
+            ));
+        }
+        Some(CategoryAccount {
+            code: details.code,
+            name: details.name,
+            revision: current.number,
+            fields: details.fields,
+        })
     }
 
     /// A row whose Symbol names several symbols, or whose Footprint lists

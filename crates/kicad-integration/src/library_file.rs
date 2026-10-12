@@ -174,9 +174,9 @@ pub fn symbol_reference(entry: &[u8]) -> Option<String> {
     if head != "symbol" {
         return None;
     }
-    let property = children.iter().find(|child| {
-        child.head == "property" && child.first.as_deref() == Some("Reference")
-    })?;
+    let property = children
+        .iter()
+        .find(|child| child.head == "property" && child.first.as_deref() == Some("Reference"))?;
     // (property "Reference" "VALUE" ...): the value is the fourth token.
     match tokens(&entry[property.span.clone()]).ok()?.get(3)? {
         Token::Text(value) => Some(value.clone()),
@@ -363,7 +363,10 @@ mod tests {
         let entry = "(symbol \"R_US\"\n\t\t(property \"Value\" \"R\")\n\t\t(property \"Reference\" \"U?\" (at 0 0 0))\n\t)";
         assert_eq!(symbol_reference(entry.as_bytes()).as_deref(), Some("U?"));
         // A symbol without one, or bytes that are not a symbol, say nothing.
-        assert_eq!(symbol_reference(b"(symbol \"C\" (property \"Value\" \"C\"))"), None);
+        assert_eq!(
+            symbol_reference(b"(symbol \"C\" (property \"Value\" \"C\"))"),
+            None
+        );
         assert_eq!(symbol_reference(b"(footprint \"R\")"), None);
         assert_eq!(symbol_reference(b"(symbol \"C\""), None);
     }

@@ -1446,6 +1446,19 @@ fn header_only_csv_sources(correlation: &str) -> Vec<serde_json::Value> {
     ]
 }
 
+/// The category of the CSV file `g-<correlation>`, which has no columns
+/// but IPN.
+fn category_entry(correlation: &str) -> serde_json::Value {
+    let category = catalog::CategoryDetails::starting(correlation, Vec::new());
+    let snapshot = category.canonical_json();
+    serde_json::json!({
+        "id": catalog::category::category_id(correlation),
+        "code": correlation,
+        "snapshotSha256": sha256_hex(&snapshot),
+        "snapshot": snapshot,
+    })
+}
+
 /// How a test request sends a blob's bytes.
 #[derive(Clone, Copy)]
 enum BlobForm {
@@ -1494,6 +1507,7 @@ fn blob_request(correlation: &str, sha: &str, bytes: &[u8], form: BlobForm) -> s
         "csvFile": format!("g-{correlation}"),
         "sourceCommit": null,
         "expectedCsvImport": 0,
+        "category": category_entry(correlation),
         "sources": header_only_csv_sources(correlation)
             .into_iter()
             .chain([serde_json::json!({ "role": "test", "path": "blob", "byteSha256": sha, "size": bytes.len(), "headerRaw": null })])
@@ -1523,6 +1537,7 @@ fn unused_blob_request(correlation: &str, sha: &str, bytes: &[u8]) -> serde_json
         "csvFile": format!("g-{correlation}"),
         "sourceCommit": null,
         "expectedCsvImport": 0,
+        "category": category_entry(correlation),
         "sources": header_only_csv_sources(correlation)
             .into_iter()
             .chain([serde_json::json!({ "role": "test", "path": "blob", "byteSha256": sha, "size": bytes.len(), "headerRaw": null })])
@@ -1740,6 +1755,18 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
         200
     );
     server.stop();
+    // Any data has categories, so the newest undo refuses first, as a
+    // whole.
+    let said = migrate(&root, &options, &["down", "4"]);
+    assert!(
+        said.contains("has categories")
+            && said.contains("Nothing was changed")
+            && !said.contains("Reverted"),
+        "{said}"
+    );
+    // With that step set aside, the older undos still refuse their own
+    // data.
+    set_aside_migration(&options, "1792300000_categories.js");
     let said = migrate(&root, &options, &["down", "3"]);
     assert!(
         said.contains("has CSV reviews")
@@ -1779,8 +1806,9 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
         "(id = @request.auth.id) && @request.body.can_edit_catalog:isset = false && @request.body.name:isset = false"
     );
     assert!(fields.contains("can_edit_catalog"));
-    let said = migrate(&root, &options, &["down", "8"]);
+    let said = migrate(&root, &options, &["down", "9"]);
     for reverted in [
+        "1792300000_categories.js",
         "1792200000_cad_item_revision_successor.js",
         "1792100000_uncommitted_changes.js",
         "1792000000_csv_reviews.js",
@@ -1840,6 +1868,19 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_details() {
     command.correlation_id.push_str("-after-rollback");
     assert_eq!(applied(&submit_import(&admin, &command).unwrap()).parts, 29);
     server.stop();
+}
+
+/// Marks `file` as not applied on the stopped instance `options`, keeping
+/// what it made, so that undoing reaches the older migrations: the newest
+/// one refuses any data with categories, which every import makes.
+fn set_aside_migration(options: &native_services::PocketBaseOptions, file: &str) {
+    let database = rusqlite::Connection::open(options.data_dir.join("data.db")).unwrap();
+    assert_eq!(
+        database
+            .execute("DELETE FROM _migrations WHERE file = ?1", [file])
+            .unwrap(),
+        1
+    );
 }
 
 /// Runs `pocketbase migrate <args>` hidden on `options`, confirming the
@@ -1906,6 +1947,9 @@ fn an_import_allowed_from_uncommitted_changes_is_recorded_kept_and_not_undone() 
 
     // The older version would lose that record, so the undo refuses and
     // changes nothing, not even the newer step, which this data allows.
+    // (The categories step, newer still, refuses any data, so it is set
+    // aside.)
+    set_aside_migration(&options, "1792300000_categories.js");
     let said = migrate(&root, &options, &["down", "2"]);
     assert!(
         said.contains("allowed from uncommitted changes")
@@ -2021,7 +2065,9 @@ fn a_cad_item_revision_has_at_most_one_successor() {
     );
 
     // Undoing the index loses nothing and lets the fork in; starting again
-    // then refuses with a plain message and changes nothing.
+    // then refuses with a plain message and changes nothing. (The
+    // categories step, newer, refuses any data, so it is set aside.)
+    set_aside_migration(&options, "1792300000_categories.js");
     let said = migrate(&root, &options, &["down", "1"]);
     assert!(
         said.contains("Reverted 1792200000_cad_item_revision_successor.js"),

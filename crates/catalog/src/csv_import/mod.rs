@@ -26,8 +26,10 @@
 //! say so, a `footprint-choices-disagree-on-bom` import problem keeps them
 //! and the setting stays unset.
 //!
-//! The CSV file name (`g-res`) is only part of the source. It is neither a
-//! category nor the IPN prefix.
+//! The CSV file makes one category (`g-res` makes `res`, see
+//! [`CategoryDraft`]) and every part in it is in that category. The IPN
+//! prefix is not the category: it only says which number range an IPN came
+//! from.
 
 mod files;
 
@@ -37,6 +39,7 @@ use crate::cad_item::{
     Blob, CAD_ITEM_DETAILS_SCHEMA, CadItem, CadItemDetails, CadItemKind, License, ModelReference,
     ModelTarget,
 };
+use crate::category::{CategoryDetails, category_code, category_id};
 use crate::hash::sha256_hex;
 use crate::ids::{CadItemRevisionId, ImportProblemId, PartId};
 use crate::ipn::Ipn;
@@ -316,10 +319,26 @@ impl ImportProblem {
     }
 }
 
+/// The category a CSV file makes, as this import would send it. The server
+/// saves it as revision 1 of a new category; for a category it already has,
+/// it takes only the fields from here and keeps the name, IPN prefix and
+/// rules it holds, so an import changes a category only when the CSV
+/// file's part details columns change.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CategoryDraft {
+    /// Derived from the code.
+    pub id: String,
+    pub details: CategoryDetails,
+    pub details_json: String,
+    pub details_sha256: String,
+}
+
 /// Everything one import would publish, ordered deterministically.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CsvImport {
     pub csv_file: String,
+    /// The category the CSV file makes.
+    pub category: CategoryDraft,
     /// The commit the inputs were read at, as the caller recorded it. The
     /// import tooling appends `+dirty` when any input differs from that
     /// commit, so a dirty tree is never recorded as a clean one.
@@ -358,6 +377,7 @@ impl CsvImport {
             text.push_str(value);
         };
         push(&self.csv_file);
+        push(&self.category.details_sha256);
         push(self.source_commit.as_deref().unwrap_or(""));
         for source in &self.sources {
             push(&source.path);
@@ -793,6 +813,17 @@ impl<'a> Planner<'a> {
         let (bytes, catalog_sha) = self.read_source("catalog-csv", &catalog_path)?;
         let table = parse_csv(&catalog_path, &bytes)?;
         self.record_csv_rows(&catalog_path, &table);
+        let code = category_code(&self.csv_file).to_owned();
+        let category = CategoryDetails::starting(
+            &code,
+            table
+                .headers
+                .iter()
+                .filter(|header| route_column(header) == ColumnRoute::PartDetails)
+                .cloned()
+                .collect(),
+        );
+        let category_json = category.canonical_json();
 
         let (substitutes_csv_bytes, substitutes_csv_sha) =
             self.read_source("substitutes-csv", SUBSTITUTES_PATH)?;
@@ -974,6 +1005,12 @@ impl<'a> Planner<'a> {
 
         Ok(CsvImport {
             csv_file: self.csv_file,
+            category: CategoryDraft {
+                id: category_id(&code),
+                details_sha256: sha256_hex(&category_json),
+                details_json: category_json,
+                details: category,
+            },
             source_commit: self.source_commit,
             sources: self.sources.into_values().collect(),
             missing_inputs: self.missing_inputs.into_iter().collect(),
@@ -1305,6 +1342,7 @@ impl<'a> Planner<'a> {
         let details = PartDetails {
             schema: PART_DETAILS_SCHEMA.to_owned(),
             ipn: ipn.as_str().to_owned(),
+            category: category_code(&self.csv_file).to_owned(),
             fields,
             manufacturer_parts,
         };

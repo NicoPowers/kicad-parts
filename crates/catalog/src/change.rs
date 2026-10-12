@@ -101,6 +101,12 @@ mod tests {
             "const PART_REVISION_SCHEMA = \"{}\";",
             crate::PART_REVISION_SCHEMA
         )));
+        assert!(library.contains(&format!(
+            "const CATEGORY_SCHEMA = \"{}\";",
+            crate::CATEGORY_SCHEMA
+        )));
+        // A remembered match is made only by an edit (catalog_write_guards).
+        assert!(library.contains("\"catalog_category_matches\""));
         assert!(!library.contains("restore"));
         assert!(library.contains(&format!(
             "const SOURCE_SCHEMA = \"{}\";",

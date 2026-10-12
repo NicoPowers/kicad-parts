@@ -1,6 +1,6 @@
 //! What differs between two saved part details, or between two part
-//! revisions, in plain rows a person can read: one per changed field, one
-//! for the manufacturer parts, one for Excluded from BOM, and one per
+//! revisions, in plain rows a person can read: one for the category, one
+//! per changed field, one for the manufacturer parts, one for Excluded from BOM, and one per
 //! symbol or footprint whose exact CAD item revision changed.
 
 use crate::part::{
@@ -11,7 +11,7 @@ use crate::part::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetailDifference {
     pub what: DifferenceKind,
-    /// The field name, `Manufacturer parts`, `Excluded from BOM`, or
+    /// `Category`, the field name, `Manufacturer parts`, `Excluded from BOM`, or
     /// `Symbol revision` or `Footprint revision` (with `choice N` for later
     /// footprint choices).
     pub label: String,
@@ -23,6 +23,8 @@ pub struct DetailDifference {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DifferenceKind {
+    /// The part's category; `before` and `after` are category codes.
+    Category,
     Field,
     ManufacturerParts,
     /// The same reference bound to a different exact CAD item revision.
@@ -33,10 +35,24 @@ pub enum DifferenceKind {
     ExcludedFromBom,
 }
 
-/// Every difference from `before` to `after`: fields first in `after`'s
-/// order (then fields only `before` had), then the manufacturer parts.
+/// The label of a category difference, and the name of the category
+/// choice in an edit and in a CSV review.
+pub const CATEGORY_LABEL: &str = "Category";
+
+/// Every difference from `before` to `after`: the category first, then
+/// fields in `after`'s order (then fields only `before` had), then the
+/// manufacturer parts.
 pub fn compare_details(before: &PartDetails, after: &PartDetails) -> Vec<DetailDifference> {
-    let mut differences = compare_fields(&before.fields, &after.fields);
+    let mut differences = Vec::new();
+    if before.category != after.category {
+        differences.push(DetailDifference {
+            what: DifferenceKind::Category,
+            label: CATEGORY_LABEL.to_owned(),
+            before: before.category.clone(),
+            after: after.category.clone(),
+        });
+    }
+    differences.extend(compare_fields(&before.fields, &after.fields));
     if before.manufacturer_parts != after.manufacturer_parts {
         let list = |details: &PartDetails| {
             details
@@ -164,6 +180,7 @@ mod tests {
         PartDetails {
             schema: PART_DETAILS_SCHEMA.into(),
             ipn: "RES-0000-0470".into(),
+            category: "res".into(),
             fields: vec![DetailField {
                 name: "Value".into(),
                 value: value.into(),
@@ -204,7 +221,8 @@ mod tests {
     fn lists_changed_fields_and_manufacturer_parts() {
         let before = details("47", &[("Yageo", "RC0603FR-0747RL")]);
         assert!(compare_details(&before, &before).is_empty());
-        let after = details("48", &[("Yageo", "RC0603FR-0747RL"), ("Vishay", "ALT-47")]);
+        let mut after = details("48", &[("Yageo", "RC0603FR-0747RL"), ("Vishay", "ALT-47")]);
+        after.category = "rvr".into();
         let differences = compare_details(&before, &after);
         assert_eq!(
             differences
@@ -217,6 +235,7 @@ mod tests {
                 ))
                 .collect::<Vec<_>>(),
             [
+                (DifferenceKind::Category, "Category", "res", "rvr"),
                 (DifferenceKind::Field, "Value", "47", "48"),
                 (
                     DifferenceKind::ManufacturerParts,

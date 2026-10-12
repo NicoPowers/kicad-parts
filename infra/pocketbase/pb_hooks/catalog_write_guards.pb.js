@@ -11,15 +11,20 @@
 //   POST /api/catalog/csv-imports, /api/catalog/edits,
 //   /api/catalog/archives and /api/catalog/csv-reviews.
 // - Revisions, saved part details, archive entries, CSV reviews, CAD items, blobs,
-//   Changes, audit entries, import problems and the command ledger refuse
-//   every update and delete, whoever saves them.
+//   categories and their revisions, remembered matches, Changes, audit
+//   entries, import problems and the command ledger refuse every update and
+//   delete, whoever saves them.
+// - A remembered match is made only with an edit that changes that part's
+//   category to the match's category, by the person who made the edit;
+//   never by an import.
 // - A part refuses every delete. Its current details may only move to its
 //   next details. Its current revision may only move to its newest revision
 //   that is not archived (a new revision, or the one an archive or
 //   unarchive makes current). Its IPN never changes.
-// - New part revisions, saved part details and CAD item revisions must be
-//   numbered right after the newest one, archived or not, name it as their
-//   predecessor and have the ID derived from their owner and number.
+// - New part revisions, saved part details, CAD item revisions and category
+//   revisions must be numbered right after the newest one, archived or not,
+//   name it as their predecessor and have the ID derived from their owner
+//   and number.
 //
 // Raw SQL bypasses record hooks; only migrations and test fixtures that
 // tamper with a stopped instance's data.db use it.
@@ -42,6 +47,9 @@ onRecordCreateRequest(
   "catalog_part_revisions",
   "catalog_archive_entries",
   "catalog_csv_reviews",
+  "catalog_categories",
+  "catalog_category_revisions",
+  "catalog_category_matches",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -62,6 +70,9 @@ onRecordUpdateRequest(
   "catalog_part_revisions",
   "catalog_archive_entries",
   "catalog_csv_reviews",
+  "catalog_categories",
+  "catalog_category_revisions",
+  "catalog_category_matches",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -80,6 +91,9 @@ onRecordDeleteRequest(
   "catalog_part_revisions",
   "catalog_archive_entries",
   "catalog_csv_reviews",
+  "catalog_categories",
+  "catalog_category_revisions",
+  "catalog_category_matches",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -98,6 +112,9 @@ onRecordDelete(
   "catalog_part_revisions",
   "catalog_archive_entries",
   "catalog_csv_reviews",
+  "catalog_categories",
+  "catalog_category_revisions",
+  "catalog_category_matches",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -115,6 +132,9 @@ onRecordUpdate(
   "catalog_part_revisions",
   "catalog_archive_entries",
   "catalog_csv_reviews",
+  "catalog_categories",
+  "catalog_category_revisions",
+  "catalog_category_matches",
   "catalog_audit_entries",
   "catalog_import_problems",
   "catalog_commands",
@@ -357,6 +377,104 @@ onRecordCreate((e) => {
   }
   return e.next();
 }, "catalog_cad_item_revisions");
+
+// A category's current revision is its newest, so a new category revision
+// must be numbered right after the newest stored one, name it as its
+// predecessor, and have the ID derived from its category and number. A
+// category's ID is derived from its code.
+onRecordCreate((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  const revision = e.record;
+  const category = revision.getString("category");
+  const number = revision.getInt("number");
+  const found = e.app.findRecordsByFilter("catalog_category_revisions", "category = {:id}", "-number", 1, 0, {
+    id: category,
+  });
+  const newest = found.length > 0 ? found[0] : null;
+  const expected = newest ? newest.getInt("number") + 1 : 1;
+  if (number !== expected || revision.getString("predecessor") !== (newest ? newest.id : "")) {
+    throw new Error(`a new revision of category ${category} must be number ${expected}, right after its current revision`);
+  }
+  if (revision.id !== lib.deriveId("category-revision", category + "\n" + number)) {
+    throw new Error(`revision ${number} of category ${category} must have the ID derived from its category and number`);
+  }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(revision.getString("snapshot"));
+  } catch (_) {
+    parsed = null;
+  }
+  const document = lib.categoryDocument(parsed);
+  if (typeof document === "string" || lib.deriveId("category", document.code) !== category) {
+    throw new Error(`revision ${number} of category ${category} must be a category with that category's code`);
+  }
+  return e.next();
+}, "catalog_category_revisions");
+
+onRecordCreate((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  if (e.record.id !== lib.deriveId("category", e.record.getString("code"))) {
+    throw new Error("a category must have the ID derived from its code");
+  }
+  return e.next();
+}, "catalog_categories");
+
+// A remembered match is a person's confirmation: it must belong to a Change
+// of kind edit, copy its seq, actor and actor name, have the ID derived from
+// the Change and its clue, and that Change must save the part's details in
+// the match's category, changed from another category. So an import, or a
+// supplier category on its own, never makes one.
+onRecordCreate((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  const match = e.record;
+  const find = (collection, id) => {
+    try {
+      return e.app.findRecordById(collection, id);
+    } catch (_) {
+      return null;
+    }
+  };
+  const change = find("catalog_changes", match.getString("change"));
+  if (
+    !change ||
+    change.getString("kind") !== lib.CHANGE_KINDS.edit ||
+    change.getInt("seq") !== match.getInt("seq") ||
+    change.getString("actor") !== match.getString("actor") ||
+    change.getString("actor_name") !== match.getString("actor_name")
+  ) {
+    throw new Error("a remembered match must belong to an edit and copy its seq and who made it");
+  }
+  if (match.id !== lib.deriveId("category-match", change.id + "\n" + match.getString("clue"))) {
+    throw new Error("a remembered match must have the ID derived from its Change and clue");
+  }
+  const saved = e.app.findRecordsByFilter(
+    "catalog_part_details",
+    "part = {:part} && change = {:change}",
+    "",
+    1,
+    0,
+    { part: match.getString("part"), change: change.id },
+  );
+  const details = saved.length > 0 ? saved[0] : null;
+  const previous = details ? find("catalog_part_details", details.getString("predecessor")) : null;
+  const categoryOf = (record) => {
+    try {
+      return JSON.parse(record.getString("snapshot")).category;
+    } catch (_) {
+      return null;
+    }
+  };
+  const category = details ? categoryOf(details) : null;
+  if (
+    typeof category !== "string" ||
+    lib.deriveId("category", category) !== match.getString("category") ||
+    !previous ||
+    categoryOf(previous) === category
+  ) {
+    throw new Error("a remembered match must come with an edit that moves its part to the match's category");
+  }
+  return e.next();
+}, "catalog_category_matches");
 
 // ---- Collections -----------------------------------------------------------
 //
