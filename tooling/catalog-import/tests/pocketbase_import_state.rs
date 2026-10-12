@@ -174,6 +174,85 @@ fn the_import_state_is_read_from_current_records_only() {
     server.stop();
 }
 
+/// CAD items whose current revision was made in the app are read with
+/// their newest imported revision in one request, however many there are.
+#[test]
+fn cad_items_made_in_the_app_are_read_in_one_request() {
+    let copy = tempfile::tempdir().unwrap();
+    let root = copy.path();
+    for path in &INPUTS[..4] {
+        let destination = root.join(path);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(services::repository_root().join(path), destination).unwrap();
+    }
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, superuser) =
+        services::start(&services::repository_root(), state.path()).unwrap();
+    import(&admin, root, "applied");
+    // The app makes new revisions of the footprint and the symbol.
+    let footprint = String::from_utf8(fs::read(root.join(FOOTPRINT)).unwrap())
+        .unwrap()
+        .replacen("(tags \"resistor\")", "(tags \"resistor app\")", 1);
+    let symbols = String::from_utf8(fs::read(root.join("symbols/g-res.kicad_sym")).unwrap())
+        .unwrap()
+        .replacen("(symbol \"R_US\"", "(symbol \"R_US\"\n\t\t(in_bom yes)", 1);
+    for (ipn, upload) in [
+        (
+            EDITED,
+            catalog::cad_file::footprint_upload(
+                footprint.as_bytes(),
+                "g-Resistor_SMD:R_0603_1608Metric",
+                "R.kicad_mod",
+            )
+            .unwrap(),
+        ),
+        (
+            ARCHIVED,
+            catalog::cad_file::symbol_upload(
+                symbols.as_bytes(),
+                "R_US",
+                "g-res:R_US",
+                "s.kicad_sym",
+            )
+            .unwrap(),
+        ),
+    ] {
+        let stored = read_back(&admin).unwrap();
+        let number = stored.part(ipn).unwrap().current_revision_number;
+        let mut command = EditCommand::new(ipn, "Use the file")
+            .editing_cad(&current_revision(&stored, ipn), number);
+        command.cad.as_mut().unwrap().uploads = vec![upload];
+        let reply = submit_edit(&admin, &command).unwrap();
+        assert_eq!(reply.status, 200, "{}", reply.body);
+    }
+
+    let proxy = CountingProxy::start(admin.base_url());
+    let counted = PocketBaseClient::new(&proxy.url)
+        .authenticate("_superusers", &superuser.email, &superuser.password)
+        .unwrap();
+    proxy.clear();
+    let read = read_import_state(&counted).unwrap();
+    let fetches = proxy.fetches();
+    let summary = format!("{fetches:#?}");
+    assert_eq!(read.current_cad.edited_in_app.len(), 2, "{summary}");
+    for edited in read.current_cad.edited_in_app.values() {
+        assert_eq!(edited.current.number, 2);
+        assert_eq!(
+            edited
+                .last_imported
+                .as_ref()
+                .map(|last| last.binding.number),
+            Some(1)
+        );
+    }
+    // Parts, current CAD item revisions, the ones made in the app, both
+    // newest imported revisions in one request (the older revisions the
+    // other parts bind, so no request of their own), current part
+    // revisions, and the two reads of the latest import runs.
+    assert_eq!(fetches.len(), 7, "{summary}");
+    server.stop();
+}
+
 /// Replaces exactly one occurrence of `from` in `path` under `root`.
 fn replace_once(root: &Path, path: &str, from: &str, to: &str) {
     let file = root.join(path);

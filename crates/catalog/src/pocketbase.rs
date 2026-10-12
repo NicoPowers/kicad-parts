@@ -474,28 +474,47 @@ fn read_current_cad(client: &PocketBaseClient, parts: &[StoredPart]) -> CollabRe
         "cad_item,number",
         CAD_ITEM_REVISION_FIELDS,
     )?;
-    for revision in edited {
+    // Their newest imported revisions, 40 CAD items per request; the newest
+    // number of each is kept.
+    let edited_items: Vec<&str> = edited
+        .iter()
+        .map(|revision| revision.cad_item.as_str())
+        .collect();
+    let mut imported: BTreeMap<String, CadItemRevisionFields> = BTreeMap::new();
+    for chunk in edited_items.chunks(40) {
+        let items = chunk
+            .iter()
+            .map(|id| format!("cad_item = {}", Value::from(*id)))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let found: Vec<CadItemRevisionFields> = client.list_record_fields(
+            "catalog_cad_item_revisions",
+            &format!("change.kind = \"csv-import\" && ({items})"),
+            "cad_item,-number",
+            CAD_ITEM_REVISION_FIELDS,
+        )?;
+        for revision in found {
+            let newer = imported
+                .get(&revision.cad_item)
+                .is_none_or(|kept| kept.number < revision.number);
+            if newer {
+                imported.insert(revision.cad_item.clone(), revision);
+            }
+        }
+    }
+    for revision in &edited {
         let Some(binding) = current_bindings.get(&revision.cad_item).cloned() else {
             continue;
         };
-        let filter = format!(
-            "cad_item = {} && change.kind = \"csv-import\"",
-            Value::from(revision.cad_item.as_str())
-        );
-        let last_imported = client
-            .first_record_fields::<CadItemRevisionFields>(
-                "catalog_cad_item_revisions",
-                &filter,
-                "-number",
-                CAD_ITEM_REVISION_FIELDS,
-            )?
+        let last_imported = imported
+            .remove(&revision.cad_item)
             .map(|last| {
                 read_cad_item_revision(last, &mut by_id)
                     .map(|(_, binding, models)| LastImported { binding, models })
             })
             .transpose()?;
         current.edited_in_app.insert(
-            revision.cad_item,
+            revision.cad_item.clone(),
             EditedInApp {
                 current: binding,
                 last_imported,
