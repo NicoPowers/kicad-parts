@@ -399,8 +399,9 @@ impl CsvImport {
     /// An import never replaces a CAD item revision made in the app
     /// (kicad-parts-3b8b): a CAD item in [`CurrentCad::edited_in_app`] is not
     /// sent, and bindings to it name the newest revision an import saved,
-    /// what the CSV said when an import last applied it. If the CSV's file
-    /// for it changed since then, each part whose row uses it gets a
+    /// what the CSV said when an import last applied it, or the app's
+    /// revision when the CSV has caught up with it. If the CSV's file for it
+    /// says anything else, each part whose row uses it gets a
     /// [`CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM`] import problem that keeps the
     /// row, so a person sees it.
     ///
@@ -457,9 +458,15 @@ impl CsvImport {
             draft.snapshot_json = draft.snapshot.canonical_json();
             draft.snapshot_sha256 = sha256_hex(&draft.snapshot_json);
             if let Some(edited) = edited {
+                // The CSV has not changed when it still says what an import
+                // last applied, or when it has caught up with what the app
+                // made; bindings then name that revision.
                 let content = draft.snapshot.content_sha256();
-                let (binding, unchanged) = match &edited.last_imported {
-                    Some(last) => (last.binding.clone(), last.binding.content_sha256 == content),
+                let last = edited.last_imported.as_ref().map(|last| &last.binding);
+                let (binding, unchanged) = match last {
+                    Some(last) if last.content_sha256 == content => (last.clone(), true),
+                    _ if edited.current.content_sha256 == content => (edited.current.clone(), true),
+                    Some(last) => (last.clone(), false),
                     None => (edited.current.clone(), false),
                 };
                 if !unchanged || model_changed {

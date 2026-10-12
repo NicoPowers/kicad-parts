@@ -1872,6 +1872,34 @@ impl<'a> Reporter<'a> {
                 "{reference}: stored blob is not the declared bytes"
             ));
         }
+        // A revision made from a file chosen in the app (kicad-parts-3b8b)
+        // that a row binds because the CSV caught up with it: its bytes must
+        // be the oracle's, wherever they came from.
+        let edit_source = serde_json::from_str::<Value>(&revision.source)
+            .ok()
+            .is_some_and(|source| source["source"] == "edit");
+        if edit_source {
+            let matches = match snapshot.kind {
+                catalog::CadItemKind::Symbol => {
+                    let item = reference.split_once(':').map_or("", |(_, item)| item);
+                    account.oracle_asset_path.as_ref().is_some_and(|path| {
+                        let file = std::fs::read(self.repository.join(path)).unwrap_or_default();
+                        Some(sha256_hex(&file).as_str()) == oracle_file_sha
+                            && SymbolLibrary::parse(&file).ok().is_some_and(|library| {
+                                matches!(library.find(item), SymbolLookup::Found(entry)
+                                    if file.get(entry.span.clone()) == Some(blob.bytes.as_slice()))
+                            })
+                    })
+                }
+                _ => Some(blob.sha256.as_str()) == oracle_file_sha,
+            };
+            if !matches {
+                self.problem(format!(
+                    "{reference}: the revision made in the app is not the oracle's file"
+                ));
+            }
+            return;
+        }
         let Ok(source) = serde_json::from_str::<CadItemSource>(&revision.source) else {
             self.problem(format!("{reference}: source does not parse"));
             return;

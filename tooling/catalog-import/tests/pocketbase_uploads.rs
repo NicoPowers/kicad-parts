@@ -819,3 +819,73 @@ fn imports_never_replace_a_cad_item_revision_made_in_the_app() {
     // covers.
     assert_eq!(team.import(), "noop");
 }
+
+#[test]
+fn a_csv_that_caught_up_with_the_app_is_not_a_change() {
+    use catalog::pocketbase::CSV_CAD_ITEM_KEPT;
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    // The CSV catalog's symbol library with a symbol the app adds first.
+    let library_path = team.copy.path().join("symbols/g-res.kicad_sym");
+    let library = fs::read_to_string(&library_path).unwrap();
+    let entry = "\t(symbol \"R_Added\"\n\t\t(in_bom yes)\n\t\t(property \"Reference\" \"R\" (at 0 0 0) (effects (font (size 1.27 1.27))))\n\t)\n";
+    let end = library.trim_end().len() - 1;
+    let caught_up = format!("{}{entry}{}", &library[..end], &library[end..]);
+    let symbol = symbol_upload(
+        caught_up.as_bytes(),
+        "R_Added",
+        "g-res:R_Added",
+        "added.kicad_sym",
+    )
+    .unwrap();
+    let before = team.read();
+    applied(
+        &submit_edit(
+            &editor,
+            &cad_edit(&before, IPN, &[("Symbol", "g-res:R_Added")], vec![symbol]),
+        )
+        .unwrap(),
+    );
+    // And a corrected footprint for the same part.
+    let corrected = redrawn(&team.file(FOOTPRINT_FILE));
+    let edited = team.read();
+    let footprint = footprint_upload(&corrected, FOOTPRINT, "R.kicad_mod").unwrap();
+    applied(&submit_edit(&editor, &cad_edit(&edited, IPN, &[], vec![footprint])).unwrap());
+
+    // The CSV catalog catches up with both, byte for byte, and another row
+    // uses the new symbol.
+    fs::write(&library_path, caught_up).unwrap();
+    fs::write(team.copy.path().join(FOOTPRINT_FILE), &corrected).unwrap();
+    let csv = team.copy.path().join("database/g-res.csv");
+    let text = fs::read_to_string(&csv).unwrap();
+    let row = text
+        .split_inclusive('\n')
+        .find(|line| line.starts_with(&format!("\"{OTHER}\"")))
+        .unwrap()
+        .to_owned();
+    fs::write(
+        &csv,
+        text.replacen(
+            &row,
+            &row.replacen("\"g-res:R_US\"", "\"g-res:R_Added\"", 1),
+            1,
+        ),
+    )
+    .unwrap();
+    let made = team.read();
+    team.import();
+    let after = team.read();
+    // Nothing to show, and no CAD item gets a revision.
+    assert!(
+        found(&after, CSV_CAD_ITEM_KEPT).is_empty(),
+        "{:?}",
+        found(&after, CSV_CAD_ITEM_KEPT)
+    );
+    assert_eq!(
+        after.cad_item_revisions.len(),
+        made.cad_item_revisions.len()
+    );
+    // The other row's part follows the CSV to the revisions the app made.
+    assert_eq!(number_of(&bound(&after, OTHER, "g-res:R_Added")), 1);
+    assert_eq!(number_of(&bound(&after, OTHER, FOOTPRINT)), 2);
+}

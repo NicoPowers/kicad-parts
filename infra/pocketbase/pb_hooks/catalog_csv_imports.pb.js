@@ -840,17 +840,11 @@ routerAdd(
       // the stored current revision of the part or footprint) while that
       // has the same content as the CAD item's current revision after this
       // request: the same content under another number is not a change.
-      // Any other binding must name that current revision.
-      const checkBinding = (target, kept) => {
-        const current = currentOf(target.cadItem);
-        if (!current) {
-          fail(`${target.who} names CAD item ${target.cadItem}, which is neither stored nor sent`);
-        }
-        // A stored record that is not what its ID says is answered as an ID
-        // collision, below; its bindings cannot be checked against it.
-        if (collisions.length > 0) {
-          return;
-        }
+      // Any other binding must name that current revision. For a CAD item
+      // changed in the app, the importer may instead name the app's current
+      // revision, when the CSV has caught up with it (the same rule applies
+      // to it).
+      const bindingProblem = (target, kept, current) => {
         // What the stored part or footprint binds now, if that revision has
         // the same content as the current one: then the binding must keep it.
         const now = kept[target.cadItem];
@@ -862,16 +856,37 @@ routerAdd(
           contentOf(nowRecord.getString("snapshot")) === current.content;
         if (nowHasCurrentContent) {
           if (target.number !== now.number || target.snapshotSha256 !== now.snapshotSha256) {
-            fail(
-              `${target.who} must keep revision ${now.number} of its CAD item, which it binds now: the current revision, ${current.number}, has the same content, and the same content under another number is not a change`,
-            );
+            return `${target.who} must keep revision ${now.number} of its CAD item, which it binds now: the current revision, ${current.number}, has the same content, and the same content under another number is not a change`;
           }
-          return;
+          return "";
         }
         if (current.number !== target.number || current.snapshotSha256 !== target.snapshotSha256) {
-          fail(
-            `${target.who} names revision ${target.number} of its CAD item, but its content changed, so an import must name the current revision, ${current.number}`,
-          );
+          return `${target.who} names revision ${target.number} of its CAD item, but its content changed, so an import must name the current revision, ${current.number}`;
+        }
+        return "";
+      };
+      const checkBinding = (target, kept) => {
+        const current = currentOf(target.cadItem);
+        if (!current) {
+          fail(`${target.who} names CAD item ${target.cadItem}, which is neither stored nor sent`);
+        }
+        // A stored record that is not what its ID says is answered as an ID
+        // collision, below; its bindings cannot be checked against it.
+        if (collisions.length > 0) {
+          return;
+        }
+        const candidates = [current];
+        const stored = currentStored(target.cadItem);
+        if (!requestRevisions[target.cadItem] && stored && madeInApp(stored)) {
+          candidates.push({
+            number: stored.getInt("number"),
+            snapshotSha256: stored.getString("snapshot_sha256"),
+            content: contentOf(stored.getString("snapshot")),
+          });
+        }
+        const problems = candidates.map((candidate) => bindingProblem(target, kept, candidate));
+        if (problems.every((problem) => problem !== "")) {
+          fail(problems[0]);
         }
       };
       for (const revision of cadItemRevisions) {
