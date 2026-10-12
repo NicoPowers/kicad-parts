@@ -754,14 +754,19 @@ function cadReferences(txApp, fields, currentRevision) {
     }
     const names = namedReferences(text);
     // KiCad gives a part one symbol, and a footprint choice listed twice
-    // is a slip; neither may become a revision.
-    if (role === "symbol" && names.length > 1) {
+    // is a slip; an edit may not make either. CSV-sourced CAD is kept and
+    // flagged with an import problem instead (several-symbols,
+    // repeated-footprint-choice), so a field the edit leaves as stored is
+    // not checked: an old CSV slip never blocks an unrelated CAD edit.
+    const stored = (currentRevision.cad_fields || []).find((field) => field.name === column);
+    const changed = !stored || stored.value !== text;
+    if (changed && role === "symbol" && names.length > 1) {
       throw new BadRequestError(
         `a part has one symbol, so the Symbol field can name only one; it names ${names.length}`,
       );
     }
     const repeated = names.find((name, index) => names.indexOf(name) !== index);
-    if (repeated) {
+    if (changed && repeated) {
       throw new BadRequestError(`the ${column} field lists ${repeated} twice`);
     }
     names.forEach((reference, ordinal) => {

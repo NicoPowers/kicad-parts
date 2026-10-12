@@ -1520,5 +1520,32 @@ fn several_symbols_or_a_repeated_footprint_choice_import_with_a_problem() {
         "{:?}",
         report.problems
     );
+
+    // CSV-sourced CAD is kept and flagged; app edits are strict only about
+    // what they change. Changing only the Footprint of the part whose
+    // Symbol came from the CSV with two symbols is not blocked by them...
+    let cad_edit = |stored: &CatalogReadback, field: &str, value: &str| {
+        let (number, revision) = current_revision(stored, "RES-0000-0470");
+        let mut command =
+            EditCommand::new("RES-0000-0470", "Change the CAD").editing_cad(&revision, number);
+        assert!(command.set_field(field, value));
+        submit_edit(&admin, &command)
+    };
+    let reply = cad_edit(
+        &stored,
+        "Footprint",
+        "g-Resistor_SMD:R_0603_1608Metric;Resistor_SMD:R_0805_2012Metric",
+    )
+    .unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    // ...but changing the Symbol to two symbols is still refused.
+    let stored = read_back(&admin).unwrap();
+    match cad_edit(&stored, "Symbol", "g-res:R_US;Device:R") {
+        Err(collaboration::CollabError::Http {
+            status: 400,
+            message,
+        }) => assert!(message.contains("can name only one"), "{message}"),
+        other => panic!("two symbols were not refused: {other:?}"),
+    }
     server.stop();
 }
