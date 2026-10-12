@@ -127,7 +127,8 @@ pub fn read_libraries(root: &Path) -> Libraries {
 }
 
 /// Every symbol and footprint the CSV files (`database/g-*.csv`) name in
-/// their Symbol and Footprint columns, one footprint choice each.
+/// their Symbol and Footprint columns, one footprint choice (or symbol)
+/// each.
 pub fn read_csv_references(root: &Path) -> Result<Vec<CsvReference>, String> {
     let mut references = BTreeSet::new();
     for path in entries(&root.join("database")) {
@@ -148,11 +149,8 @@ pub fn read_csv_references(root: &Path) -> Result<Vec<CsvReference>, String> {
             };
             for record in &table.records {
                 let value = record.fields.get(index).map(String::as_str).unwrap_or("");
-                let choices = match kind {
-                    CadItemKind::Footprint => footprint_choices(value),
-                    _ => vec![value.trim()],
-                };
-                for reference in choices.into_iter().filter(|choice| !choice.is_empty()) {
+                // Like the import, a value naming several (`;`) names each.
+                for reference in footprint_choices(value) {
                     references.insert(CsvReference {
                         file: file.clone(),
                         kind,
