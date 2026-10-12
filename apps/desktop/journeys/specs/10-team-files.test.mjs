@@ -98,7 +98,7 @@ describe('team catalog: edit a part with files', () => {
   let files;
 
   before(async () => {
-    server = await startTeamServer();
+    server = await startTeamServer({ csv: ['g-res'] });
     [editor] = server.accounts;
     files = tempDir('files');
     ({ browser } = await launchApp({

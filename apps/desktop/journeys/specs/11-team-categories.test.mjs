@@ -1,5 +1,6 @@
-// Categories (kicad-parts-ae44): the local team server imports every CSV
-// file, one category each, so every part shows its category by name. Edit
+// Categories (kicad-parts-ae44): the local team server imports each CSV
+// file as one category (here the resistors, capacitors and regulators), so
+// every part in it shows its category by name. Edit
 // part offers every category; choosing another keeps the IPN and every
 // field and adds the new category's fields, and the history says what
 // changed in plain names.
@@ -35,7 +36,7 @@ describe('team catalog: categories', () => {
   let editor;
 
   before(async () => {
-    server = await startTeamServer();
+    server = await startTeamServer({ csv: ['g-res', 'g-cap', 'g-reg'] });
     [editor] = server.accounts;
     ({ browser } = await launchApp({
       args: [`--team-server=${server.url}`, `--team-email=${editor.email}`],
@@ -92,13 +93,13 @@ describe('team catalog: categories', () => {
     });
   }
 
-  it('shows the category of a part from every CSV file', async () => {
+  it('shows the category of a part from each CSV file', async () => {
     await (await browser.$(BADGE)).click();
     await (await browser.$('aria/Password')).setValue(editor.password);
     await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();
     await waitForText(browser, BADGE, `Team catalog · ${editor.name}`);
     await waitForLiveUpdates(browser);
-    // A regulator, from g-reg.csv: the team catalog has every CSV file.
+    // A regulator, from g-reg.csv.
     await searchFor(browser, 'KF33BD', '1 matching part');
     await selectResult(browser, 'KF33BD-TR');
     await waitForTeamPart();
@@ -120,8 +121,8 @@ describe('team catalog: categories', () => {
     const options = await browser.execute(() =>
       [...document.querySelectorAll('#edit-category option')].map((o) => o.textContent.trim()),
     );
-    assert.equal(options.length, 21, 'one choice per CSV file');
-    assert.ok(options.includes('Capacitors') && options.includes('Board features'), JSON.stringify(options));
+    // One choice per imported CSV file, by name.
+    assert.deepEqual(options, ['Capacitors', 'Resistors', 'Voltage regulators']);
     assert.deepEqual(await editLabels(), ['Category', 'Description', 'Value', 'Tolerance', 'Datasheet']);
     assert.equal(await browser.$('#edit-category-hint').isExisting(), false, 'no hint before a change');
 

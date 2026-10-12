@@ -68,7 +68,7 @@ describe('team catalog: reviewing new CSV values that were not applied', () => {
   let otherToken;
 
   before(async () => {
-    server = await startTeamServer();
+    server = await startTeamServer({ csv: ['g-res'] });
     [editor, other] = server.accounts;
     otherToken = await teamSignIn(server.url, other);
     ({ browser } = await launchApp({

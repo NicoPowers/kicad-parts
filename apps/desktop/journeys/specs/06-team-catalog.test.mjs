@@ -44,7 +44,7 @@ describe('team catalog: history, edits and conflicts', () => {
   let otherToken;
 
   before(async () => {
-    server = await startTeamServer();
+    server = await startTeamServer({ csv: ['g-res'] });
     [editor, other, viewer] = server.accounts;
     otherToken = await teamSignIn(server.url, other);
     ({ browser } = await launchApp({
@@ -523,13 +523,12 @@ describe('team catalog: history, edits and conflicts', () => {
     await screenshot(browser, '49-team-read-only');
   });
 
-  it('shows parts from every CSV file, each with its category', async () => {
-    // The team server imports every CSV file, so a regulator is in the team
-    // catalog too, with its own history.
+  it('says when a part is not in the team catalog', async () => {
+    // This team server has only the resistors, so a regulator from
+    // g-reg.csv is not in it yet.
     await searchFor(browser, 'KF33BD', '1 matching part');
     await selectResult(browser, 'KF33BD-TR');
-    await waitForText(browser, '#part-category', 'Category: Voltage regulators');
-    assert.equal(await textOf(browser, '#fields-heading'), 'Part details (4)');
-    assert.equal(await textOf(browser, `${COLUMN} [role="tab"][aria-selected="false"]`), 'History (1)');
+    await waitForText(browser, '.part-fields .hint', 'This part is not in the team catalog yet, so it has no history.');
+    assert.match(await textOf(browser, '#fields-heading'), /^Catalog fields \(\d+\)$/);
   });
 });

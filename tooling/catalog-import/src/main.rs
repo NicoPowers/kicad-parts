@@ -10,13 +10,17 @@
 //! PocketBase and its data are deleted when the command ends; the
 //! repository is only read. Exits 1 if anything was lost.
 //!
-//! `catalog-import local-team-server [--desktop | --json]`
+//! `catalog-import local-team-server [--desktop | --json] [--csv FILES]`
 //!
 //! Starts a disposable team server on 127.0.0.1 for trying the desktop app
 //! by hand: a PocketBase with every CSV file of the CSV catalog imported
 //! (`database/g-*.csv`, one category each) and three team members (two who
 //! can edit, one who can only read), each with a new random password. It
 //! prints the server address and the accounts, then:
+//!
+//! - with `--csv g-res,g-cap` (a comma list; may be given more than once),
+//!   imports only those CSV files, which starts faster and leaves the rest
+//!   of the CSV catalog's parts out of the team catalog;
 //!
 //! - with `--desktop`, opens the built desktop app pointed at the server
 //!   and stops the server when the app closes;
@@ -60,7 +64,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage: catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]\n       catalog-import local-team-server [--desktop | --json]";
+const USAGE: &str = "usage: catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]\n       catalog-import local-team-server [--desktop | --json] [--csv g-res,g-cap ...]";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -136,12 +140,7 @@ enum Then {
 }
 
 fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let then = match args {
-        [] => Then::WaitForEnter,
-        [flag] if flag == "--desktop" => Then::OpenDesktop,
-        [flag] if flag == "--json" => Then::PrintJson,
-        _ => return Err(USAGE.into()),
-    };
+    let (then, chosen) = server_options(args).ok_or(USAGE)?;
     let desktop = desktop_binary();
     if then == Then::OpenDesktop && !desktop.is_file() {
         return Err(format!(
@@ -152,21 +151,32 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let root = services::repository_root();
-    let csv_files = services::csv_files(&root)?;
+    let every = services::csv_files(&root)?;
+    let all = chosen.is_empty();
+    let csv_files = if all {
+        every
+    } else {
+        if let Some(unknown) = chosen.iter().find(|name| !every.contains(name)) {
+            return Err(
+                format!("database/{unknown}.csv is not a CSV file of the CSV catalog").into(),
+            );
+        }
+        chosen
+    };
     let planned = services::plan_all(&root, &csv_files)?;
     // `reimport` imports the resistors again.
-    let import = planned
-        .iter()
-        .find(|import| import.csv_file == "g-res")
-        .ok_or("database/g-res.csv is missing")?
-        .clone();
+    let import = match planned.iter().find(|import| import.csv_file == "g-res") {
+        Some(import) => import.clone(),
+        None => services::plan(&root, "g-res")?,
+    };
     // A known folder under target/, not the system temp folder, so a run
     // that is killed outright is cleaned up by the next one.
     let folder = RunFolder::create(&root.join("target").join("local-team-server"))?;
     let (stop_sender, stop) = mpsc::channel::<Stop>();
     stop_on_ctrl_c(stop_sender.clone());
     let (server, admin, _superuser) = services::start(&root, folder.path())?;
-    // Every CSV file, so every category exists. Files share CAD items (one
+    // Every CSV file (unless --csv names some), so every category exists.
+    // Files share CAD items (one
     // footprint serves several categories), so each import reads the team
     // catalog first, as an importer does.
     for each in &planned {
@@ -229,11 +239,19 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         }
         Then::WaitForEnter | Then::OpenDesktop => {
             writeln!(out, "Team server: {}", server.url())?;
-            writeln!(
-                out,
-                "All {} CSV files in database/ are imported, one category each.",
-                csv_files.len()
-            )?;
+            if all {
+                writeln!(
+                    out,
+                    "All {} CSV files in database/ are imported, one category each.",
+                    csv_files.len()
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "These CSV files are imported, one category each: {}.",
+                    csv_files.join(", ")
+                )?;
+            }
             writeln!(
                 out,
                 "Sign in to the desktop app with one of these accounts:"
@@ -312,6 +330,39 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
     removed?;
     Ok(())
+}
+
+/// What to do after starting, and the CSV files `--csv` names (empty for
+/// every file); `None` for arguments that are not understood.
+fn server_options(args: &[String]) -> Option<(Then, Vec<String>)> {
+    let mut then = None;
+    let mut chosen: Vec<String> = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--desktop" | "--json" if then.is_none() => {
+                then = Some(if arg == "--desktop" {
+                    Then::OpenDesktop
+                } else {
+                    Then::PrintJson
+                });
+            }
+            "--csv" => {
+                let list = rest.next()?;
+                for name in list.split(',').map(str::trim) {
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let name = name.trim_end_matches(".csv").to_owned();
+                    if !chosen.contains(&name) {
+                        chosen.push(name);
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some((then.unwrap_or(Then::WaitForEnter), chosen))
 }
 
 /// For a `reimport` or `reimport <folder>` line, the folder to import from
@@ -432,6 +483,32 @@ fn desktop_binary() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_team_server_takes_a_mode_and_csv_files() {
+        let args =
+            |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_owned).collect() };
+        let options = |text: &str| server_options(&args(text));
+        assert!(
+            options("")
+                .is_some_and(|(then, chosen)| then == Then::WaitForEnter && chosen.is_empty())
+        );
+        let (then, chosen) = options("--json --csv g-res,g-cap --csv g-reg.csv,g-res").unwrap();
+        assert!(then == Then::PrintJson);
+        assert_eq!(chosen, ["g-res", "g-cap", "g-reg"]);
+        assert!(
+            options("--csv g-res --desktop").is_some_and(|(then, _)| then == Then::OpenDesktop)
+        );
+        for refused in [
+            "--csv",
+            "--csv g-res,,g-cap",
+            "--json --desktop",
+            "--other",
+            "g-res",
+        ] {
+            assert!(options(refused).is_none(), "{refused}");
+        }
+    }
 
     #[test]
     fn only_reimport_lines_are_commands() {

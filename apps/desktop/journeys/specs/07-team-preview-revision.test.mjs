@@ -69,7 +69,7 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
   const local = {};
 
   before(async () => {
-    server = await startTeamServer();
+    server = await startTeamServer({ csv: ['g-res'] });
     [account] = server.accounts;
     ({ browser, dataDir } = await launchApp({
       args: [

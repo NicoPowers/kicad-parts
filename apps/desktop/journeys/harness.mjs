@@ -579,12 +579,13 @@ export async function waitForPreviewImages(browser, section, timeout = 60_000) {
 
 /**
  * Starts `catalog-import local-team-server --json`: a disposable PocketBase
- * on 127.0.0.1 with every CSV file imported and three accounts. It runs
+ * on 127.0.0.1 with every CSV file imported (or only `csv`, such as
+ * `['g-res']`, which starts faster) and three accounts. It runs
  * windowless in a kill-on-close job and stops when its input closes, so it
  * cannot outlive this process.
  * @returns {Promise<{ url: string, accounts: { name: string, email: string, password: string, canEditCatalog: boolean }[], stop: () => Promise<void> }>}
  */
-export async function startTeamServer() {
+export async function startTeamServer({ csv = [] } = {}) {
   const exe = path.join(
     repoRoot,
     'target',
@@ -592,7 +593,8 @@ export async function startTeamServer() {
     process.platform === 'win32' ? 'catalog-import.exe' : 'catalog-import',
   );
   assert.ok(fs.existsSync(exe), `build it first: ${exe}`);
-  const child = spawn(exe, ['local-team-server', '--json'], {
+  const args = ['local-team-server', '--json', ...(csv.length > 0 ? ['--csv', csv.join(',')] : [])];
+  const child = spawn(exe, args, {
     cwd: repoRoot,
     stdio: ['pipe', 'pipe', 'inherit'],
     windowsHide: true,
@@ -615,7 +617,7 @@ export async function startTeamServer() {
     });
   });
   const info = JSON.parse(line);
-  record({ event: 'team-server', url: info.url, accounts: info.accounts.map((a) => a.email) });
+  record({ event: 'team-server', url: info.url, csv, accounts: info.accounts.map((a) => a.email) });
   // Later lines answer `reimport` requests, one each, in order.
   let rest = '';
   const waiting = [];
