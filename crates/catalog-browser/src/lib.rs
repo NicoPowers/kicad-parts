@@ -329,13 +329,31 @@ impl CatalogBrowser {
             Ok(read) => read,
             Err(message) => return problem(kind, PreviewProblemReason::Unresolved, None, message),
         };
-        let lib_ref = LibRef::parse(&request.reference)
-            .ok()
-            .filter(|reference| reference.item == name)
-            .unwrap_or(LibRef {
-                library: "g-file".into(),
-                item: name,
-            });
+        // The file names itself, and the name becomes a file name in the
+        // staging folder, so it must be a plain name; a reference still
+        // being typed falls back to a placeholder library.
+        if !catalog::cad_file::is_plain_name(&name) {
+            return problem(
+                kind,
+                PreviewProblemReason::Unexportable,
+                None,
+                format!(
+                    "The {} in the file is named {name:?}, which cannot be used: a name cannot be . or .., start with -, or hold / \\ : or control characters.",
+                    noun(kind)
+                ),
+            );
+        }
+        let typed = LibRef::parse(&request.reference).ok().filter(|reference| {
+            reference.item == name && catalog::cad_file::is_plain_name(&reference.library)
+        });
+        let Some(lib_ref) = typed.or_else(|| LibRef::parse(&format!("g-file:{name}")).ok()) else {
+            return problem(
+                kind,
+                PreviewProblemReason::Unexportable,
+                None,
+                format!("The {} in the file cannot be drawn.", noun(kind)),
+            );
+        };
         let item = StoredItem {
             lib_ref,
             blob_sha256: sha256_hex(&stored),

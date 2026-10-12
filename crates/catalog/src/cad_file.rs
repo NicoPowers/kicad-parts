@@ -10,6 +10,7 @@
 
 use crate::csv_import::classify_model_reference;
 use crate::pocketbase::{CadUpload, UploadRole};
+use kicad_integration::LibRef;
 use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
 
 /// The symbols of a `.kicad_sym` file.
@@ -77,6 +78,7 @@ pub fn symbol_upload(
     file_name: &str,
 ) -> Result<CadUpload, String> {
     kicad_text(bytes)?;
+    check_name(reference, name, "symbol")?;
     let library = SymbolLibrary::parse(bytes)
         .map_err(|error| format!("The file is not a KiCad symbol library: {error}."))?;
     let entry = match library.find(name) {
@@ -94,7 +96,6 @@ pub fn symbol_upload(
     let Some(version) = library.version.clone() else {
         return Err("The file does not say which KiCad version saved it.".into());
     };
-    check_name(reference, name, "symbol")?;
     Ok(CadUpload {
         role: UploadRole::Symbol,
         reference: reference.to_owned(),
@@ -157,14 +158,43 @@ pub fn model_upload(bytes: &[u8], key: &str, file_name: &str) -> Result<CadUploa
     })
 }
 
+/// Whether `name` can be a library or item name: what [`LibRef::parse`]
+/// allows (not empty, `.` or `..`, and no `/`, `\\`, `:` or NUL), with no
+/// other control character and no leading `-`. Both halves of a reference
+/// become file names, in KiCad's libraries and in the preview's staging
+/// folder, and a name can come from a downloaded file.
+pub fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.starts_with('-')
+        && !name.contains(['/', '\\', ':'])
+        && !name.chars().any(char::is_control)
+}
+
 /// Checks that `reference` is `LIB:NAME` in one of the Catalog's own (`g-`)
-/// libraries, with `name` after the colon.
+/// libraries, with `name` after the colon, and that both are plain names
+/// ([`is_plain_name`]), exactly as written.
 fn check_name(reference: &str, name: &str, what: &str) -> Result<(), String> {
+    if !is_plain_name(name) {
+        return Err(format!(
+            "The {what}'s name in the file, {name:?}, cannot be used: a name cannot be . or .., start with -, or hold / \\ : or control characters."
+        ));
+    }
     let Some((library, item)) = reference.split_once(':') else {
         return Err(format!(
             "Give the {what} a library, such as g-res:{name}, before you save."
         ));
     };
+    let parsed = LibRef::parse(reference).ok();
+    if !is_plain_name(library)
+        || !is_plain_name(item)
+        || parsed.is_none_or(|parsed| parsed.to_string() != reference)
+    {
+        return Err(format!(
+            "{reference:?} cannot be used as a reference: write LIBRARY:NAME, with no spaces around it, and a library and name that are not . or .., do not start with -, and hold no / \\ : or control characters."
+        ));
+    }
     if !library.starts_with("g-") || library.len() < 3 {
         return Err(format!(
             "A file can only be added to the Catalog's own libraries, whose names start with g-, not {library}."
@@ -274,6 +304,49 @@ mod tests {
         );
         assert!(read_footprint_file(b"(kicad_symbol_lib)").is_err());
         assert!(model_upload(b"", "3d-models/x.step", "x.step").is_err());
+    }
+
+    #[test]
+    fn names_that_could_leave_a_folder_are_refused() {
+        // A downloaded file names itself; the name becomes a file name in
+        // the preview's staging folder and in KiCad's libraries.
+        for name in [
+            "../escaped",
+            r"..\escaped",
+            r"C:\escaped\x",
+            "/escaped",
+            "a\u{0}b",
+            "a:b",
+            "a\u{1}b",
+            "-a",
+            "..",
+        ] {
+            let footprint = format!("(footprint {name:?})");
+            let error = footprint_upload(footprint.as_bytes(), &format!("g-res:{name}"), "f")
+                .expect_err(name);
+            assert!(error.contains("cannot be used"), "{name:?}: {error}");
+            let library = format!("(kicad_symbol_lib (version 1) (symbol {name:?}))");
+            let error = symbol_upload(library.as_bytes(), name, &format!("g-res:{name}"), "f")
+                .expect_err(name);
+            assert!(error.contains("cannot be used"), "{name:?}: {error}");
+        }
+        // The library someone types is checked the same way.
+        for reference in [
+            "g-:R",
+            "g-a/b:R",
+            "g-a:b:R",
+            "..:R",
+            "-g:R",
+            "g-res\u{1}:R",
+            " g-res:R",
+        ] {
+            let footprint = "(footprint \"R\")";
+            assert!(
+                footprint_upload(footprint.as_bytes(), reference, "f").is_err(),
+                "{reference:?}"
+            );
+        }
+        assert!(footprint_upload(b"(footprint \"R\")", "g-res:R", "f").is_ok());
     }
 
     #[test]

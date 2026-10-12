@@ -238,6 +238,39 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
         assert_eq!(set.cad_item_revision, None);
     }
 
+    // A file that names itself so it would leave the staging folder is not
+    // drawn, and nothing is written outside the app's cache.
+    for name in [
+        "../../../escaped",
+        r"..\..\..\escaped",
+        r"C:\escaped\x",
+        "a:b",
+        "a\u{1}b",
+    ] {
+        // Quoted as KiCad writes strings: only backslashes and quotes are
+        // escaped, so the control character stays as it is.
+        let quoted = name.replace('\\', "\\\\").replace('"', "\\\"");
+        let hostile = format!("(footprint \"{quoted}\"\n\t(version 20241229)\n)\n");
+        let outcome = browser.preview_file(&FilePreviewRequest {
+            file: file(FileKind::Footprint, "f.kicad_mod", hostile.as_bytes(), None),
+            reference: format!("g-Resistor_SMD:{name}"),
+            selection: None,
+        });
+        assert!(
+            matches!(outcome, PreviewOutcome::Problem(_)),
+            "{name:?}: {outcome:?}"
+        );
+    }
+    assert!(
+        !data
+            .path()
+            .parent()
+            .unwrap()
+            .join("escaped.kicad_mod")
+            .exists()
+    );
+    assert!(!std::path::Path::new(r"C:\escaped").exists());
+
     // Saving the footprint file: footprint revision 2, for this part only.
     let part = team.part(IPN).unwrap().unwrap();
     let mut request = opened(&part, "Corrected silkscreen");

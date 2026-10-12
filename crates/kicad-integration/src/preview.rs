@@ -286,6 +286,7 @@ impl PreviewCache {
     ) -> Result<Preview, PreviewError> {
         let name = &item.lib_ref.item;
         reject_option_like(name)?;
+        check_file_names(&item.lib_ref)?;
         check_sha256(item)?;
         let Some(version) = item.format_version.as_deref() else {
             return Err(PreviewError::Unexportable(format!(
@@ -325,6 +326,7 @@ impl PreviewCache {
     ) -> Result<Preview, PreviewError> {
         let lib_ref = &item.lib_ref;
         reject_option_like(&lib_ref.item)?;
+        check_file_names(lib_ref)?;
         check_sha256(item)?;
         let entry = self.entry_dir(kicad, "fp-blob", &item.blob_sha256, &lib_ref.item);
         let export = Export {
@@ -713,6 +715,24 @@ fn output_stem(name: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Refuses a reference whose library or name could not be a plain file
+/// name inside a staging folder: one [`LibRef::parse`] would refuse (empty,
+/// `.` or `..`, holding `/`, `\\`, `:` or NUL), or one holding any other
+/// control character. Stored items can carry a name from a file someone
+/// chose (kicad-parts-3b8b), and both halves become file names.
+fn check_file_names(lib_ref: &LibRef) -> Result<(), PreviewError> {
+    let text = lib_ref.to_string();
+    let parsed = LibRef::parse(&text).ok();
+    let control = text.chars().any(char::is_control);
+    if control || parsed.as_ref() != Some(lib_ref) {
+        return Err(PreviewError::Unexportable(format!(
+            "{:?} cannot be drawn: a library or name cannot be empty, be . or .., or hold / \\ : or control characters.",
+            text
+        )));
+    }
+    Ok(())
 }
 
 /// kicad-cli parses a leading `-` as an option, so such a name would either

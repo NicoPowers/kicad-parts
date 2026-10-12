@@ -411,3 +411,67 @@ fn stored_bytes_that_do_not_match_or_cannot_be_drawn_are_refused() {
     ));
     assert_eq!(cache.export_count(), 0);
 }
+
+#[test]
+fn stored_items_with_names_that_could_leave_the_staging_folder_are_refused() {
+    let fixture = fixture(true);
+    let root = fixture._dir.path().to_path_buf();
+    let footprint = b"(footprint \"x\")".to_vec();
+    for (library, item) in [
+        ("g-file", "../../../escaped"),
+        ("g-file", r"..\..\..\escaped"),
+        ("g-file", r"C:\escaped\x"),
+        ("g-file", "/escaped"),
+        ("g-file", "a\u{0}b"),
+        ("g-file", "a:b"),
+        ("g-file", "a\u{1}b"),
+        ("../../escaped", "x"),
+        ("g-file", ".."),
+    ] {
+        let item = StoredItem {
+            lib_ref: LibRef {
+                library: library.into(),
+                item: item.into(),
+            },
+            blob_sha256: sha256_hex(&footprint),
+            format_version: Some("20241209".into()),
+        };
+        let bytes = footprint.clone();
+        assert!(
+            matches!(
+                fixture
+                    .cache
+                    .stored_footprint(&fixture.kicad, &item, || Ok(bytes), None),
+                Err(PreviewError::Unexportable(_))
+            ),
+            "{library}:{:?}",
+            item.lib_ref.item
+        );
+        let entry = ENTRY.as_bytes().to_vec();
+        assert!(matches!(
+            fixture
+                .cache
+                .stored_symbol(&fixture.kicad, &item, || Ok(entry), None),
+            Err(PreviewError::Unexportable(_))
+        ));
+    }
+    let escaped: Vec<_> = walk(&root)
+        .into_iter()
+        .filter(|path| path.to_string_lossy().contains("escaped"))
+        .collect();
+    assert!(escaped.is_empty(), "{escaped:?}");
+    assert!(!Path::new(r"C:\escaped").exists());
+    assert_eq!(fixture.cache.export_count(), 0);
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        found.push(path.clone());
+        if path.is_dir() {
+            found.extend(walk(&path));
+        }
+    }
+    found
+}
