@@ -1227,8 +1227,8 @@ pub enum CreateOutcome {
         change_id: String,
         seq: u64,
         audit_entry_id: String,
-        details: PublishedRecord,
-        revision: PublishedRecord,
+        details: Box<PublishedRecord>,
+        revision: Box<PublishedRecord>,
         cad_item_revisions: Vec<String>,
         #[serde(default)]
         new_cad_item_revisions: Vec<NewCadItemRevision>,

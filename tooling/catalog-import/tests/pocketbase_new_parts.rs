@@ -333,6 +333,9 @@ fn a_new_part_may_use_what_the_catalog_and_kicad_already_have() {
     assert_eq!(*targets[1], CadReferenceTarget::External);
 }
 
+/// A change to a request's body.
+type Change = Box<dyn Fn(&mut Value)>;
+
 #[test]
 fn a_new_part_is_refused_plainly_and_nothing_is_written() {
     let team = Team::start();
@@ -375,7 +378,7 @@ fn a_new_part_is_refused_plainly_and_nothing_is_written() {
             Err(other) => panic!("expected 400, got {other:?}"),
         }
     };
-    let cases: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+    let cases: Vec<(&str, Change)> = vec![
         (
             "is not an IPN",
             Box::new(|body| body["ipn"] = json!("RES-1-1")),
