@@ -860,8 +860,10 @@ fn save_failed(error: CollabError) -> Result<PublishResult, String> {
 /// The edit as the person meant it. Spaces typed or pasted around a value
 /// they changed are left out, so adding only spaces changes nothing and
 /// an MPN pasted with a space after it is still the same MPN. A value they
-/// did not change stays exactly as it is, spaces and all. A manufacturer
-/// row left blank is left out.
+/// did not change stays exactly as it is, spaces and all. Manufacturer
+/// parts are tidied row by row: a row exactly as it was stays as it is, a
+/// changed row has its manufacturer and MPN trimmed, and a row left blank
+/// is left out.
 fn tidied(
     mut request: TeamEditRequest,
     details: &PartDetails,

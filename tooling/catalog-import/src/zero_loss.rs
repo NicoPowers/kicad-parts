@@ -959,12 +959,6 @@ impl<'a> Reporter<'a> {
         changes
     }
 
-    /// A part is Excluded from BOM exactly when a symbol revision it binds
-    /// says `(in_bom no)` in its stored bytes, or every footprint choice is a
-    /// footprint revision whose `(attr ...)` has `exclude_from_bom`. If only
-    /// some footprint choices say so, the setting must be unset and the
-    /// latest run must have found a `footprint-choices-disagree-on-bom`
-    /// import problem.
     /// A row whose Symbol names several symbols, or whose Footprint lists
     /// a choice more than once, needs a several-symbols or
     /// repeated-footprint-choice import problem (the row still imports
@@ -1012,6 +1006,12 @@ impl<'a> Reporter<'a> {
         }
     }
 
+    /// A part is Excluded from BOM exactly when a symbol revision it binds
+    /// says `(in_bom no)` in its stored bytes, or every footprint choice is a
+    /// footprint revision whose `(attr ...)` has `exclude_from_bom`. If only
+    /// some footprint choices say so, the setting must be unset and the
+    /// latest run must have found a `footprint-choices-disagree-on-bom`
+    /// import problem.
     fn check_excluded_from_bom(
         &mut self,
         row_number: usize,
