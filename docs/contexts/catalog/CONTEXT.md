@@ -73,7 +73,7 @@ A symbol, footprint or 3D model that parts use. It keeps its identity when its c
 _Avoid_: Catalog Asset, asset, file, library item
 
 **Source**:
-Where a revision's data came from, such as a CSV file and row, or the file someone chose in the app.
+Where a revision's data came from, such as a CSV file and row, the file someone chose in the app, or the files someone downloaded for a new part and the site they came from.
 _Avoid_: Provenance, origin
 
 **License**:
