@@ -67,6 +67,16 @@ fn imported(root: &Path) -> KnownCad {
     }
 }
 
+/// [`imported`], leaving out `csv_file` (such as one that cannot be read).
+fn imported_without(root: &Path, csv_file: &str) -> KnownCad {
+    let moved = tempfile::tempdir().unwrap();
+    let file = format!("database/{csv_file}.csv");
+    fs::rename(root.join(&file), moved.path().join("held.csv")).unwrap();
+    let known = imported(root);
+    fs::rename(moved.path().join("held.csv"), root.join(&file)).unwrap();
+    known
+}
+
 fn kinds(check: &LibraryCheck) -> Vec<(Group, &'static str, &str)> {
     check
         .findings
@@ -118,7 +128,7 @@ fn a_library_in_order_finds_only_what_the_catalog_lacks() {
     let known = imported(root.path());
     let kicad: BTreeSet<String> = ["Package_SO:SOIC-8_3.9x4.9mm_P1.27mm".to_owned()].into();
     let libraries = read_libraries(root.path());
-    let csv = read_csv_references(root.path()).unwrap();
+    let csv = read_csv_references(root.path(), &mut Vec::new());
     let found = check(CheckInputs {
         libraries: &libraries,
         known: &known,
@@ -621,4 +631,103 @@ fn power_symbols_are_never_listed_as_not_in_the_catalog() {
         .collect();
     assert!(listed.contains(&"g-pwr:NOT_POWER"), "{listed:?}");
     assert!(!listed.contains(&"g-pwr:GND"), "{listed:?}");
+}
+
+/// A CSV file that cannot be read does not stop the check: it is listed,
+/// and everything else is checked.
+#[test]
+fn an_unreadable_csv_file_is_listed_and_the_rest_is_checked() {
+    let root = small_catalog(&[]);
+    fs::write(root.path().join("database/g-bad.csv"), [0xff, 0xfe, b'\n']).unwrap();
+    let found = check_folder(root.path(), &imported_without(root.path(), "g-bad"), None).unwrap();
+    let unreadable = found
+        .findings
+        .iter()
+        .find(|f| f.kind == FindingKind::Unreadable)
+        .unwrap();
+    assert_eq!(unreadable.file, "database/g-bad.csv");
+    assert!(
+        unreadable.message.starts_with("Could not be read: "),
+        "{}",
+        unreadable.message
+    );
+    assert!(
+        found
+            .findings
+            .iter()
+            .any(|f| f.kind == FindingKind::SimilarName)
+    );
+}
+
+/// Makes `link` a link to the folder `target` (a junction on Windows,
+/// which needs no special rights).
+fn link_folder(target: &Path, link: &Path) {
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+/// Like the import, the check never follows a link, whether it is one of
+/// the library folders themselves or something inside them; each is listed.
+#[test]
+fn links_are_not_followed_and_are_listed() {
+    let root = small_catalog(&[]);
+    let known = imported(root.path());
+    let elsewhere = tempfile::tempdir().unwrap();
+    fs::create_dir_all(elsewhere.path().join("g-Outside.3dshapes")).unwrap();
+    fs::write(elsewhere.path().join("g-Outside.3dshapes/X.step"), "x").unwrap();
+    fs::write(
+        elsewhere.path().join("Linked.kicad_mod"),
+        footprint("Linked", &["/home/me/x.step"]),
+    )
+    .unwrap();
+    link_folder(
+        elsewhere.path(),
+        &root.path().join("footprints").join("g-Linked.pretty"),
+    );
+    fs::remove_dir_all(root.path().join("3d-models")).unwrap();
+    link_folder(elsewhere.path(), &root.path().join("3d-models"));
+    let found = check_folder(root.path(), &known, None).unwrap();
+    let unreadable: Vec<&str> = found
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::Unreadable)
+        .map(|f| f.file.as_str())
+        .collect();
+    assert_eq!(
+        unreadable,
+        ["3d-models", "footprints/g-Linked.pretty"],
+        "{}",
+        found.report()
+    );
+    assert!(
+        found
+            .findings
+            .iter()
+            .filter(|f| f.kind != FindingKind::Unreadable)
+            .all(|f| !f.item.contains("Linked") && !f.item.contains("Outside")),
+        "{}",
+        found.report()
+    );
+    // The footprint's own model in the linked folder is not seen either.
+    assert!(
+        found
+            .findings
+            .iter()
+            .any(|f| f.kind == FindingKind::MissingModel)
+    );
 }

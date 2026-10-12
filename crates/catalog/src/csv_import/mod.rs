@@ -33,6 +33,7 @@
 
 mod files;
 
+pub(crate) use files::is_link;
 pub use files::{CsvRecord, CsvTable, input_exists, parse_csv, read_input};
 
 use crate::cad_item::{

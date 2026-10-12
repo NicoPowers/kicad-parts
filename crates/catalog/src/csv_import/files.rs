@@ -65,8 +65,10 @@ pub fn exact_file(root: &Path, relative: &str) -> Result<Option<PathBuf>, Import
     Ok(None)
 }
 
+/// Whether `metadata` is of a link or (on Windows) any reparse point,
+/// which imports never pass through.
 #[cfg(windows)]
-fn is_link(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_link(metadata: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     metadata.file_type().is_symlink()
@@ -74,7 +76,7 @@ fn is_link(metadata: &fs::Metadata) -> bool {
 }
 
 #[cfg(not(windows))]
-fn is_link(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_link(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 

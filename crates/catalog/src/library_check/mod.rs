@@ -552,7 +552,7 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
             kind: FindingKind::Unreadable,
             item: file.clone(),
             file: file.clone(),
-            message: format!("The file could not be read: {why}"),
+            message: format!("Could not be read: {why}"),
         });
     }
 

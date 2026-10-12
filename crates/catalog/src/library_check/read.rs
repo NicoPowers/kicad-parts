@@ -5,7 +5,7 @@
 use super::{CheckInputs, CsvReference, KnownCad, Libraries, LibraryCheck, LibraryFootprint};
 use super::{LibrarySymbol, check};
 use crate::cad_item::CadItemKind;
-use crate::csv_import::parse_csv;
+use crate::csv_import::{is_link, parse_csv};
 use crate::hash::sha256_hex;
 use kicad_integration::footprint_choices;
 use kicad_integration::library_file::{FootprintFile, Sexp, SymbolLibrary, model_references};
@@ -37,8 +37,8 @@ pub fn check_folder_with(
     kicad_share: Option<&Path>,
     todays_footprints: &BTreeMap<String, String>,
 ) -> Result<LibraryCheck, String> {
-    let libraries = read_libraries(root);
-    let csv = read_csv_references(root)?;
+    let mut libraries = read_libraries(root);
+    let csv = read_csv_references(root, &mut libraries.unreadable);
     let kicad = kicad_share.map(|share| kicad_footprints(share, &libraries));
     Ok(check(CheckInputs {
         libraries: &libraries,
@@ -49,13 +49,19 @@ pub fn check_folder_with(
     }))
 }
 
+/// Why a link is not followed, as an unreadable file says it.
+const LINK: &str =
+    "it is a link, which the library check does not follow (the import refuses links too)";
+
 /// Reads every symbol of `symbols/g-*.kicad_sym`, every footprint of
 /// `footprints/g-*.pretty` and the name of every file under `3d-models/`.
-/// A missing folder has nothing in it; a file that cannot be read is listed
-/// in [`Libraries::unreadable`].
+/// A missing folder has nothing in it; a file that cannot be read, and a
+/// link (never followed, as the import refuses links), is listed in
+/// [`Libraries::unreadable`].
 pub fn read_libraries(root: &Path) -> Libraries {
     let mut libraries = Libraries::default();
-    for path in entries(&root.join("symbols")) {
+    let unreadable = &mut libraries.unreadable;
+    for (path, file) in entries(root, "symbols", unreadable) {
         let Some(library) = file_name(&path)
             .strip_suffix(".kicad_sym")
             .filter(|name| name.starts_with("g-"))
@@ -66,7 +72,6 @@ pub fn read_libraries(root: &Path) -> Libraries {
         if !path.is_file() {
             continue;
         }
-        let file = format!("symbols/{library}.kicad_sym");
         let parsed = fs::read(&path)
             .map_err(|error| error.to_string())
             .and_then(|bytes| {
@@ -93,10 +98,10 @@ pub fn read_libraries(root: &Path) -> Libraries {
                     });
                 }
             }
-            Err(why) => libraries.unreadable.push((file, why)),
+            Err(why) => unreadable.push((file, why)),
         }
     }
-    for folder in entries(&root.join("footprints")) {
+    for (folder, folder_file) in entries(root, "footprints", unreadable) {
         let Some(library) = file_name(&folder)
             .strip_suffix(".pretty")
             .filter(|name| name.starts_with("g-"))
@@ -107,7 +112,7 @@ pub fn read_libraries(root: &Path) -> Libraries {
         if !folder.is_dir() {
             continue;
         }
-        for path in entries(&folder) {
+        for (path, file) in entries(root, &folder_file, unreadable) {
             let Some(name) = file_name(&path)
                 .strip_suffix(".kicad_mod")
                 .map(str::to_owned)
@@ -132,33 +137,42 @@ pub fn read_libraries(root: &Path) -> Libraries {
                         models,
                     });
                 }
-                Err(error) => libraries.unreadable.push((
-                    format!("footprints/{library}.pretty/{name}.kicad_mod"),
-                    error.to_string(),
-                )),
+                Err(error) => unreadable.push((file, error.to_string())),
             }
         }
     }
     let mut models = Vec::new();
-    files_under(&root.join("3d-models"), "3d-models", &mut models);
+    files_under(root, "3d-models", &mut models, unreadable);
     libraries.models = models.into_iter().collect();
     libraries
 }
 
 /// Every symbol and footprint the CSV files (`database/g-*.csv`) name in
 /// their Symbol and Footprint columns, one footprint choice (or symbol)
-/// each.
-pub fn read_csv_references(root: &Path) -> Result<Vec<CsvReference>, String> {
+/// each. A CSV file that cannot be read, or a link, is added to
+/// `unreadable` and the rest is read.
+pub fn read_csv_references(
+    root: &Path,
+    unreadable: &mut Vec<(String, String)>,
+) -> Vec<CsvReference> {
     let mut references = BTreeSet::new();
-    for path in entries(&root.join("database")) {
+    for (path, file) in entries(root, "database", unreadable) {
         let name = file_name(&path);
         let is_csv_file = name.starts_with("g-") && name.ends_with(".csv");
         if !is_csv_file || !path.is_file() {
             continue;
         }
-        let file = format!("database/{name}");
-        let bytes = fs::read(&path).map_err(|error| format!("cannot read {file}: {error}"))?;
-        let table = parse_csv(&file, &bytes).map_err(|error| error.0)?;
+        let table = match fs::read(&path) {
+            Ok(bytes) => parse_csv(&file, &bytes).map_err(|error| error.0),
+            Err(error) => Err(error.to_string()),
+        };
+        let table = match table {
+            Ok(table) => table,
+            Err(why) => {
+                unreadable.push((file, why));
+                continue;
+            }
+        };
         for (kind, column) in [
             (CadItemKind::Symbol, "Symbol"),
             (CadItemKind::Footprint, "Footprint"),
@@ -179,7 +193,7 @@ pub fn read_csv_references(root: &Path) -> Result<Vec<CsvReference>, String> {
             }
         }
     }
-    Ok(references.into_iter().collect())
+    references.into_iter().collect()
 }
 
 /// The footprints outside our libraries that the symbols name and that
@@ -208,19 +222,37 @@ pub fn kicad_footprints(share: &Path, libraries: &Libraries) -> BTreeSet<String>
         .collect()
 }
 
-/// The entries of `folder`, in name order, links left out; none if it
-/// cannot be read.
-fn entries(folder: &Path) -> Vec<PathBuf> {
-    let Ok(read) = fs::read_dir(folder) else {
+/// The entries of the folder `relative` (a `/`-separated repository path)
+/// under `root`, in name order, each with its repository path; none if it
+/// is missing or cannot be read. Links are never followed: a link, the
+/// folder itself or an entry in it, is added to `unreadable` instead.
+fn entries(
+    root: &Path,
+    relative: &str,
+    unreadable: &mut Vec<(String, String)>,
+) -> Vec<(PathBuf, String)> {
+    let folder = root.join(relative);
+    match fs::symlink_metadata(&folder) {
+        Ok(metadata) if is_link(&metadata) => {
+            unreadable.push((relative.to_owned(), LINK.to_owned()));
+            return Vec::new();
+        }
+        Ok(_) => {}
+        Err(_) => return Vec::new(),
+    }
+    let Ok(read) = fs::read_dir(&folder) else {
         return Vec::new();
     };
-    let mut paths: Vec<PathBuf> = read
-        .flatten()
-        .filter(|entry| {
-            fs::symlink_metadata(entry.path()).is_ok_and(|metadata| !is_link(&metadata))
-        })
-        .map(|entry| entry.path())
-        .collect();
+    let mut paths: Vec<(PathBuf, String)> = Vec::new();
+    for entry in read.flatten() {
+        let path = entry.path();
+        let file = format!("{relative}/{}", file_name(&path));
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if is_link(&metadata) => unreadable.push((file, LINK.to_owned())),
+            Ok(_) => paths.push((path, file)),
+            Err(error) => unreadable.push((file, error.to_string())),
+        }
+    }
     paths.sort();
     paths
 }
@@ -231,31 +263,19 @@ fn file_name(path: &Path) -> &str {
         .unwrap_or_default()
 }
 
-/// Every file under `folder`, as `prefix/...` paths with `/`.
-fn files_under(folder: &Path, prefix: &str, found: &mut Vec<String>) {
-    for path in entries(folder) {
-        let name = file_name(&path);
-        if name.is_empty() {
-            continue;
-        }
-        let relative = format!("{prefix}/{name}");
+/// Every file under the folder `relative` (a repository path), as
+/// `relative/...` paths with `/`.
+fn files_under(
+    root: &Path,
+    relative: &str,
+    found: &mut Vec<String>,
+    unreadable: &mut Vec<(String, String)>,
+) {
+    for (path, file) in entries(root, relative, unreadable) {
         if path.is_dir() {
-            files_under(&path, &relative, found);
+            files_under(root, &file, found, unreadable);
         } else if path.is_file() {
-            found.push(relative);
+            found.push(file);
         }
     }
-}
-
-#[cfg(not(windows))]
-fn is_link(metadata: &fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
-}
-
-#[cfg(windows)]
-fn is_link(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    metadata.file_type().is_symlink()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
