@@ -36,7 +36,8 @@
 //         from; only the ones that moved are given; nothing is written
 //   409 { outcome: "correlation_reused", correlationId, message }
 //   400 bad input (including a symbol or footprint the Catalog does not
-//       have), 401 not signed in, 403 not allowed to edit, 404 no such part.
+//       have, more than one symbol, or a footprint choice listed twice),
+//       401 not signed in, 403 not allowed to edit, 404 no such part.
 // Applied and no-op answers are replayed byte for byte for a repeated
 // correlation ID (with X-Collab-Replayed: true).
 //

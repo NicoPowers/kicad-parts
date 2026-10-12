@@ -753,6 +753,17 @@ function cadReferences(txApp, fields, currentRevision) {
       continue;
     }
     const names = namedReferences(text);
+    // KiCad gives a part one symbol, and a footprint choice listed twice
+    // is a slip; neither may become a revision.
+    if (role === "symbol" && names.length > 1) {
+      throw new BadRequestError(
+        `a part has one symbol, so the Symbol field can name only one; it names ${names.length}`,
+      );
+    }
+    const repeated = names.find((name, index) => names.indexOf(name) !== index);
+    if (repeated) {
+      throw new BadRequestError(`the ${column} field lists ${repeated} twice`);
+    }
     names.forEach((reference, ordinal) => {
       const library = reference.indexOf(":") >= 0 ? reference.substring(0, reference.indexOf(":")) : reference;
       let target;

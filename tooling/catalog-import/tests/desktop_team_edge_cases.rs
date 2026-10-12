@@ -232,3 +232,47 @@ fn saving_while_the_team_server_is_stopped_says_so_plainly() {
     };
     assert_eq!(team.archive(archive), Ok(plain));
 }
+
+#[test]
+fn a_part_keeps_one_symbol_and_each_footprint_choice_once() {
+    let desktop = start();
+    let team = &desktop.team;
+    let part = team.part(IPN).unwrap().unwrap();
+    let refused = |field: &str, value: &str| {
+        let mut request = opened(&part, "Change the CAD");
+        set(&mut request, field, value);
+        match team.edit(request).unwrap() {
+            PublishResult::Refused { message } => message,
+            other => panic!("{field} {value:?} was not refused: {other:?}"),
+        }
+    };
+    // KiCad gives a part one symbol, so a second one is refused, not saved
+    // as a revision KiCad cannot use.
+    assert_eq!(
+        refused("Symbol", "g-res:R_US;Device:R"),
+        "A part has one symbol, so the Symbol field can name only one; it names 2."
+    );
+    // Several footprint choices are fine, but not the same one twice.
+    assert_eq!(
+        refused(
+            "Footprint",
+            "g-Resistor_SMD:R_0603_1608Metric; g-Resistor_SMD:R_0603_1608Metric"
+        ),
+        "The Footprint field lists g-Resistor_SMD:R_0603_1608Metric twice."
+    );
+    assert_eq!(team.part(IPN).unwrap().unwrap().revision.number, 1);
+    let mut request = opened(&part, "Allow the 0805 footprint too");
+    set(
+        &mut request,
+        "Footprint",
+        "g-Resistor_SMD:R_0603_1608Metric;Resistor_SMD:R_0805_2012Metric",
+    );
+    assert!(matches!(
+        team.edit(request).unwrap(),
+        PublishResult::Saved {
+            revision: Some(2),
+            ..
+        }
+    ));
+    desktop.server.stop();
+}
