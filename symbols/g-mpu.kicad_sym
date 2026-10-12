@@ -4883,7 +4883,7 @@
 				)
 			)
 		)
-		(property "Footprint" "g-con:MirrMez699_mirrored"
+		(property "Footprint" "g-Connector_Molex:MirrMez699_mirrored"
 			(at 19.304 -4.318 0)
 			(effects
 				(font
