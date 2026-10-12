@@ -7,7 +7,7 @@ use collaboration::PocketBaseClient;
 use native_services::{
     PocketBaseOptions, PocketBaseServer, Superuser, pocketbase_binary, random_name,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -171,6 +171,19 @@ pub fn source_commit(repository: &Path, read: &[&str], missing: &[&str]) -> Opti
     }
 }
 
+/// The CSV catalog files under `repository` (`database/g-*.csv`), by name
+/// without `.csv`, in name order.
+pub fn csv_files(repository: &Path) -> std::io::Result<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(repository.join("database"))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter_map(|name| name.strip_suffix(".csv").map(str::to_owned))
+        .filter(|name| name.starts_with("g-"))
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
 /// Plans the import of `csv_file`, recording the source commit of exactly
 /// the files the import reads and looks for.
 pub fn plan(repository: &Path, csv_file: &str) -> Result<CsvImport, ImportError> {
@@ -178,6 +191,34 @@ pub fn plan(repository: &Path, csv_file: &str) -> Result<CsvImport, ImportError>
     let probe = catalog.import(csv_file, None)?;
     let (read, missing) = input_paths(&probe);
     catalog.import(csv_file, source_commit(repository, &read, &missing))
+}
+
+/// Plans the import of each of `csv_files`, recording one source commit for
+/// the files all of them read and look for together: `HEAD`, or `HEAD+dirty`
+/// for every one of them when any of those files has uncommitted changes.
+/// Comparing the files with `HEAD` once, rather than once per CSV file,
+/// makes planning the whole CSV catalog about ten times faster; it suits a
+/// team server that is thrown away (`local-team-server`).
+pub fn plan_all(repository: &Path, csv_files: &[String]) -> Result<Vec<CsvImport>, ImportError> {
+    let catalog = CsvCatalog::new(repository);
+    let probes = csv_files
+        .iter()
+        .map(|csv_file| catalog.import(csv_file, None))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut read = BTreeSet::new();
+    let mut missing = BTreeSet::new();
+    for probe in &probes {
+        let (probe_read, probe_missing) = input_paths(probe);
+        read.extend(probe_read);
+        missing.extend(probe_missing);
+    }
+    let read: Vec<&str> = read.into_iter().collect();
+    let missing: Vec<&str> = missing.into_iter().collect();
+    let commit = source_commit(repository, &read, &missing);
+    csv_files
+        .iter()
+        .map(|csv_file| catalog.import(csv_file, commit.clone()))
+        .collect()
 }
 
 /// The paths `import` read, and the paths it looked for but did not find.

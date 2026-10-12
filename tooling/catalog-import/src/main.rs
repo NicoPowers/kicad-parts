@@ -13,9 +13,10 @@
 //! `catalog-import local-team-server [--desktop | --json]`
 //!
 //! Starts a disposable team server on 127.0.0.1 for trying the desktop app
-//! by hand: a PocketBase with the resistors imported and three team
-//! members (two who can edit, one who can only read), each with a new
-//! random password. It prints the server address and the accounts, then:
+//! by hand: a PocketBase with every CSV file of the CSV catalog imported
+//! (`database/g-*.csv`, one category each) and three team members (two who
+//! can edit, one who can only read), each with a new random password. It
+//! prints the server address and the accounts, then:
 //!
 //! - with `--desktop`, opens the built desktop app pointed at the server
 //!   and stops the server when the app closes;
@@ -151,20 +152,33 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let root = services::repository_root();
-    let import = services::plan(&root, "g-res")?;
+    let csv_files = services::csv_files(&root)?;
+    let planned = services::plan_all(&root, &csv_files)?;
+    // `reimport` imports the resistors again.
+    let import = planned
+        .iter()
+        .find(|import| import.csv_file == "g-res")
+        .ok_or("database/g-res.csv is missing")?
+        .clone();
     // A known folder under target/, not the system temp folder, so a run
     // that is killed outright is cleaned up by the next one.
     let folder = RunFolder::create(&root.join("target").join("local-team-server"))?;
     let (stop_sender, stop) = mpsc::channel::<Stop>();
     stop_on_ctrl_c(stop_sender.clone());
     let (server, admin, _superuser) = services::start(&root, folder.path())?;
-    let reply = submit_import(
-        &admin,
-        &ImportCommand::new(&import, "Import the resistors from database/g-res.csv")
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-    )?;
-    if !matches!(reply.outcome, ImportOutcome::Applied { .. }) {
-        return Err(format!("the import did not apply: {}", reply.body).into());
+    // Every CSV file, so every category exists. Files share CAD items (one
+    // footprint serves several categories), so each import reads the team
+    // catalog first, as an importer does.
+    for each in &planned {
+        let csv_file = &each.csv_file;
+        let state = read_import_state(&admin)?;
+        let command = ImportCommand::new(each, &format!("Import database/{csv_file}.csv"))
+            .expecting(&state)
+            .allowing_uncommitted_changes(services::has_uncommitted_changes(each));
+        let reply = submit_import(&admin, &command)?;
+        if !matches!(reply.outcome, ImportOutcome::Applied { .. }) {
+            return Err(format!("the import of {csv_file} did not apply: {}", reply.body).into());
+        }
     }
     let members = [
         services::add_member(&admin, "Local Editor", "editor@example.test", true)?,
@@ -212,7 +226,11 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         }
         Then::WaitForEnter | Then::OpenDesktop => {
             writeln!(out, "Team server: {}", server.url())?;
-            writeln!(out, "The resistors from database/g-res.csv are imported.")?;
+            writeln!(
+                out,
+                "All {} CSV files in database/ are imported, one category each.",
+                csv_files.len()
+            )?;
             writeln!(
                 out,
                 "Sign in to the desktop app with one of these accounts:"
