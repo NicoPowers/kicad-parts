@@ -1,11 +1,11 @@
 //! Calls into the Tauri shell. Payload shapes come from `desktop-contract`.
 
 use desktop_contract::{
-    AppStatus, FilePreviewRequest, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
-    SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
-    TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest,
-    TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamSameMpn,
-    TeamStatus, command,
+    AppStatus, FilePreviewRequest, LibraryCheckView, PartDetail, PreviewOutcome, PreviewRequest,
+    PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest,
+    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
+    TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
+    TeamSameMpn, TeamStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -202,4 +202,11 @@ pub async fn team_check_mpn(mpn: String, manufacturer: String) -> Result<Vec<Tea
         },
     )
     .await
+}
+
+/// What the library check found, for someone who can edit; `None` for
+/// anyone else. The app works it out again only when the team catalog
+/// changed.
+pub async fn team_library_check() -> Result<Option<LibraryCheckView>, String> {
+    call(command::TEAM_LIBRARY_CHECK, &NoArgs {}).await
 }

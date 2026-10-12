@@ -142,7 +142,7 @@ fn a_library_in_order_finds_only_what_the_catalog_lacks() {
     );
     assert_eq!(
         found.findings[0].message,
-        "g-ics:IC_TP4333 is in our library but not in the Catalog; no part uses it yet."
+        "No part uses it, and the Catalog does not have it yet."
     );
     assert_eq!(
         (found.findings[0].library(), found.findings[0].name()),
@@ -387,7 +387,10 @@ fn a_model_no_footprint_links_is_not_in_the_catalog_yet() {
         (lonely.library(), lonely.name()),
         ("g-Package_SO.3dshapes", "Lonely.step")
     );
-    assert!(lonely.message.ends_with("no footprint uses it yet."));
+    assert_eq!(
+        lonely.message,
+        "No footprint uses it, and the Catalog does not have it yet."
+    );
 }
 
 #[test]

@@ -576,7 +576,7 @@ fn not_in_catalog(item: &str, file: String, user: &str) -> Finding {
         kind: FindingKind::NotInCatalog,
         item: item.to_owned(),
         file,
-        message: format!("{item} is in our library but not in the Catalog; no {user} uses it yet."),
+        message: format!("No {user} uses it, and the Catalog does not have it yet."),
     }
 }
 

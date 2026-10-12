@@ -527,12 +527,29 @@ export async function selectResult(browser, name) {
   assert.fail(`no search result mentions ${name}`);
 }
 
-/** Waits until the team badge says live updates are connected. */
+/**
+ * Waits until the team badge says live updates are connected, and then
+ * until the library check (shown to people who can edit) is worked out for
+ * what the app follows, so screenshots always show its line.
+ */
 export async function waitForLiveUpdates(browser) {
   await browser.waitUntil(
     async () =>
       browser.execute(() => document.querySelector('.team-settings > summary')?.classList.contains('kicad-badge-ready')),
     { timeout: 20_000, timeoutMsg: 'live updates never connected' },
+  );
+  await waitForLibraryCheck(browser);
+}
+
+/**
+ * Waits until the library check is worked out for what the app follows
+ * now (or is not shown, for someone who can only view or is signed out).
+ */
+export async function waitForLibraryCheck(browser) {
+  await browser.waitUntil(
+    async () =>
+      browser.execute(() => document.querySelector('.search-pane')?.dataset.libraryCheck !== 'loading'),
+    { timeout: 30_000, interval: 50, timeoutMsg: 'the library check was never worked out' },
   );
 }
 

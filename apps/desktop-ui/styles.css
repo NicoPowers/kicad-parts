@@ -1318,3 +1318,91 @@ a {
 .add-part .file-canvas {
   height: 15rem;
 }
+
+/* The library check (kicad-parts-da65): a short line under the search box
+   for people who can edit, and its view in the part panel. */
+.library-check-line {
+  margin: 0.45rem 0.9rem 0;
+  font-size: 0.88rem;
+}
+
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  text-decoration: underline;
+  text-align: left;
+}
+
+.link-button.urgent {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.library-check-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.library-check-header h2:focus {
+  outline: none;
+}
+
+.library-check-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+}
+
+.library-check-group {
+  margin-bottom: 1.1rem;
+}
+
+.library-check-group h3 {
+  display: inline;
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.library-check-group summary {
+  cursor: pointer;
+}
+
+.library-check-group .hint {
+  margin: 0.15rem 0 0.5rem;
+}
+
+.library-check-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--line);
+}
+
+.library-check-item {
+  padding: 0.5rem 0.2rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.library-check-group.to-fix .library-check-item {
+  padding-left: 0.6rem;
+  border-left: 4px solid var(--danger);
+}
+
+.library-check-item p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.library-check-name code {
+  font-weight: 600;
+}
+
+.library-check-file {
+  color: var(--muted);
+  font-size: 0.85rem;
+}

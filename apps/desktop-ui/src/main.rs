@@ -5,18 +5,20 @@
 
 mod add_part;
 mod backend;
+mod library_check;
 mod team;
 
 use add_part::AddPartView;
 use desktop_contract::{
-    AppStatus, KicadStatus, ManufacturerPart, PartDetail, PreviewKind, PreviewOutcome,
-    PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet, SearchResponse, TeamPart,
-    TeamSession, TeamStatus, unit_label,
+    AppStatus, KicadStatus, LibraryCheckView, ManufacturerPart, PartDetail, PreviewKind,
+    PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet,
+    SearchResponse, TeamPart, TeamSession, TeamStatus, unit_label,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use library_check::{LibraryCheckLine, LibraryCheckPanel};
 use std::time::Duration;
-use team::{Notice, TeamBadge, TeamColumn, TeamUi};
+use team::{Notice, TeamBadge, TeamColumn, TeamUi, focus_later};
 
 /// Results shown per search. The catalog search itself covers every row.
 const RESULT_LIMIT: usize = 200;
@@ -69,9 +71,12 @@ fn App() -> impl IntoView {
             )
         })
     });
+    // True while the Library check view is open in the part panel.
+    let checking = RwSignal::new(false);
     Effect::new(move |_| {
         if !can_add.get() {
             adding.set(false);
+            checking.set(false);
         }
     });
     let team_changes = Memo::new(move |_| {
@@ -93,6 +98,52 @@ fn App() -> impl IntoView {
     };
     refresh_team();
     set_interval(refresh_team, TEAM_POLL);
+
+    // The library check, for people who can edit: worked out by the app
+    // once per change of the team catalog (who is signed in, a new Change
+    // or a finished import), never per keystroke.
+    let check_position = Memo::new(move |_| {
+        team.with(
+            |status| match status.as_ref().map(|status| &status.session) {
+                Some(TeamSession::SignedIn {
+                    can_edit: true,
+                    email,
+                    checkpoint,
+                    imports,
+                    ..
+                }) => Some((email.clone(), *checkpoint, *imports)),
+                _ => None,
+            },
+        )
+    });
+    let library_check = RwSignal::new(None::<LibraryCheckView>);
+    // The position the shown check was worked out for, so the journeys
+    // can wait until it is current.
+    let checked_at = RwSignal::new(None::<(String, u64, u64)>);
+    Effect::new(move |_| {
+        let Some(position) = check_position.get() else {
+            library_check.set(None);
+            checked_at.set(None);
+            return;
+        };
+        spawn_local(async move {
+            let result = backend::team_library_check().await;
+            // Only the answer for the latest position is kept; the last
+            // one stays shown while a newer one is worked out.
+            if check_position.get_untracked().as_ref() != Some(&position) {
+                return;
+            }
+            if let Ok(found) = result {
+                library_check.set(found);
+            }
+            checked_at.set(Some(position));
+        });
+    });
+    let check_state = move || match check_position.get() {
+        None => "off",
+        Some(position) if checked_at.get().as_ref() == Some(&position) => "ready",
+        Some(_) => "loading",
+    };
     // The header does not need the checkpoint; leaving it out keeps the
     // menu from re-rendering whenever someone saves a Change.
     let team_badge = Memo::new(move |_| {
@@ -147,7 +198,7 @@ fn App() -> impl IntoView {
             <KicadProblem status=status kicad_epoch=kicad_epoch override_input=override_input />
             <SettingsProblem status=status />
             <main class="workspace">
-                <section class="search-pane" aria-label="Part search">
+                <section class="search-pane" aria-label="Part search" data-library-check=check_state>
                     <div class="search-head">
                         <label class="search-label" for="part-search">
                             "Search parts"
@@ -157,7 +208,10 @@ fn App() -> impl IntoView {
                                 type="button"
                                 id="add-part-open"
                                 class="add-part-open"
-                                on:click=move |_| adding.set(true)
+                                on:click=move |_| {
+                                    checking.set(false);
+                                    adding.set(true);
+                                }
                             >
                                 "Add part"
                             </button>
@@ -174,9 +228,23 @@ fn App() -> impl IntoView {
                         prop:value=move || query.get()
                         on:input:target=move |event| query.set(event.target().value())
                     />
-                    <ResultList results=results selected=selected adding=adding />
+                    <LibraryCheckLine
+                        check=library_check
+                        open=Callback::new(move |_| {
+                            adding.set(false);
+                            checking.set(true);
+                        })
+                    />
+                    <ResultList results=results selected=selected adding=adding checking=checking />
                 </section>
-                <PartPanel selected=selected kicad_epoch=kicad_epoch team=team adding=adding />
+                <PartPanel
+                    selected=selected
+                    kicad_epoch=kicad_epoch
+                    team=team
+                    adding=adding
+                    checking=checking
+                    library_check=library_check
+                />
             </main>
         </div>
     }
@@ -470,6 +538,7 @@ fn ResultList(
     results: RwSignal<Load<SearchResponse>>,
     selected: RwSignal<Option<String>>,
     adding: RwSignal<bool>,
+    checking: RwSignal<bool>,
 ) -> impl IntoView {
     view! {
         <p id="result-count" class="result-count" aria-live="polite">
@@ -526,6 +595,7 @@ fn ResultList(
                                     aria-current=move || is_selected().then_some("true")
                                     on:click=move |_| {
                                         adding.set(false);
+                                        checking.set(false);
                                         selected.set(Some(ipn.clone()));
                                     }
                                 >
@@ -548,6 +618,8 @@ fn PartPanel(
     kicad_epoch: RwSignal<u32>,
     team: RwSignal<Option<TeamStatus>>,
     adding: RwSignal<bool>,
+    checking: RwSignal<bool>,
+    library_check: RwSignal<Option<LibraryCheckView>>,
 ) -> impl IntoView {
     let detail = RwSignal::new(None::<Load<Option<PartDetail>>>);
     let symbol = RwSignal::new(Load::<PreviewOutcome>::Loading);
@@ -778,6 +850,10 @@ fn PartPanel(
     });
 
     let close_adding = Callback::new(move |_| adding.set(false));
+    let close_checking = Callback::new(move |_| {
+        checking.set(false);
+        focus_later("library-check-open");
+    });
     let added = Callback::new(move |ipn: String| {
         pending_notice.set_value(Some(format!("Added {ipn} as revision 1.")));
         adding.set(false);
@@ -789,11 +865,23 @@ fn PartPanel(
         selected.set(Some(ipn));
     });
     view! {
-        <section class="part-panel" aria-label=move || if adding.get() { "New part" } else { "Selected part" }>
+        <section
+            class="part-panel"
+            aria-label=move || if adding.get() {
+                "New part"
+            } else if checking.get() {
+                "Library check"
+            } else {
+                "Selected part"
+            }
+        >
             {move || adding.get().then(|| view! {
                 <AddPartView form=add_form close=close_adding done=added open_part=open_part />
             })}
-            {move || if adding.get() { ().into_any() } else { match detail.get() {
+            {move || (checking.get() && !adding.get()).then(|| view! {
+                <LibraryCheckPanel check=library_check close=close_checking />
+            })}
+            {move || if adding.get() || checking.get() { ().into_any() } else { match detail.get() {
                 None => view! {
                     <div class="empty-state">
                         <h2>"No part selected"</h2>
