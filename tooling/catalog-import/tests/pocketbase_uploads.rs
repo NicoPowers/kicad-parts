@@ -509,7 +509,7 @@ fn wrong_or_unused_files_are_refused_plainly_and_nothing_is_written() {
             .collect()
     };
     let symbol = |bytes: &str| json!({ "role": "symbol", "reference": "g-res:R_X", "fileName": "x.kicad_sym", "formatVersion": "20241209", "text": bytes });
-    for (uploads, fields, says) in [
+    let cases = [
         // The name in the file is not the reference's.
         (
             json!([{ "role": "footprint", "reference": "g-Resistor_SMD:R_0805_2012Metric", "fileName": "f.kicad_mod", "text": text(&corrected) }]),
@@ -590,7 +590,46 @@ fn wrong_or_unused_files_are_refused_plainly_and_nothing_is_written() {
             fields.clone(),
             "is empty",
         ),
+    ];
+    // References and 3D model paths follow the rule KiCad Integration's
+    // LibRef::parse applies, as both halves become file names.
+    let mut cases = cases.to_vec();
+    cases.push((
+        json!([{ "role": "symbol", "reference": "g-:R_X", "fileName": "x.kicad_sym", "formatVersion": "20241209", "text": "(symbol \"x\")" }]),
+        with_symbol("g-:R_X"),
+        "start with g- followed by a name",
+    ));
+    for reference in [
+        "g-res:-R",
+        "g-res:R\u{1}",
+        "g-res:R\u{0}",
+        "g-res:..",
+        "g-res:a:b",
+        "..:R",
+        "g-res\\x:R",
+        "g-res/x:R",
     ] {
+        cases.push((
+            json!([{ "role": "symbol", "reference": reference, "fileName": "x.kicad_sym", "formatVersion": "20241209", "text": "(symbol \"x\")" }]),
+            with_symbol(reference),
+            "cannot be used as a reference",
+        ));
+    }
+    for key in [
+        "3d-models/../x.step",
+        "3d-models/x.step",
+        "3d-models/g-a.3dshapes/../x.step",
+        "3d-models/g-a.3dshapes/sub/x.step",
+        "3d-models/g-.3dshapes/x.step",
+        "3d-models/g-a.3dshapes/-x.step",
+    ] {
+        cases.push((
+            json!([{ "role": "3d-model", "reference": key, "fileName": "x.step", "base64": "AAEC" }]),
+            fields.clone(),
+            "is not a Catalog 3D model path",
+        ));
+    }
+    for (uploads, fields, says) in cases {
         match send(&editor, uploads, &fields) {
             Err(CollabError::Http {
                 status: 400,

@@ -118,7 +118,9 @@ pub fn read_footprint_file(bytes: &[u8]) -> Result<FootprintFileInfo, String> {
     let models = kicad_integration::library_file::model_references(text)
         .into_iter()
         .map(|reference| ModelFileReference {
-            key: classify_model_reference(&reference).candidate,
+            key: classify_model_reference(&reference)
+                .candidate
+                .filter(|key| is_catalog_model_key(key)),
             reference,
         })
         .collect();
@@ -146,6 +148,11 @@ pub fn footprint_upload(
 /// The upload of a whole 3D model file for `key`, the `3d-models/...` path
 /// a footprint sent with it names.
 pub fn model_upload(bytes: &[u8], key: &str, file_name: &str) -> Result<CadUpload, String> {
+    if !is_catalog_model_key(key) {
+        return Err(format!(
+            "{key} is not where the Catalog keeps 3D models, such as 3d-models/g-Resistor_SMD.3dshapes/R_0603_1608Metric.step."
+        ));
+    }
     if bytes.is_empty() {
         return Err(format!("The 3D model file {file_name} is empty."));
     }
@@ -170,6 +177,27 @@ pub fn is_plain_name(name: &str) -> bool {
         && !name.starts_with('-')
         && !name.contains(['/', '\\', ':'])
         && !name.chars().any(char::is_control)
+}
+
+/// Whether `key` is where the Catalog keeps a 3D model: its footprint
+/// library's folder, `3d-models/g-<library>.3dshapes/<file>`, with plain
+/// names (kicad-parts-82ea), so it can never leave that folder. The team
+/// server's catalog_lib.js isCatalogModelKey applies the same rule.
+pub fn is_catalog_model_key(key: &str) -> bool {
+    let Some(rest) = key.strip_prefix("3d-models/") else {
+        return false;
+    };
+    let Some((folder, file)) = rest.split_once('/') else {
+        return false;
+    };
+    let Some(library) = folder.strip_suffix(".3dshapes") else {
+        return false;
+    };
+    library.starts_with("g-")
+        && library.len() > 2
+        && is_plain_name(library)
+        && is_plain_name(file)
+        && !file.contains('/')
 }
 
 /// Checks that `reference` is `LIB:NAME` in one of the Catalog's own (`g-`)
@@ -303,7 +331,7 @@ mod tests {
                 .contains("must be R_0603_1608Metric")
         );
         assert!(read_footprint_file(b"(kicad_symbol_lib)").is_err());
-        assert!(model_upload(b"", "3d-models/x.step", "x.step").is_err());
+        assert!(model_upload(b"", "3d-models/g-a.3dshapes/x.step", "x.step").is_err());
     }
 
     #[test]
@@ -347,6 +375,30 @@ mod tests {
             );
         }
         assert!(footprint_upload(b"(footprint \"R\")", "g-res:R", "f").is_ok());
+    }
+
+    #[test]
+    fn catalog_3d_model_paths_stay_in_their_library_folder() {
+        assert!(is_catalog_model_key(
+            "3d-models/g-Resistor_SMD.3dshapes/R_0603_1608Metric.step"
+        ));
+        for key in [
+            "3d-models/../x.step",
+            "3d-models/x.step",
+            "3d-models/g-a.3dshapes/../x.step",
+            "3d-models/g-a.3dshapes/sub/x.step",
+            "3d-models/g-.3dshapes/x.step",
+            "3d-models/g-a.3dshapes/-x.step",
+            "3d-models/g-a.3dshapes/x\u{1}.step",
+            "models/g-a.3dshapes/x.step",
+        ] {
+            assert!(!is_catalog_model_key(key), "{key}");
+            assert!(model_upload(b"x", key, "x.step").is_err(), "{key}");
+        }
+        // A footprint naming a model elsewhere does not ask for it.
+        let footprint = "(footprint \"F\" (model \"${GITPLM_PARTS}/3d-models/x.step\"))";
+        let file = read_footprint_file(footprint.as_bytes()).unwrap();
+        assert_eq!(file.models[0].key, None);
     }
 
     #[test]

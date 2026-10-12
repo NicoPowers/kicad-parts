@@ -626,6 +626,53 @@ function classifyModelReference(reference) {
   return { scope: scope, status: "unresolved", candidate: null };
 }
 
+// Characters Rust's char::is_control matches (Unicode category Cc).
+const CONTROL_CHARACTER = /[\u0000-\u001F\u007F-\u009F]/;
+
+// Whether `name` can be one half of LIB:NAME: the rule crates/kicad-integration
+// LibRef::parse applies (not empty, . or .., and no / \\ : or NUL), with no
+// other control character and no leading "-", as crates/catalog cad_file
+// is_plain_name. Both halves become file names, in KiCad's libraries and in
+// preview folders, and a name can come from a downloaded file.
+function isPlainName(name) {
+  return (
+    name.length > 0 &&
+    name !== "." &&
+    name !== ".." &&
+    name.charAt(0) !== "-" &&
+    !/[/\\:]/.test(name) &&
+    !CONTROL_CHARACTER.test(name)
+  );
+}
+
+// Why `reference` cannot take a file, or "": it must be LIB:NAME exactly as
+// written (one colon, no spaces around it), both halves plain names, in one
+// of the Catalog's own libraries (g- and more).
+function uploadReferenceProblem(reference) {
+  const parts = reference.split(":");
+  if (parts.length !== 2 || trimSpace(reference) !== reference || !isPlainName(parts[0]) || !isPlainName(parts[1])) {
+    return `${reference} cannot be used as a reference: write LIBRARY:NAME with one colon, no spaces around it, and a library and name that are not . or .., do not start with -, and hold no / \\ : or control characters`;
+  }
+  if (!parts[0].startsWith("g-") || parts[0].length < 3) {
+    return `a file can only be added to the Catalog's own libraries, whose names start with g- followed by a name, such as g-res, not ${parts[0]}`;
+  }
+  return "";
+}
+
+// Whether `key` is where the Catalog keeps a 3D model: its footprint
+// library's folder, 3d-models/g-<library>.3dshapes/<file>, with plain names
+// (kicad-parts-82ea), so a model path can never leave that folder.
+function isCatalogModelKey(key) {
+  const match = /^3d-models\/([^/\\]+)\.3dshapes\/([^/\\]+)$/.exec(key);
+  return (
+    match !== null &&
+    match[1].startsWith("g-") &&
+    match[1].length > 2 &&
+    isPlainName(match[1]) &&
+    isPlainName(match[2])
+  );
+}
+
 // The name after the colon of LIB:NAME, or null.
 function referenceName(reference) {
   const colon = reference.indexOf(":");
@@ -674,7 +721,11 @@ function readUploadedFootprint(upload) {
     formatVersion: version ? sexpWord(version[2]) : null,
     models: modelReferences(upload.text).map((reference) => {
       const classified = classifyModelReference(reference);
-      return { reference: reference, scope: classified.scope, status: classified.status, candidate: classified.candidate };
+      // Only a path into a footprint library's own 3D model folder can name a
+      // Catalog 3D model; anything else stays a missing local model.
+      const candidate =
+        classified.candidate !== null && isCatalogModelKey(classified.candidate) ? classified.candidate : null;
+      return { reference: reference, scope: classified.scope, status: classified.status, candidate: candidate };
     }),
   };
 }
@@ -710,14 +761,16 @@ function preparedUploads(txApp, uploads) {
   const footprints = {};
   for (const upload of uploads) {
     if (upload.kind === "model-3d") {
+      if (!isCatalogModelKey(upload.reference)) {
+        fail(
+          `${upload.reference} is not a Catalog 3D model path, such as 3d-models/g-Resistor_SMD.3dshapes/R_0603_1608Metric.step`,
+        );
+      }
       continue;
     }
-    if (referenceName(upload.reference) === null) {
-      fail(`${upload.reference} is not a reference such as g-Resistor_SMD:R_0603_1608Metric`);
-    }
-    const library = upload.reference.substring(0, upload.reference.indexOf(":"));
-    if (!library.startsWith("g-")) {
-      fail(`a file can only be added to the Catalog's own libraries, whose names start with g-, not ${library}`);
+    const problem = uploadReferenceProblem(upload.reference);
+    if (problem) {
+      fail(problem);
     }
     if (upload.kind === "symbol") {
       readUploadedSymbol(upload);
