@@ -1678,6 +1678,11 @@ fn save_csv_review(
         let mut revision = None;
         let mut answered: Vec<bool> = Vec::new();
         let mut applied = false;
+        // A group saved while the part could not be read again: its message
+        // if it was the last group, and whether the summary may be unsure
+        // what was saved.
+        let mut not_shown: Option<String> = None;
+        let mut unsure = false;
         for (request, cad) in requests.into_iter().zip(kinds) {
             let problem = request.problem.clone();
             let result = backend::team_csv_review(request).await;
@@ -1704,6 +1709,17 @@ fn save_csv_review(
                     answered.push(cad);
                     done(ui);
                     part.set(Some(latest));
+                    not_shown = None;
+                }
+                // Saved, but the part could not be read again: go on with
+                // the next group, so a server that is back still gets it and
+                // one still down gets the usual saved / not saved message.
+                Ok(PublishResult::SavedNotShown { message }) => {
+                    applied = true;
+                    unsure = true;
+                    answered.push(cad);
+                    done(ui);
+                    not_shown = Some(message);
                 }
                 // Already reviewed: nothing left to do for this group.
                 Ok(PublishResult::NothingToSave { .. }) => done(ui),
@@ -1733,6 +1749,10 @@ fn save_csv_review(
         ui.busy.set(false);
         ui.selected.set(None);
         let message = match (applied, took, details_saved, revision) {
+            _ if not_shown.is_some() => not_shown.unwrap_or_default(),
+            // A group was saved without being read back: what it saved is
+            // not known here, but the part shown is current.
+            (true, true, _, _) if unsure => "Saved.".to_owned(),
             (false, _, _, _) => {
                 "These CSV values were already reviewed, so nothing was saved.".to_owned()
             }

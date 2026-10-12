@@ -1125,19 +1125,18 @@ fn reload(client: &PocketBaseClient, ipn: &str) -> Result<LoadedPart, ReadFailur
 }
 
 /// What a save that worked shows: `saved` with the part as it is now, or,
-/// if the team server could not be reached to read it, that the save
-/// worked anyway.
+/// if the part could not be read again for any reason, that the save
+/// worked anyway (it is done either way).
 fn saved_then(
     reloaded: Result<LoadedPart, ReadFailure>,
     saved: impl FnOnce(TeamPart) -> PublishResult,
 ) -> Result<PublishResult, String> {
-    match reloaded {
-        Ok(loaded) => Ok(saved(loaded.view)),
-        Err(ReadFailure::Unreachable) => Ok(PublishResult::SavedNotShown {
+    Ok(match reloaded {
+        Ok(loaded) => saved(loaded.view),
+        Err(_) => PublishResult::SavedNotShown {
             message: SAVED_NOT_SHOWN.into(),
-        }),
-        Err(ReadFailure::Other(message)) => Err(message),
-    }
+        },
+    })
 }
 
 /// How a CAD reference is bound, in plain words, naming the CAD item's own
