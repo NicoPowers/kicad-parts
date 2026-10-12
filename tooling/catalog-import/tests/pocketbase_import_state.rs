@@ -21,7 +21,7 @@ use catalog::{
 };
 use catalog_import::services;
 use collaboration::PocketBaseClient;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -245,6 +245,11 @@ fn cad_items_made_in_the_app_are_read_in_one_request() {
             Some(1)
         );
     }
+    // The library check knows the bytes made in the app and the newest
+    // imported ones, so a CSV catalog file with either is unchanged.
+    for id in read.current_cad.edited_in_app.keys() {
+        assert_eq!(read.cad_item_bytes[id].len(), 2, "{id}");
+    }
     // Parts, current CAD item revisions, the ones made in the app, both
     // newest imported revisions in one request (the older revisions the
     // other parts bind, so no request of their own), current part
@@ -319,6 +324,18 @@ fn state_from(stored: &CatalogReadback) -> ImportState {
         )
     };
     let mut current_cad = CurrentCad::default();
+    let mut cad_item_bytes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let blob_of = |revision: &catalog::pocketbase::StoredCadItemRevision| {
+        serde_json::from_str::<CadItemDetails>(&revision.snapshot)
+            .unwrap()
+            .blob_sha256
+    };
+    let imported = |revision: &catalog::pocketbase::StoredCadItemRevision| {
+        stored
+            .changes
+            .iter()
+            .any(|change| change.id == revision.change && change.kind == "csv-import")
+    };
     for cad_item in &stored.cad_items {
         let newest = stored
             .cad_item_revisions
@@ -326,6 +343,20 @@ fn state_from(stored: &CatalogReadback) -> ImportState {
             .filter(|revision| revision.cad_item == cad_item.id)
             .max_by_key(|revision| revision.number)
             .unwrap();
+        // The bytes of its current revision and, when that was made in the
+        // app, of its newest imported revision.
+        let bytes = cad_item_bytes.entry(cad_item.id.clone()).or_default();
+        bytes.insert(blob_of(newest));
+        if !imported(newest) {
+            if let Some(last) = stored
+                .cad_item_revisions
+                .iter()
+                .filter(|revision| revision.cad_item == cad_item.id && imported(revision))
+                .max_by_key(|revision| revision.number)
+            {
+                bytes.insert(blob_of(last));
+            }
+        }
         let details: CadItemDetails = serde_json::from_str(&newest.snapshot).unwrap();
         let models = details
             .model_references
@@ -396,6 +427,7 @@ fn state_from(stored: &CatalogReadback) -> ImportState {
             .collect(),
         current_cad,
         latest_imports,
+        cad_item_bytes,
     }
 }
 

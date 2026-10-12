@@ -179,6 +179,21 @@ pub fn discover(options: &DiscoveryOptions) -> Discovery {
     first_problem.unwrap_or(Discovery::Missing { searched: roots })
 }
 
+/// KiCad's bundled data folder (holding `symbols/` and `footprints/`) of
+/// the newest KiCad install found in `locations`, without running
+/// kicad-cli. For tools that only read KiCad's libraries, such as the
+/// library check of the CSV import.
+pub fn installed_share_dir(locations: &SearchLocations) -> Option<PathBuf> {
+    let roots = match locations {
+        SearchLocations::Standard => standard_roots(),
+        SearchLocations::Only(roots) => roots.clone(),
+    };
+    roots
+        .iter()
+        .flat_map(|root| candidates_under(root))
+        .find_map(|cli| share_dir_for(&cli))
+}
+
 fn probe(cli: PathBuf, source: InstallSource) -> Discovery {
     let output = match run_kicad_cli(&cli, ["version"], VERSION_TIMEOUT) {
         Ok(output) => output,

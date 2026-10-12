@@ -310,6 +310,11 @@ pub struct ImportState {
     pub current_cad: CurrentCad,
     /// The latest import run of each CSV file, oldest first.
     pub latest_imports: Vec<LatestImport>,
+    /// For each CAD item, by CAD item ID, the SHA-256 of the bytes of its
+    /// current revision and, when that revision was made in the app, of
+    /// its newest imported revision too. The library check compares the
+    /// CSV catalog's files with them (`crate::library_check`).
+    pub cad_item_bytes: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl ImportState {
@@ -380,9 +385,10 @@ pub fn read_import_state(client: &PocketBaseClient) -> CollabResult<ImportState>
         "ipn",
         "id,ipn,ipn_prefix,variant,current_revision,current_revision_number,current_details,current_details_number,first_change",
     )?;
-    let current_cad = read_current_cad(client, &parts)?;
+    let (current_cad, cad_item_bytes) = read_current_cad(client, &parts)?;
     let latest_imports = read_latest_imports(client)?;
     Ok(ImportState {
+        cad_item_bytes,
         current_revisions: parts
             .iter()
             .map(|part| (part.ipn.clone(), part.current_revision_number))
@@ -443,7 +449,9 @@ fn read_latest_imports(client: &PocketBaseClient) -> CollabResult<Vec<LatestImpo
 }
 
 /// Each CAD item's current revision, with a footprint's 3D model bindings,
-/// and the CAD item revisions each part's current revision binds.
+/// and the CAD item revisions each part's current revision binds; and, by
+/// CAD item ID, the SHA-256 of the bytes of its current revision and of its
+/// newest imported revision (see [`ImportState::cad_item_bytes`]).
 ///
 /// Reads three sets of records:
 /// - each CAD item's current revision: its newest, the one that no other
@@ -454,8 +462,12 @@ fn read_latest_imports(client: &PocketBaseClient) -> CollabResult<Vec<LatestImpo
 ///
 /// A footprint's snapshot names the 3D model revisions it binds, so they
 /// need no read of their own.
-fn read_current_cad(client: &PocketBaseClient, parts: &[StoredPart]) -> CollabResult<CurrentCad> {
+fn read_current_cad(
+    client: &PocketBaseClient,
+    parts: &[StoredPart],
+) -> CollabResult<(CurrentCad, BTreeMap<String, BTreeSet<String>>)> {
     let mut current = CurrentCad::default();
+    let mut bytes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut by_id: BTreeMap<String, (String, Binding)> = BTreeMap::new();
     let newest: Vec<CadItemRevisionFields> = client.list_record_fields(
         "catalog_cad_item_revisions",
@@ -465,7 +477,8 @@ fn read_current_cad(client: &PocketBaseClient, parts: &[StoredPart]) -> CollabRe
     )?;
     let mut current_bindings: BTreeMap<String, Binding> = BTreeMap::new();
     for revision in newest {
-        let (cad_item, binding, models) = read_cad_item_revision(revision, &mut by_id)?;
+        let (cad_item, binding, models, blob) = read_cad_item_revision(revision, &mut by_id)?;
+        bytes.entry(cad_item.clone()).or_default().insert(blob);
         current_bindings.insert(cad_item.clone(), binding.clone());
         current.cad_items.insert(
             cad_item,
@@ -520,8 +533,13 @@ fn read_current_cad(client: &PocketBaseClient, parts: &[StoredPart]) -> CollabRe
         let last_imported = imported
             .remove(&revision.cad_item)
             .map(|last| {
-                read_cad_item_revision(last, &mut by_id)
-                    .map(|(_, binding, models)| LastImported { binding, models })
+                read_cad_item_revision(last, &mut by_id).map(|(_, binding, models, blob)| {
+                    bytes
+                        .entry(revision.cad_item.clone())
+                        .or_default()
+                        .insert(blob);
+                    LastImported { binding, models }
+                })
             })
             .transpose()?;
         current.edited_in_app.insert(
@@ -572,16 +590,18 @@ fn read_current_cad(client: &PocketBaseClient, parts: &[StoredPart]) -> CollabRe
             .collect();
         current.parts.insert((*ipn).to_owned(), bindings);
     }
-    Ok(current)
+    Ok((current, bytes))
 }
 
 /// Reads one CAD item revision's snapshot. Gives its CAD item, its binding
-/// (also kept in `by_id` under its ID) and, for a footprint, the 3D model
-/// revisions it binds, by CAD item ID.
+/// (also kept in `by_id` under its ID), for a footprint the 3D model
+/// revisions it binds, by CAD item ID, and the SHA-256 of its bytes.
+type ReadRevision = (String, Binding, BTreeMap<String, Binding>, String);
+
 fn read_cad_item_revision(
     revision: CadItemRevisionFields,
     by_id: &mut BTreeMap<String, (String, Binding)>,
-) -> CollabResult<(String, Binding, BTreeMap<String, Binding>)> {
+) -> CollabResult<ReadRevision> {
     let details: CadItemDetails = serde_json::from_str(&revision.snapshot).map_err(|error| {
         CollabError::Protocol(format!(
             "CAD item revision {} cannot be read: {error}",
@@ -615,7 +635,7 @@ fn read_cad_item_revision(
         })
         .collect();
     by_id.insert(revision.id, (revision.cad_item.clone(), binding.clone()));
-    Ok((revision.cad_item, binding, models))
+    Ok((revision.cad_item, binding, models, details.blob_sha256))
 }
 
 /// What the import route answered.

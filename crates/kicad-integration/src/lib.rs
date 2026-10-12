@@ -19,7 +19,7 @@ pub mod resolver;
 
 pub use discovery::{
     Discovery, DiscoveryOptions, InstallSource, KicadInstall, KicadVersion, SUPPORTED_MAJOR,
-    SearchLocations, discover,
+    SearchLocations, discover, installed_share_dir,
 };
 pub use preview::{
     CacheOutcome, MAX_RUNNING, Preview, PreviewCache, PreviewError, PreviewImage, Selection,

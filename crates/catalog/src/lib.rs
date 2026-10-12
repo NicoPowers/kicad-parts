@@ -59,6 +59,7 @@ pub mod guess;
 mod hash;
 mod ids;
 mod ipn;
+pub mod library_check;
 mod part;
 pub mod pocketbase;
 pub mod replica;
