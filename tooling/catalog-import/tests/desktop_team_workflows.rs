@@ -1026,3 +1026,155 @@ fn a_csv_row_naming_a_symbol_only_the_app_has_can_only_be_kept() {
     assert_eq!(revision, None);
     assert!(part.csv_changes.is_empty(), "{:?}", part.csv_changes);
 }
+
+/// A download whose only clues are the symbol's reference letter, the
+/// footprint's name and the description.
+fn clue_download(name: &str, letter: &str, footprint: &str, description: &str) -> Vec<u8> {
+    let symbol = format!(
+        "(kicad_symbol_lib
+	(version 20241209)
+	(generator \"vendor\")
+	(symbol \"{name}\"
+		(in_bom yes)
+		(on_board yes)
+		(property \"Reference\" \"{letter}\" (at 0 0 0) (effects (font (size 1.27 1.27))))
+		(property \"Value\" \"{name}\" (at 0 0 0) (effects (font (size 1.27 1.27))))
+		(property \"Description\" \"{description}\" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+		(property \"Manufacturer_Name\" \"Acme Parts\" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+		(property \"MPN\" \"{name}-1\" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+		(symbol \"{name}_1_1\"
+			(pin passive line (at -2.54 0 0) (length 1.27) (name \"~\" (effects (font (size 1.27 1.27)))) (number \"1\" (effects (font (size 1.27 1.27)))))
+			(pin passive line (at 2.54 0 180) (length 1.27) (name \"~\" (effects (font (size 1.27 1.27)))) (number \"2\" (effects (font (size 1.27 1.27)))))
+		)
+	)
+)
+"
+    );
+    zip_of(&[
+        (&format!("{name}.kicad_sym"), symbol.as_bytes()),
+        (
+            &format!("{footprint}.kicad_mod"),
+            footprint_named(footprint).as_bytes(),
+        ),
+    ])
+}
+
+/// The category guess on real-world clues: conflicting clues, no clues,
+/// and a new footprint family that a confirmation teaches.
+#[test]
+fn the_category_guess_on_conflicting_missing_and_learned_clues() {
+    let team = Team::start();
+    let codes = |reading: &TeamDownload| -> Vec<String> {
+        reading
+            .guesses
+            .iter()
+            .map(|guess| guess.code.clone())
+            .collect()
+    };
+    // R letter but a capacitor footprint: both are offered.
+    let reading = team.read(&clue_download("X_Conflict", "R", "C_0805_X", ""));
+    let found = codes(&reading);
+    assert!(
+        found.contains(&"cap".to_owned()) && found.contains(&"res".to_owned()),
+        "{:?}",
+        reading.guesses
+    );
+    // No clue at all: no guess, the field is left empty.
+    let reading = team.read(&clue_download("X_None", "U", "Weird_Thing_1", ""));
+    assert!(reading.guesses.is_empty(), "{:?}", reading.guesses);
+
+    // A brand-new footprint family, confirmed once as a capacitor...
+    let reading = team.read(&clue_download("X_First", "U", "ZZCAP_1", ""));
+    let first_guess = codes(&reading);
+    // (no package group is known for it, so the engineer types one)
+    assert_eq!(reading.footprint_library, "");
+    let mut confirmed = new_part(&reading, "CAP-0004-0001", "cap");
+    confirmed.footprint = "g-Capacitor_SMD:ZZCAP_1".into();
+    let saved = team.add(&team.team, confirmed);
+    assert!(matches!(saved, PublishResult::Added { .. }), "{saved:?}");
+    // ...helps the next download of that family.
+    let reading = team.read(&clue_download("X_Second", "U", "ZZCAP_2", ""));
+    assert_eq!(
+        codes(&reading).first().map(String::as_str),
+        Some("cap"),
+        "first time {first_guess:?}, after confirming: {:?}",
+        reading.guesses
+    );
+    assert!(
+        reading.guesses[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("ZZCAP")),
+        "{:?}",
+        reading.guesses[0].reasons
+    );
+}
+
+/// IPNs an engineer types: lower case, spaces, the wrong prefix, a
+/// value-coded variant, and one someone else took meanwhile.
+#[test]
+fn ipns_an_engineer_types() {
+    let team = Team::start();
+    let check = |ipn: &str, prefix: &str| team.browser.check_ipn(ipn, prefix, &team.team).problem;
+    assert!(check("cap-0004-0001", "CAP").is_some());
+    assert!(
+        check("CAP-0004-0001", "RES")
+            .unwrap()
+            .contains("starting with RES-")
+    );
+    assert!(
+        check("RES-0000-4702", "RES").is_none(),
+        "a value-coded variant"
+    );
+    let reading = team.read(&download(MPN));
+    // Spaces around a typed IPN are not part of it.
+    let spaced = new_part(&reading, " CAP-0004-0001 ", "cap");
+    let saved = team.add(&team.team, spaced);
+    let PublishResult::Added { part } = saved else {
+        panic!("{saved:?}");
+    };
+    assert_eq!(part.ipn, "CAP-0004-0001");
+    // A value-coded resistor variant.
+    let resistor = team.read(&zip_of(&[(
+        "R_New.kicad_sym",
+        repository_text("symbols/g-res.kicad_sym")
+            .replace("(symbol \"R", "(symbol \"RX")
+            .as_bytes(),
+    )]));
+    let mut value_coded = new_part(&resistor, "RES-0000-4702", "res");
+    value_coded.footprint = "g-Resistor_SMD:R_0603_1608Metric".into();
+    value_coded.symbol = "g-res:R_US".into();
+    let saved = team.add(&team.team, value_coded);
+    assert!(matches!(saved, PublishResult::Added { .. }), "{saved:?}");
+    // Someone else takes the offered IPN while this engineer fills in the
+    // form: nothing saved, the next free one offered.
+    let second = team.second("Bea Editor", "bea@example.test", true);
+    let offered = team.read(&download("OTHER-1"));
+    let next = offered
+        .categories
+        .iter()
+        .find(|c| c.code == "cap")
+        .unwrap()
+        .next_ipn
+        .clone();
+    assert_eq!(next, "CAP-0005-0001");
+    let theirs = team
+        .browser
+        .read_download(
+            &request(&download_with_symbol("C_Bea", "BEA-1"), "bea.zip"),
+            &second,
+        )
+        .unwrap();
+    let saved = team.add(&second, new_part(&theirs, &next, "cap"));
+    assert!(matches!(saved, PublishResult::Added { .. }), "{saved:?}");
+    let mut mine = new_part(&offered, &next, "cap");
+    mine.symbol = "g-cap:C".into();
+    let PublishResult::IpnTaken {
+        next_free, yours, ..
+    } = team.add(&team.team, mine)
+    else {
+        panic!("not taken");
+    };
+    assert!(!yours);
+    assert_eq!(next_free, "CAP-0006-0001");
+}
