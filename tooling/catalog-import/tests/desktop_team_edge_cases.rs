@@ -1,7 +1,8 @@
 //! Edge cases of the desktop's team catalog use cases (catalog-browser's
 //! TeamCatalog) against a disposable PocketBase with the resistors
 //! imported: spaces around typed values, blank manufacturer rows, and a team
-//! server that stops while the app is open.
+//! server that stops while the app is open or loses the answer to a save
+//! (through a small proxy that can drop connections).
 
 use catalog::PartDetails;
 use catalog::pocketbase::{EditCommand, ImportCommand, read_back, submit_edit, submit_import};
@@ -12,6 +13,9 @@ use desktop_contract::{
     TeamSession,
 };
 use native_services::PocketBaseServer;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 
 const IPN: &str = "RES-0000-0470";
 
@@ -26,6 +30,109 @@ struct Desktop {
 }
 
 fn start() -> Desktop {
+    start_through(None)
+}
+
+/// What the proxy in front of the team server does to each request.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Fault {
+    /// Passes every request and answer on.
+    None,
+    /// Passes a save (POST /api/catalog/...) on but drops its answer, as a
+    /// connection that breaks after the server saved would.
+    LoseSaveAnswer,
+    /// Passes the next save and its answer on, then acts as a stopped
+    /// server.
+    DownAfterSave,
+    /// Acts as a stopped server: closes every connection at once.
+    Down,
+}
+
+/// A proxy on 127.0.0.1 in front of `upstream` (http://127.0.0.1:port),
+/// whose fault the test sets. Each request gets its own connection to the
+/// team server, closed after the answer, so answers (including the live
+/// update stream) are copied as they come.
+fn proxy(upstream: &str) -> (String, Arc<Mutex<Fault>>) {
+    let upstream = upstream.trim_start_matches("http://").to_owned();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let fault = Arc::new(Mutex::new(Fault::None));
+    let shared = fault.clone();
+    std::thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            let upstream = upstream.clone();
+            let fault = shared.clone();
+            std::thread::spawn(move || {
+                let _ = pass_on(client, &upstream, &fault);
+            });
+        }
+    });
+    (url, fault)
+}
+
+fn pass_on(mut client: TcpStream, upstream: &str, fault: &Mutex<Fault>) -> std::io::Result<()> {
+    // The request head, then as much body as it says.
+    let mut request = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let head_end = loop {
+        let read = client.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(());
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+            break at + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&request[..head_end]).into_owned();
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    while request.len() < head_end + length {
+        let read = client.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+    }
+    let save = head.starts_with("POST /api/catalog/");
+    let now = *fault.lock().unwrap();
+    if now == Fault::Down {
+        return Ok(());
+    }
+    if save && now == Fault::DownAfterSave {
+        *fault.lock().unwrap() = Fault::Down;
+    }
+    // One request per connection to the team server.
+    let mut lines: Vec<&str> = head
+        .trim_end()
+        .lines()
+        .filter(|line| !line.to_ascii_lowercase().starts_with("connection:"))
+        .collect();
+    lines.push("Connection: close");
+    let mut server = TcpStream::connect(upstream)?;
+    server.write_all(format!("{}\r\n\r\n", lines.join("\r\n")).as_bytes())?;
+    server.write_all(&request[head_end..])?;
+    if save && now == Fault::LoseSaveAnswer {
+        // The server saves and answers; the answer never arrives.
+        std::io::copy(&mut server, &mut std::io::sink())?;
+        return Ok(());
+    }
+    std::io::copy(&mut server, &mut client)?;
+    Ok(())
+}
+
+/// Like [`start`], with the desktop talking to the team server through a
+/// proxy when `through` is Some; the proxy's fault is put there.
+fn start_through(through: Option<&mut Option<Arc<Mutex<Fault>>>>) -> Desktop {
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
@@ -37,7 +144,14 @@ fn start() -> Desktop {
     )
     .unwrap();
     let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
-    let url = server.url().to_owned();
+    let url = match through {
+        Some(slot) => {
+            let (url, fault) = proxy(server.url());
+            *slot = Some(fault);
+            url
+        }
+        None => server.url().to_owned(),
+    };
     let team = TeamCatalog::open(
         state.path().join("desktop").join("team.json"),
         Some(url.clone()),
@@ -363,5 +477,84 @@ fn a_conflict_lists_only_what_truly_differs() {
         team.edit(conflict.merged.clone()).unwrap(),
         PublishResult::AlreadySaved { .. }
     ));
+    desktop.server.stop();
+}
+
+#[test]
+fn a_save_whose_answer_is_lost_is_retried_without_saving_twice() {
+    let mut fault = None;
+    let desktop = start_through(Some(&mut fault));
+    let fault = fault.unwrap();
+    let set_fault = |now: Fault| *fault.lock().unwrap() = now;
+    let team = &desktop.team;
+    let part = team.part(IPN).unwrap().unwrap();
+    let saved_details = || {
+        let readback = read_back(&desktop.admin).unwrap();
+        readback.part(IPN).unwrap().current_details_number
+    };
+    let unreachable = PublishResult::Refused {
+        message: "Could not reach the team server. Check that it is running, then save again."
+            .into(),
+    };
+
+    // The save reaches the server, which saves it, but the answer is lost.
+    set_fault(Fault::LoseSaveAnswer);
+    let mut request = opened(&part, "Exact value");
+    set(&mut request, "Value", "47R");
+    request.correlation_id = Some("desktop-lost-answer-1".into());
+    assert_eq!(team.edit(request.clone()), Ok(unreachable.clone()));
+    assert_eq!(saved_details(), 2, "the server saved it");
+    // Saving again, as the app does with the same correlation ID, replays
+    // the answer: saved once, not twice and not a conflict with yourself.
+    set_fault(Fault::None);
+    let PublishResult::Saved { part, .. } = team.edit(request).unwrap() else {
+        panic!("the retry was not taken as saved");
+    };
+    assert_eq!((part.details.number, part.history.len()), (2, 2));
+
+    // The save works, but the server stops before the app can show it.
+    set_fault(Fault::DownAfterSave);
+    let mut request = opened(&part, "Tighter tolerance");
+    set(&mut request, "Tolerance", "0.5%");
+    assert_eq!(
+        team.edit(request),
+        Ok(PublishResult::SavedNotShown {
+            message: "Saved. The app could not reach the team server to show the latest version; it will update when the server is back.".into()
+        })
+    );
+    assert_eq!(saved_details(), 3);
+
+    // Someone else saved first, and the server stops before the app can
+    // show their change: nothing was saved, and the app says so plainly.
+    set_fault(Fault::None);
+    let readback = read_back(&desktop.admin).unwrap();
+    let stored = readback.part(IPN).unwrap();
+    let details: PartDetails = serde_json::from_str(
+        &readback
+            .part_details(&stored.current_details)
+            .unwrap()
+            .snapshot,
+    )
+    .unwrap();
+    let mut theirs = EditCommand::new(IPN, "Better description")
+        .editing_details(&details, stored.current_details_number);
+    theirs.set_field("Description", "Thick film resistor 47R");
+    assert_eq!(submit_edit(&desktop.admin, &theirs).unwrap().status, 200);
+    set_fault(Fault::DownAfterSave);
+    let mut stale = opened(&part, "Datasheet");
+    stale.expected_details = 3;
+    set(&mut stale, "Datasheet", "https://example.test/rc0603.pdf");
+    assert_eq!(
+        team.edit(stale),
+        Ok(PublishResult::Refused {
+            message: "Someone else changed this part first, so nothing was saved. The app could not reach the team server to show their change. Check that it is running, then save again.".into()
+        })
+    );
+    // A stopped server while the app reads the part before saving: plain
+    // too.
+    set_fault(Fault::Down);
+    let mut request = opened(&part, "Value");
+    set(&mut request, "Value", "47 Ohm");
+    assert_eq!(team.edit(request), Ok(unreachable));
     desktop.server.stop();
 }

@@ -552,6 +552,10 @@ pub enum PublishResult {
     },
     /// Nothing would change, so nothing was saved.
     NothingToSave { message: String },
+    /// The save worked, but the team server could not be reached afterwards
+    /// to show the part as it is now; the app updates by itself when it
+    /// catches up.
+    SavedNotShown { message: String },
     /// Every change the edit makes is already saved, so nothing
     /// more was saved. `part` is the part as it is now.
     AlreadySaved { message: String, part: TeamPart },

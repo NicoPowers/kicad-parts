@@ -488,6 +488,17 @@ fn published(ui: TeamUi, part: RwSignal<Option<TeamPart>>, result: Result<Publis
             // Several review requests are summed up by save_csv_review.
             part.set(Some(saved));
         }
+        // The save worked; the part shown updates by itself once the app
+        // reaches the team server again.
+        Ok(PublishResult::SavedNotShown { message }) => {
+            ui.editing.set(None);
+            ui.conflict.set(None);
+            ui.archiving.set(None);
+            ui.archive_reason.set(String::new());
+            ui.close_review();
+            ui.notice.set(Some(Notice::Done(message)));
+            scroll_column_to_top();
+        }
         Ok(PublishResult::AlreadySaved {
             message,
             part: saved,

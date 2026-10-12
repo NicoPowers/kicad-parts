@@ -357,7 +357,15 @@ impl TeamCatalog {
             Ok(None) => return Err(format!("{} is no longer in the team catalog", request.ipn)),
             Err(error) => return save_failed(error),
         };
-        let started = load(&client, &part)?;
+        let started = match load(&client, &part) {
+            Ok(started) => started,
+            Err(ReadFailure::Unreachable) => {
+                return Ok(PublishResult::Refused {
+                    message: SAVE_UNREACHABLE.into(),
+                });
+            }
+            Err(ReadFailure::Other(message)) => return Err(message),
+        };
         let base_details = started
             .details
             .get(&request.expected_details)
@@ -420,12 +428,6 @@ impl TeamCatalog {
             &request.reason,
         );
         command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
-        let reload = || -> Result<TeamPart, String> {
-            let part = part_by_ipn(&client, &request.ipn)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("{} is no longer in the team catalog", request.ipn))?;
-            load_part(&client, &part)
-        };
         match submit_archive(&client, &command) {
             Ok(reply) => match reply.outcome {
                 ArchiveOutcome::Applied {
@@ -433,11 +435,13 @@ impl TeamCatalog {
                     archived,
                     current_revision,
                     ..
-                } => Ok(PublishResult::Archived {
-                    revision,
-                    archived,
-                    current: current_revision.number,
-                    part: reload()?,
+                } => saved_then(reload(&client, &request.ipn), |part| {
+                    PublishResult::Archived {
+                        revision,
+                        archived,
+                        current: current_revision.number,
+                        part,
+                    }
                 }),
                 ArchiveOutcome::Noop { .. } => Ok(PublishResult::NothingToSave {
                     message: if request.archived {
@@ -474,12 +478,6 @@ impl TeamCatalog {
             &request.reason,
         );
         command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
-        let reload = || -> Result<TeamPart, String> {
-            let part = part_by_ipn(&client, &request.ipn)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("{} is no longer in the team catalog", request.ipn))?;
-            load_part(&client, &part)
-        };
         match submit_csv_review(&client, &command) {
             Ok(reply) => match reply.outcome {
                 CsvReviewOutcome::Applied {
@@ -487,11 +485,13 @@ impl TeamCatalog {
                     details,
                     revision,
                     ..
-                } => Ok(PublishResult::CsvReviewed {
-                    accepted,
-                    details_saved: details.is_some(),
-                    revision: revision.map(|revision| revision.number),
-                    part: reload()?,
+                } => saved_then(reload(&client, &request.ipn), |part| {
+                    PublishResult::CsvReviewed {
+                        accepted,
+                        details_saved: details.is_some(),
+                        revision: revision.map(|revision| revision.number),
+                        part,
+                    }
                 }),
                 CsvReviewOutcome::Noop { .. } => Ok(PublishResult::NothingToSave {
                     message: "Someone already reviewed these CSV values, so nothing was saved."
@@ -533,18 +533,14 @@ impl TeamCatalog {
             &LoadedPart,
         ) -> Result<TeamConflict, String>,
     ) -> Result<PublishResult, String> {
-        let reload = || -> Result<LoadedPart, String> {
-            let part = part_by_ipn(client, ipn)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("{ipn} is no longer in the team catalog"))?;
-            load(client, &part)
-        };
         match reply {
             Ok(reply) => match reply.outcome {
-                PublishOutcome::Applied { revision, .. } => Ok(PublishResult::Saved {
-                    revision: revision.map(|revision| revision.number),
-                    part: reload()?.view,
-                }),
+                PublishOutcome::Applied { revision, .. } => {
+                    saved_then(reload(client, ipn), |part| PublishResult::Saved {
+                        revision: revision.map(|revision| revision.number),
+                        part,
+                    })
+                }
                 PublishOutcome::Noop { .. } => Ok(PublishResult::NothingToSave {
                     message: "Nothing changed, so nothing was saved.".into(),
                 }),
@@ -552,11 +548,17 @@ impl TeamCatalog {
                     current_details,
                     current_revision,
                     ..
-                } => Ok(PublishResult::Conflict(Box::new(conflict(
-                    current_details.as_deref(),
-                    current_revision.as_deref(),
-                    &reload()?,
-                )?))),
+                } => match reload(client, ipn) {
+                    Ok(loaded) => Ok(PublishResult::Conflict(Box::new(conflict(
+                        current_details.as_deref(),
+                        current_revision.as_deref(),
+                        &loaded,
+                    )?))),
+                    Err(ReadFailure::Unreachable) => Ok(PublishResult::Refused {
+                        message: CONFLICT_NOT_SHOWN.into(),
+                    }),
+                    Err(ReadFailure::Other(message)) => Err(message),
+                },
                 PublishOutcome::CorrelationReused { message, .. } => {
                     Ok(PublishResult::Refused { message })
                 }
@@ -837,6 +839,14 @@ const ALREADY_SAVED: &str = "These changes are already saved, so nothing more wa
 const SAVE_UNREACHABLE: &str =
     "Could not reach the team server. Check that it is running, then save again.";
 
+/// What to say when a save worked but the part could not be read again.
+/// The app catches up by itself once live updates reconnect.
+const SAVED_NOT_SHOWN: &str = "Saved. The app could not reach the team server to show the latest version; it will update when the server is back.";
+
+/// What to say when someone else saved first and their change could not be
+/// read. Nothing was saved, so saving again is safe.
+const CONFLICT_NOT_SHOWN: &str = "Someone else changed this part first, so nothing was saved. The app could not reach the team server to show their change. Check that it is running, then save again.";
+
 /// A save that failed before the server answered it.
 fn save_failed(error: CollabError) -> Result<PublishResult, String> {
     match error {
@@ -1069,7 +1079,63 @@ struct LoadedPart {
 }
 
 fn load_part(client: &PocketBaseClient, part: &StoredPart) -> Result<TeamPart, String> {
-    load(client, part).map(|loaded| loaded.view)
+    load(client, part)
+        .map(|loaded| loaded.view)
+        .map_err(String::from)
+}
+
+/// Why reading a part from the team server failed: it could not be
+/// reached, or something else, said in words.
+enum ReadFailure {
+    Unreachable,
+    Other(String),
+}
+
+impl From<CollabError> for ReadFailure {
+    fn from(error: CollabError) -> Self {
+        match error {
+            CollabError::Transport(_) => Self::Unreachable,
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
+impl From<String> for ReadFailure {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl From<ReadFailure> for String {
+    fn from(failure: ReadFailure) -> Self {
+        match failure {
+            ReadFailure::Unreachable => "Could not reach the team server.".into(),
+            ReadFailure::Other(message) => message,
+        }
+    }
+}
+
+/// `ipn` as it is now, read again after a save.
+fn reload(client: &PocketBaseClient, ipn: &str) -> Result<LoadedPart, ReadFailure> {
+    let part = part_by_ipn(client, ipn)?
+        .ok_or_else(|| format!("{ipn} is no longer in the team catalog"))?;
+    load(client, &part)
+}
+
+/// What a save that worked shows: `saved` with the part as it is now, or,
+/// if the team server could not be reached to read it, that the save
+/// worked anyway.
+fn saved_then(
+    reloaded: Result<LoadedPart, ReadFailure>,
+    saved: impl FnOnce(TeamPart) -> PublishResult,
+) -> Result<PublishResult, String> {
+    match reloaded {
+        Ok(loaded) => Ok(saved(loaded.view)),
+        Err(ReadFailure::Unreachable) => Ok(PublishResult::SavedNotShown {
+            message: SAVED_NOT_SHOWN.into(),
+        }),
+        Err(ReadFailure::Other(message)) => Err(message),
+    }
 }
 
 /// How a CAD reference is bound, in plain words, naming the CAD item's own
@@ -1086,8 +1152,8 @@ fn binding(reference: &CadReference) -> String {
     }
 }
 
-fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, String> {
-    let fail = |error: CollabError| error.to_string();
+fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, ReadFailure> {
+    let fail = ReadFailure::from;
     let saved_details = part_details_of(client, &part.id).map_err(fail)?;
     let revisions = part_revisions(client, &part.id).map_err(fail)?;
     let archive_entries = archive_entries_of(client, &part.id).map_err(fail)?;
