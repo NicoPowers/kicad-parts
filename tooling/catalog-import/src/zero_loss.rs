@@ -46,7 +46,11 @@
 //!   `Price_Range`, `Price_LastSynced_UTC`: `supplier-data`.
 //!
 //! `Symbol` and `Footprint` go to `part-revision` in every file but g-pcb,
-//! so the table leaves them out.
+//! so the table leaves them out. A Symbol that names several symbols, or a
+//! Footprint that lists a choice more than once, still goes there exactly as
+//! the CSV says (each listed reference is bound), and the row also needs a
+//! `several-symbols` or `repeated-footprint-choice` import problem, as a
+//! missing symbol needs its own.
 //!
 //! | CSV file | `part-details` besides `IPN` | manufacturer parts | `import-problem` |
 //! |----------|------------------------------|--------------------|------------------|
@@ -738,6 +742,19 @@ impl<'a> Reporter<'a> {
                     ));
                 }
             }
+            let cad_cell = |name: &str| {
+                headers
+                    .iter()
+                    .zip(row)
+                    .find(|(column, _)| column.as_str() == name)
+                    .map(|(_, value)| value.as_str())
+            };
+            self.check_cad_lists(
+                &ipn,
+                cad_cell("Symbol"),
+                cad_cell("Footprint"),
+                &mut explained,
+            );
             if cad_kept.is_none() {
                 self.check_excluded_from_bom(row_number, &ipn, cad, &mut explained);
                 cad_scope.insert(ipn.clone(), revision.cad.clone());
@@ -948,6 +965,53 @@ impl<'a> Reporter<'a> {
     /// some footprint choices say so, the setting must be unset and the
     /// latest run must have found a `footprint-choices-disagree-on-bom`
     /// import problem.
+    /// A row whose Symbol names several symbols, or whose Footprint lists
+    /// a choice more than once, needs a several-symbols or
+    /// repeated-footprint-choice import problem (the row still imports
+    /// with its CAD as the CSV says).
+    fn check_cad_lists(
+        &mut self,
+        ipn: &str,
+        symbol: Option<&str>,
+        footprint: Option<&str>,
+        explained: &mut BTreeSet<String>,
+    ) {
+        let named = |cell: Option<&str>| -> Vec<String> {
+            cell.unwrap_or_default()
+                .split(';')
+                .map(str::trim)
+                .filter(|reference| !reference.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let symbols = named(symbol);
+        let footprints = named(footprint);
+        let repeated = footprints
+            .iter()
+            .enumerate()
+            .any(|(index, reference)| footprints[..index].contains(reference));
+        for (code, column, needed) in [
+            ("several-symbols", "Symbol", symbols.len() > 1),
+            ("repeated-footprint-choice", "Footprint", repeated),
+        ] {
+            if !needed {
+                continue;
+            }
+            let location = format!("rows[IPN={ipn}].{column}");
+            let found = self
+                .find_problem(|problem, _| {
+                    problem.code == code && problem.subject == ipn && problem.location == location
+                })
+                .map(|(problem, _)| problem.id.clone());
+            match found {
+                Some(id) => {
+                    explained.insert(id);
+                }
+                None => self.problem(format!("no import problem {code} for {ipn}")),
+            }
+        }
+    }
+
     fn check_excluded_from_bom(
         &mut self,
         row_number: usize,
@@ -1568,9 +1632,28 @@ impl<'a> Reporter<'a> {
                         binding.role == role && binding.reference == reference.reference
                     })
                     .collect();
+                // One binding for each time the part's field lists the
+                // reference: a repeated footprint choice (kept with a
+                // repeated-footprint-choice problem) binds each time.
+                let column = if role == CadReferenceRole::Symbol {
+                    "Symbol"
+                } else {
+                    "Footprint"
+                };
+                let listed = scope[*ipn]
+                    .field(column)
+                    .unwrap_or_default()
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|named| *named == reference.reference)
+                    .count()
+                    .max(1);
                 match bindings.as_slice() {
-                    [binding] => {
-                        targets.insert(serde_json::to_string(&binding.target).unwrap_or_default());
+                    found if found.len() == listed => {
+                        for binding in found {
+                            targets
+                                .insert(serde_json::to_string(&binding.target).unwrap_or_default());
+                        }
                     }
                     _ => self.problem(format!(
                         "{ipn} has {} bindings for {}",

@@ -1068,6 +1068,43 @@ impl<'a> Planner<'a> {
                 .map(str::trim)
                 .filter(|reference| !reference.is_empty())
                 .collect();
+            // KiCad gives a part one symbol, and a footprint choice listed
+            // twice is a slip. Like a missing symbol, the row still imports
+            // with its CAD exactly as the CSV says; a problem says what to
+            // fix.
+            let location = format!("rows[IPN={ipn}].{column}");
+            if role == CadReferenceRole::Symbol && references.len() > 1 {
+                self.record_problem(ImportProblem::new(
+                    "several-symbols",
+                    ipn.as_str(),
+                    catalog_path,
+                    &location,
+                    format!(
+                        "{ipn} names {} symbols ({field}), but KiCad gives a part one symbol; fix its Symbol in {catalog_path}",
+                        references.len()
+                    ),
+                    json!({ "column": column, "value": field, "references": references }),
+                ));
+            }
+            let mut repeated: Vec<&str> = Vec::new();
+            for (index, reference) in references.iter().enumerate() {
+                if references[..index].contains(reference) && !repeated.contains(reference) {
+                    repeated.push(reference);
+                }
+            }
+            if role == CadReferenceRole::Footprint && !repeated.is_empty() {
+                self.record_problem(ImportProblem::new(
+                    "repeated-footprint-choice",
+                    ipn.as_str(),
+                    catalog_path,
+                    &location,
+                    format!(
+                        "{ipn} lists the footprint choice {} more than once; fix its Footprint in {catalog_path}",
+                        repeated.join(", ")
+                    ),
+                    json!({ "column": column, "value": field, "repeated": repeated }),
+                ));
+            }
             for (ordinal, reference) in references.into_iter().enumerate() {
                 let (target, marked) = self.bind(role, reference, ipn)?;
                 match role {

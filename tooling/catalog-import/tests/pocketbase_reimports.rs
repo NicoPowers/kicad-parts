@@ -1440,3 +1440,85 @@ fn an_import_never_brings_an_archived_revision_back() {
         "the tests changed the CSV catalog"
     );
 }
+
+/// Replaces exactly one occurrence of `from` in the row of `ipn`.
+fn change_row(root: &Path, ipn: &str, from: &str, to: &str) {
+    let row = row_of(root, CSV, ipn);
+    assert_eq!(row.matches(from).count(), 1, "{from:?} in {row}");
+    replace_once(root, CSV, &row, &row.replacen(from, to, 1));
+}
+
+#[test]
+fn several_symbols_or_a_repeated_footprint_choice_import_with_a_problem() {
+    // KiCad gives a part one symbol, and a footprint choice listed twice is
+    // a slip. Like a missing symbol, the row still imports with its CAD
+    // exactly as the CSV says, and an import problem says what to fix.
+    let copy = tempfile::tempdir().unwrap();
+    let root = copy.path();
+    copy_catalog(root);
+    change_row(
+        root,
+        "RES-0000-0470",
+        "\"g-res:R_US\"",
+        "\"g-res:R_US; Device:R\"",
+    );
+    change_row(
+        root,
+        "RES-0000-1000",
+        "\"g-Resistor_SMD:R_0603_1608Metric\"",
+        "\"g-Resistor_SMD:R_0603_1608Metric;g-Resistor_SMD:R_0603_1608Metric\"",
+    );
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&repository(), state.path()).unwrap();
+    let reply = import_reading_first(&admin, &plan(root), "-first");
+    assert_eq!(outcome(&reply), "applied", "{}", reply.body);
+    let stored = read_back(&admin).unwrap();
+    // Every cell is accounted for.
+    lossless_report(root, &stored, "several symbols and a repeated choice");
+    let problem = |code: &str, ipn: &str| {
+        stored
+            .problems
+            .iter()
+            .find(|problem| problem.code == code && problem.subject == ipn)
+            .unwrap_or_else(|| panic!("no {code} problem for {ipn}"))
+            .clone()
+    };
+    let several = problem("several-symbols", "RES-0000-0470");
+    assert_eq!(several.location, "rows[IPN=RES-0000-0470].Symbol");
+    assert_eq!(
+        several.message,
+        "RES-0000-0470 names 2 symbols (g-res:R_US; Device:R), but KiCad gives a part one symbol; fix its Symbol in database/g-res.csv"
+    );
+    let repeated = problem("repeated-footprint-choice", "RES-0000-1000");
+    assert_eq!(repeated.location, "rows[IPN=RES-0000-1000].Footprint");
+    assert_eq!(
+        repeated.message,
+        "RES-0000-1000 lists the footprint choice g-Resistor_SMD:R_0603_1608Metric more than once; fix its Footprint in database/g-res.csv"
+    );
+    // The revisions keep what the CSV says.
+    assert_eq!(
+        current_revision(&stored, "RES-0000-0470").1.field("Symbol"),
+        Some("g-res:R_US; Device:R")
+    );
+    // Rows without either have no such problem.
+    assert!(!stored.problems.iter().any(|problem| {
+        (problem.code == "several-symbols" || problem.code == "repeated-footprint-choice")
+            && problem.subject != "RES-0000-0470"
+            && problem.subject != "RES-0000-1000"
+    }));
+    // The zero-loss report notices a lost problem.
+    let mut copy = stored.clone();
+    copy.problems
+        .retain(|problem| problem.code != "several-symbols");
+    let oracle = csv_catalog_fixture::build_manifest(root).unwrap();
+    let report = catalog_import::report(&oracle, "g-res", &copy, root);
+    assert!(
+        report
+            .problems
+            .iter()
+            .any(|problem| problem.contains("no import problem several-symbols")),
+        "{:?}",
+        report.problems
+    );
+    server.stop();
+}
