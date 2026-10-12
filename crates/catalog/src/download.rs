@@ -289,6 +289,9 @@ const DESCRIPTION_NAMES: [&str; 2] = ["description", "kidescription"];
 /// Property names for keywords.
 const KEYWORD_NAMES: [&str; 2] = ["kikeywords", "keywords"];
 
+/// A symbol property or a field: its name and its value.
+pub type Property = (String, String);
+
 /// The properties of one symbol entry, with values trimmed; KiCad's `~`
 /// (no value) is blank.
 pub fn symbol_fields(entry: &[u8]) -> Vec<(String, String)> {
@@ -346,7 +349,7 @@ pub fn keywords(properties: &[(String, String)]) -> String {
 pub fn fill_fields(
     category_fields: &[String],
     properties: &[(String, String)],
-) -> (Vec<(String, String)>, Vec<(String, String)>) {
+) -> (Vec<Property>, Vec<Property>) {
     let mut used: BTreeSet<String> = BTreeSet::new();
     let filled = category_fields
         .iter()
@@ -376,11 +379,11 @@ pub fn fill_fields(
         .iter()
         .filter(|(name, value)| {
             let name_plain = plain(name);
-            !value.is_empty()
-                && !used.contains(name)
-                && name_plain != "reference"
-                && !(MPN_NAMES.contains(&name_plain.as_str()) && *value == mpn)
-                && !(MANUFACTURER_NAMES.contains(&name_plain.as_str()) && *value == manufacturer)
+            let holds_the_manufacturer_part = (MPN_NAMES.contains(&name_plain.as_str())
+                && *value == mpn)
+                || (MANUFACTURER_NAMES.contains(&name_plain.as_str()) && *value == manufacturer);
+            let left_out = value.is_empty() || used.contains(name) || name_plain == "reference";
+            !left_out && !holds_the_manufacturer_part
         })
         .cloned()
         .collect();
