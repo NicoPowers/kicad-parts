@@ -470,7 +470,7 @@ impl<'a> Reporter<'a> {
     fn run(mut self) -> ZeroLossReport {
         let oracle = self.oracle;
         let readback = self.readback;
-        let table = self.csv_file.trim_start_matches("g-").to_owned();
+        let table = catalog::category::category_code(&self.csv_file).to_owned();
         let Some(category) = oracle
             .catalog
             .categories
