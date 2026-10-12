@@ -9,7 +9,7 @@ use crate::csv_import::parse_csv;
 use crate::hash::sha256_hex;
 use kicad_integration::footprint_choices;
 use kicad_integration::library_file::{FootprintFile, SymbolLibrary, model_references};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,6 +21,22 @@ pub fn check_folder(
     known: &KnownCad,
     kicad_share: Option<&Path>,
 ) -> Result<LibraryCheck, String> {
+    check_folder_with(
+        root,
+        known,
+        kicad_share,
+        super::baseline::todays_footprints(),
+    )
+}
+
+/// [`check_folder`] with `todays_footprints` (repository path to SHA-256)
+/// in place of today's CSV catalog built into the program.
+pub fn check_folder_with(
+    root: &Path,
+    known: &KnownCad,
+    kicad_share: Option<&Path>,
+    todays_footprints: &BTreeMap<String, String>,
+) -> Result<LibraryCheck, String> {
     let libraries = read_libraries(root);
     let csv = read_csv_references(root)?;
     let kicad = kicad_share.map(|share| kicad_footprints(share, &libraries));
@@ -29,6 +45,7 @@ pub fn check_folder(
         known,
         csv: &csv,
         kicad_footprints: kicad.as_ref(),
+        todays_footprints,
     }))
 }
 

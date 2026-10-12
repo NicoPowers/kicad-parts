@@ -52,18 +52,27 @@ fn link_model(root: &Path, link: &str) {
 fn old_problems_import_and_a_new_bad_3d_model_link_is_refused_before_sending() {
     let copy = tempfile::tempdir().unwrap();
     let root = copy.path();
-    copy_inputs(root);
-    // The footprint already links a model in someone's home folder before
-    // the first import: an old problem, so clean-up.
-    link_model(root, "/home/jeffs/Workspace/Cliff/3d-models/R_0603.step");
+    copy_catalog(root);
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) =
         services::start(&services::repository_root(), state.path()).unwrap();
-    let import = CsvCatalog::new(root).import("g-res", None).unwrap();
+    // g-osc.csv uses a footprint of today's CSV catalog that links its 3D
+    // model through ${GITPLM_3DMODELS}: an old problem, so clean-up, and
+    // the import goes ahead.
+    let oscillators = CsvCatalog::new(root).import("g-osc", None).unwrap();
+    let reason = "Import the parts from database/g-osc.csv";
     let (command, check) =
-        services::prepare_checked_import(&admin, root, &import, REASON, Allow::default()).unwrap();
+        services::prepare_checked_import(&admin, root, &oscillators, reason, Allow::default())
+            .unwrap();
     assert_eq!(check.count(Group::ToFix), 0, "{}", check.report());
-    assert_eq!(check.count(Group::CleanUp), 1, "{}", check.report());
+    let osc_footprint = "footprints/g-Crystal.pretty/Abracon_ABS07L.kicad_mod";
+    assert!(
+        check
+            .in_group(Group::CleanUp)
+            .any(|finding| finding.file == osc_footprint),
+        "{}",
+        check.report()
+    );
     let reply = submit_import(&admin, &command).unwrap();
     assert!(
         matches!(reply.outcome, ImportOutcome::Applied { .. }),
@@ -72,16 +81,24 @@ fn old_problems_import_and_a_new_bad_3d_model_link_is_refused_before_sending() {
     );
     // Imported again unchanged: still only clean-up, and it goes ahead.
     let (_, again) =
-        services::prepare_checked_import(&admin, root, &import, REASON, Allow::default()).unwrap();
+        services::prepare_checked_import(&admin, root, &oscillators, reason, Allow::default())
+            .unwrap();
     assert_eq!(again.count(Group::ToFix), 0, "{}", again.report());
-    let clean_up: Vec<&str> = again
+    let clean_up = again
         .in_group(Group::CleanUp)
-        .map(|finding| finding.message.as_str())
-        .collect();
+        .find(|finding| finding.file == osc_footprint)
+        .unwrap();
     assert!(
-        clean_up[0].ends_with("The Catalog already has the footprint like this."),
-        "{clean_up:?}"
+        clean_up
+            .message
+            .ends_with("The Catalog already has the footprint like this."),
+        "{}",
+        clean_up.message
     );
+    let import = CsvCatalog::new(root).import("g-res", None).unwrap();
+    let (command, _) =
+        services::prepare_checked_import(&admin, root, &import, REASON, Allow::default()).unwrap();
+    submit_import(&admin, &command).unwrap();
 
     // Someone changes the footprint in KiCad and links a model on their
     // own drive: the import is refused before anything is sent.
@@ -181,5 +198,62 @@ fn todays_csv_files_import_one_by_one() {
     // Today's old problems: 3D model links outside the library, and two
     // missing model files.
     assert!(clean_up >= 14, "{clean_up}");
+    server.stop();
+}
+
+/// A new CSV file (never imported) whose row uses a footprint drawn by
+/// hand since today's CSV catalog, linking a 3D model in a home folder: its
+/// first import is refused before anything is sent, because only
+/// footprints still as today's CSV catalog had them keep old problems as
+/// clean-up.
+#[test]
+fn a_new_csv_file_cannot_bring_in_a_new_bad_3d_model_link() {
+    let copy = tempfile::tempdir().unwrap();
+    let root = copy.path();
+    copy_inputs(root);
+    let hand = fs::read_to_string(root.join(FOOTPRINT))
+        .unwrap()
+        .replace(
+            "(footprint \"R_0603_1608Metric\"",
+            "(footprint \"R_0603_Hand\"",
+        )
+        .replace(KICAD_MODEL, "/home/me/models/R_0603_Hand.step");
+    fs::write(
+        root.join("footprints/g-Resistor_SMD.pretty/R_0603_Hand.kicad_mod"),
+        hand,
+    )
+    .unwrap();
+    let csv = fs::read_to_string(root.join("database/g-res.csv")).unwrap();
+    let header = csv.lines().next().unwrap();
+    let row = csv.lines().nth(1).unwrap().replace("RES-", "HND-").replace(
+        "g-Resistor_SMD:R_0603_1608Metric",
+        "g-Resistor_SMD:R_0603_Hand",
+    );
+    fs::write(
+        root.join("database/g-hnd.csv"),
+        format!("{header}\n{row}\n"),
+    )
+    .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) =
+        services::start(&services::repository_root(), state.path()).unwrap();
+    let import = CsvCatalog::new(root).import("g-hnd", None).unwrap();
+    let before = read_back(&admin).unwrap();
+    let Err(refused) = services::prepare_import(
+        &admin,
+        root,
+        &import,
+        "Import the hand-made part",
+        Allow::default(),
+    ) else {
+        panic!("not refused");
+    };
+    assert!(
+        refused.starts_with("The library check found a problem in files this import uses")
+            && refused.contains("footprints/g-Resistor_SMD.pretty/R_0603_Hand.kicad_mod")
+            && refused.contains("/home/me/models/R_0603_Hand.step"),
+        "{refused}"
+    );
+    assert!(read_back(&admin).unwrap() == before, "nothing was sent");
     server.stop();
 }

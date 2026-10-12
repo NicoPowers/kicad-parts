@@ -1,4 +1,4 @@
-use super::read::{check_folder, read_csv_references, read_libraries};
+use super::read::{check_folder, check_folder_with, read_csv_references, read_libraries};
 use super::*;
 use crate::csv_import::CsvCatalog;
 use crate::hash::sha256_hex;
@@ -124,6 +124,7 @@ fn a_library_in_order_finds_only_what_the_catalog_lacks() {
         known: &known,
         csv: &csv,
         kicad_footprints: Some(&kicad),
+        todays_footprints: todays_footprints(),
     });
     assert_eq!(
         kinds(&found),
@@ -160,6 +161,7 @@ fn a_library_in_order_finds_only_what_the_catalog_lacks() {
     let empty = BTreeSet::new();
     let without_lm358 = check(CheckInputs {
         kicad_footprints: Some(&empty),
+        todays_footprints: todays_footprints(),
         libraries: &libraries,
         known: &known,
         csv: &csv,
@@ -175,6 +177,7 @@ fn a_library_in_order_finds_only_what_the_catalog_lacks() {
         check_folder(root.path(), &known, None).unwrap(),
         check(CheckInputs {
             kicad_footprints: None,
+            todays_footprints: todays_footprints(),
             libraries: &libraries,
             known: &known,
             csv: &csv,
@@ -236,17 +239,29 @@ fn every_kind_of_3d_model_link_is_judged() {
         .map(|(path, text)| (path.as_str(), text.as_str()))
         .collect();
     let root = small_catalog(&borrowed);
-    // Nothing imported yet: the first import takes the library as it is.
+    // Nothing imported yet, but these footprints are not today's CSV
+    // catalog's: a first import does not take new footprints as they are.
     let first = check_folder(root.path(), &KnownCad::default(), None).unwrap();
-    assert_eq!(first.count(Group::ToFix), 0, "{}", first.report());
+    assert_eq!(first.count(Group::ToFix), 7, "{}", first.report());
+    assert_eq!(first.count(Group::CleanUp), 0, "{}", first.report());
+    // As today's CSV catalog had them, the first import takes them as they
+    // are: their old problems are clean-up.
+    let libraries = read_libraries(root.path());
+    let today: BTreeMap<String, String> = libraries
+        .footprints
+        .iter()
+        .map(|f| (f.file(), f.sha256.clone()))
+        .collect();
+    let as_today = check_folder_with(root.path(), &KnownCad::default(), None, &today).unwrap();
+    assert_eq!(as_today.count(Group::ToFix), 0, "{}", as_today.report());
+    assert_eq!(as_today.count(Group::CleanUp), 7, "{}", as_today.report());
     assert!(
-        first.in_group(Group::CleanUp).all(|f| f
+        as_today.in_group(Group::CleanUp).all(|f| f
             .message
             .ends_with("It was like this before the first import.")),
         "{}",
-        first.report()
+        as_today.report()
     );
-    assert_eq!(first.count(Group::CleanUp), 7, "{}", first.report());
     // g-ics.csv was imported before, and none of these footprints is in
     // the Catalog: each is new, so a problem is an error.
     let after_an_import = KnownCad {
@@ -339,18 +354,28 @@ fn only_new_or_changed_footprints_have_errors() {
     assert_eq!(severity_of(&changed, "Old"), Some(Severity::Error));
     assert_eq!(changed.count(Group::ToFix), 2, "{}", changed.report());
 
-    // A CSV file never imported uses the unused footprint: its first
-    // import takes it as it is, so its problem is clean-up.
+    // A new (or renamed) CSV file, never imported, uses the footprint drawn
+    // since today's CSV catalog: its link is judged like any new one, an
+    // error, so no CSV file brings a bad 3D model link in as clean-up.
     fs::write(
         root.path().join("database/g-new.csv"),
         format!("{CSV_HEADER}NEW-0001-0001,X,Y,New part,,g-Package_SO:Unused\n"),
     )
     .unwrap();
     let first_import = check_folder(root.path(), &known, None).unwrap();
-    assert_eq!(
-        severity_of(&first_import, "Unused"),
-        Some(Severity::CleanUp)
-    );
+    assert_eq!(severity_of(&first_import, "Unused"), Some(Severity::Error));
+    // Only a footprint still as it was in today's CSV catalog keeps its old
+    // problem as clean-up at its CSV file's first import.
+    let unused = root
+        .path()
+        .join("footprints/g-Package_SO.pretty/Unused.kicad_mod");
+    let today: BTreeMap<String, String> = [(
+        "footprints/g-Package_SO.pretty/Unused.kicad_mod".to_owned(),
+        sha256_hex(fs::read(&unused).unwrap()),
+    )]
+    .into();
+    let as_today = check_folder_with(root.path(), &known, None, &today).unwrap();
+    assert_eq!(severity_of(&as_today, "Unused"), Some(Severity::CleanUp));
     fs::remove_file(root.path().join("database/g-new.csv")).unwrap();
 
     // A row of a CSV file imported before now uses it: the next import
