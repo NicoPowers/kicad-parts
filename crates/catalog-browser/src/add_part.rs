@@ -522,11 +522,21 @@ fn linked_model(
     })
 }
 
+/// Whether `reference` names a file's own symbol or footprint `name`, in one
+/// of the Catalog's libraries (`g-...`), so the part uses the file. Any
+/// other reference is one the engineer typed instead: a symbol or footprint
+/// the Catalog or KiCad already has, such as `g-cap:C` or `Device:C`.
+fn uses_file(reference: &str, name: &str) -> bool {
+    reference
+        .split_once(':')
+        .is_some_and(|(library, item)| library.starts_with("g-") && item == name)
+}
+
 /// The uploads a new part sends: the symbol from its library file, the
 /// footprint pointed at its 3D model in the Catalog's folder for the
 /// footprint's library, and the 3D model. Files for references that are not
-/// the Catalog's own are not sent (a footprint the Catalog or KiCad already
-/// has).
+/// the Catalog's own are not sent (a symbol or footprint the Catalog or
+/// KiCad already has, chosen instead of the download's).
 pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, String> {
     let decoded = |file: &TeamFile| crate::team::decoded(&file.base64, &file.file_name);
     let source = |file: &TeamFile| file.label.clone().unwrap_or_else(|| file.file_name.clone());
@@ -537,18 +547,27 @@ pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, St
             .symbol
             .as_deref()
             .ok_or_else(|| "Choose which symbol of the file to use.".to_owned())?;
-        uploads.push(symbol_upload(
-            &decoded(file)?,
-            name,
-            request.symbol.trim(),
-            &source(file),
-        )?);
+        if uses_file(request.symbol.trim(), name) {
+            uploads.push(symbol_upload(
+                &decoded(file)?,
+                name,
+                request.symbol.trim(),
+                &source(file),
+            )?);
+        }
     }
     let footprint = footprint_choices(&request.footprint)
         .first()
         .map(|choice| (*choice).to_owned())
         .unwrap_or_default();
-    if let Some(file) = of_kind(FileKind::Footprint) {
+    let footprint_file = match of_kind(FileKind::Footprint) {
+        Some(file) => {
+            let name = read_footprint_file(&decoded(file)?)?.name;
+            uses_file(&footprint, &name).then_some(file)
+        }
+        None => None,
+    };
+    if let Some(file) = footprint_file {
         let mut bytes = decoded(file)?;
         let mut linked = false;
         if let Some(model) = of_kind(FileKind::Model3d) {
