@@ -66,6 +66,19 @@ fn every_real_3d_model_imports_in_one_request_per_csv_file() {
         let import = CsvCatalog::new(&root).import(csv_file, None).unwrap();
         let state = catalog::pocketbase::read_import_state(&admin).unwrap();
         let command = ImportCommand::new(&import, &format!("Import {csv_file}")).expecting(&state);
+        // One request per CSV file, with every UTF-8 blob (the real 3D
+        // models are STEP text) sent as text, which PocketBase's own code
+        // hashes; only other bytes go as base64, hashed in JavaScript.
+        let body = command.body();
+        for (blob, sent) in import.blobs.iter().zip(body["blobs"].as_array().unwrap()) {
+            let as_text = std::str::from_utf8(&blob.bytes).is_ok();
+            assert_eq!(
+                sent.get("text").is_some(),
+                as_text,
+                "{csv_file}: {}",
+                blob.sha256
+            );
+        }
         let started = Instant::now();
         let reply = submit_import(&admin, &command).unwrap();
         let took = started.elapsed();
@@ -114,10 +127,11 @@ fn every_real_3d_model_imports_in_one_request_per_csv_file() {
         "the import changed its inputs"
     );
     // UTF-8 blobs are hashed by PocketBase's own code: g-con, with the
-    // largest model (1.5 MiB), takes about 0.2 s. Hashed in JavaScript it
-    // took about 5 s, so this catches a return to that.
+    // largest model (1.5 MiB), takes about 0.2 s (about 5 s hashed in
+    // JavaScript). The text check above catches a return to that; this
+    // bound is only a generous backstop, so a busy machine never fails it.
     assert!(
-        slowest < Duration::from_secs(3),
+        slowest < Duration::from_secs(30),
         "the slowest import request took {slowest:?}"
     );
 }
