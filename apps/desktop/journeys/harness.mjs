@@ -701,3 +701,25 @@ export async function editAsSomeoneElse(url, token, ipn, values, reason) {
   record({ event: 'edit-by-someone-else', ipn, seq: answer.seq, values });
   return answer.seq;
 }
+
+/**
+ * Archives or unarchives revision `revision` of `ipn` as someone else, the
+ * way another desktop would. Returns the Change's number.
+ */
+export async function archiveAsSomeoneElse(url, token, ipn, revision, archived, reason) {
+  const reply = await fetch(`${url}/api/catalog/archives`, {
+    method: 'POST',
+    headers: { Authorization: token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      correlationId: `journey-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+      reason,
+      ipn,
+      revision,
+      archived,
+    }),
+  });
+  const answer = await reply.json();
+  assert.equal(reply.status, 200, `someone else's archive: ${JSON.stringify(answer)}`);
+  record({ event: 'archive-by-someone-else', ipn, revision, archived, seq: answer.seq });
+  return answer.seq;
+}
