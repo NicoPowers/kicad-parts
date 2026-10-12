@@ -898,3 +898,35 @@ fn a_csv_that_caught_up_with_the_app_is_not_a_change() {
     assert_eq!(number_of(&bound(&after, OTHER, "g-res:R_Added")), 1);
     assert_eq!(number_of(&bound(&after, OTHER, FOOTPRINT)), 2);
 }
+
+#[test]
+fn an_edit_with_files_is_replayed_and_its_correlation_id_is_never_reused() {
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    let before = team.read();
+    let original = team.file(FOOTPRINT_FILE);
+    let corrected = redrawn(&original);
+    let upload = footprint_upload(&corrected, FOOTPRINT, "R.kicad_mod").unwrap();
+    let command = cad_edit(&before, IPN, &[], vec![upload]);
+    let first = submit_edit(&editor, &command).unwrap();
+    applied(&first);
+    let saved = team.read();
+    // Sent again (as after a lost answer): the same answer, byte for byte,
+    // and nothing more written.
+    let again = submit_edit(&editor, &command).unwrap();
+    assert!(again.replayed);
+    assert_eq!((again.status, &again.body), (first.status, &first.body));
+    assert_eq!(team.read().counts(), saved.counts());
+    // The same correlation ID with other bytes is another request.
+    let mut other = command.clone();
+    other.cad.as_mut().unwrap().uploads[0].bytes =
+        corrected.iter().copied().chain(*b"\n").collect();
+    let reused = submit_edit(&editor, &other).unwrap();
+    assert_eq!(reused.status, 409, "{}", reused.body);
+    assert!(
+        matches!(reused.outcome, PublishOutcome::CorrelationReused { .. }),
+        "{}",
+        reused.body
+    );
+    assert_eq!(team.read().counts(), saved.counts());
+}
