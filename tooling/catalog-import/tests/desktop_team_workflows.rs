@@ -972,7 +972,7 @@ fn a_csv_row_naming_a_symbol_only_the_app_has_can_only_be_kept() {
     let csv = team.copy.path().join("database/g-cap.csv");
     let mut text = fs::read_to_string(&csv).unwrap();
     text.push_str(&format!(
-        "\"CAP-0004-0001\",\"{MPN}\",\"Samsung Electro-Mechanics\",\"CAP CER 0.1UF 50V X7R 0603\",\"g-cap:C_New\",\"{NEW_FOOTPRINT}\",\"100n\",\"\",\"\",\"\",\".Datasheet\",\"\",\"\",\"\",\"\",\"\",\"\",\"\"
+        "\"CAP-0004-0001\",\"{MPN}\",\"Samsung Electro-Mechanics\",\"CAP CER 0.1UF 50V X7R 0603\",\"g-cap:C_New\",\"{NEW_FOOTPRINT}\",\"100n\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\"
 "
     ));
     fs::write(&csv, text).unwrap();
