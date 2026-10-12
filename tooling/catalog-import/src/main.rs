@@ -172,9 +172,12 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     for each in &planned {
         let csv_file = &each.csv_file;
         let state = read_import_state(&admin)?;
-        let command = ImportCommand::new(each, &format!("Import database/{csv_file}.csv"))
-            .expecting(&state)
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(each));
+        let command = ImportCommand::new(
+            each,
+            &format!("Import the parts from database/{csv_file}.csv"),
+        )
+        .expecting(&state)
+        .allowing_uncommitted_changes(services::has_uncommitted_changes(each));
         let reply = submit_import(&admin, &command)?;
         if !matches!(reply.outcome, ImportOutcome::Applied { .. }) {
             return Err(format!("the import of {csv_file} did not apply: {}", reply.body).into());

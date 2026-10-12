@@ -579,7 +579,7 @@ export async function waitForPreviewImages(browser, section, timeout = 60_000) {
 
 /**
  * Starts `catalog-import local-team-server --json`: a disposable PocketBase
- * on 127.0.0.1 with the resistors imported and three accounts. It runs
+ * on 127.0.0.1 with every CSV file imported and three accounts. It runs
  * windowless in a kill-on-close job and stops when its input closes, so it
  * cannot outlive this process.
  * @returns {Promise<{ url: string, accounts: { name: string, email: string, password: string, canEditCatalog: boolean }[], stop: () => Promise<void> }>}

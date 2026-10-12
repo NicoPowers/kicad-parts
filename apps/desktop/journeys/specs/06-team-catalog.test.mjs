@@ -523,10 +523,13 @@ describe('team catalog: history, edits and conflicts', () => {
     await screenshot(browser, '49-team-read-only');
   });
 
-  it('says when a part is not in the team catalog', async () => {
+  it('shows parts from every CSV file, each with its category', async () => {
+    // The team server imports every CSV file, so a regulator is in the team
+    // catalog too, with its own history.
     await searchFor(browser, 'KF33BD', '1 matching part');
     await selectResult(browser, 'KF33BD-TR');
-    await waitForText(browser, '.part-fields .hint', 'This part is not in the team catalog yet, so it has no history.');
-    assert.match(await textOf(browser, '#fields-heading'), /^Catalog fields \(\d+\)$/);
+    await waitForText(browser, '#part-category', 'Category: Voltage regulators');
+    assert.equal(await textOf(browser, '#fields-heading'), 'Part details (4)');
+    assert.equal(await textOf(browser, `${COLUMN} [role="tab"][aria-selected="false"]`), 'History (1)');
   });
 });
