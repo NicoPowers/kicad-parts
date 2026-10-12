@@ -37,8 +37,10 @@
 //   409 { outcome: "correlation_reused", correlationId, message }
 //   400 bad input (including a malformed IPN, an unknown category, fields
 //       that are not the category's, an unsafe name, a symbol or footprint
-//       the Catalog does not have and no file was sent for, or a file that
-//       is wrong or not used), 401 not signed in, 403 not allowed to edit.
+//       the Catalog does not have and no file was sent for, a file that is
+//       wrong or not used, or a file named like a CAD item the Catalog has
+//       but with other content, which would change it for every part that
+//       uses it), 401 not signed in, 403 not allowed to edit.
 // Applied answers are replayed byte for byte for a repeated correlation ID
 // (with X-Collab-Replayed: true); ipn_taken is not stored, so a retry is
 // checked again.

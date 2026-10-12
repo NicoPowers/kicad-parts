@@ -2459,6 +2459,18 @@ function publishCreate(e) {
     refuse("details", detailsProblem(detailsDocument));
     const cadFields = createdCadFields(request.cadFields);
     const prepared = preparedUploads(txApp, request.uploads);
+    // A new part makes new CAD items. A file named like a CAD item the
+    // Catalog has, with other content, would change what every part using
+    // it gets, so it is refused; the same content simply uses it.
+    for (const key of Object.keys(prepared)) {
+      const entry = prepared[key];
+      if (entry.isNew && !entry.cadItemIsNew) {
+        const what = entry.kind === "model-3d" ? "3D model" : entry.kind;
+        fail(
+          `the Catalog already has the ${what} ${entry.key}, with other content; a new part cannot change it. Use the Catalog's ${what}, or put the file's ${what} in another library`,
+        );
+      }
+    }
     const revisionDocument = {
       schema: PART_REVISION_SCHEMA,
       ipn: request.ipn,

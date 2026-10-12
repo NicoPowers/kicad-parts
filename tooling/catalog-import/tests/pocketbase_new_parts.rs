@@ -427,6 +427,21 @@ fn a_new_part_is_refused_plainly_and_nothing_is_written() {
                     json!("3d-models/g-Resistor_SMD.3dshapes/Other.step");
             }),
         ),
+        // A file named like the Catalog's own footprint, with other
+        // content, would change it for every part that uses it.
+        (
+            "already has the footprint g-Resistor_SMD:R_0603_1608Metric",
+            Box::new(|body| {
+                let text = body["uploads"][1]["text"].as_str().unwrap().replace(
+                    "(footprint \"R_0603_New\"",
+                    "(footprint \"R_0603_1608Metric\"",
+                );
+                body["uploads"][1]["text"] = json!(text);
+                body["uploads"][1]["reference"] = json!("g-Resistor_SMD:R_0603_1608Metric");
+                body["cadFields"][1]["value"] = json!("g-Resistor_SMD:R_0603_1608Metric");
+                body["uploads"] = json!([body["uploads"][0].clone(), body["uploads"][1].clone()]);
+            }),
+        ),
         // A symbol the Catalog does not have and no file was sent for.
         (
             "is not in the Catalog; choose a file",
