@@ -276,6 +276,25 @@ pub fn suggested_footprint_library(name: &str) -> Option<&'static str> {
     Some(library)
 }
 
+/// The footprint group to suggest for a new part in the category `code`
+/// when its footprint's name says none, such as `g-Capacitor_SMD` for
+/// capacitors; `None` for categories whose parts come in many packages.
+pub fn category_footprint_library(code: &str) -> Option<&'static str> {
+    let library = match code {
+        "res" => "g-Resistor_SMD",
+        "cap" => "g-Capacitor_SMD",
+        "ind" => "g-Inductor_SMD",
+        "dio" => "g-Diode_SMD",
+        "opt" => "g-LED_SMD",
+        "osc" => "g-Crystal",
+        "cpd" => "g-Fuse",
+        "rvr" => "g-Potentiometer_SMD",
+        "swi" => "g-Button_Switch_SMD",
+        _ => return None,
+    };
+    Some(library)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

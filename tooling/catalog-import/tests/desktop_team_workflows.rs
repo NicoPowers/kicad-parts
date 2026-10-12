@@ -174,7 +174,16 @@ fn new_part(reading: &TeamDownload, ipn: &str, category: &str) -> TeamNewPartReq
             mpn: reading.mpn.clone(),
         }],
         symbol: format!("g-{category}:{}", reading.symbol_name),
-        footprint: format!("{}:{}", reading.footprint_library, reading.footprint_name),
+        // The download's package group, else the one its category suggests.
+        footprint: format!(
+            "{}:{}",
+            if reading.footprint_library.is_empty() {
+                &chosen.footprint_library
+            } else {
+                &reading.footprint_library
+            },
+            reading.footprint_name
+        ),
         files,
         from: reading.from.clone(),
         downloads: vec!["download.zip".into()],
@@ -525,15 +534,178 @@ fn an_added_part_can_use_the_catalogs_symbol_instead_of_the_downloads() {
             (symbol.into(), footprint.into())
         );
     }
-    // A typo in a Catalog reference is the server's to refuse plainly.
-    let mut request = new_part(&reading, "CAP-0007-0001", "cap");
-    request.symbol = "g-cap:C_Nwe".into();
-    let PublishResult::Refused { message } = team.add(&team.team, request) else {
-        panic!("not refused");
+    // A reference that names the file's own symbol or footprint, but not
+    // in one of the Catalog's libraries, keeps the file and says so; it is
+    // never taken for KiCad's own.
+    for (symbol, footprint, says) in [
+        (
+            "g-cap:C_New",
+            "Capacitor_SMD:C_0603_New",
+            "A file can only be added to the Catalog's own libraries",
+        ),
+        (
+            "cap:C_New",
+            NEW_FOOTPRINT,
+            "A file can only be added to the Catalog's own libraries",
+        ),
+        (
+            "g-cap:C_New",
+            "C_0603_New",
+            "Give the footprint a library, such as g-",
+        ),
+    ] {
+        let mut request = new_part(&reading, "CAP-0007-0001", "cap");
+        request.symbol = symbol.into();
+        request.footprint = footprint.into();
+        let saved = team.add(&team.team, request);
+        let PublishResult::Refused { message } = saved else {
+            panic!("{symbol} and {footprint} not refused: {saved:?}");
+        };
+        assert!(
+            message.contains(says),
+            "{symbol} and {footprint}: {message}"
+        );
+    }
+    // A Catalog reference the Catalog does not have, while a file is
+    // chosen: say which reference saves the file.
+    for (symbol, footprint, says) in [
+        (
+            "g-cap:C_Nwe",
+            NEW_FOOTPRINT,
+            "The download's symbol is C_New; write g-cap:C_New to save it.",
+        ),
+        (
+            "g-cap:C_New",
+            "g-Capacitor_SMD:C_0603_Nwe",
+            "The download's footprint is C_0603_New; write g-Capacitor_SMD:C_0603_New to save it.",
+        ),
+    ] {
+        let mut request = new_part(&reading, "CAP-0007-0001", "cap");
+        request.symbol = symbol.into();
+        request.footprint = footprint.into();
+        let PublishResult::Refused { message } = team.add(&team.team, request) else {
+            panic!("{symbol} and {footprint} not refused");
+        };
+        assert_eq!(message, says);
+    }
+}
+
+/// A download that names only half of a manufacturer part: the form says
+/// so when it reads the files, and saving is refused plainly before
+/// anything is sent.
+#[test]
+fn a_manufacturer_part_needs_both_halves() {
+    let team = Team::start();
+    let only_manufacturer = symbol_named("C_Half", "HALF-1").replace(
+        "		(property \"Manufacturer_Part_Number\" \"HALF-1\" (at 0 0 0) (effects (hide yes)))
+",
+        "",
+    );
+    let only_mpn = symbol_named("C_Half", "HALF-2").replace(
+        "		(property \"Manufacturer_Name\" \"Samsung Electro-Mechanics\" (at 0 0 0) (effects (hide yes)))
+",
+        "",
+    );
+    for (symbol, note, refusal) in [
+        (
+            only_manufacturer,
+            "The download names a manufacturer but no MPN. Type the MPN, or clear Manufacturer.",
+            "Type the MPN, or clear Manufacturer.",
+        ),
+        (
+            only_mpn,
+            "The download names an MPN but no manufacturer. Type the manufacturer, or clear MPN.",
+            "Type the manufacturer, or clear MPN.",
+        ),
+    ] {
+        let reading = team.read(&zip_of(&[
+            ("C_Half.kicad_sym", symbol.as_bytes()),
+            (
+                "C_0603_Half.kicad_mod",
+                footprint_named("C_0603_Half").as_bytes(),
+            ),
+        ]));
+        assert!(
+            reading.notes.iter().any(|found| found == note),
+            "{:?}",
+            reading.notes
+        );
+        let saved = team.add(&team.team, new_part(&reading, "CAP-0004-0001", "cap"));
+        let PublishResult::Refused { message } = saved else {
+            panic!("not refused: {saved:?}");
+        };
+        assert_eq!(message, refusal);
+    }
+}
+
+/// A footprint whose name says no package group gets one from a footprint
+/// the Catalog has with the same pads, else from the category chosen.
+#[test]
+fn a_footprint_library_is_suggested_when_its_name_says_none() {
+    let team = Team::start();
+    // The same pads as the Catalog's C_0603_1608Metric.
+    let reading = team.read(&clue_download("X_Same", "C", "CAP_GRM18_MUR", ""));
+    assert_eq!(reading.footprint_library, "g-Capacitor_SMD");
+    // Other pads: the chosen category says.
+    let other = footprint_named("CAP_ODD_PADS").replace("(at -0.775 0)", "(at -0.9 0)");
+    let symbol = symbol_named("C_OddPads", "ODD-PADS");
+    let reading = team.read(&zip_of(&[
+        ("C_OddPads.kicad_sym", symbol.as_bytes()),
+        ("CAP_ODD_PADS.kicad_mod", other.as_bytes()),
+    ]));
+    assert_eq!(reading.footprint_library, "");
+    let library = |code: &str| {
+        reading
+            .categories
+            .iter()
+            .find(|category| category.code == code)
+            .unwrap()
+            .footprint_library
+            .clone()
     };
+    assert_eq!(library("cap"), "g-Capacitor_SMD");
+    assert_eq!(library("res"), "g-Resistor_SMD");
+    let saved = team.add(&team.team, new_part(&reading, "CAP-0004-0001", "cap"));
+    let PublishResult::Added { part } = saved else {
+        panic!("{saved:?}");
+    };
+    assert_eq!(
+        part.revision.cad_fields[1].value,
+        "g-Capacitor_SMD:CAP_ODD_PADS"
+    );
+}
+
+/// A 3D model file name with characters Windows forbids in file names
+/// (" < > | ? *) is saved under a name with _ in their place.
+#[test]
+fn a_model_name_windows_forbids_is_saved_with_underscores() {
+    let team = Team::start();
+    let model = "C_0603\"quoted\"<x>|y?*.step";
+    let footprint = footprint_named("C_0603_Quoted").replace(
+        "${KIPRJMOD}/3D/C_0603_Quoted.stp",
+        &format!("${{KIPRJMOD}}/3D/{}", model.replace('"', "\\\"")),
+    );
+    let reading = team.read(&zip_of(&[
+        (
+            "C_Quoted.kicad_sym",
+            symbol_named("C_Quoted", "QUOTED-1").as_bytes(),
+        ),
+        ("C_0603_Quoted.kicad_mod", footprint.as_bytes()),
+        (&format!("3D/{model}"), MODEL),
+    ]));
+    assert_eq!(reading.model, Some(0), "{:?}", reading.notes);
+    let saved = team.add(&team.team, new_part(&reading, "CAP-0004-0001", "cap"));
+    assert!(matches!(saved, PublishResult::Added { .. }), "{saved:?}");
+    let key = "3d-models/g-Capacitor_SMD.3dshapes/C_0603_quoted__x__y__.step";
+    let stored = catalog::pocketbase::read_back(&team.admin).unwrap();
     assert!(
-        message.contains("g-cap:C_Nwe is not in the Catalog"),
-        "{message}"
+        stored.cad_items.iter().any(|item| item.key == key),
+        "{:?}",
+        stored
+            .cad_items
+            .iter()
+            .map(|item| &item.key)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1089,11 +1261,7 @@ fn the_category_guess_on_conflicting_missing_and_learned_clues() {
     // A brand-new footprint family, confirmed once as a capacitor...
     let reading = team.read(&clue_download("X_First", "U", "ZZCAP_1", ""));
     let first_guess = codes(&reading);
-    // (no package group is known for it, so the engineer types one)
-    assert_eq!(reading.footprint_library, "");
-    let mut confirmed = new_part(&reading, "CAP-0004-0001", "cap");
-    confirmed.footprint = "g-Capacitor_SMD:ZZCAP_1".into();
-    let saved = team.add(&team.team, confirmed);
+    let saved = team.add(&team.team, new_part(&reading, "CAP-0004-0001", "cap"));
     assert!(matches!(saved, PublishResult::Added { .. }), "{saved:?}");
     // ...helps the next download of that family.
     let reading = team.read(&clue_download("X_Second", "U", "ZZCAP_2", ""));

@@ -752,6 +752,11 @@ pub struct TeamNewCategory {
     /// What the symbol says that fills none of the fields, so nothing is
     /// silently lost.
     pub unused: Vec<Field>,
+    /// The footprint group to suggest in this category, such as
+    /// `g-Capacitor_SMD`: the download's own when its footprint says, else
+    /// one the category suggests; blank when neither does.
+    #[serde(default)]
+    pub footprint_library: String,
 }
 
 /// A guess of the new part's category.

@@ -667,6 +667,16 @@ impl TeamCatalog {
         if request.reason.trim().is_empty() {
             return refused("Say why you are adding the part before you save.".into());
         }
+        for part in &request.manufacturer_parts {
+            match (
+                part.manufacturer.trim().is_empty(),
+                part.mpn.trim().is_empty(),
+            ) {
+                (false, true) => return refused("Type the MPN, or clear Manufacturer.".into()),
+                (true, false) => return refused("Type the manufacturer, or clear MPN.".into()),
+                _ => {}
+            }
+        }
         // A taken IPN is the server's to say: someone may take it any time.
         if catalog::Ipn::parse(request.ipn.trim()).is_err() {
             if let Some(problem) = self.check_ipn(request.ipn.trim(), "", known).problem {
@@ -754,7 +764,9 @@ impl TeamCatalog {
             Err(CollabError::Http {
                 status: 400,
                 message,
-            }) => refused(message),
+            }) => {
+                refused(crate::add_part::reference_for_file(&request, &message).unwrap_or(message))
+            }
             Err(CollabError::Forbidden(message)) => refused(message),
             Err(CollabError::Unauthorized(_)) => {
                 refused("Your sign-in has ended. Sign in again, then save.".into())

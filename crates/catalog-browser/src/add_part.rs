@@ -10,8 +10,9 @@
 //! network, so the guess is the same every time.
 
 use catalog::cad_file::{
-    footprint_upload, is_catalog_model_key, is_plain_name, model_upload, read_footprint_file,
-    read_symbol_file, suggested_footprint_library, symbol_upload,
+    category_footprint_library, footprint_upload, is_catalog_model_key, is_plain_name,
+    model_upload, read_footprint_file, read_symbol_file, suggested_footprint_library,
+    symbol_upload,
 };
 use catalog::download::{
     self, Download, DownloadFile, DownloadKind, PadKey, fill_fields, link_model, manufacturer_part,
@@ -189,6 +190,18 @@ pub(crate) fn read(
     };
     let properties = entry.as_deref().map(symbol_fields).unwrap_or_default();
     let (mpn, manufacturer) = manufacturer_part(&properties);
+    // A manufacturer part needs both halves; say so now, not at Save.
+    match (manufacturer.is_empty(), mpn.is_empty()) {
+        (false, true) => notes.push(
+            "The download names a manufacturer but no MPN. Type the MPN, or clear Manufacturer."
+                .into(),
+        ),
+        (true, false) => notes.push(
+            "The download names an MPN but no manufacturer. Type the manufacturer, or clear MPN."
+                .into(),
+        ),
+        _ => {}
+    }
     let footprint_info = footprint.and_then(|file| read_footprint_file(&file.bytes).ok());
     let footprint_name = footprint_info
         .as_ref()
@@ -229,6 +242,27 @@ pub(crate) fn read(
         Vec::new()
     };
 
+    // The footprint's group: from its name, else from a footprint of the
+    // Catalog with the same name or pads; else each category suggests one.
+    let named_library = suggested_footprint_library(&footprint_name)
+        .unwrap_or_default()
+        .to_owned();
+    let known_footprints = match footprint {
+        Some(file) => known_footprints(file, &footprint_name, &named_library, context),
+        None => Vec::new(),
+    };
+    let footprint_library = if named_library.is_empty() {
+        known_footprints
+            .iter()
+            .filter_map(|known| known.reference.split_once(':'))
+            .map(|(library, _)| library)
+            .find(|library| library.starts_with("g-"))
+            .unwrap_or_default()
+            .to_owned()
+    } else {
+        named_library
+    };
+
     let categories = context
         .categories
         .iter()
@@ -245,17 +279,17 @@ pub(crate) fn read(
                 .unwrap_or_default(),
                 fields: as_fields(fields),
                 unused: as_fields(unused),
+                footprint_library: if footprint_library.is_empty() {
+                    category_footprint_library(&category.code)
+                        .unwrap_or_default()
+                        .to_owned()
+                } else {
+                    footprint_library.clone()
+                },
             }
         })
         .collect();
 
-    let footprint_library = suggested_footprint_library(&footprint_name)
-        .unwrap_or_default()
-        .to_owned();
-    let known_footprints = match footprint {
-        Some(file) => known_footprints(file, &footprint_name, &footprint_library, context),
-        None => Vec::new(),
-    };
     let model = footprint_info
         .as_ref()
         .and_then(|info| linked_model(info, &models))
@@ -546,14 +580,64 @@ fn linked_model(
     })
 }
 
-/// Whether `reference` names a file's own symbol or footprint `name`, in one
-/// of the Catalog's libraries (`g-...`), so the part uses the file. Any
-/// other reference is one the engineer typed instead: a symbol or footprint
-/// the Catalog or KiCad already has, such as `g-cap:C` or `Device:C`.
+/// Whether `reference` names a file's own symbol or footprint `name`, so
+/// the part uses the file. Only another name after the colon means the
+/// engineer typed a symbol or footprint the Catalog or KiCad already has
+/// instead, such as `g-cap:C` or `Device:C`; a reference to the file's own
+/// name in another library, or with no library, keeps the file, so
+/// [`symbol_upload`] and [`footprint_upload`] say what to write.
 fn uses_file(reference: &str, name: &str) -> bool {
-    reference
-        .split_once(':')
-        .is_some_and(|(library, item)| library.starts_with("g-") && item == name)
+    match reference.split_once(':') {
+        Some((_, item)) => item == name,
+        None => true,
+    }
+}
+
+/// When the team server refuses a Catalog reference it does not have while
+/// a file was chosen under another name, the reference that saves the file,
+/// in plain words, such as "The download's symbol is C_New; write
+/// g-cap:C_New to save it."
+pub(crate) fn reference_for_file(request: &TeamNewPartRequest, refusal: &str) -> Option<String> {
+    let refusal = refusal.to_lowercase();
+    let decoded = |file: &TeamFile| crate::team::decoded(&file.base64, &file.file_name).ok();
+    let footprint = footprint_choices(&request.footprint)
+        .first()
+        .map(|choice| (*choice).to_owned())
+        .unwrap_or_default();
+    request.files.iter().find_map(|file| {
+        let (role, reference, name) = match file.kind {
+            FileKind::Symbol => (
+                "symbol",
+                request.symbol.trim().to_owned(),
+                file.symbol.clone()?,
+            ),
+            FileKind::Footprint => (
+                "footprint",
+                footprint.clone(),
+                read_footprint_file(&decoded(file)?).ok()?.name,
+            ),
+            FileKind::Model3d => return None,
+        };
+        let (library, item) = reference.split_once(':')?;
+        let missing = format!("{role} {} is not in the catalog", reference.to_lowercase());
+        (item != name && library.starts_with("g-") && refusal.contains(&missing))
+            .then(|| format!("The download's {role} is {name}; write {library}:{name} to save it."))
+    })
+}
+
+/// A file name with the characters Windows forbids in file names (`"`, `<`,
+/// `>`, `|`, `?` and `*`) replaced by `_`, so the 3D model has a name every
+/// computer can keep. The footprint is pointed at it by that name.
+fn model_file_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if matches!(c, '"' | '<' | '>' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// The uploads a new part sends: the symbol from its library file, the
@@ -593,13 +677,16 @@ pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, St
     };
     if let Some(file) = footprint_file {
         let mut bytes = decoded(file)?;
+        // The reference first, so a missing g- or library is said plainly
+        // before anything about the 3D model's place.
+        footprint_upload(&bytes, &footprint, &source(file))?;
         let mut linked = false;
         if let Some(model) = of_kind(FileKind::Model3d) {
             let library = footprint
                 .split_once(':')
                 .map(|(library, _)| library)
                 .unwrap_or_default();
-            let name = model.file_name.clone();
+            let name = model_file_name(&model.file_name);
             if !is_plain_name(&name) {
                 return Err(format!(
                     "The 3D model's file name {name:?} cannot be used: a name cannot be . or .., start with -, or hold / \\ : or control characters."
@@ -612,7 +699,8 @@ pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, St
             let text = String::from_utf8(bytes).map_err(|_| {
                 "The footprint file is not text, so it is not a file KiCad saved.".to_owned()
             })?;
-            bytes = link_model(&text, &format!("${{GITPLM_PARTS}}/{key}"), &name).into_bytes();
+            bytes = link_model(&text, &format!("${{GITPLM_PARTS}}/{key}"), &model.file_name)
+                .into_bytes();
             uploads.push(model_upload(&decoded(model)?, &key, &source(model))?);
             linked = true;
         }
@@ -640,6 +728,18 @@ mod tests {
         assert_eq!(symbol_pins(library, "Base"), Ok(3));
         assert_eq!(symbol_pins(library, "Child"), Ok(3));
         assert_eq!(symbol_pins(library, "Orphan"), Err("Missing".to_owned()));
+    }
+
+    #[test]
+    fn model_names_lose_what_windows_forbids() {
+        assert_eq!(
+            model_file_name("C \"0603\"<x>|y?*.step"),
+            "C _0603__x__y__.step"
+        );
+        assert_eq!(
+            model_file_name("C_0603 (Murata).step"),
+            "C_0603 (Murata).step"
+        );
     }
 
     #[test]
