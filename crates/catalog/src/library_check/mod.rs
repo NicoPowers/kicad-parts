@@ -656,10 +656,13 @@ fn is_kicad_model_link(link: &str) -> bool {
         return false;
     };
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    // A `..` part would climb out of KiCad's folder.
     digits > 0
         && rest[digits..]
             .strip_prefix("_3DMODEL_DIR}")
-            .is_some_and(|rest| rest.starts_with(['/', '\\']))
+            .is_some_and(|rest| {
+                rest.starts_with(['/', '\\']) && !rest.split(['/', '\\']).any(|part| part == "..")
+            })
 }
 
 /// The link a footprint's own 3D model should have, such as

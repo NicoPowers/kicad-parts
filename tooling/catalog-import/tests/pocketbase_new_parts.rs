@@ -421,7 +421,6 @@ fn a_new_part_is_refused_plainly_and_nothing_is_written() {
             "is not used",
             Box::new(|body| {
                 body["cadFields"][1]["value"] = json!("Resistor_SMD:R_0603_1608Metric");
-                body["uploads"] = json!([body["uploads"][0].clone(), body["uploads"][1].clone()]);
             }),
         ),
         // A 3D model no footprint names.
@@ -444,7 +443,6 @@ fn a_new_part_is_refused_plainly_and_nothing_is_written() {
                 body["uploads"][1]["text"] = json!(text);
                 body["uploads"][1]["reference"] = json!("g-Resistor_SMD:R_0603_1608Metric");
                 body["cadFields"][1]["value"] = json!("g-Resistor_SMD:R_0603_1608Metric");
-                body["uploads"] = json!([body["uploads"][0].clone(), body["uploads"][1].clone()]);
             }),
         ),
         // A symbol the Catalog does not have and no file was sent for.
@@ -576,4 +574,53 @@ fn a_changed_resave_after_a_lost_answer_says_you_added_it() {
         "{}",
         reply.body
     );
+}
+
+/// The team server applies the library check's rule for 3D model links to
+/// a new part's footprint file too (kicad-parts-da65): a link outside the
+/// Catalog's 3D model folder, or to a Catalog 3D model neither stored nor
+/// sent, is refused plainly and nothing is written.
+#[test]
+fn a_new_part_whose_footprint_links_a_3d_model_outside_the_library_is_refused() {
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    let before = team.read();
+    let link = format!("${{GITPLM_PARTS}}/{MODEL}");
+    let with_footprint = |text: String, model: bool| {
+        let mut command = new_part(IPN);
+        command.uploads = uploads();
+        command.uploads[1] =
+            footprint_upload(text.as_bytes(), FOOTPRINT, "R_0603_New.kicad_mod").unwrap();
+        if !model {
+            command.uploads.truncate(2);
+        }
+        command
+    };
+    for (text, model, says) in [
+        (
+            footprint_file().replace(&link, "${KIPRJMOD}/3D/R_0603_New.stp"),
+            false,
+            "he footprint's 3D model link ${KIPRJMOD}/3D/R_0603_New.stp is outside the Catalog's library, so it only works on one computer",
+        ),
+        (
+            footprint_file(),
+            false,
+            "he footprint links the 3D model 3d-models/g-Resistor_SMD.3dshapes/R_0603_New.step, which the Catalog does not have",
+        ),
+    ] {
+        match submit_create(&editor, &with_footprint(text, model)) {
+            Err(CollabError::Http {
+                status: 400,
+                message,
+            }) => assert!(message.contains(says), "{says}: {message}"),
+            other => panic!("expected 400 saying {says:?}, got {other:?}"),
+        }
+    }
+    assert!(team.read() == before, "nothing was written");
+    // KiCad's own model is fine.
+    let kicad = footprint_file().replace(
+        &link,
+        "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+    );
+    applied(&submit_create(&editor, &with_footprint(kicad, false)).unwrap());
 }

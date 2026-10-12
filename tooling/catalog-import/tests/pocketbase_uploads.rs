@@ -381,7 +381,7 @@ fn a_new_symbol_from_a_file_with_two_symbols() {
 }
 
 #[test]
-fn a_footprint_names_its_3d_model_which_is_sent_or_left_missing() {
+fn a_footprint_names_its_3d_model_which_is_sent_or_the_edit_is_refused() {
     let team = Team::start();
     let editor = team.member("Ada Editor", true);
     let before = team.read();
@@ -400,41 +400,30 @@ fn a_footprint_names_its_3d_model_which_is_sent_or_left_missing() {
     let reference = "g-Resistor_SMD:R_New";
     let upload = footprint_upload(footprint.as_bytes(), reference, "R_New.kicad_mod").unwrap();
 
-    // Without the 3D model, it is saved as a missing 3D model.
-    let reply = submit_edit(
-        &editor,
-        &cad_edit(
-            &before,
-            IPN,
-            &[("Footprint", reference)],
-            vec![upload.clone()],
+    // Without the 3D model, which the Catalog lacks, the edit is refused
+    // (the library check's rule, kicad-parts-da65) and nothing is written.
+    refused(
+        submit_edit(
+            &editor,
+            &cad_edit(
+                &before,
+                IPN,
+                &[("Footprint", reference)],
+                vec![upload.clone()],
+            ),
         ),
-    )
-    .unwrap();
-    let (_, new) = applied(&reply);
-    assert_eq!(
-        new,
-        [("footprint".to_owned(), reference.to_owned(), 1, Some(0))]
+        400,
+        "he footprint links the 3D model 3d-models/g-Resistor_SMD.3dshapes/R_New.step, which the Catalog does not have. Choose that 3D model file too, or fix the link in KiCad's Footprint Editor",
     );
-    let after = team.read();
-    let footprint_item = catalog::CadItemId::new(catalog::CadItemKind::Footprint, reference);
-    let first = after
-        .cad_item_revision(catalog::CadItemRevisionId::new(&footprint_item, 1).as_str())
-        .unwrap();
-    let snapshot: CadItemDetails = serde_json::from_str(&first.snapshot).unwrap();
-    assert_eq!(snapshot.model_references[0].scope, "local");
-    assert!(matches!(
-        &snapshot.model_references[0].target,
-        ModelTarget::Unresolved { status } if status == "missing"
-    ));
+    assert!(team.read() == before, "nothing was written");
 
     // With it (any bytes, here not text), the 3D model is a new CAD item and
-    // the footprint's next revision binds it.
+    // the footprint's first revision binds it.
     let model = vec![0x00, 0xff, 0x10, 0x80];
     let reply = submit_edit(
         &editor,
         &cad_edit(
-            &after,
+            &before,
             OTHER,
             &[("Footprint", reference)],
             vec![upload, model_upload(&model, key, "R_New.stp").unwrap()],
@@ -446,14 +435,15 @@ fn a_footprint_names_its_3d_model_which_is_sent_or_left_missing() {
         new,
         [
             ("model-3d".to_owned(), key.to_owned(), 1, None),
-            ("footprint".to_owned(), reference.to_owned(), 2, Some(1)),
+            ("footprint".to_owned(), reference.to_owned(), 1, Some(0)),
         ]
     );
     let last = team.read();
-    let second = last
-        .cad_item_revision(catalog::CadItemRevisionId::new(&footprint_item, 2).as_str())
+    let footprint_item = catalog::CadItemId::new(catalog::CadItemKind::Footprint, reference);
+    let first = last
+        .cad_item_revision(catalog::CadItemRevisionId::new(&footprint_item, 1).as_str())
         .unwrap();
-    let snapshot: CadItemDetails = serde_json::from_str(&second.snapshot).unwrap();
+    let snapshot: CadItemDetails = serde_json::from_str(&first.snapshot).unwrap();
     let model_item = catalog::CadItemId::new(catalog::CadItemKind::Model3d, key);
     assert!(matches!(
         &snapshot.model_references[0].target,
@@ -463,6 +453,81 @@ fn a_footprint_names_its_3d_model_which_is_sent_or_left_missing() {
         .cad_item_revision(catalog::CadItemRevisionId::new(&model_item, 1).as_str())
         .unwrap();
     assert_eq!(last.blob(&stored_model.blob).unwrap().bytes, model);
+}
+
+/// The team server applies the library check's rule for 3D model links to
+/// every footprint file an edit sends, so an older app or a direct request
+/// cannot store a link that only works on one computer: KiCad's own and
+/// embedded models are fine; any place outside the Catalog's 3D model
+/// folder, or a Catalog 3D model path outside a footprint library's folder,
+/// is refused plainly, and nothing is written.
+#[test]
+fn a_footprint_file_linking_a_3d_model_outside_the_library_is_refused() {
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    let before = team.read();
+    let original = String::from_utf8(team.file(FOOTPRINT_FILE)).unwrap();
+    let kicad = "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step";
+    let linking = |link: &str| {
+        let text = redrawn(original.replace(kicad, link).as_bytes());
+        footprint_upload(&text, FOOTPRINT, "R.kicad_mod").unwrap()
+    };
+    let own = "${GITPLM_PARTS}/3d-models/g-Resistor_SMD.3dshapes/R_0603_1608Metric.step";
+    for (link, says) in [
+        (
+            "${KIPRJMOD}/3D/R_0603.stp".to_owned(),
+            format!("he footprint's 3D model link ${{KIPRJMOD}}/3D/R_0603.stp is outside the Catalog's library, so it only works on one computer. Link the model as {own} in KiCad's Footprint Editor, or remove the link, then choose the file again"),
+        ),
+        (
+            "/home/me/models/R_0603.step".to_owned(),
+            "he footprint's 3D model link /home/me/models/R_0603.step is outside the Catalog's library".to_owned(),
+        ),
+        (
+            "${GITPLM_3DMODELS}/R_0603.step".to_owned(),
+            "he footprint's 3D model link ${GITPLM_3DMODELS}/R_0603.step is outside the Catalog's library".to_owned(),
+        ),
+        (
+            "${KICAD9_3DMODEL_DIR}/../../me/R_0603.step".to_owned(),
+            "he footprint's 3D model link ${KICAD9_3DMODEL_DIR}/../../me/R_0603.step is outside the Catalog's library".to_owned(),
+        ),
+        (
+            "${GITPLM_PARTS}/3d-models/R_0603.step".to_owned(),
+            format!("he footprint links the 3D model 3d-models/R_0603.step, a place where the Catalog keeps no 3D models. Link the model as {own} in KiCad's Footprint Editor, then choose the file again"),
+        ),
+    ] {
+        refused(
+            submit_edit(&editor, &cad_edit(&before, IPN, &[], vec![linking(&link)])),
+            400,
+            &says,
+        );
+    }
+    assert!(team.read() == before, "nothing was written");
+    // KiCad's own and embedded models are fine.
+    let reply = submit_edit(
+        &editor,
+        &cad_edit(
+            &before,
+            IPN,
+            &[],
+            vec![linking("kicad-embed://R_0603.step")],
+        ),
+    )
+    .unwrap();
+    applied(&reply);
+    let after = team.read();
+    let reply = submit_edit(
+        &editor,
+        &cad_edit(
+            &after,
+            IPN,
+            &[],
+            vec![linking(
+                "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+            )],
+        ),
+    )
+    .unwrap();
+    applied(&reply);
 }
 
 #[test]

@@ -682,6 +682,41 @@ function isCatalogModelKey(key) {
   );
 }
 
+// The library check's rule for the 3D model links of a footprint file an
+// edit or a new part sends (kicad-parts-da65, crates/catalog library_check
+// judge_model_link and chosen_footprint_problems): KiCad's own models
+// (${KICAD<n>_3DMODEL_DIR}/..., never with a .. part) and models embedded
+// in the footprint (kicad-embed://...) are fine; a ${GITPLM_PARTS}/3d-models
+// path must be a Catalog 3D model path that the Catalog has or the request
+// sends (`available`); anything else only works on one computer. Gives why
+// the footprint `reference` cannot be saved, or "". Imports are checked by
+// the import tool, not here.
+function modelLinkProblem(reference, link, available) {
+  if (link.startsWith("kicad-embed://")) {
+    return "";
+  }
+  const kicad = /^\$\{KICAD[0-9]+_3DMODEL_DIR\}[/\\](.*)$/.exec(link);
+  if (kicad !== null && !kicad[1].split(/[/\\]/).includes("..")) {
+    return "";
+  }
+  const colon = reference.indexOf(":");
+  const library = reference.substring(0, colon);
+  const name = reference.substring(colon + 1);
+  const own = "${GITPLM_PARTS}/3d-models/" + library + ".3dshapes/" + name + ".step";
+  const ours = link.startsWith("${GITPLM_PARTS}/") || link.startsWith("${GITPLM_PARTS}\\");
+  const candidate = ours ? classifyModelReference(link).candidate : null;
+  if (candidate === null) {
+    return `the footprint's 3D model link ${link} is outside the Catalog's library, so it only works on one computer. Link the model as ${own} in KiCad's Footprint Editor, or remove the link, then choose the file again`;
+  }
+  if (!isCatalogModelKey(candidate)) {
+    return `the footprint links the 3D model ${candidate}, a place where the Catalog keeps no 3D models. Link the model as ${own} in KiCad's Footprint Editor, then choose the file again`;
+  }
+  if (!available(candidate)) {
+    return `the footprint links the 3D model ${candidate}, which the Catalog does not have. Choose that 3D model file too, or fix the link in KiCad's Footprint Editor`;
+  }
+  return "";
+}
+
 // The name after the colon of LIB:NAME, or null.
 function referenceName(reference) {
   const colon = reference.indexOf(":");
@@ -851,6 +886,18 @@ function preparedUploads(txApp, uploads) {
       prepared[upload.kind + "\n" + upload.reference] = prepare(upload, upload.formatVersion, []);
     } else if (upload.kind === "footprint") {
       const read = footprints[upload.reference];
+      for (const link of modelReferences(upload.text)) {
+        const problem = modelLinkProblem(upload.reference, link, (key) => {
+          if (prepared["model-3d\n" + key]) {
+            return true;
+          }
+          const stored = cadItem("model-3d", key);
+          return stored.stored !== null && stored.stored !== undefined && currentCadItemRevision(txApp, stored.id) !== null;
+        });
+        if (problem) {
+          fail(problem);
+        }
+      }
       // The 3D model revisions the footprint's current revision binds,
       // kept while their content is the 3D model's current content.
       const item = cadItem("footprint", upload.reference);
@@ -3272,6 +3319,7 @@ module.exports = {
   publishCreate: publishCreate,
   modelReferences: modelReferences,
   classifyModelReference: classifyModelReference,
+  modelLinkProblem: modelLinkProblem,
   publishArchive: publishArchive,
   publishCsvReview: publishCsvReview,
   excludedFromBom: excludedFromBom,

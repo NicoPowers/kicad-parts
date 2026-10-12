@@ -567,3 +567,26 @@ fn todays_csv_catalog_has_nothing_to_fix() {
         )
     );
 }
+
+#[test]
+fn a_kicad_model_link_climbing_out_of_kicads_folder_is_outside() {
+    for link in [
+        "${KICAD9_3DMODEL_DIR}/../../me/x.step",
+        r"${KICAD10_3DMODEL_DIR}\..\me\x.step",
+        "${KICAD_3DMODEL_DIR}/x.step",
+    ] {
+        assert_eq!(
+            judge_model_link("g-a", "x", link),
+            ModelLink::Outside,
+            "{link}"
+        );
+    }
+    assert_eq!(
+        judge_model_link(
+            "g-a",
+            "x",
+            "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/x.step"
+        ),
+        ModelLink::Kicad
+    );
+}
