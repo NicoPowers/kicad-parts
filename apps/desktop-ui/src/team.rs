@@ -293,7 +293,7 @@ impl<T: Send + Sync + 'static> Clone for RetrySlot<T> {
 impl<T: Send + Sync + 'static> Copy for RetrySlot<T> {}
 
 impl<T: Clone + PartialEq + Send + Sync + 'static> RetrySlot<T> {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             last: StoredValue::new(None),
             opened_id: StoredValue::new(new_correlation_id()),
@@ -301,7 +301,7 @@ impl<T: Clone + PartialEq + Send + Sync + 'static> RetrySlot<T> {
     }
 
     /// Starts afresh, as when its form opens: the next save gets a new ID.
-    fn open(&self) {
+    pub(crate) fn open(&self) {
         self.last.set_value(None);
         self.opened_id.set_value(new_correlation_id());
     }
@@ -309,7 +309,7 @@ impl<T: Clone + PartialEq + Send + Sync + 'static> RetrySlot<T> {
     /// The correlation ID for `request`: the previous one if this is the
     /// same save sent again, the form's own ID for its first save,
     /// otherwise new.
-    fn id_for(&self, request: T) -> String {
+    pub(crate) fn id_for(&self, request: T) -> String {
         let repeated = self.last.with_value(|last| match last {
             Some((previous, id)) if *previous == request => Some(id.clone()),
             _ => None,
@@ -397,7 +397,7 @@ impl TeamUi {
         self.archiving.set(Some((number, archived, current)));
     }
 
-    fn start_editing(&self, draft: Draft) {
+    pub(crate) fn start_editing(&self, draft: Draft) {
         self.edit_attempt.open();
         self.draft.set_value(draft);
         self.close_review();
@@ -409,7 +409,7 @@ impl TeamUi {
     }
 }
 
-fn draft_of(part: &TeamPart) -> Draft {
+pub(crate) fn draft_of(part: &TeamPart) -> Draft {
     Draft {
         ipn: part.ipn.clone(),
         base_details: part.details.number,
@@ -488,7 +488,7 @@ fn choose_category(draft: &mut Draft, category: &TeamCategory) {
 
 /// Scrolls the right-hand column to its top, where the notice or the
 /// conflict is.
-fn scroll_column_to_top() {
+pub(crate) fn scroll_column_to_top() {
     if let Ok(Some(column)) = document().query_selector(".part-fields") {
         let _ = js_sys::Reflect::set(&column, &"scrollTop".into(), &0.into());
     }
@@ -802,7 +802,7 @@ fn NoticeView(ui: TeamUi) -> impl IntoView {
 }
 
 /// `(blank)` for an empty value, so a blank field is visible.
-fn shown(value: &str) -> String {
+pub(crate) fn shown(value: &str) -> String {
     if value.is_empty() {
         "(blank)".to_owned()
     } else {
@@ -1293,7 +1293,7 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
 
 /// The largest file the app sends: a save sends at most 32 MB, and a file
 /// that is not text grows by a third on the way.
-const MAX_FILE_BYTES: f64 = 24.0 * 1024.0 * 1024.0;
+pub(crate) const MAX_FILE_BYTES: f64 = 24.0 * 1024.0 * 1024.0;
 
 /// What a chosen symbol library or footprint file holds, once read.
 #[derive(Clone, Debug, PartialEq)]
@@ -1379,7 +1379,7 @@ async fn read_chosen(
 }
 
 /// Standard base64 with padding.
-fn base64(bytes: &[u8]) -> String {
+pub(crate) fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -1677,7 +1677,7 @@ fn FileArea(ui: TeamUi, index: usize, kind: FileKind, ipn: String) -> impl IntoV
 
 /// The drawing of a chosen symbol or footprint file.
 #[component]
-fn FilePreview(
+pub(crate) fn FilePreview(
     kind: FileKind,
     preview: RwSignal<Option<Result<PreviewOutcome, String>>>,
     previewing: RwSignal<bool>,
@@ -1979,6 +1979,30 @@ fn EntryView(
             <p class="hint">
                 "The current values were kept instead of the CSV values. You are asked again only if the CSV changes."
             </p>
+        }
+        .into_any()
+    } else if entry.revision == Some(1) && !entry.changes.is_empty() {
+        // A part added in the app: where it came from and the files it
+        // was made from.
+        let rows = entry.changes.clone();
+        view! {
+            <p class="hint">"The first revision of this part, made from these files:"</p>
+            <table class="changes" aria-label="Where the part came from">
+                <tbody>
+                    {rows
+                        .into_iter()
+                        .map(|change| {
+                            let value = value_view(&change.label, &change.after);
+                            view! {
+                                <tr>
+                                    <th scope="row">{change.label}</th>
+                                    <td>{value}</td>
+                                </tr>
+                            }
+                        })
+                        .collect_view()}
+                </tbody>
+            </table>
         }
         .into_any()
     } else if entry.revision == Some(1) {
@@ -2510,7 +2534,7 @@ fn kind_words(cad: bool) -> &'static str {
 
 /// Moves keyboard focus to the element with `id` once the view has been
 /// redrawn.
-fn focus_later(id: &str) {
+pub(crate) fn focus_later(id: &str) {
     let id = id.to_owned();
     request_animation_frame(move || {
         use wasm_bindgen::JsCast;

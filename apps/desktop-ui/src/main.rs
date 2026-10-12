@@ -3,18 +3,20 @@
 //! Signed in to the team catalog, a part it has also shows its history and
 //! can be edited there.
 
+mod add_part;
 mod backend;
 mod team;
 
+use add_part::AddPartView;
 use desktop_contract::{
-    AppStatus, KicadStatus, PartDetail, PreviewKind, PreviewOutcome, PreviewProblem,
-    PreviewProblemReason, PreviewRequest, PreviewSet, SearchResponse, TeamPart, TeamSession,
-    TeamStatus, unit_label,
+    AppStatus, KicadStatus, ManufacturerPart, PartDetail, PreviewKind, PreviewOutcome,
+    PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet, SearchResponse, TeamPart,
+    TeamSession, TeamStatus, unit_label,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::time::Duration;
-use team::{TeamBadge, TeamColumn, TeamUi};
+use team::{Notice, TeamBadge, TeamColumn, TeamUi};
 
 /// Results shown per search. The catalog search itself covers every row.
 const RESULT_LIMIT: usize = 200;
@@ -57,6 +59,21 @@ fn App() -> impl IntoView {
     });
 
     let team = RwSignal::new(None::<TeamStatus>);
+    // True while the Add part form is open in the part panel.
+    let adding = RwSignal::new(false);
+    let can_add = Memo::new(move |_| {
+        team.with(|status| {
+            matches!(
+                status.as_ref().map(|status| &status.session),
+                Some(TeamSession::SignedIn { can_edit: true, .. })
+            )
+        })
+    });
+    Effect::new(move |_| {
+        if !can_add.get() {
+            adding.set(false);
+        }
+    });
     let team_changes = Memo::new(move |_| {
         team.with(
             |status| match status.as_ref().map(|status| &status.session) {
@@ -131,9 +148,22 @@ fn App() -> impl IntoView {
             <SettingsProblem status=status />
             <main class="workspace">
                 <section class="search-pane" aria-label="Part search">
-                    <label class="search-label" for="part-search">
-                        "Search parts"
-                    </label>
+                    <div class="search-head">
+                        <label class="search-label" for="part-search">
+                            "Search parts"
+                        </label>
+                        {move || can_add.get().then(|| view! {
+                            <button
+                                type="button"
+                                id="add-part-open"
+                                class="add-part-open"
+                                aria-pressed=move || if adding.get() { "true" } else { "false" }
+                                on:click=move |_| adding.set(true)
+                            >
+                                "Add part"
+                            </button>
+                        })}
+                    </div>
                     <input
                         id="part-search"
                         class="search-input"
@@ -145,9 +175,9 @@ fn App() -> impl IntoView {
                         prop:value=move || query.get()
                         on:input:target=move |event| query.set(event.target().value())
                     />
-                    <ResultList results=results selected=selected />
+                    <ResultList results=results selected=selected adding=adding />
                 </section>
-                <PartPanel selected=selected kicad_epoch=kicad_epoch team=team />
+                <PartPanel selected=selected kicad_epoch=kicad_epoch team=team adding=adding />
             </main>
         </div>
     }
@@ -440,6 +470,7 @@ fn SettingsProblem(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
 fn ResultList(
     results: RwSignal<Load<SearchResponse>>,
     selected: RwSignal<Option<String>>,
+    adding: RwSignal<bool>,
 ) -> impl IntoView {
     view! {
         <p id="result-count" class="result-count" aria-live="polite">
@@ -494,7 +525,10 @@ fn ResultList(
                                     type="button"
                                     class="result"
                                     aria-current=move || is_selected().then_some("true")
-                                    on:click=move |_| selected.set(Some(ipn.clone()))
+                                    on:click=move |_| {
+                                        adding.set(false);
+                                        selected.set(Some(ipn.clone()));
+                                    }
                                 >
                                     <span class="result-title">{title}</span>
                                     <span class="result-ipn">{aside}</span>
@@ -514,6 +548,7 @@ fn PartPanel(
     selected: RwSignal<Option<String>>,
     kicad_epoch: RwSignal<u32>,
     team: RwSignal<Option<TeamStatus>>,
+    adding: RwSignal<bool>,
 ) -> impl IntoView {
     let detail = RwSignal::new(None::<Load<Option<PartDetail>>>);
     let symbol = RwSignal::new(Load::<PreviewOutcome>::Loading);
@@ -530,6 +565,10 @@ fn PartPanel(
     let team_checked = RwSignal::new(false);
     let team_seq = StoredValue::new(0u64);
     let ui = TeamUi::new();
+    // Set by Add part for the part it opens: what to say once it is shown,
+    // and a manufacturer part to add to it in Edit part.
+    let pending_notice = StoredValue::new(None::<String>);
+    let pending_part = StoredValue::new(None::<(String, ManufacturerPart)>);
     // Changes whenever someone saves a Change, a CSV import run finishes
     // (it may find CSV changes to review), or on sign-in and sign-out.
     let team_checkpoint = Memo::new(move |_| {
@@ -591,6 +630,9 @@ fn PartPanel(
         team_part.set(None);
         team_checked.set(false);
         ui.reset();
+        if let Some(message) = pending_notice.try_update_value(Option::take).flatten() {
+            ui.notice.set(Some(Notice::Done(message)));
+        }
         spawn_local(async move {
             let result = backend::part_detail(&ipn).await;
             if seq.get_value() == current {
@@ -645,6 +687,26 @@ fn PartPanel(
                 team_checked.set(true);
             }
         });
+    });
+
+    // Add part's "Add as a manufacturer part of it instead": once the part
+    // is shown, Edit part opens with the manufacturer part added.
+    Effect::new(move |_| {
+        let Some(part) = team_part.get() else {
+            return;
+        };
+        let wanted = pending_part.with_value(|pending| {
+            pending
+                .as_ref()
+                .filter(|(ipn, _)| *ipn == part.ipn)
+                .map(|(_, added)| added.clone())
+        });
+        if let Some(added) = wanted {
+            pending_part.set_value(None);
+            let mut draft = team::draft_of(&part);
+            draft.parts.push(added);
+            ui.start_editing(draft);
+        }
     });
 
     Effect::new(move |_| {
@@ -708,9 +770,23 @@ fn PartPanel(
         }
     });
 
+    let close_adding = Callback::new(move |_| adding.set(false));
+    let added = Callback::new(move |ipn: String| {
+        pending_notice.set_value(Some(format!("Added {ipn} as revision 1.")));
+        adding.set(false);
+        selected.set(Some(ipn));
+    });
+    let open_part = Callback::new(move |(ipn, part): (String, Option<ManufacturerPart>)| {
+        pending_part.set_value(part.map(|part| (ipn.clone(), part)));
+        adding.set(false);
+        selected.set(Some(ipn));
+    });
     view! {
-        <section class="part-panel" aria-label="Selected part">
-            {move || match detail.get() {
+        <section class="part-panel" aria-label=move || if adding.get() { "New part" } else { "Selected part" }>
+            {move || adding.get().then(|| view! {
+                <AddPartView close=close_adding done=added open_part=open_part />
+            })}
+            {move || if adding.get() { ().into_any() } else { match detail.get() {
                 None => view! {
                     <div class="empty-state">
                         <h2>"No part selected"</h2>
@@ -743,7 +819,7 @@ fn PartPanel(
                     />
                 }
                 .into_any(),
-            }}
+            }}}
         </section>
     }
 }
