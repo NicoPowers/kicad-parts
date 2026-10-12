@@ -7,6 +7,8 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import {
+  FOOTPRINT,
+  SYMBOL,
   assertAccessible,
   launchApp,
   record,
@@ -16,6 +18,7 @@ import {
   startTeamServer,
   textOf,
   waitForLiveUpdates,
+  waitForPreviewImages,
   waitForText,
 } from '../harness.mjs';
 
@@ -104,6 +107,9 @@ describe('team catalog: categories', () => {
     await selectResult(browser, MPN);
     await waitForTeamPart();
     await waitForText(browser, CATEGORY, 'Category: Resistors');
+    // The drawings finish before the screenshot below.
+    await waitForPreviewImages(browser, SYMBOL);
+    await waitForPreviewImages(browser, FOOTPRINT);
   });
 
   it('chooses another category in Edit part, keeping the IPN and every field', async () => {
