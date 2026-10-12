@@ -420,13 +420,28 @@ fn a_model_no_footprint_links_is_not_in_the_catalog_yet() {
 
 #[test]
 fn similar_names_contain_each_other_or_are_a_few_edits_apart() {
-    let names = ["IC_TP4333", "TP4056", "LM358", "R"];
+    let names = ["IC_TP4333", "TP4056", "LM358", "R", "Crystal_SMD"];
     let similar = |name: &str| similar_name(name, names.iter().copied());
     assert_eq!(similar("TP4333"), Some("IC_TP4333"));
-    assert_eq!(similar("LM385"), Some("LM358"));
     assert_eq!(similar("lm358"), Some("LM358"));
-    assert_eq!(similar("TP4057"), Some("TP4056"));
+    assert_eq!(similar("Crystal_SDM"), Some("Crystal_SMD"));
     assert_eq!(similar("XYZ123"), None);
+    // A changed or added digit names another part or package, not a typo.
+    assert_eq!(similar("LM385"), None);
+    assert_eq!(similar("TP4057"), None);
+    for (name, other) in [
+        ("R_0402", "R_0603"),
+        ("C_0805", "C_0603"),
+        ("SOT-23", "SOT-223"),
+        ("SOT-223", "SOT-23"),
+    ] {
+        assert_eq!(similar_name(name, [other].into_iter()), None, "{name}");
+    }
+    // One name containing the other still counts.
+    assert_eq!(
+        similar_name("R_0402", ["R_0402_1005Metric"].into_iter()),
+        Some("R_0402_1005Metric")
+    );
     // A short name alone is no clue.
     assert_eq!(similar_name("RX", ["R_US_LONG"].into_iter()), None);
 }
@@ -589,4 +604,21 @@ fn a_kicad_model_link_climbing_out_of_kicads_folder_is_outside() {
         ),
         ModelLink::Kicad
     );
+}
+
+#[test]
+fn power_symbols_are_never_listed_as_not_in_the_catalog() {
+    let power =
+        "\t(symbol \"GND\"\n\t\t(power)\n\t\t(property \"Reference\" \"#PWR\" (at 0 0 0))\n\t)\n";
+    let root = small_catalog(&[(
+        "symbols/g-pwr.kicad_sym",
+        &library(&[power.to_owned(), symbol("NOT_POWER", "")]),
+    )]);
+    let found = check_folder(root.path(), &imported(root.path()), None).unwrap();
+    let listed: Vec<&str> = found
+        .in_group(Group::NotInCatalog)
+        .map(|f| f.item.as_str())
+        .collect();
+    assert!(listed.contains(&"g-pwr:NOT_POWER"), "{listed:?}");
+    assert!(!listed.contains(&"g-pwr:GND"), "{listed:?}");
 }

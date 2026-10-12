@@ -304,6 +304,8 @@ pub struct LibrarySymbol {
     pub name: String,
     /// The symbol's own Footprint property, blank if it has none.
     pub footprint: String,
+    /// A power symbol, `(power)`, such as GND: it never becomes a part.
+    pub power: bool,
 }
 
 impl LibrarySymbol {
@@ -425,7 +427,9 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
     // Symbols nobody uses yet, and symbols naming a footprint nobody has.
     for symbol in &libraries.symbols {
         let reference = symbol.reference();
-        if !used.contains_key(&(CadItemKind::Symbol, reference.as_str()))
+        // A power symbol (GND, VCC...) never becomes a part.
+        if !symbol.power
+            && !used.contains_key(&(CadItemKind::Symbol, reference.as_str()))
             && !known.has(CadItemKind::Symbol, &reference)
         {
             findings.push(not_in_catalog(&reference, symbol.file(), "part"));
@@ -782,7 +786,9 @@ pub fn chosen_footprint_problems(
 
 /// The name in `candidates` most like `name`: one contains the other
 /// (ignoring case, the shorter at least 3 characters long), or they are at
-/// most 2 edits apart. The closest wins, then the first in name order.
+/// most 2 edits apart with the same digits in the same order (a changed or
+/// added digit names another part or package, such as R_0402 and R_0603,
+/// not a typo). The closest wins, then the first in name order.
 pub fn similar_name<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     let wanted = name.to_lowercase();
     let mut best: Option<(usize, &str)> = None;
@@ -798,7 +804,13 @@ pub fn similar_name<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -
             (&lower, &wanted)
         };
         let contains = short.chars().count() >= 3 && long.contains(short.as_str());
-        if distance > 2 && !contains {
+        let digits = |text: &str| {
+            text.chars()
+                .filter(char::is_ascii_digit)
+                .collect::<String>()
+        };
+        let typo = distance <= 2 && digits(&wanted) == digits(&lower);
+        if !typo && !contains {
             continue;
         }
         let better = match best {

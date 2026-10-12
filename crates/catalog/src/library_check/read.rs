@@ -8,7 +8,7 @@ use crate::cad_item::CadItemKind;
 use crate::csv_import::parse_csv;
 use crate::hash::sha256_hex;
 use kicad_integration::footprint_choices;
-use kicad_integration::library_file::{FootprintFile, SymbolLibrary, model_references};
+use kicad_integration::library_file::{FootprintFile, Sexp, SymbolLibrary, model_references};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -77,17 +77,19 @@ pub fn read_libraries(root: &Path) -> Libraries {
         match parsed {
             Ok((bytes, parsed)) => {
                 for entry in parsed.entries {
-                    let footprint = kicad_integration::library_file::symbol_properties(
-                        &bytes[entry.span.clone()],
-                    )
-                    .into_iter()
-                    .find(|(name, _)| name == "Footprint")
-                    .map(|(_, value)| value)
-                    .unwrap_or_default();
+                    let text = &bytes[entry.span.clone()];
+                    let footprint = kicad_integration::library_file::symbol_properties(text)
+                        .into_iter()
+                        .find(|(name, _)| name == "Footprint")
+                        .map(|(_, value)| value)
+                        .unwrap_or_default();
+                    let power =
+                        Sexp::parse(text).is_ok_and(|tree| tree.children("power").next().is_some());
                     libraries.symbols.push(LibrarySymbol {
                         library: library.clone(),
                         name: entry.name,
                         footprint,
+                        power,
                     });
                 }
             }
