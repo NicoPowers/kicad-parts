@@ -3064,6 +3064,23 @@ function publishCsvReview(e) {
           ) {
             fail(`the CSV's ${name} is the same as the part's`);
           }
+          // A reference the CSV catalog cannot find never replaces the same
+          // reference the Catalog has (such as a symbol added in this app,
+          // which the CSV catalog's library file lacks): KiCad would lose it.
+          for (const reference of csvReferences) {
+            const ours = storedReferences.find((item) => item.reference === reference.reference);
+            if (
+              reference.target &&
+              reference.target.kind === "unresolved" &&
+              ours &&
+              ours.target &&
+              ours.target.kind === "cad-item-revision"
+            ) {
+              fail(
+                `the CSV catalog does not have the ${role} ${reference.reference}, which the Catalog has; keep the current ${role}`,
+              );
+            }
+          }
           // Each CAD item revision the CSV named must be stored and be what
           // the problem recorded.
           for (const reference of csvReferences) {

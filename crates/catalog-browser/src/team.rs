@@ -2156,6 +2156,29 @@ fn cad_rows(
         let changed_in_csv = before.is_none_or(|before| {
             before.field(name) != Some(theirs) || references(before) != their_references
         });
+        // A reference the CSV catalog cannot find, which the Catalog has
+        // (such as a symbol added in this app): accepting it would lose it,
+        // so it can only be kept.
+        let lost = their_references.iter().find(|theirs| {
+            matches!(theirs.target, CadReferenceTarget::Unresolved { .. })
+                && our_references.iter().any(|ours| {
+                    ours.reference == theirs.reference
+                        && matches!(ours.target, CadReferenceTarget::CadItemRevision { .. })
+                })
+        });
+        if let Some(lost) = lost {
+            rows.push(CsvChangeRow {
+                field: name.to_owned(),
+                now: now_text,
+                csv: format!(
+                    "The CSV catalog does not have {}. It cannot be accepted here, because the Catalog has it.",
+                    lost.reference
+                ),
+                changed_in_csv,
+                keep_only: true,
+            });
+            continue;
+        }
         rows.push(CsvChangeRow {
             field: name.to_owned(),
             now: now_text,
