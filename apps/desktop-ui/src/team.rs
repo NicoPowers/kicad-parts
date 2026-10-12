@@ -322,6 +322,17 @@ impl TeamUi {
         focus_later("csv-review-heading");
     }
 
+    /// Opens the archive form. Its first save gets a new correlation ID, so
+    /// archiving the same revision for the same reason as an earlier save
+    /// (after someone else unarchived it) is not taken for that save.
+    fn start_archiving(&self, number: u32, archived: bool, current: u32) {
+        self.attempt.set_value(None);
+        self.opened_id.set_value(new_correlation_id());
+        self.notice.set(None);
+        self.archive_reason.set(String::new());
+        self.archiving.set(Some((number, archived, current)));
+    }
+
     fn start_editing(&self, draft: Draft) {
         self.attempt.set_value(None);
         self.opened_id.set_value(new_correlation_id());
@@ -1299,9 +1310,7 @@ fn ArchiveSection(
                     class="archive-open"
                     id=opener
                     on:click=move |_| {
-                        ui.notice.set(None);
-                        ui.archive_reason.set(String::new());
-                        ui.archiving.set(Some((number, !archived, current)));
+                        ui.start_archiving(number, !archived, current);
                         focus_later("archive-reason");
                     }
                 >
