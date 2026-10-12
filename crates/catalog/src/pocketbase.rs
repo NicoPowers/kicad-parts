@@ -1242,6 +1242,10 @@ pub enum CreateOutcome {
         correlation_id: String,
         ipn: String,
         message: String,
+        /// The caller added that part in the app: a save whose answer was
+        /// lost, sent again with changes.
+        #[serde(default)]
+        added_by_you: bool,
     },
     #[serde(rename_all = "camelCase")]
     CorrelationReused {

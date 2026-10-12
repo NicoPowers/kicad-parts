@@ -32,10 +32,13 @@
 //         revision: { id, number, snapshotSha256 }, cadItemRevisions,
 //         newCadItemRevisions: [{ kind, key, number, id, otherParts }],
 //         rememberedMatches: [{ clue, value }] }
-//   409 { outcome: "ipn_taken", correlationId, ipn, message }
-//         the Catalog already has a part with that IPN; nothing is written
+//   409 { outcome: "ipn_taken", correlationId, ipn, message, addedByYou }
+//         the Catalog already has a part with that IPN; nothing is written.
+//         addedByYou is true when the caller added that part in the app
+//         (a save whose answer was lost, then changed and sent again)
 //   409 { outcome: "correlation_reused", correlationId, message }
-//   400 bad input (including a malformed IPN, an unknown category, fields
+//   400 bad input (including a malformed IPN, an IPN whose prefix is not
+//       the category's IPN prefix, an unknown category, fields
 //       that are not the category's, an unsafe name, a symbol or footprint
 //       the Catalog does not have and no file was sent for, a file that is
 //       wrong or not used, or a file named like a CAD item the Catalog has

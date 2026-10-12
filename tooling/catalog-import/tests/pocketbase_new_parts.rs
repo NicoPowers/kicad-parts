@@ -383,6 +383,11 @@ fn a_new_part_is_refused_plainly_and_nothing_is_written() {
             "is not an IPN",
             Box::new(|body| body["ipn"] = json!("RES-1-1")),
         ),
+        // A category with an IPN prefix numbers its parts with it.
+        (
+            "has an IPN starting with RES-, not CAP-0001-0001",
+            Box::new(|body| body["ipn"] = json!("CAP-0001-0001")),
+        ),
         (
             "is not in the Catalog",
             Box::new(|body| body["category"] = json!("nope")),
@@ -475,4 +480,100 @@ fn a_correlation_id_is_never_reused_for_another_new_part() {
         reused.body
     );
     assert_eq!(team.read().counts(), saved.counts());
+}
+
+#[test]
+fn signing_in_is_needed() {
+    let team = Team::start();
+    let anonymous = PocketBaseClient::new(team.server.url());
+    match submit_create(&anonymous, &new_part(IPN)) {
+        Err(CollabError::Unauthorized(_)) => {}
+        other => panic!("expected 401, got {other:?}"),
+    }
+}
+
+#[test]
+fn two_saves_of_one_ipn_at_once_add_one_part_and_the_other_can_retry() {
+    let team = Team::start();
+    let ada = team.member("Ada Editor", true);
+    let bob = team.member("Bob Editor", true);
+    let replies: Vec<CreateReply> = std::thread::scope(|scope| {
+        let saves: Vec<_> = [&ada, &bob]
+            .into_iter()
+            .map(|client| scope.spawn(move || submit_create(client, &new_part(IPN)).unwrap()))
+            .collect();
+        saves.into_iter().map(|save| save.join().unwrap()).collect()
+    });
+    let applied_count = replies
+        .iter()
+        .filter(|reply| matches!(reply.outcome, CreateOutcome::Applied { .. }))
+        .count();
+    let taken: Vec<&CreateReply> = replies
+        .iter()
+        .filter(|reply| matches!(reply.outcome, CreateOutcome::IpnTaken { .. }))
+        .collect();
+    assert_eq!((applied_count, taken.len()), (1, 1), "{replies:?}");
+    // The one who lost did not add it, so the app offers the next IPN.
+    assert!(matches!(
+        taken[0].outcome,
+        CreateOutcome::IpnTaken {
+            added_by_you: false,
+            ..
+        }
+    ));
+    // Retrying with the next free IPN works, using the files the first
+    // save stored.
+    let mut retry = new_part("RES-0002-0001");
+    retry.uploads = Vec::new();
+    applied(&submit_create(&ada, &retry).unwrap());
+    assert!(team.read().part("RES-0002-0001").is_some());
+}
+
+#[test]
+fn a_changed_resave_after_a_lost_answer_says_you_added_it() {
+    let team = Team::start();
+    let ada = team.member("Ada Editor", true);
+    let bob = team.member("Bob Editor", true);
+    applied(&submit_create(&ada, &new_part(IPN)).unwrap());
+    // The answer was lost; Ada changes the reason and saves again.
+    let mut again = new_part(IPN);
+    again.reason = "A new 0603 resistor, 1k".into();
+    let reply = submit_create(&ada, &again).unwrap();
+    assert!(
+        matches!(
+            reply.outcome,
+            CreateOutcome::IpnTaken {
+                added_by_you: true,
+                ..
+            }
+        ),
+        "{}",
+        reply.body
+    );
+    // Someone else taking the same IPN is told it is taken, not theirs.
+    let reply = submit_create(&bob, &new_part(IPN)).unwrap();
+    assert!(
+        matches!(
+            reply.outcome,
+            CreateOutcome::IpnTaken {
+                added_by_you: false,
+                ..
+            }
+        ),
+        "{}",
+        reply.body
+    );
+    // An imported part is never "yours".
+    let reply = submit_create(&ada, &new_part("RES-0000-0470")).unwrap();
+    assert!(
+        matches!(
+            reply.outcome,
+            CreateOutcome::IpnTaken {
+                added_by_you: false,
+                ..
+            }
+        ),
+        "{}",
+        reply.body
+    );
 }

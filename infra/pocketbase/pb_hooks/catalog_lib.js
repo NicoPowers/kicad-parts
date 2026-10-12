@@ -2424,7 +2424,13 @@ function publishCreate(e) {
     }
 
     const partId = deriveId("part", request.ipn);
-    if (recordById(txApp, "catalog_parts", partId) || first("catalog_parts", "ipn = {:ipn}", { ipn: request.ipn })) {
+    const existing =
+      recordById(txApp, "catalog_parts", partId) || first("catalog_parts", "ipn = {:ipn}", { ipn: request.ipn });
+    if (existing) {
+      // Who added it: when it is the caller (a save whose answer was lost,
+      // then changed and sent again), the app offers to open it instead of
+      // saving the part twice under another IPN.
+      const added = recordById(txApp, "catalog_changes", existing.getString("first_change"));
       reply = {
         status: 409,
         body: {
@@ -2432,6 +2438,7 @@ function publishCreate(e) {
           correlationId: request.correlationId,
           ipn: request.ipn,
           message: `the Catalog already has a part with the IPN ${request.ipn}; an IPN is never reused`,
+          addedByYou: !!added && added.getString("kind") === CHANGE_KINDS.create && added.getString("actor") === actor.id,
         },
       };
       return;
@@ -2441,6 +2448,11 @@ function publishCreate(e) {
       throw new BadRequestError(`the category ${request.category} is not in the Catalog`);
     }
     const categoryDetails = JSON.parse(categoryRevision.getString("snapshot"));
+    // A category with an IPN prefix numbers its parts with it.
+    const prefix = categoryDetails.ipn_prefix || "";
+    if (prefix && request.ipn.substring(0, 3) !== prefix) {
+      fail(`a part in ${categoryDetails.name} has an IPN starting with ${prefix}-, not ${request.ipn}`);
+    }
     const refuse = (what, problem) => {
       if (problem) {
         throw new BadRequestError(`the ${what} of ${request.ipn} cannot be saved: ${problem}`);

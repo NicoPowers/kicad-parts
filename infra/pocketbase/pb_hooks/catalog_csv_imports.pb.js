@@ -106,7 +106,7 @@
 //   problem (csv-cad-matches-archived-revision) keeps the row, on every run;
 // - a part whose details and CAD are both unchanged stays as it is. If its
 //   source row changed anyway (for example its supplier data), or the part
-//   was last saved by an edit, so there is no CSV row to compare with, an
+//   was last saved in the app (added or edited), so there is no CSV row to compare with, an
 //   import problem keeps the new row;
 // - a part that an earlier import run of this CSV file made, but no row
 //   makes now, gets an import problem, found again by every later run;
@@ -1076,7 +1076,7 @@ routerAdd(
                 part.ipn,
                 row.path || "",
                 location,
-                `${part.ipn} was last saved by an edit, so there is no CSV row to compare the row with; the row is kept here and nothing is saved`,
+                `${part.ipn} was last saved in the app (added or edited there), so there is no CSV row to compare the row with; the row is kept here and nothing is saved`,
                 JSON.stringify({
                   current_revision_number: revisionNumber,
                   current_details_number: detailsNumber,
@@ -1130,7 +1130,7 @@ routerAdd(
                 part.ipn,
                 row.path || "",
                 location,
-                `the part details in the row of ${part.ipn} differ from its current details, which were saved by an edit, not a CSV import; the row is kept here and the details are left as they are`,
+                `the part details in the row of ${part.ipn} differ from its current details, which were saved in the app (added or edited there), not by a CSV import; the row is kept here and the details are left as they are`,
                 JSON.stringify({
                   current_details_number: detailsNumber,
                   current_details_change_kind: detailsSavedBy.kind,
@@ -1190,7 +1190,7 @@ routerAdd(
                 part.ipn,
                 row.path || "",
                 location,
-                `the symbols, footprints or 3D models that the row of ${part.ipn} uses differ from its current revision ${revisionNumber}, which was saved by an edit, not a CSV import; the row is kept here and the current revision is left as it is`,
+                `the symbols, footprints or 3D models that the row of ${part.ipn} uses differ from its current revision ${revisionNumber}, which was saved in the app (added or edited there), not by a CSV import; the row is kept here and the current revision is left as it is`,
                 JSON.stringify({
                   current_revision_number: revisionNumber,
                   current_revision_change_kind: revisionSavedBy.kind,
