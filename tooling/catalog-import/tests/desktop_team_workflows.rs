@@ -384,8 +384,9 @@ fn an_added_part_is_edited_moved_given_a_file_and_archived() {
     assert_eq!(part.details.category, "res");
     assert_eq!(part.ipn, "CAP-0004-0001");
 
-    // Replace its footprint (made by Add part) with a corrected file.
-    let corrected = footprint_named("C_0603_New").replacen(
+    // Replace its footprint (made by Add part) with a corrected file, its
+    // 3D model linked to the Catalog's folder as Add part saved it.
+    let corrected = stored_footprint().replacen(
         "\t(fp_line",
         "\t(fp_circle (center 0 0) (end 2 0) (stroke (width 0.3) (type solid)) (fill no) (layer \"F.SilkS\"))\n\t(fp_line",
         1,
@@ -1437,7 +1438,7 @@ fn a_conflict_while_a_file_is_chosen() {
         request.files = vec![team_file(
             FileKind::Footprint,
             "C_0603_New.kicad_mod",
-            footprint_named("C_0603_New")
+            stored_footprint()
                 .replacen(
                     "(tags",
                     &format!(
@@ -1596,4 +1597,103 @@ fn model_file_names_with_odd_characters() {
             "{model}: {saved:?}"
         );
     }
+}
+
+/// The library check's rule for 3D model links (kicad-parts-da65) in Add
+/// part and Edit part: a download's link to its vendor's folder is left
+/// out when its 3D model is not used, and a footprint file whose link only
+/// works on one computer, or names a 3D model the Catalog lacks, is refused
+/// before anything is sent.
+#[test]
+fn a_3d_model_link_outside_the_library_never_reaches_the_catalog() {
+    let team = Team::start();
+    // Add part without the download's 3D model: the footprint's link to
+    // ${KIPRJMOD}/3D/... is left out, and the history says so.
+    let reading = team.read(&download(MPN));
+    let mut request = new_part(&reading, "CAP-0004-0001", "cap");
+    request.files.retain(|file| file.kind != FileKind::Model3d);
+    let PublishResult::Added { part } = team.add(&team.team, request) else {
+        panic!("not added");
+    };
+    let stored = catalog::pocketbase::read_back(&team.admin).unwrap();
+    let footprint = stored
+        .cad_items
+        .iter()
+        .find(|item| item.key == NEW_FOOTPRINT)
+        .unwrap();
+    let revision = stored
+        .cad_item_revisions
+        .iter()
+        .find(|revision| revision.cad_item == footprint.id)
+        .unwrap();
+    assert!(
+        revision.snapshot.contains("\"model_references\":[]"),
+        "{}",
+        revision.snapshot
+    );
+    assert!(
+        revision
+            .source
+            .contains("(3D model link to the download's folder left out)"),
+        "{}",
+        revision.source
+    );
+
+    // Edit part with a footprint file linking a model in a home folder:
+    // refused, plainly, and nothing is saved.
+    let with_link = |link: &str, model: Option<&str>| {
+        let mut request = opened(&part, "Corrected footprint");
+        let text = catalog::download::link_model(
+            &footprint_named("C_0603_New").replacen("(tags", "(descr \"corrected\")\n\t(tags", 1),
+            link,
+            "C_0603_New.stp",
+        );
+        request.files = vec![team_file(
+            FileKind::Footprint,
+            "C_0603_New.kicad_mod",
+            text.as_bytes(),
+            None,
+        )];
+        if let Some(key) = model {
+            let mut file = team_file(FileKind::Model3d, "C_0603_New.step", MODEL, None);
+            file.model_key = Some(key.to_owned());
+            request.files.push(file);
+        }
+        request
+    };
+    let home = team
+        .team
+        .edit(with_link("/home/me/models/C_0603_New.step", None))
+        .unwrap();
+    assert_eq!(
+        home,
+        PublishResult::Refused {
+            message: "The footprint's 3D model link /home/me/models/C_0603_New.step is outside the Catalog's library, so it only works on one computer. Link the model as ${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_New.step in KiCad's Footprint Editor, or remove the link, then choose the file again. Nothing was saved.".into()
+        }
+    );
+    // Linked into the Catalog's folder, but the 3D model is neither in the
+    // Catalog nor chosen: refused too.
+    let key = "3d-models/g-Capacitor_SMD.3dshapes/C_0603_New.step";
+    let link = format!("${{GITPLM_PARTS}}/{key}");
+    let PublishResult::Refused { message } = team.team.edit(with_link(&link, None)).unwrap() else {
+        panic!("not refused");
+    };
+    assert!(
+        message.contains("which the Catalog does not have. Choose that 3D model file too"),
+        "{message}"
+    );
+    let unchanged = team.team.part("CAP-0004-0001").unwrap().unwrap();
+    assert_eq!(unchanged.revision.number, 1);
+    // With the 3D model file chosen too, it saves.
+    let saved = team.team.edit(with_link(&link, Some(key))).unwrap();
+    assert!(
+        matches!(
+            saved,
+            PublishResult::Saved {
+                revision: Some(2),
+                ..
+            }
+        ),
+        "{saved:?}"
+    );
 }

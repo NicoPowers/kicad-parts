@@ -6,9 +6,11 @@
 //! report against the oracle. Each import does what an import into the
 //! team catalog does: it refuses files with changes that are not committed
 //! unless `--allow-uncommitted-changes` is given, reads the team catalog,
-//! refuses an older checkout and expects each part's current revision. The
-//! PocketBase and its data are deleted when the command ends; the
-//! repository is only read. Exits 1 if anything was lost.
+//! refuses an older checkout, runs the library check (printed to standard
+//! error; an error in a file the import uses stops it before anything is
+//! sent) and expects each part's current revision. The PocketBase and its
+//! data are deleted when the command ends; the repository is only read.
+//! Exits 1 if anything was lost.
 //!
 //! `catalog-import local-team-server [--desktop | --json] [--csv FILES]`
 //!
@@ -29,7 +31,10 @@
 //!   `reimport` it reads imports the resistors again, as an importer would
 //!   after reading the team catalog, and prints one JSON line with the
 //!   outcome (`{"reimported":"nothing_changed"}`); `reimport <folder>`
-//!   imports them from a copy of the CSV catalog in that folder instead;
+//!   imports them from a copy of the CSV catalog in that folder instead.
+//!   Each reimport runs the library check like a real import, so a copy
+//!   with a new footprint whose 3D model link is outside the library is
+//!   refused (`{"reimported":"refused: The library check found ..."}`);
 //! - otherwise, stops when you press Enter.
 //!
 //! The team server is thrown away when it stops, so its imports are allowed
@@ -47,6 +52,7 @@
 //! including on Ctrl+C; a run killed outright is deleted by the next run.
 //! Nothing else is written.
 
+use catalog::library_check::Group;
 use catalog::pocketbase::{
     ImportCommand, ImportOutcome, read_back, read_import_state, submit_import,
 };
@@ -107,7 +113,10 @@ fn pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let (server, admin, _superuser) = services::start(&services::repository_root(), state.path())?;
     // Each import reads the team catalog first, as a real import does: it
     // refuses an older checkout and expects each part's current revision.
-    let first_command = services::prepare_import(&admin, &root, &import, &reason, allow)?;
+    let (first_command, check) =
+        services::prepare_checked_import(&admin, &root, &import, &reason, allow)?;
+    // Standard output is the JSON summary; the check is for the person.
+    eprintln!("{}", check.report());
     let first = submit_import(&admin, &first_command)?;
     let after_first = read_back(&admin)?;
     // Its correlation ID differs from the first one's because it expects
@@ -119,6 +128,12 @@ fn pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let report = catalog_import::report(&oracle, csv_file, &readback, &root);
     let mut summary = report.summary();
+    summary["library_check"] = serde_json::json!({
+        "to_fix": check.count(Group::ToFix),
+        "not_in_catalog": check.count(Group::NotInCatalog),
+        "worth_a_look": check.count(Group::WorthALook),
+        "clean_up": check.count(Group::CleanUp),
+    });
     summary["import"] = serde_json::json!({
         "first": serde_json::from_str::<serde_json::Value>(&first.body)?,
         "second": serde_json::from_str::<serde_json::Value>(&second.body)?,
@@ -276,9 +291,10 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                     let Ok(line) = line else { break };
                     if let Some(from) = reimport_command(&line) {
                         match reimport_from(&admin, &import, from) {
-                            Ok(outcome) => {
-                                println!("Imported again: {}.", outcome.replace('_', " "))
-                            }
+                            Ok(outcome) => match outcome.strip_prefix("refused: ") {
+                                Some(why) => println!("The import was refused. {why}"),
+                                None => println!("Imported again: {}.", outcome.replace('_', " ")),
+                            },
                             Err(error) => println!("The import failed: {error}"),
                         }
                     } else if line.trim().is_empty() {
@@ -383,19 +399,24 @@ fn reimport_from(
     folder: Option<PathBuf>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     match folder {
-        None => reimport(admin, import),
-        Some(folder) => reimport(admin, &services::plan(&folder, "g-res")?),
+        None => reimport(admin, import, &services::repository_root()),
+        Some(folder) => reimport(admin, &services::plan(&folder, "g-res")?, &folder),
     }
 }
 
 /// Imports the resistors again as an importer would after reading the team
 /// catalog, and names the outcome. Uncommitted changes are allowed, because
-/// this team server is thrown away when it stops.
+/// this team server is thrown away when it stops; the library check runs as
+/// for any import, so an error in a file it uses refuses it.
 fn reimport(
     admin: &collaboration::PocketBaseClient,
     import: &catalog::CsvImport,
+    folder: &std::path::Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let state = read_import_state(admin)?;
+    if let Err(refusal) = services::check_libraries(folder, import, &state) {
+        return Ok(format!("refused: {refusal}"));
+    }
     let command = ImportCommand::new(import, "Import the resistors from database/g-res.csv")
         .expecting(&state)
         .allowing_uncommitted_changes(services::has_uncommitted_changes(import));

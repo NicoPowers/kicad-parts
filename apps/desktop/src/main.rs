@@ -7,11 +7,11 @@
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
-    AppStatus, FilePreviewRequest, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
-    SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
-    TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest,
-    TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamSameMpn,
-    TeamStatus,
+    AppStatus, FilePreviewRequest, LibraryCheckView, PartDetail, PreviewOutcome, PreviewRequest,
+    PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest,
+    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
+    TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
+    TeamSameMpn, TeamStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -394,6 +394,16 @@ async fn team_add_part(
     blocking(move || browser.add_part(request, &team)).await?
 }
 
+#[tauri::command]
+async fn team_library_check(
+    browser: State<'_, Browser>,
+    team: State<'_, Team>,
+) -> Result<Option<LibraryCheckView>, String> {
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    // Worked out again only when the team catalog changed.
+    blocking(move || browser.library_check(&team)).await?
+}
+
 fn main() {
     let options = match LaunchOptions::parse(std::env::args_os().skip(1)) {
         Ok(options) => options,
@@ -473,6 +483,7 @@ fn main() {
             team_check_ipn,
             team_add_part,
             team_check_mpn,
+            team_library_check,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -582,6 +593,7 @@ mod tests {
             command::TEAM_CHECK_IPN,
             command::TEAM_ADD_PART,
             command::TEAM_CHECK_MPN,
+            command::TEAM_LIBRARY_CHECK,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

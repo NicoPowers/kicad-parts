@@ -5,15 +5,16 @@
 //! else, so everything here is testable without a window.
 
 mod add_part;
+mod library;
 pub mod team;
 
 use base64::Engine;
 use csv_catalog::{CatalogPart, CsvCatalog};
 use desktop_contract::{
-    AppStatus, CatalogStatus, Field, FileKind, FilePreviewRequest, KicadStatus, PartDetail,
-    PartSummary, PreviewImage, PreviewKind, PreviewOutcome, PreviewProblem, PreviewProblemReason,
-    PreviewRequest, PreviewSet, PublishResult, SearchResponse, TeamDownload, TeamDownloadRequest,
-    TeamIpnCheck, TeamNewPartRequest,
+    AppStatus, CatalogStatus, Field, FileKind, FilePreviewRequest, KicadStatus, LibraryCheckView,
+    PartDetail, PartSummary, PreviewImage, PreviewKind, PreviewOutcome, PreviewProblem,
+    PreviewProblemReason, PreviewRequest, PreviewSet, PublishResult, SearchResponse, TeamDownload,
+    TeamDownloadRequest, TeamIpnCheck, TeamNewPartRequest,
 };
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use kicad_integration::{
@@ -69,6 +70,8 @@ pub struct CatalogBrowser {
     footprints: OnceLock<Vec<add_part::LocalFootprint>>,
     /// The CSV catalog's IPNs, read the first time they are needed.
     csv_ipns: OnceLock<BTreeSet<String>>,
+    /// The last library check and what it was worked out for.
+    library_check: library::Cached,
 }
 
 impl CatalogBrowser {
@@ -89,6 +92,7 @@ impl CatalogBrowser {
         Self {
             footprints: OnceLock::new(),
             csv_ipns: OnceLock::new(),
+            library_check: library::Cached::default(),
             previews,
             catalog,
             kicad: RwLock::new(KicadState {
@@ -290,6 +294,23 @@ impl CatalogBrowser {
                 kicad_share,
             },
         )
+    }
+
+    /// The library check (kicad-parts-da65) of this app's CSV catalog folder
+    /// against the team catalog, for someone who can edit; `None` while
+    /// signed out or for someone who can only view. It is worked out once
+    /// per change of the team catalog (a new Change, a finished import or
+    /// another person signing in) and kept until then.
+    pub fn library_check(&self, team: &TeamCatalog) -> Result<Option<LibraryCheckView>, String> {
+        let kicad_share = {
+            let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
+            match &kicad.discovery {
+                Discovery::Ready(install) => install.share_dir.clone(),
+                _ => None,
+            }
+        };
+        self.library_check
+            .get(team, &self.config.catalog_root, kicad_share.as_deref())
     }
 
     /// Whether `ipn` can be a new part's IPN.

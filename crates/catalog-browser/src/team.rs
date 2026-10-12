@@ -16,6 +16,8 @@
 //! publishing a Change) or after catching up.
 
 use crate::PartValues;
+use catalog::library_check::{chosen_footprint_problems, judge_model_link};
+use catalog::pocketbase::UploadRole;
 use catalog::pocketbase::{
     ArchiveCommand, ArchiveOutcome, CSV_CAD_DIFFERS, CSV_CAD_ITEM_KEPT, CSV_DETAILS_DIFFER,
     CadUpload, ConflictingRecord, CreateCommand, CreateOutcome, CsvReviewCommand, CsvReviewOutcome,
@@ -395,6 +397,9 @@ impl TeamCatalog {
             Ok(uploads) => uploads,
             Err(message) => return Ok(PublishResult::Refused { message }),
         };
+        if let Some(message) = model_link_refusal(&client, &uploads)? {
+            return Ok(PublishResult::Refused { message });
+        }
         // A new category: the part keeps every field it had and gains the
         // new category's fields it lacks (blank unless typed in the form).
         let category = match request.category.as_str() {
@@ -605,6 +610,30 @@ impl TeamCatalog {
             .collect()
     }
 
+    /// Who is signed in and how far the app has followed the team catalog
+    /// (its checkpoint and finished imports), when they can edit: the
+    /// library check is worked out again only when this changes. No
+    /// request; `None` while signed out or for someone who can only view.
+    pub(crate) fn editor_position(&self) -> Option<(String, u64, u64)> {
+        let state = self.lock();
+        let session = state.session.as_ref().filter(|session| session.can_edit)?;
+        let (_, checkpoint, imports) = session.follower.snapshot();
+        Some((session.email.clone(), checkpoint, imports))
+    }
+
+    /// What an importer reads from the team catalog: each CAD item's
+    /// current revision and the bytes of its newest imported one, and the
+    /// latest import runs. For the library check.
+    pub(crate) fn import_state(&self) -> Result<catalog::pocketbase::ImportState, String> {
+        let client = self.client()?;
+        catalog::pocketbase::read_import_state(&client).map_err(|error| {
+            format!(
+                "The team catalog could not be read because {}.",
+                plain_reason(&error)
+            )
+        })
+    }
+
     /// Every category's current revision and every remembered match, for
     /// Add part's category guess: two requests.
     pub(crate) fn categories_and_matches(
@@ -687,6 +716,9 @@ impl TeamCatalog {
             Ok(uploads) => uploads,
             Err(message) => return refused(message),
         };
+        if let Some(message) = model_link_refusal(&client, &uploads)? {
+            return refused(message);
+        }
         let ipn = request.ipn.trim().to_owned();
         let mut command = CreateCommand::new(&ipn, &request.category, request.reason.trim());
         command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
@@ -1336,6 +1368,57 @@ fn uploads_of(files: &[TeamFile], cad_fields: &[Field]) -> Result<Vec<CadUpload>
         uploads.push(upload);
     }
     Ok(uploads)
+}
+
+/// Why a footprint file being saved cannot be, by the library check's rule
+/// for 3D model links (kicad-parts-da65), or `None`: each link must stay in
+/// the Catalog's library, and a 3D model it links there must be in the
+/// Catalog or sent with it. Nothing is sent before this says so.
+fn model_link_refusal(
+    client: &PocketBaseClient,
+    uploads: &[CadUpload],
+) -> Result<Option<String>, String> {
+    let sent: BTreeSet<&str> = uploads
+        .iter()
+        .filter(|upload| upload.role == UploadRole::Model3d)
+        .map(|upload| upload.reference.as_str())
+        .collect();
+    let mut problems = Vec::new();
+    for upload in uploads
+        .iter()
+        .filter(|upload| upload.role == UploadRole::Footprint)
+    {
+        let Ok(file) = catalog::cad_file::read_footprint_file(&upload.bytes) else {
+            continue;
+        };
+        let (library, name) = upload.reference.split_once(':').unwrap_or_default();
+        let links: Vec<String> = file
+            .models
+            .into_iter()
+            .map(|model| model.reference)
+            .collect();
+        // The Catalog's 3D models the links name and the edit does not send.
+        let mut in_catalog = BTreeSet::new();
+        for link in &links {
+            let judged = judge_model_link(library, name, link);
+            let Some(path) = judged.path().filter(|path| !sent.contains(path)) else {
+                continue;
+            };
+            let known = has_cad_item(client, CadItemKind::Model3d, path).map_err(|error| {
+                format!(
+                    "The team catalog could not be checked because {}.",
+                    plain_reason(&error)
+                )
+            })?;
+            if known {
+                in_catalog.insert(path.to_owned());
+            }
+        }
+        problems.extend(chosen_footprint_problems(library, name, &links, |path| {
+            sent.contains(path) || in_catalog.contains(path)
+        }));
+    }
+    Ok((!problems.is_empty()).then(|| format!("{} Nothing was saved.", problems.join(" "))))
 }
 
 /// Checks the address, signs in, reads the account, and starts following.

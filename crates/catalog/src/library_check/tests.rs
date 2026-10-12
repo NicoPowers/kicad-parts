@@ -30,11 +30,14 @@ fn library(symbols: &[String]) -> String {
 }
 
 fn footprint(name: &str, models: &[&str]) -> String {
-    let models: String = models
-        .iter()
-        .map(|model| format!("\t(model \"{model}\"\n\t\t(offset (xyz 0 0 0))\n\t)\n"))
-        .collect();
-    format!("(footprint \"{name}\"\n\t(version 20241229)\n{models})\n")
+    let mut text = format!("(footprint \"{name}\"\n\t(version 20241229)\n");
+    for model in models {
+        text.push_str(&format!(
+            "\t(model \"{model}\"\n\t\t(offset (xyz 0 0 0))\n\t)\n"
+        ));
+    }
+    text.push_str(")\n");
+    text
 }
 
 const CSV_HEADER: &str = "IPN,MPN,Manufacturer,Description,Symbol,Footprint\n";
@@ -234,6 +237,13 @@ fn every_kind_of_3d_model_link_is_judged() {
     // Nothing imported yet: the first import takes the library as it is.
     let first = check_folder(root.path(), &KnownCad::default(), None).unwrap();
     assert_eq!(first.count(Group::ToFix), 0, "{}", first.report());
+    assert!(
+        first.in_group(Group::CleanUp).all(|f| f
+            .message
+            .ends_with("It was like this before the first import.")),
+        "{}",
+        first.report()
+    );
     // Every footprint is new to a Catalog that has had an import: a
     // problem is an error.
     let after_an_import = KnownCad {
@@ -263,7 +273,7 @@ fn every_kind_of_3d_model_link_is_judged() {
     let home = found.findings.iter().find(|f| f.name() == "Home").unwrap();
     assert_eq!(
         home.message,
-        "The footprint links the 3D model /home/jeffs/Workspace/Cliff/3d-models/DFN-12_FTD.step, which is outside our library, so it only works on one computer. Put the file in 3d-models/g-Package_SO.3dshapes/ and link it as ${GITPLM_PARTS}/3d-models/g-Package_SO.3dshapes/Home.step."
+        "The footprint links the 3D model /home/jeffs/Workspace/Cliff/3d-models/DFN-12_FTD.step, which is outside our library, so it only works on one computer. Put the file in 3d-models/g-Package_SO.3dshapes/ and link it as ${GITPLM_PARTS}/3d-models/g-Package_SO.3dshapes/Home.step. A CSV row uses the footprint, so the next import would add it."
     );
     assert_eq!(home.file, "footprints/g-Package_SO.pretty/Home.kicad_mod");
     // An error in a file an import reads stops it; one elsewhere does not.
@@ -397,6 +407,13 @@ fn a_chosen_footprint_with_a_link_that_would_stop_it_is_refused_plainly() {
             "The footprint links the 3D model 3d-models/g-Package_SO.3dshapes/SOIC-8.step, which the Catalog does not have. Choose that 3D model file too, or fix the link in KiCad's Footprint Editor."
         ]
     );
+    let elsewhere = ["${GITPLM_PARTS}/3d-models/SOIC-8.step".to_owned()];
+    assert_eq!(
+        chosen_footprint_problems("g-Package_SO", "SOIC-8", &elsewhere, |_| false),
+        [
+            "The footprint links the 3D model 3d-models/SOIC-8.step, a place where the Catalog keeps no 3D models. Link the model as ${GITPLM_PARTS}/3d-models/g-Package_SO.3dshapes/SOIC-8.step in KiCad's Footprint Editor, then choose the file again."
+        ]
+    );
 }
 
 #[test]
@@ -422,7 +439,7 @@ fn the_report_lists_errors_then_warnings_then_new_items_then_counts_clean_up() {
     };
     assert_eq!(
         check.report(),
-        "Library check: 1 to fix, 1 not in the Catalog yet, 1 worth a look, 1 to clean up.\nTo fix:\n  file of g-a:Bad: about g-a:Bad\nWorth a look:\n  file of g-a:Shared: about g-a:Shared\nNot in the Catalog yet:\n  g-a:New (file of g-a:New)\nClean-up: 1 old problem on symbols and footprints the Catalog already has unchanged; the desktop app lists them."
+        "Library check: 1 to fix, 1 not in the Catalog yet, 1 worth a look, 1 to clean up.\nTo fix:\n  file of g-a:Bad: about g-a:Bad\nWorth a look:\n  file of g-a:Shared: about g-a:Shared\nNot in the Catalog yet:\n  g-a:New (file of g-a:New)\nClean-up: 1 old problem that was there before this import; the desktop app lists them."
     );
     assert_eq!(
         LibraryCheck::default().summary(),

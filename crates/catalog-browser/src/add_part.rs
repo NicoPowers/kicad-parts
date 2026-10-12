@@ -16,9 +16,10 @@ use catalog::cad_file::{
 };
 use catalog::download::{
     self, Download, DownloadFile, DownloadKind, PadKey, fill_fields, link_model, manufacturer_part,
-    next_free_ipn, pad_count, pad_signature, pin_count, symbol_fields,
+    next_free_ipn, pad_count, pad_signature, pin_count, remove_model_links, symbol_fields,
 };
 use catalog::guess::{Clues, ExamplePart, RememberedMatch, best_guess, guess_category};
+use catalog::library_check::{ModelLink, judge_model_link};
 use catalog::pocketbase::{CadUpload, EDIT_BODY_LIMIT};
 use catalog::{CategoryDetails, PartDetails, PartRevision};
 use desktop_contract::{
@@ -680,12 +681,12 @@ pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, St
         // The reference first, so a missing g- or library is said plainly
         // before anything about the 3D model's place.
         footprint_upload(&bytes, &footprint, &source(file))?;
+        let library = footprint
+            .split_once(':')
+            .map(|(library, _)| library)
+            .unwrap_or_default();
         let mut linked = false;
         if let Some(model) = of_kind(FileKind::Model3d) {
-            let library = footprint
-                .split_once(':')
-                .map(|(library, _)| library)
-                .unwrap_or_default();
             let name = model_file_name(&model.file_name);
             if !is_plain_name(&name) {
                 return Err(format!(
@@ -704,14 +705,33 @@ pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, St
             uploads.push(model_upload(&decoded(model)?, &key, &source(model))?);
             linked = true;
         }
-        // The history says the file was changed this one way.
-        let label = if linked {
-            shortened(&format!(
+        // The download's other 3D model links point where its vendor kept
+        // the models, which only works on their computer: they are left
+        // out, so the Catalog never stores a link the library check calls
+        // an error (kicad-parts-da65). KiCad's own models stay.
+        let name = footprint
+            .split_once(':')
+            .map(|(_, name)| name)
+            .unwrap_or_default();
+        let text = String::from_utf8(bytes).map_err(|_| {
+            "The footprint file is not text, so it is not a file KiCad saved.".to_owned()
+        })?;
+        let kept = remove_model_links(&text, |link| {
+            judge_model_link(library, name, link) == ModelLink::Outside
+        });
+        let left_out = kept != text;
+        bytes = kept.into_bytes();
+        // The history says how the file was changed.
+        let label = match (linked, left_out) {
+            (true, _) => shortened(&format!(
                 "{} (3D model path set to the Catalog's)",
                 source(file)
-            ))
-        } else {
-            source(file)
+            )),
+            (false, true) => shortened(&format!(
+                "{} (3D model link to the download's folder left out)",
+                source(file)
+            )),
+            (false, false) => source(file),
         };
         uploads.push(footprint_upload(&bytes, &footprint, &label)?);
     }

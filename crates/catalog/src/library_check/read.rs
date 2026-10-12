@@ -132,7 +132,8 @@ pub fn read_csv_references(root: &Path) -> Result<Vec<CsvReference>, String> {
     let mut references = BTreeSet::new();
     for path in entries(&root.join("database")) {
         let name = file_name(&path);
-        if !(name.starts_with("g-") && name.ends_with(".csv")) || !path.is_file() {
+        let is_csv_file = name.starts_with("g-") && name.ends_with(".csv");
+        if !is_csv_file || !path.is_file() {
             continue;
         }
         let file = format!("database/{name}");

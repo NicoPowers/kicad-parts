@@ -201,6 +201,26 @@ impl LibraryCheck {
             .collect()
     }
 
+    /// Why an import that reads `files` must stop before it sends
+    /// anything, in plain words, or `None` when no error is in them. Like
+    /// the commit-first rule, only the files the import uses count, so
+    /// other work in the libraries never blocks it.
+    pub fn import_refusal(&self, files: &BTreeSet<&str>) -> Option<String> {
+        let errors = self.errors_in(files);
+        let (found, them) = match errors.len() {
+            0 => return None,
+            1 => ("a problem".to_owned(), "it"),
+            count => (format!("{count} problems"), "them"),
+        };
+        let mut text = format!(
+            "The library check found {found} in files this import uses, so nothing was sent. Fix {them} in KiCad, commit, and import again:"
+        );
+        for error in errors {
+            text.push_str(&format!("\n- {}: {}", error.file, error.message));
+        }
+        Some(text)
+    }
+
     /// One line saying how many findings each group has, such as
     /// `Library check: 1 to fix, 22 not in the Catalog yet, 2 worth a look,
     /// 36 to clean up.`; `Library check: nothing found.` when there are
@@ -247,8 +267,9 @@ impl LibraryCheck {
         let clean_up = self.count(Group::CleanUp);
         if clean_up > 0 {
             lines.push(format!(
-                "Clean-up: {clean_up} old {} on symbols and footprints the Catalog already has unchanged; the desktop app lists them.",
-                if clean_up == 1 { "problem" } else { "problems" }
+                "Clean-up: {clean_up} old {} that {} there before this import; the desktop app lists them.",
+                if clean_up == 1 { "problem" } else { "problems" },
+                if clean_up == 1 { "was" } else { "were" }
             ));
         }
         lines.join("\n")
@@ -419,7 +440,7 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
         let reference = footprint.reference();
         let in_csv = used.contains(&(CadItemKind::Footprint, reference.as_str()));
         let state = match known.bytes_of(CadItemKind::Footprint, &reference) {
-            _ if !known.imported_before => FootprintState::Unchanged,
+            _ if !known.imported_before => FootprintState::BeforeFirstImport,
             Some(bytes) if bytes.contains(&footprint.sha256) => FootprintState::Unchanged,
             Some(_) => FootprintState::Changed,
             None if in_csv => FootprintState::New,
@@ -520,7 +541,10 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
 /// Where a footprint stands against the last import.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FootprintState {
-    /// The Catalog has these bytes, or nothing was imported yet.
+    /// Nothing was imported yet, so there is no last import to compare
+    /// with: the first import takes the libraries as they are.
+    BeforeFirstImport,
+    /// The Catalog has these bytes.
     Unchanged,
     /// The Catalog has the footprint with other bytes.
     Changed,
@@ -655,7 +679,14 @@ fn model_finding(
         _ => return None,
     };
     let (severity, message) = match state {
-        FootprintState::Changed | FootprintState::New => (Severity::Error, problem),
+        FootprintState::Changed => (
+            Severity::Error,
+            format!("{problem} The footprint changed since the last import."),
+        ),
+        FootprintState::New => (
+            Severity::Error,
+            format!("{problem} A CSV row uses the footprint, so the next import would add it."),
+        ),
         FootprintState::Unused => (
             Severity::Warning,
             format!("{problem} Fix it before a part uses this footprint."),
@@ -663,6 +694,10 @@ fn model_finding(
         FootprintState::Unchanged => (
             Severity::CleanUp,
             format!("{problem} The Catalog already has the footprint like this."),
+        ),
+        FootprintState::BeforeFirstImport => (
+            Severity::CleanUp,
+            format!("{problem} It was like this before the first import."),
         ),
     };
     Some(Finding {
@@ -693,9 +728,16 @@ pub fn chosen_footprint_problems(
                 own_model_link(library, name)
             ),
             ModelLink::Own { path } | ModelLink::Shared { path } if !available(&path) => {
-                format!(
-                    "The footprint links the 3D model {path}, which the Catalog does not have. Choose that 3D model file too, or fix the link in KiCad's Footprint Editor."
-                )
+                if crate::cad_file::is_catalog_model_key(&path) {
+                    format!(
+                        "The footprint links the 3D model {path}, which the Catalog does not have. Choose that 3D model file too, or fix the link in KiCad's Footprint Editor."
+                    )
+                } else {
+                    format!(
+                        "The footprint links the 3D model {path}, a place where the Catalog keeps no 3D models. Link the model as {} in KiCad's Footprint Editor, then choose the file again.",
+                        own_model_link(library, name)
+                    )
+                }
             }
             _ => continue,
         };

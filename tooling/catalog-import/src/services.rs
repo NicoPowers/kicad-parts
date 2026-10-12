@@ -2,7 +2,8 @@
 
 use catalog::CsvCatalog;
 use catalog::csv_import::{CsvImport, ImportError};
-use catalog::pocketbase::{ImportCommand, read_import_state};
+use catalog::library_check::{KnownCad, LibraryCheck, read::check_folder};
+use catalog::pocketbase::{ImportCommand, ImportState, read_import_state};
 use collaboration::PocketBaseClient;
 use native_services::{
     PocketBaseOptions, PocketBaseServer, Superuser, pocketbase_binary, random_name,
@@ -255,7 +256,11 @@ pub struct Allow {
 ///   that are not committed, unless `allow.uncommitted_changes` is set
 ///   (see [`check_committed`]);
 /// - if the import's checkout (`repository`) does not include the team
-///   catalog's latest imports, unless `allow.older_checkout` is set.
+///   catalog's latest imports, unless `allow.older_checkout` is set;
+/// - before sending anything, if the library check finds an error in a
+///   file the import reads, such as a new footprint whose 3D model link
+///   only works on one computer (see [`check_libraries`]). Nothing allows
+///   that: fixing the link is quick.
 ///
 /// The run's audit entry records each one that was allowed and used.
 pub fn prepare_import<'a>(
@@ -265,15 +270,48 @@ pub fn prepare_import<'a>(
     reason: &str,
     allow: Allow,
 ) -> Result<ImportCommand<'a>, String> {
+    prepare_checked_import(client, repository, import, reason, allow).map(|(command, _)| command)
+}
+
+/// [`prepare_import`], also giving the library check it ran, for printing.
+pub fn prepare_checked_import<'a>(
+    client: &PocketBaseClient,
+    repository: &Path,
+    import: &'a CsvImport,
+    reason: &str,
+    allow: Allow,
+) -> Result<(ImportCommand<'a>, LibraryCheck), String> {
     check_committed(repository, import, allow)?;
     let state = read_import_state(client).map_err(|error| error.to_string())?;
     if !allow.older_checkout {
         crate::checkout::check_checkout(repository, import, &state)?;
     }
-    Ok(ImportCommand::new(import, reason)
+    let check = check_libraries(repository, import, &state)?;
+    let command = ImportCommand::new(import, reason)
         .expecting(&state)
         .allowing_older_checkout(allow.older_checkout)
-        .allowing_uncommitted_changes(allow.uncommitted_changes && has_uncommitted_changes(import)))
+        .allowing_uncommitted_changes(allow.uncommitted_changes && has_uncommitted_changes(import));
+    Ok((command, check))
+}
+
+/// Runs the library check on the CSV catalog under `repository` against
+/// the team catalog's import state, with KiCad's own footprints when KiCad
+/// is installed. Refuses, listing what to fix, when an error is in a file
+/// `import` reads or looks for: such a footprint is new or changed since
+/// the last import, and the import would bring it into the Catalog.
+pub fn check_libraries(
+    repository: &Path,
+    import: &CsvImport,
+    state: &ImportState,
+) -> Result<LibraryCheck, String> {
+    let share = kicad_integration::installed_share_dir(&Default::default());
+    let check = check_folder(repository, &KnownCad::from_state(state), share.as_deref())?;
+    let (read, missing) = input_paths(import);
+    let files: BTreeSet<&str> = read.into_iter().chain(missing).collect();
+    match check.import_refusal(&files) {
+        Some(refusal) => Err(refusal),
+        None => Ok(check),
+    }
 }
 
 /// Refuses `import` if the files it uses have changes that are not

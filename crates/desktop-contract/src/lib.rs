@@ -26,6 +26,7 @@ pub mod command {
     pub const TEAM_CHECK_IPN: &str = "team_check_ipn";
     pub const TEAM_ADD_PART: &str = "team_add_part";
     pub const TEAM_CHECK_MPN: &str = "team_check_mpn";
+    pub const TEAM_LIBRARY_CHECK: &str = "team_library_check";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -793,6 +794,50 @@ pub struct TeamKnownFootprint {
 }
 
 /// Is this IPN free for a new part?
+/// What the library check found (kicad-parts-da65): the CSV catalog's own
+/// libraries compared with the team catalog. Shown to people who can edit.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryCheckView {
+    /// Errors: they stop an import, and Add part or Edit part with them.
+    pub to_fix: usize,
+    /// Symbols, footprints and 3D models no part uses and the Catalog does
+    /// not have yet.
+    pub not_in_catalog: usize,
+    pub worth_a_look: usize,
+    /// Old problems of footprints the Catalog has unchanged.
+    pub clean_up: usize,
+    /// The groups that have items, in order: To fix, Not in the Catalog
+    /// yet, Worth a look, Clean-up.
+    pub groups: Vec<LibraryCheckGroup>,
+}
+
+impl LibraryCheckView {
+    /// Whether the check found anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.groups.iter().all(|group| group.items.is_empty())
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryCheckGroup {
+    /// Such as `To fix`.
+    pub title: String,
+    /// One plain sentence saying what the group means.
+    pub hint: String,
+    pub items: Vec<LibraryCheckItem>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryCheckItem {
+    /// Such as `g-ics`, or a 3D model's folder.
+    pub library: String,
+    /// Such as `IC_TP4333`, or a 3D model's file name.
+    pub name: String,
+    /// The repository file, such as `symbols/g-ics.kicad_sym`.
+    pub file: String,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamIpnRequest {
     pub ipn: String,

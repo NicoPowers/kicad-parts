@@ -505,11 +505,52 @@ pub fn link_model(footprint: &str, path: &str, model_file: &str) -> String {
     )
 }
 
+/// `footprint` (the text of a `.kicad_mod`) without the `(model ...)` lists
+/// whose path, as written (without its quotes), `remove` says to leave
+/// out, each with the line it stood on when nothing else was on it.
+/// Nothing else changes.
+pub fn remove_model_links(footprint: &str, remove: impl Fn(&str) -> bool) -> String {
+    let mut kept = String::new();
+    let mut from = 0;
+    for (list, path) in model_lists(footprint) {
+        if list.start < from || !remove(footprint[path].trim_matches('"')) {
+            continue;
+        }
+        // The whole line, when the list is alone on it.
+        let line_start = footprint[..list.start].rfind('\n').map_or(0, |at| at + 1);
+        let alone_before = footprint[line_start..list.start]
+            .bytes()
+            .all(|byte| byte == b' ' || byte == b'\t');
+        let line_end = footprint[list.end..]
+            .find('\n')
+            .map_or(footprint.len(), |at| list.end + at + 1);
+        let alone_after = footprint[list.end..line_end].trim().is_empty();
+        let (start, end) = if alone_before && alone_after && line_start >= from {
+            (line_start, line_end)
+        } else {
+            (list.start, list.end)
+        };
+        kept.push_str(&footprint[from..start]);
+        from = end;
+    }
+    kept.push_str(&footprint[from..]);
+    kept
+}
+
 /// The byte span of each `(model "...")` path, quotes included, found the
 /// way [`kicad_integration::library_file::model_references`] finds them, and
 /// of each KiCad 5 path written without quotes, which that leaves out (so
 /// the app and the team server agree); linking quotes it.
 fn model_path_spans(footprint: &str) -> Vec<std::ops::Range<usize>> {
+    model_lists(footprint)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()
+}
+
+/// Each `(model ...)` list of `footprint`: the span of the whole list and
+/// of its path (see [`model_path_spans`]).
+fn model_lists(footprint: &str) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
     let bytes = footprint.as_bytes();
     let space = |byte: u8| byte.is_ascii_whitespace();
     let mut spans = Vec::new();
@@ -546,7 +587,7 @@ fn model_path_spans(footprint: &str) -> Vec<std::ops::Range<usize>> {
                         .map_or(footprint.len(), |at| start + at)
                 };
                 if end > start {
-                    spans.push(start..end);
+                    spans.push((index - 1..list_end(bytes, index - 1), start..end));
                 }
                 index = end.max(index);
             }
@@ -554,6 +595,31 @@ fn model_path_spans(footprint: &str) -> Vec<std::ops::Range<usize>> {
         }
     }
     spans
+}
+
+/// Where the list opened at `open` (its `(`) ends, just past its `)`,
+/// skipping quoted strings; the end of the text if it is not closed.
+fn list_end(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index = quoted_end(bytes, index);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    bytes.len()
 }
 
 /// Where the quoted string starting at `start` (its `"`) ends, just past
@@ -966,6 +1032,41 @@ mod tests {
         let linked = link_model(only_text, path, "x.step");
         assert!(linked.contains("(descr \"(model x)\")"), "{linked}");
         assert!(linked.contains(&format!("(model \"{path}\"")), "{linked}");
+    }
+
+    #[test]
+    fn leaves_out_the_3d_model_links_asked_for() {
+        let footprint = "(footprint \"F\"
+	(descr \"see (model 3) note\")
+	(model \"${KIPRJMOD}/3D/F.stp\"
+		(offset
+			(xyz 0 0 0)
+		)
+	)
+	(model \"${KICAD9_3DMODEL_DIR}/x.step\" (offset (xyz 0 0 0)))
+	(model_x \"no.step\")
+)
+";
+        let kept = remove_model_links(footprint, |path| path.starts_with("${KIPRJMOD}"));
+        assert_eq!(
+            kept,
+            "(footprint \"F\"
+	(descr \"see (model 3) note\")
+	(model \"${KICAD9_3DMODEL_DIR}/x.step\" (offset (xyz 0 0 0)))
+	(model_x \"no.step\")
+)
+"
+        );
+        assert!(kicad_integration::library_file::FootprintFile::parse(kept.as_bytes()).is_ok());
+        // A list sharing its line with others leaves only itself; a KiCad 5
+        // path without quotes is found too.
+        let old =
+            "(module F (layer F.Cu) (model ${KISYS3DMOD}/x.step (at (xyz 0 0 0))) (attr smd))";
+        assert_eq!(
+            remove_model_links(old, |_| true),
+            "(module F (layer F.Cu)  (attr smd))"
+        );
+        assert_eq!(remove_model_links(footprint, |_| false), footprint);
     }
 
     #[test]
