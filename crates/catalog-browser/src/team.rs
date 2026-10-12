@@ -1961,12 +1961,18 @@ fn to_changes(
     differences: Vec<catalog::DetailDifference>,
     names: &CategoryNames,
 ) -> Vec<DetailChange> {
+    // A field a category change added blank needs no row of its own: the
+    // category row says why it is there. Without a category change (a CSV
+    // header change, say) every row is shown.
+    let moved = differences
+        .iter()
+        .any(|difference| difference.what == DifferenceKind::Category);
     differences
         .into_iter()
-        // A field added blank (with a new category) needs no row of its
-        // own: the category row says why it is there.
         .filter(|difference| {
-            difference.what != DifferenceKind::Field || difference.before != difference.after
+            !moved
+                || difference.what != DifferenceKind::Field
+                || difference.before != difference.after
         })
         .map(|difference| {
             let shown = |code: String| match difference.what {
@@ -2491,6 +2497,29 @@ fn save_settings(path: &Path, settings: &TeamSettings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_category_change_hides_the_fields_it_added_blank() {
+        let difference = |what, label: &str, before: &str, after: &str| catalog::DetailDifference {
+            what,
+            label: label.into(),
+            before: before.into(),
+            after: after.into(),
+        };
+        let names: CategoryNames = [("res".to_owned(), "Resistors".to_owned())].into();
+        let labels = |rows: Vec<DetailChange>| -> Vec<String> {
+            rows.into_iter().map(|row| row.label).collect()
+        };
+        // A blank column a CSV header change added is shown.
+        let header = vec![difference(DifferenceKind::Field, "Notes", "", "")];
+        assert_eq!(labels(to_changes(header, &names)), ["Notes"]);
+        // With a category change, the category row explains it.
+        let moved = vec![
+            difference(DifferenceKind::Category, "Category", "cap", "res"),
+            difference(DifferenceKind::Field, "Tolerance", "", ""),
+        ];
+        assert_eq!(labels(to_changes(moved, &names)), ["Category"]);
+    }
 
     #[test]
     fn a_row_moved_to_another_csv_file_shows_its_new_category_by_name() {
