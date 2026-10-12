@@ -7315,8 +7315,8 @@
       },
       {
         "path": "symbols/g-art.kicad_sym",
-        "byte_sha256": "1be378b739ab51ca825a27c422d5ee018526504fbaf8604c3d85153ebc8d492e",
-        "semantic_sha256": "bdf4fcb11a2e406ae5a0aa9b15327ac2d4352766d290532c9071e073247176e7",
+        "byte_sha256": "88afcc8a18df0170bba229d4a3054112f205bdc115d1eea01f349d61dcfda58e",
+        "semantic_sha256": "e329423eba23689f4a769867bc8d129fa9f65be60bfc4da5eda1235f2fb7cfe9",
         "bytes": 5893
       },
       {
@@ -7351,8 +7351,8 @@
       },
       {
         "path": "symbols/g-ind.kicad_sym",
-        "byte_sha256": "271aa163c30551ad20466dba269c385f078dff2cff02a4f7e93289f42d365056",
-        "semantic_sha256": "b16eaa38f25b6be558423c0f18eafae4b1f1e7d242dd7077593681fd738eaaa9",
+        "byte_sha256": "84c7fb2ef773607e873c0a68ade8025332635ced0b4512eda170f059394636ae",
+        "semantic_sha256": "2741b51015f0c15303c02875ae6dee6766cd6a68776cb46c808e9b983ee5294b",
         "bytes": 133438
       },
       {
@@ -7369,8 +7369,8 @@
       },
       {
         "path": "symbols/g-opt.kicad_sym",
-        "byte_sha256": "6ebe98d8a074e9531efcdc201aaf3bf33899fd0550f5e219f404da65e8c1a25a",
-        "semantic_sha256": "a6c260f05886fdfb2154f3eb90a8d63b6f8ef7578851b1efb1ddacab64f327e7",
+        "byte_sha256": "cfecb1bbda36119cff81cadf381b44e0d26cf5b7ee56fd7923df92a43407347f",
+        "semantic_sha256": "081556667e92ebe11a5cad936e9d4d0aded2752d3815b70aaeb15a9d8eb83430",
         "bytes": 13960
       },
       {
@@ -7467,15 +7467,15 @@
       },
       {
         "path": "footprints/g-Crystal.pretty/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.kicad_mod",
-        "byte_sha256": "c3ca4366f0733d29c26592f6071f886ad0e6323c06633806c098ba800302da27",
-        "semantic_sha256": "f7aeedac863e46afb89d807c51f60bf68ef261856c4b83d1a0257d7740644e83",
-        "bytes": 2156
+        "byte_sha256": "5e06f8ccd2a05cb0f0f4a7e2ceb20132b29438e2ccfa2c94e5961c96187baeed",
+        "semantic_sha256": "bb97d2bf315ff8d62f29003afee52ce5ca867cae5db3a3b67778c4ebb7f56952",
+        "bytes": 2175
       },
       {
         "path": "footprints/g-Crystal.pretty/Crystal_SMD_SeikoEpson_FA128-4Pin_2.0x1.6mm.kicad_mod",
-        "byte_sha256": "7c9e5058e9668c30a97672a0733bcfc510a419d1323c3de62c0abfe368928431",
-        "semantic_sha256": "972202ba1421e6f1c71d97ffb084b559cd893f8b5cc51563c22e0fb844651d06",
-        "bytes": 4015
+        "byte_sha256": "d3348fb32ff04e82ec419c331ef951e7d254793732654cc258eba343b76a7197",
+        "semantic_sha256": "a489821a65716b7bd4ffbe15773873b388528f55e080bf400dc673c9ff0899e4",
+        "bytes": 4034
       },
       {
         "path": "footprints/g-Diode_SMD.pretty/DFN-0.060X0.030_Semtech.kicad_mod",
@@ -10412,14 +10412,14 @@
       },
       {
         "source_footprint": "footprints/g-Crystal.pretty/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.kicad_mod",
-        "reference": "${GITPLM_PARTS}/3d-models/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.step",
+        "reference": "${GITPLM_PARTS}/3d-models/g-Crystal.3dshapes/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.step",
         "scope": "local",
         "status": "missing",
         "asset_path": null
       },
       {
         "source_footprint": "footprints/g-Crystal.pretty/Crystal_SMD_SeikoEpson_FA128-4Pin_2.0x1.6mm.kicad_mod",
-        "reference": "${GITPLM_PARTS}/3d-models/Crystal_SMD_SeikoEpson_FA128-4Pin_2.0x1.6mm.step",
+        "reference": "${GITPLM_PARTS}/3d-models/g-Crystal.3dshapes/Crystal_SMD_SeikoEpson_FA128-4Pin_2.0x1.6mm.step",
         "scope": "local",
         "status": "missing",
         "asset_path": null
@@ -10708,14 +10708,14 @@
     {
       "code": "missing-3d-model-reference",
       "path": "footprints/g-Crystal.pretty/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.kicad_mod",
-      "location": "model=${GITPLM_PARTS}/3d-models/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.step",
-      "message": "3D model reference `${GITPLM_PARTS}/3d-models/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.step` is missing (local)"
+      "location": "model=${GITPLM_PARTS}/3d-models/g-Crystal.3dshapes/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.step",
+      "message": "3D model reference `${GITPLM_PARTS}/3d-models/g-Crystal.3dshapes/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.step` is missing (local)"
     },
     {
       "code": "missing-3d-model-reference",
       "path": "footprints/g-Crystal.pretty/Crystal_SMD_SeikoEpson_FA128-4Pin_2.0x1.6mm.kicad_mod",
-      "location": "model=${GITPLM_PARTS}/3d-models/Crystal_SMD_SeikoEpson_FA128-4Pin_2.0x1.6mm.step",
-      "message": "3D model reference `${GITPLM_PARTS}/3d-models/Crystal_SMD_SeikoEpson_FA128-4Pin_2.0x1.6mm.step` is missing (local)"
+      "location": "model=${GITPLM_PARTS}/3d-models/g-Crystal.3dshapes/Crystal_SMD_SeikoEpson_FA128-4Pin_2.0x1.6mm.step",
+      "message": "3D model reference `${GITPLM_PARTS}/3d-models/g-Crystal.3dshapes/Crystal_SMD_SeikoEpson_FA128-4Pin_2.0x1.6mm.step` is missing (local)"
     },
     {
       "code": "missing-3d-model-reference",

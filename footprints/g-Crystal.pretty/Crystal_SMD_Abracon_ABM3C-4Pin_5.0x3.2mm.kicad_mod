@@ -114,7 +114,7 @@
 		(roundrect_rratio 0.192308)
 	)
 	(embedded_fonts no)
-	(model "${GITPLM_PARTS}/3d-models/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.step"
+	(model "${GITPLM_PARTS}/3d-models/g-Crystal.3dshapes/Crystal_SMD_Abracon_ABM3C-4Pin_5.0x3.2mm.step"
 		(offset
 			(xyz 0 0 0)
 		)
