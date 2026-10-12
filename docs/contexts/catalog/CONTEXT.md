@@ -93,12 +93,16 @@ _Avoid_: Engineering Protection, lock, freeze
 ### Importing
 
 **CSV catalog**:
-The original CSV files and CAD libraries this product imports from. Nobody edits them.
+The original CSV files and CAD libraries this product imports from. Engineers may still draw symbols and footprints in KiCad in its libraries; the library check finds them.
 _Avoid_: Legacy Catalog, old database, source of truth
 
 **Import problem**:
 Something an import could not handle, such as a missing symbol. The import records it instead of dropping it.
 _Avoid_: Import Diagnostic, warning, error
+
+**Library check**:
+A comparison of the CSV catalog's libraries with the Catalog: what is in them but not in the Catalog yet, and which 3D model links work only on one computer or name a missing file. Its errors stop an import, and Add part or Edit part, until they are fixed; old problems of footprints the Catalog already has unchanged are only clean-up.
+_Avoid_: lint, audit, validation
 
 **CSV review**:
 A person's answer to new CSV values that an import did not apply because the part, or a symbol or footprint it uses, was edited in this app: they accept some of the CSV's values and keep the rest, or keep all the current values. It covers what the CSV said, so the app does not ask again about the same CSV values; it asks again when the CSV changes.
