@@ -301,13 +301,22 @@ const KEYWORD_NAMES: [&str; 2] = ["kikeywords", "keywords"];
 pub type Property = (String, String);
 
 /// The properties of one symbol entry, with values trimmed; KiCad's `~`
-/// (no value) is blank.
+/// (no value) is blank, and so is a placeholder such as `.Value` or
+/// `.Datasheet` (a dot and the property's own name), which the Catalog's own
+/// symbols carry for the part's field to fill.
 pub fn symbol_fields(entry: &[u8]) -> Vec<(String, String)> {
     symbol_properties(entry)
         .into_iter()
         .map(|(name, value)| {
             let value = value.trim();
-            let value = if value == "~" { "" } else { value };
+            let placeholder = value
+                .strip_prefix('.')
+                .is_some_and(|rest| rest.eq_ignore_ascii_case(&name));
+            let value = if value == "~" || placeholder {
+                ""
+            } else {
+                value
+            };
             (name, value.to_owned())
         })
         .collect()
@@ -850,6 +859,16 @@ mod tests {
         assert_eq!(
             symbol_fields(entry),
             properties(&[("Datasheet", ""), ("Description", "A")])
+        );
+        // The Catalog's own symbols hold placeholders for the part's fields.
+        let entry = b"(symbol \"C\" (property \"Value\" \".Value\") (property \"Datasheet\" \".Datasheet\") (property \"Description\" \".5 mm pitch\"))";
+        assert_eq!(
+            symbol_fields(entry),
+            properties(&[
+                ("Value", ""),
+                ("Datasheet", ""),
+                ("Description", ".5 mm pitch")
+            ])
         );
     }
 
