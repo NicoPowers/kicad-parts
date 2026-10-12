@@ -165,6 +165,29 @@ pub fn symbol_entries_say_not_in_bom(bytes: &[u8]) -> bool {
     })
 }
 
+/// The value of a symbol's own `(property "Reference" "...")`, such as `R`
+/// or `U?`, from the bytes of one top-level `(symbol ...)` entry. `None`
+/// when the bytes do not read as one symbol or it has no Reference
+/// property (a symbol that extends another inherits its parent's).
+pub fn symbol_reference(entry: &[u8]) -> Option<String> {
+    let (head, children) = root_children(entry).ok()?;
+    if head != "symbol" {
+        return None;
+    }
+    let property = children.iter().find(|child| {
+        child.head == "property" && child.first.as_deref() == Some("Reference")
+    })?;
+    // (property "Reference" "VALUE" ...): the value is the fourth token.
+    match tokens(&entry[property.span.clone()]).ok()?.get(3)? {
+        Token::Text(value) => Some(value.clone()),
+        Token::Atom(range) => Some(
+            String::from_utf8_lossy(&entry[property.span.start + range.start..][..range.len()])
+                .into_owned(),
+        ),
+        _ => None,
+    }
+}
+
 /// Whether the bytes of a footprint (a whole `.kicad_mod`) have
 /// `exclude_from_bom` in an `(attr ...)`. Bytes that do not read as a
 /// footprint say nothing. catalog_lib.js footprintExcludedFromBom reads them
@@ -334,6 +357,16 @@ mod tests {
     use super::*;
 
     const LIBRARY: &str = "(kicad_symbol_lib\n\t(version 20241209)\n\t(generator \"x\")\n\t(symbol \"C\"\n\t\t(property \"Value\" \"a (b\\\" c\")\n\t)\n\t(symbol \"R_US\"\n\t\t(symbol \"R_US_0_1\")\n\t)\n\t(symbol \"R_Child\"\n\t\t(extends \"R_US\")\n\t)\n)\n";
+
+    #[test]
+    fn reads_a_symbols_own_reference() {
+        let entry = "(symbol \"R_US\"\n\t\t(property \"Value\" \"R\")\n\t\t(property \"Reference\" \"U?\" (at 0 0 0))\n\t)";
+        assert_eq!(symbol_reference(entry.as_bytes()).as_deref(), Some("U?"));
+        // A symbol without one, or bytes that are not a symbol, say nothing.
+        assert_eq!(symbol_reference(b"(symbol \"C\" (property \"Value\" \"C\"))"), None);
+        assert_eq!(symbol_reference(b"(footprint \"R\")"), None);
+        assert_eq!(symbol_reference(b"(symbol \"C\""), None);
+    }
 
     #[test]
     fn cuts_top_level_symbols_exactly() {

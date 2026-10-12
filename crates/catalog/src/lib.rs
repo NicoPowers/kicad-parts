@@ -50,9 +50,11 @@
 
 pub mod cad_file;
 mod cad_item;
+pub mod category;
 mod change;
 mod compare;
 pub mod csv_import;
+pub mod guess;
 mod hash;
 mod ids;
 mod ipn;
@@ -63,6 +65,7 @@ pub mod replica;
 pub use cad_item::{
     Blob, CadItem, CadItemDetails, CadItemKind, License, ModelReference, ModelTarget,
 };
+pub use category::{CATEGORY_SCHEMA, CategoryDetails, CategoryRules};
 pub use change::ChangeKind;
 pub use compare::{
     DetailDifference, DifferenceKind, compare_details, compare_revisions, describe_binding,
