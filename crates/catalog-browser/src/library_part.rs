@@ -466,7 +466,6 @@ impl Plan {
                 "The footprint's 3D model {} from our library is saved with it.",
                 model.path
             )),
-            (Some(_), None) => {}
             _ => {}
         }
         for item in self.references() {

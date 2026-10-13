@@ -1197,7 +1197,7 @@ fn DownloadForm(
         move || match form.known_footprint.get() {
             Some(reference) => view! {
                 <li class="check" id="add-known-footprint">
-                    <p>{format!("Uses {reference} instead of the footprint in the download.")}</p>
+                    <p>{if ours { format!("Uses {reference} instead of the footprint chosen in our libraries.") } else { format!("Uses {reference} instead of the footprint in the download.") }}</p>
                     <button
                         type="button"
                         on:click=move |_| {
@@ -1205,7 +1205,7 @@ fn DownloadForm(
                             draw.run(());
                         }
                     >
-                        "Use the download's footprint"
+                        {if ours { "Use the chosen footprint" } else { "Use the download's footprint" }}
                     </button>
                 </li>
             }
