@@ -93,11 +93,19 @@ describe(`search over ${ROWS} rows`, () => {
     // While searching, a section shows its first 25 matches, then "Show
     // all" shows up to 200 and says how many there are.
     assert.equal(await partsShown(browser), 25);
-    await (await browser.$('.section-show-all')).click();
+    // Chosen with the keyboard, Show all moves focus to the first newly
+    // shown part, so focus never drops to the page.
+    await browser.execute(() => document.querySelector('.section-show-all').focus());
+    await browser.keys('Enter');
     await browser.waitUntil(async () => (await partsShown(browser)) === 200, {
       timeout: 5_000,
       timeoutMsg: 'Show all did not show 200 parts',
     });
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() => document.activeElement === document.querySelector('.section-parts > li:nth-child(26) button.result')),
+      { timeout: 5_000, timeoutMsg: 'focus did not move to the 26th part after Show all' },
+    );
     assert.equal(await textOf(browser, '.section-more'), 'Showing 200 of 3,343. Search to narrow the list.');
     await browser.execute(() => document.querySelector('.section-more').scrollIntoView({ block: 'end' }));
     await assertAccessible(browser, '30-large-catalog');

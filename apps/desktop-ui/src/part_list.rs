@@ -287,6 +287,9 @@ pub(crate) fn ResultList(
         }
     };
 
+    // The section whose Show all was just chosen: once its parts load,
+    // focus moves to the first newly shown part, as the button is gone.
+    let focus_after_load = StoredValue::new(None::<String>);
     // Loads up to SECTION_ROWS parts of `category` for the search shown.
     let load_section = move |category: String| {
         let Load::Ready(searched) = results.get_untracked() else {
@@ -318,6 +321,17 @@ pub(crate) fn ResultList(
             // Kept only if the search and team catalog are still the same.
             let current = loaded.with_untracked(|loaded| loaded.key == key);
             if current {
+                let focus =
+                    focus_after_load.with_value(|wanted| wanted.as_ref() == Some(&category));
+                if focus {
+                    focus_after_load.set_value(None);
+                    let first_new = format!(
+                        "#{} > li:nth-child({}) button.result",
+                        section_id(&category),
+                        SEARCH_ROWS + 1
+                    );
+                    focus_when_drawn(first_new);
+                }
                 loaded.update(|loaded| {
                     loaded.sections.insert(category, rows);
                 });
@@ -469,6 +483,7 @@ pub(crate) fn ResultList(
                         choose=choose
                         load=load_section
                         toggled=toggled
+                        focus_after_load=focus_after_load
                     />
                 }
             />
@@ -488,6 +503,7 @@ fn Section(
     choose: impl Fn(String) + Copy + Send + Sync + 'static,
     load: impl Fn(String) + Copy + Send + Sync + 'static,
     toggled: impl Fn() + Copy + Send + Sync + 'static,
+    focus_after_load: StoredValue<Option<String>>,
 ) -> impl IntoView {
     let is_searching = searching(&query);
     // This section's contents in the latest answer.
@@ -544,6 +560,7 @@ fn Section(
             loaded.update(|loaded| {
                 loaded.shown_all.insert(category.clone());
             });
+            focus_after_load.set_value(Some(category.clone()));
             load(category.clone());
         }
     };
@@ -699,6 +716,22 @@ fn scroll_selected_into_view() -> Scrolled {
     } else {
         Scrolled::Done
     }
+}
+
+/// Moves keyboard focus to the element `selector` finds once the view has
+/// been redrawn.
+fn focus_when_drawn(selector: String) {
+    request_animation_frame(move || {
+        use wasm_bindgen::JsCast;
+        if let Some(element) = document()
+            .query_selector(&selector)
+            .ok()
+            .flatten()
+            .and_then(|element| element.dyn_into::<leptos::web_sys::HtmlElement>().ok())
+        {
+            let _ = element.focus();
+        }
+    });
 }
 
 fn scroll_list_to_top() {
