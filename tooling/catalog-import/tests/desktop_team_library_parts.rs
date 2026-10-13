@@ -11,8 +11,9 @@ use catalog_browser::{BrowserConfig, CatalogBrowser};
 use catalog_import::services::{self, Allow};
 use collaboration::PocketBaseClient;
 use desktop_contract::{
-    LibraryCheckView, LiveUpdates, ManufacturerPart, PublishResult, SignInRequest, TeamDownload,
-    TeamDownloadRequest, TeamLibraryChoice, TeamNewPartRequest, TeamPart, TeamSession,
+    LibraryCheckView, LiveUpdates, ManufacturerPart, PublishResult, SignInRequest,
+    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamLibraryChoice, TeamNewPartRequest,
+    TeamPart, TeamSession,
 };
 use kicad_integration::SearchLocations;
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
@@ -337,6 +338,34 @@ fn new_part(reading: &TeamDownload, ipn: &str, category: &str) -> TeamNewPartReq
     }
 }
 
+/// Appends `part`'s CSV row to the copy's g-cap.csv, with the part's own
+/// values and its Symbol and Footprint, as someone would by hand.
+fn add_csv_row(root: &Path, part: &TeamPart) {
+    let field = |name: &str| {
+        part.details
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| field.value.clone())
+            .unwrap_or_default()
+    };
+    let mut csv = text(root, "database/g-cap.csv");
+    csv.push_str(&format!(
+        "\"{}\",\"{MPN}\",\"Samsung Electro-Mechanics\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"\",\"\",\"\",\"\",\"\",\"\",\"\"
+",
+        part.ipn,
+        field("Description"),
+        part.revision.field("Symbol").unwrap_or_default(),
+        part.revision.field("Footprint").unwrap_or_default(),
+        field("Value"),
+        field("Voltage"),
+        field("Material"),
+        field("Tolerance"),
+        field("Datasheet"),
+    ));
+    fs::write(root.join("database/g-cap.csv"), csv).unwrap();
+}
+
 fn added(result: PublishResult) -> TeamPart {
     match result {
         PublishResult::Added { part } => part,
@@ -479,27 +508,7 @@ fn a_part_from_our_libraries_end_to_end() {
     // Someone adds the part's CSV row by hand, naming the same symbol and
     // footprint with the same bytes, and imports: nothing to change.
     let revisions = team.stored_revisions();
-    let details = &part.details;
-    let field = |name: &str| {
-        details
-            .fields
-            .iter()
-            .find(|field| field.name == name)
-            .map(|field| field.value.clone())
-            .unwrap_or_default()
-    };
-    let mut csv = text(&root, "database/g-cap.csv");
-    csv.push_str(&format!(
-        "\"{}\",\"{MPN}\",\"Samsung Electro-Mechanics\",\"{}\",\"{SYMBOL}\",\"{FOOTPRINT}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"\",\"\",\"\",\"\",\"\",\"\",\"\"\n",
-        part.ipn,
-        field("Description"),
-        field("Value"),
-        field("Voltage"),
-        field("Material"),
-        field("Tolerance"),
-        field("Datasheet"),
-    ));
-    fs::write(root.join("database/g-cap.csv"), csv).unwrap();
+    add_csv_row(&root, &part);
     commit_all(&root, "The new capacitor's CSV row");
     let outcome = import(&team.admin, &root, "g-cap");
     assert!(
@@ -615,4 +624,125 @@ fn problems_stop_the_save_and_the_catalogs_own_items_are_used() {
     let part = added(team.add(request));
     assert_eq!(part.revision.field("Symbol"), Some("g-cap:C"));
     assert_eq!(team.stored_revisions(), revisions + 2);
+}
+
+/// Items added from our libraries are imported CAD, not CAD made in the
+/// app: someone redraws the footprint in KiCad and commits, and the next CSV
+/// import that names it gives it a new revision, with no false "changed in
+/// this app" notice. The part itself was added in the app, so it keeps its
+/// revision and offers the new footprint as a CSV change to accept.
+#[test]
+fn a_later_csv_import_updates_items_added_from_our_libraries() {
+    let team = Team::start(draw_by_hand);
+    let root = team.root().to_path_buf();
+    let reading = team.read(choice(Some(SYMBOL), None));
+    let cap = reading
+        .categories
+        .iter()
+        .find(|category| category.code == "cap")
+        .unwrap();
+    let part = added(team.add(new_part(&reading, &cap.next_ipn, "cap")));
+
+    // Redrawn in KiCad with a link only one computer has: like any imported
+    // footprint changed since its import, it is to fix.
+    let footprint = root.join(FOOTPRINT_FILE);
+    let saved = fs::read_to_string(&footprint).unwrap();
+    let redrawn = saved.replacen(
+        "(attr",
+        "(descr \"redrawn\")
+	(attr",
+        1,
+    );
+    fs::write(
+        &footprint,
+        redrawn.replace(
+            &format!("${{GITPLM_PARTS}}/{MODEL_FILE}"),
+            "/home/me/C_0603_Hand.step",
+        ),
+    )
+    .unwrap();
+    let check = team.check();
+    let to_fix = group(&check, "To fix");
+    assert_eq!(to_fix, [FOOTPRINT], "{check:#?}");
+    assert!(
+        check.groups[0].items[0]
+            .message
+            .ends_with("The footprint changed since the last import."),
+        "{check:#?}"
+    );
+
+    // Fixed, committed, and its CSV row added: the import gives the
+    // footprint revision 2.
+    fs::write(&footprint, &redrawn).unwrap();
+    add_csv_row(&root, &part);
+    commit_all(&root, "Redrawn in KiCad, with its CSV row");
+    let outcome = import(&team.admin, &root, "g-cap");
+    assert!(
+        matches!(outcome, ImportOutcome::Applied { .. }),
+        "{outcome:?}"
+    );
+    let stored = read_back(&team.admin).unwrap();
+    let item = stored
+        .cad_items
+        .iter()
+        .find(|item| item.key == FOOTPRINT)
+        .unwrap();
+    let newest = stored
+        .cad_item_revisions
+        .iter()
+        .filter(|revision| revision.cad_item == item.id)
+        .max_by_key(|revision| revision.number)
+        .unwrap();
+    assert_eq!(newest.number, 2);
+    assert!(
+        newest.source.contains("\"source\":\"csv-catalog\""),
+        "{}",
+        newest.source
+    );
+    assert!(
+        !stored
+            .problems
+            .iter()
+            .any(|problem| problem.code == catalog::CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM),
+        "{:?}",
+        stored.problems
+    );
+
+    // The part keeps its revision and offers the new footprint, which can
+    // be accepted.
+    let now = team.team.part(&part.ipn).unwrap().unwrap();
+    assert_eq!(now.revision.number, 1);
+    let cad = now
+        .csv_changes
+        .iter()
+        .find(|changes| changes.cad)
+        .unwrap_or_else(|| panic!("{:?}", now.csv_changes));
+    let row = cad
+        .rows
+        .iter()
+        .find(|row| row.field == "Footprint")
+        .unwrap_or_else(|| panic!("{cad:?}"));
+    assert!(!row.keep_only, "{row:?}");
+    let reply = team
+        .team
+        .csv_review(TeamCsvReviewRequest {
+            correlation_id: None,
+            ipn: part.ipn.clone(),
+            problem: cad.problem.clone(),
+            accept: vec!["Footprint".into()],
+            expected: cad.expected,
+            reason: "Take the redrawn footprint".into(),
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            reply,
+            PublishResult::CsvReviewed {
+                revision: Some(2),
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    assert_eq!(team.check().to_fix, 0);
 }

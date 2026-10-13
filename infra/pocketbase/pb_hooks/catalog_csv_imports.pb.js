@@ -695,8 +695,13 @@ routerAdd(
         return storedCurrent[cadItemId];
       };
       // Whether a stored CAD item revision was made in the app (by an
-      // edit), not by a CSV import.
+      // edit), not by a CSV import. One read from our libraries
+      // (kicad-parts-37a7) holds the CSV catalog's own file, so it counts as
+      // imported and a later import may replace it.
       const madeInApp = (revision) => {
+        if (lib.isFromOurLibraries(revision)) {
+          return false;
+        }
         const change = byId("catalog_changes", revision.getString("change"));
         return !change || change.getString("kind") !== lib.CHANGE_KINDS.csvImport;
       };
@@ -712,8 +717,8 @@ routerAdd(
             current && madeInApp(current)
               ? first(
                   "catalog_cad_item_revisions",
-                  "cad_item = {:cad_item} && change.kind = {:kind}",
-                  { cad_item: cadItemId, kind: lib.CHANGE_KINDS.csvImport },
+                  "cad_item = {:cad_item} && (change.kind = {:kind} || source ~ {:library})",
+                  { cad_item: cadItemId, kind: lib.CHANGE_KINDS.csvImport, library: lib.LIBRARY_SOURCE_MARK },
                   "-number",
                 ) || current
               : current;

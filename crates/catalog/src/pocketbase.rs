@@ -448,6 +448,11 @@ fn read_latest_imports(client: &PocketBaseClient) -> CollabResult<Vec<LatestImpo
     Ok(latest)
 }
 
+/// A filter value matching the Source of a CAD item revision read from our
+/// libraries (catalog_lib.js LIBRARY_SOURCE): such a revision counts as
+/// imported, like a CSV import's.
+const FROM_OUR_LIBRARIES: &str = "'\"source\":\"library\"'";
+
 /// Each CAD item's current revision, with a footprint's 3D model bindings,
 /// and the CAD item revisions each part's current revision binds; and, by
 /// CAD item ID, the SHA-256 of the bytes of its current revision and of its
@@ -491,10 +496,15 @@ fn read_current_cad(
     }
 
     // The CAD items whose current revision was made in the app, and for
-    // each, the newest revision a CSV import saved (kicad-parts-3b8b).
+    // each, the newest revision a CSV import saved (kicad-parts-3b8b). A
+    // revision read from our libraries (kicad-parts-37a7) is imported CAD,
+    // not CAD made in the app: its bytes are the CSV catalog's own files,
+    // so a later import may replace it.
     let edited: Vec<CadItemRevisionFields> = client.list_record_fields(
         "catalog_cad_item_revisions",
-        "catalog_cad_item_revisions_via_predecessor.id = \"\" && change.kind != \"csv-import\"",
+        &format!(
+            "catalog_cad_item_revisions_via_predecessor.id = \"\" && change.kind != \"csv-import\" && source !~ {FROM_OUR_LIBRARIES}"
+        ),
         "cad_item,number",
         CAD_ITEM_REVISION_FIELDS,
     )?;
@@ -513,7 +523,9 @@ fn read_current_cad(
             .join(" || ");
         let found: Vec<CadItemRevisionFields> = client.list_record_fields(
             "catalog_cad_item_revisions",
-            &format!("change.kind = \"csv-import\" && ({items})"),
+            &format!(
+                "(change.kind = \"csv-import\" || source ~ {FROM_OUR_LIBRARIES}) && ({items})"
+            ),
             "cad_item,-number",
             CAD_ITEM_REVISION_FIELDS,
         )?;

@@ -505,6 +505,19 @@ function uploadLibrary(upload, which, role, reference, bytes, sha256) {
   return { path: expected, byteSha256: library.byteSha256, commit: library.commit, byteRange: byteRange };
 }
 
+// What the Source of a revision read from our libraries holds, for
+// filters: CSV imports treat such revisions as imported, not made in the app.
+const LIBRARY_SOURCE_MARK = '"source":"library"';
+
+// Whether a stored CAD item revision was read from our libraries.
+function isFromOurLibraries(revision) {
+  try {
+    return JSON.parse(revision.getString("source")).source === LIBRARY_SOURCE;
+  } catch (error) {
+    return false;
+  }
+}
+
 // What a request's hash records of an upload.
 function hashedUpload(upload) {
   const hashed = [upload.role, upload.reference, upload.fileName, upload.formatVersion, upload.sha256];
@@ -3449,6 +3462,8 @@ module.exports = {
   PART_DETAILS_SCHEMA: PART_DETAILS_SCHEMA,
   PART_REVISION_SCHEMA: PART_REVISION_SCHEMA,
   SOURCE_SCHEMA: SOURCE_SCHEMA,
+  LIBRARY_SOURCE_MARK: LIBRARY_SOURCE_MARK,
+  isFromOurLibraries: isFromOurLibraries,
   CATEGORY_SCHEMA: CATEGORY_SCHEMA,
   categoryCode: categoryCode,
   categoryDocument: categoryDocument,
