@@ -295,6 +295,31 @@ pub(crate) fn ResultList(
         if previous.as_ref() != Some(&now) {
             let shown = shown_query.get_value().unwrap_or_default();
             reveals.update_value(|reveals| reveals.select(now.clone(), &shown));
+            // A part already in the shown results (clicked in the list) is
+            // revealed at once, without waiting for the next answer.
+            let found = now.as_deref().and_then(|ipn| {
+                results.with_untracked(|results| match results {
+                    Load::Ready(searched) => searched
+                        .response
+                        .sections
+                        .iter()
+                        .find(|section| section.hits.iter().any(|hit| hit.ipn == ipn))
+                        .map(|section| (section.category.clone(), searched.response.query.clone())),
+                    _ => None,
+                })
+            });
+            if let Some((category, query)) = found {
+                let reveal = reveals
+                    .try_update_value(|reveals| {
+                        reveals.results(now.as_deref(), Some(&category), &query)
+                    })
+                    .flatten();
+                if let Some(category) = reveal {
+                    open.update(|open| open.reveal(&category, &query));
+                    want_scroll.set_value(true);
+                    try_scroll();
+                }
+            }
         }
         now
     });
