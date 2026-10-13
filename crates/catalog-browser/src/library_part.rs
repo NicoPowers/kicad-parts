@@ -248,11 +248,13 @@ pub(crate) fn plan(
             plan.problems.push(problem);
         }
     }
-    let paths: Vec<String> = plan.sent_paths().into_iter().map(str::to_owned).collect();
-    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
-    plan.commit = commit_holding(root, &paths);
+    // The bytes already read are the ones compared with the commit, so a
+    // file saved again in KiCad since is never sent as committed.
+    let commit = commit_holding(root, &plan.sent_files());
+    let sends = !plan.sent_files().is_empty();
+    plan.commit = commit;
     if let Err(problem) = &plan.commit {
-        if !paths.is_empty() {
+        if sends {
             plan.problems.push(problem.clone());
         }
     }
@@ -290,13 +292,19 @@ impl Plan {
             .filter(|file| !self.in_catalog.contains(&file.path))
     }
 
-    /// The repository paths of the files to send.
-    fn sent_paths(&self) -> Vec<&str> {
+    /// The files to send: each repository path and its bytes as read.
+    fn sent_files(&self) -> Vec<(&str, &[u8])> {
         self.sends_symbol()
-            .map(|symbol| symbol.path.as_str())
+            .map(|symbol| (symbol.path.as_str(), symbol.file.as_slice()))
             .into_iter()
-            .chain(self.sends_footprint().map(|file| file.path.as_str()))
-            .chain(self.sends_model().map(|file| file.path.as_str()))
+            .chain(
+                self.sends_footprint()
+                    .map(|file| (file.path.as_str(), file.bytes.as_slice())),
+            )
+            .chain(
+                self.sends_model()
+                    .map(|file| (file.path.as_str(), file.bytes.as_slice())),
+            )
             .collect()
     }
 
@@ -360,9 +368,9 @@ impl Plan {
     /// `symbols/g-ics.kicad_sym at 1a2b3c4d5e6f`.
     pub(crate) fn sources(&self) -> Vec<String> {
         let commit = self.commit.clone().unwrap_or_default();
-        self.sent_paths()
+        self.sent_files()
             .into_iter()
-            .map(|path| match commit.get(..12) {
+            .map(|(path, _)| match commit.get(..12) {
                 Some(short) => format!("{path} at {short}"),
                 None => path.to_owned(),
             })
