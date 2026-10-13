@@ -634,6 +634,17 @@ impl TeamCatalog {
         })
     }
 
+    /// Whether the Catalog has the CAD item `key` of `kind`: one request.
+    pub(crate) fn has_cad_item(&self, kind: CadItemKind, key: &str) -> Result<bool, String> {
+        let client = self.client()?;
+        has_cad_item(&client, kind, key).map_err(|error| {
+            format!(
+                "The team catalog could not be read because {}.",
+                plain_reason(&error)
+            )
+        })
+    }
+
     /// Every category's current revision and every remembered match, for
     /// Add part's category guess: two requests.
     pub(crate) fn categories_and_matches(
@@ -691,6 +702,21 @@ impl TeamCatalog {
         request: TeamNewPartRequest,
         known: &BTreeSet<String>,
     ) -> Result<PublishResult, String> {
+        let files = || {
+            let uploads = crate::add_part::uploads(&request)?;
+            Ok((uploads, request.downloads.clone()))
+        };
+        self.add_part_with(request.clone(), known, files)
+    }
+
+    /// [`Self::add_part`] with the files to send, and the names of the files
+    /// the part came from, made by `files` once the form's own checks pass.
+    pub(crate) fn add_part_with(
+        &self,
+        request: TeamNewPartRequest,
+        known: &BTreeSet<String>,
+        files: impl FnOnce() -> Result<(Vec<CadUpload>, Vec<String>), String>,
+    ) -> Result<PublishResult, String> {
         let client = self.client()?;
         let refused = |message: String| Ok(PublishResult::Refused { message });
         if request.reason.trim().is_empty() {
@@ -712,8 +738,8 @@ impl TeamCatalog {
                 return refused(problem);
             }
         }
-        let uploads = match crate::add_part::uploads(&request) {
-            Ok(uploads) => uploads,
+        let (uploads, sources) = match files() {
+            Ok(files) => files,
             Err(message) => return refused(message),
         };
         if let Some(message) = model_link_refusal(&client, &uploads)? {
@@ -744,7 +770,7 @@ impl TeamCatalog {
         command.cad_fields[1].value = request.footprint.trim().to_owned();
         command.uploads = uploads;
         command.from = request.from.trim().to_owned();
-        command.files = request.downloads.clone();
+        command.files = sources;
         if command.body().to_string().len() > EDIT_BODY_LIMIT {
             return refused(format!(
                 "The files are too big to save together: one save can send at most {} MB. Choose No 3D model, or a smaller model. Nothing was saved.",
@@ -1898,7 +1924,13 @@ fn downloaded_from(change: &StoredChange) -> Option<DetailChange> {
         (false, false) => format!("{from}: {}", files.join(", ")),
     };
     Some(DetailChange {
-        label: "Downloaded from".into(),
+        // A part from our libraries was not downloaded.
+        label: if from == crate::library_part::FROM_OUR_LIBRARIES {
+            "Added from"
+        } else {
+            "Downloaded from"
+        }
+        .into(),
         before: String::new(),
         after,
     })

@@ -5,7 +5,9 @@
 //! else, so everything here is testable without a window.
 
 mod add_part;
+mod git;
 mod library;
+mod library_part;
 pub mod team;
 
 use base64::Engine;
@@ -264,35 +266,76 @@ impl CatalogBrowser {
     /// Reads the files chosen for Add part (kicad-parts-9693): what they
     /// hold, what the symbol says, the category guess, the next free IPN
     /// for each category, and the checks before saving.
+    ///
+    /// With [`TeamDownloadRequest::library`], the symbol and footprint are
+    /// read from our libraries in the CSV catalog folder instead
+    /// (kicad-parts-37a7), with the library check's findings for them.
     pub fn read_download(
         &self,
         request: &TeamDownloadRequest,
         team: &TeamCatalog,
     ) -> Result<TeamDownload, String> {
+        let context = self.add_part_context(team)?;
+        match &request.library {
+            None => add_part::read(request, &context),
+            Some(choice) => {
+                let plan = self.library_plan(choice, true, team)?;
+                Ok(plan.reading(&context))
+            }
+        }
+    }
+
+    /// What Add part reads besides the files: the team catalog's
+    /// categories, remembered matches and parts, every IPN, the CSV
+    /// catalog's footprints and KiCad's data folder.
+    fn add_part_context(&self, team: &TeamCatalog) -> Result<add_part::Context<'_>, String> {
         let (categories, remembered) = team.categories_and_matches()?;
         let parts = team.current_parts();
         let mut ipns = self.csv_ipns().clone();
         ipns.extend(parts.iter().map(|(details, _)| details.ipn.clone()));
-        let kicad_share = {
-            let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
-            match &kicad.discovery {
-                Discovery::Ready(install) => install.share_dir.clone(),
-                _ => None,
-            }
-        };
         let footprints = self
             .footprints
             .get_or_init(|| add_part::local_footprints(&self.config.catalog_root));
-        add_part::read(
-            request,
-            &add_part::Context {
-                categories,
-                remembered,
-                parts,
-                ipns,
-                footprints,
-                kicad_share,
-            },
+        Ok(add_part::Context {
+            categories,
+            remembered,
+            parts,
+            ipns,
+            footprints,
+            kicad_share: self.kicad_share(),
+        })
+    }
+
+    /// KiCad's data folder, when KiCad was found.
+    fn kicad_share(&self) -> Option<PathBuf> {
+        let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
+        match &kicad.discovery {
+            Discovery::Ready(install) => install.share_dir.clone(),
+            _ => None,
+        }
+    }
+
+    /// The symbol and footprint `choice` names in our libraries, read from
+    /// the CSV catalog folder, with what saving them needs.
+    fn library_plan(
+        &self,
+        choice: &desktop_contract::TeamLibraryChoice,
+        follow_symbol: bool,
+        team: &TeamCatalog,
+    ) -> Result<library_part::Plan, String> {
+        let share = self.kicad_share();
+        let check = self
+            .library_check
+            .check(team, &self.config.catalog_root, share.as_deref())?
+            .ok_or_else(|| {
+                "Sign in as someone who can edit to add a part from our libraries.".to_owned()
+            })?;
+        library_part::plan(
+            &self.config.catalog_root,
+            choice,
+            follow_symbol,
+            &check,
+            &|kind, key| team.has_cad_item(kind, key),
         )
     }
 
@@ -302,13 +345,7 @@ impl CatalogBrowser {
     /// per change of the team catalog (a new Change, a finished import or
     /// another person signing in) and kept until then.
     pub fn library_check(&self, team: &TeamCatalog) -> Result<Option<LibraryCheckView>, String> {
-        let kicad_share = {
-            let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
-            match &kicad.discovery {
-                Discovery::Ready(install) => install.share_dir.clone(),
-                _ => None,
-            }
-        };
+        let kicad_share = self.kicad_share();
         self.library_check
             .get(team, &self.config.catalog_root, kicad_share.as_deref())
     }
@@ -318,13 +355,36 @@ impl CatalogBrowser {
         team.check_ipn(ipn, prefix, self.csv_ipns())
     }
 
-    /// Saves a new part from Add part.
+    /// Saves a new part from Add part. A part from our libraries
+    /// ([`TeamNewPartRequest::library`]) is read again from the CSV catalog
+    /// folder, so what is saved is what the folder and its commit hold now;
+    /// only the chosen items the Symbol and Footprint still name are used.
     pub fn add_part(
         &self,
         request: TeamNewPartRequest,
         team: &TeamCatalog,
     ) -> Result<PublishResult, String> {
-        team.add_part(request, self.csv_ipns())
+        let Some(choice) = request.library.clone() else {
+            return team.add_part(request, self.csv_ipns());
+        };
+        let footprint = footprint_choices(&request.footprint)
+            .first()
+            .map(|choice| (*choice).to_owned());
+        let used = desktop_contract::TeamLibraryChoice {
+            symbol: choice
+                .symbol
+                .filter(|symbol| symbol.trim() == request.symbol.trim()),
+            footprint: choice
+                .footprint
+                .filter(|chosen| Some(chosen.trim()) == footprint.as_deref()),
+        };
+        let mut request = request;
+        request.files.clear();
+        request.from = library_part::FROM_OUR_LIBRARIES.to_owned();
+        team.add_part_with(request, self.csv_ipns(), || {
+            let plan = self.library_plan(&used, false, team)?;
+            Ok((plan.uploads()?, plan.sources()))
+        })
     }
 
     pub fn part(&self, ipn: &str) -> Option<PartDetail> {

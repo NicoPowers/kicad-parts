@@ -215,6 +215,37 @@ pub fn kicad_footprints(share: &Path, libraries: &Libraries) -> BTreeSet<String>
         .collect()
 }
 
+/// The bytes of the repository file `relative` (a `/`-separated path such
+/// as `symbols/g-ics.kicad_sym`) under `root`, read with the same safety as
+/// the rest of the library check: every part of the path must be a plain
+/// name (never `..` or empty), and no folder on the way, nor the file, may
+/// be a link, which is never followed. Refuses with a plain reason.
+pub fn read_library_file(root: &Path, relative: &str) -> Result<Vec<u8>, String> {
+    let parts: Vec<&str> = relative.split('/').collect();
+    let plain = |part: &&str| {
+        !part.is_empty() && *part != "." && *part != ".." && !part.contains(['\\', ':'])
+    };
+    if !parts.iter().all(plain) {
+        return Err(format!(
+            "{relative} is not a path inside the CSV catalog folder."
+        ));
+    }
+    let mut path = root.to_path_buf();
+    for (index, part) in parts.iter().enumerate() {
+        path.push(part);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| format!("{relative} is not in the CSV catalog folder."))?;
+        if is_link(&metadata) {
+            return Err(format!("{relative} could not be read: {LINK}."));
+        }
+        let last = index + 1 == parts.len();
+        if last && !metadata.is_file() {
+            return Err(format!("{relative} is not a file."));
+        }
+    }
+    fs::read(&path).map_err(|error| format!("{relative} could not be read: {error}."))
+}
+
 /// The entries of the folder `relative` (a `/`-separated repository path)
 /// under `root`, in name order, each with its repository path; none if it
 /// is missing or cannot be read. Links are never followed: a link, the

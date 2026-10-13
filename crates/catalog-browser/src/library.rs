@@ -8,7 +8,7 @@ use catalog::library_check::{Group, KnownCad, LibraryCheck, read::check_folder};
 use desktop_contract::{LibraryCheckGroup, LibraryCheckItem, LibraryCheckView};
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 /// Who was signed in, the team catalog's checkpoint and finished imports,
@@ -29,7 +29,7 @@ struct Fingerprint {
 
 /// The last library check and the position it was worked out for.
 #[derive(Default)]
-pub(crate) struct Cached(Mutex<Option<(Position, LibraryCheckView)>>);
+pub(crate) struct Cached(Mutex<Option<(Position, Arc<LibraryCheck>)>>);
 
 impl Cached {
     /// The library check for what `team` follows now and the folder as it
@@ -41,23 +41,39 @@ impl Cached {
         root: &Path,
         kicad_share: Option<&Path>,
     ) -> Result<Option<LibraryCheckView>, String> {
+        Ok(self
+            .check(team, root, kicad_share)?
+            .map(|check| view_of(&check)))
+    }
+
+    /// [`Self::get`], as the check itself, for Add part from our libraries
+    /// (kicad-parts-37a7), which needs each finding's kind.
+    pub(crate) fn check(
+        &self,
+        team: &TeamCatalog,
+        root: &Path,
+        kicad_share: Option<&Path>,
+    ) -> Result<Option<Arc<LibraryCheck>>, String> {
         let Some((email, checkpoint, imports)) = team.editor_position() else {
             return Ok(None);
         };
         let position = (email, checkpoint, imports, fingerprint(root));
-        if let Some((at, view)) = self.lock().as_ref() {
+        if let Some((at, check)) = self.lock().as_ref() {
             if *at == position {
-                return Ok(Some(view.clone()));
+                return Ok(Some(check.clone()));
             }
         }
         let state = team.import_state()?;
-        let check = check_folder(root, &KnownCad::from_state(&state), kicad_share)?;
-        let view = view_of(&check);
-        *self.lock() = Some((position, view.clone()));
-        Ok(Some(view))
+        let check = Arc::new(check_folder(
+            root,
+            &KnownCad::from_state(&state),
+            kicad_share,
+        )?);
+        *self.lock() = Some((position, check.clone()));
+        Ok(Some(check))
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(Position, LibraryCheckView)>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(Position, Arc<LibraryCheck>)>> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 }

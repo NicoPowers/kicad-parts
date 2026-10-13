@@ -119,6 +119,16 @@ struct SymbolChoice<'a> {
     name: String,
 }
 
+/// Where the files Add part reads came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Origin<'a> {
+    /// A download the engineer chose.
+    Download,
+    /// Our libraries (kicad-parts-37a7): the footprint chosen there, by
+    /// reference, which is never a near-copy of itself.
+    Library { footprint: &'a str },
+}
+
 /// Reads the downloaded files: see [`desktop_contract::TeamDownload`].
 pub(crate) fn read(
     request: &TeamDownloadRequest,
@@ -138,8 +148,29 @@ pub(crate) fn read(
                 .into(),
         );
     }
+    Ok(read_files(
+        &download,
+        request.symbol,
+        request.footprint,
+        request.without_models,
+        context,
+        Origin::Download,
+    ))
+}
+
+/// What Add part makes of `download`, with the symbol and footprint at
+/// `symbol` and `footprint` chosen (the first when `None`).
+pub(crate) fn read_files(
+    download: &Download,
+    symbol: Option<usize>,
+    footprint: Option<usize>,
+    without_models: bool,
+    context: &Context<'_>,
+    origin: Origin<'_>,
+) -> TeamDownload {
+    let ours = matches!(origin, Origin::Library { .. });
     let mut notes = Vec::new();
-    let symbols = symbol_choices(&download, &mut notes);
+    let symbols = symbol_choices(download, &mut notes);
     let footprints: Vec<&DownloadFile> = download
         .of_kind(DownloadKind::Footprint)
         .filter(|file| match read_footprint_file(&file.bytes) {
@@ -151,22 +182,26 @@ pub(crate) fn read(
         })
         .collect();
     let models: Vec<&DownloadFile> = download.of_kind(DownloadKind::Model3d).collect();
-    let symbol_at = request
-        .symbol
-        .unwrap_or(0)
-        .min(symbols.len().saturating_sub(1));
-    let footprint_at = request
-        .footprint
+    let symbol_at = symbol.unwrap_or(0).min(symbols.len().saturating_sub(1));
+    let footprint_at = footprint
         .unwrap_or(0)
         .min(footprints.len().saturating_sub(1));
     let symbol = symbols.get(symbol_at);
     let footprint = footprints.get(footprint_at).copied();
     if symbol.is_none() {
-        notes.push("The download has no KiCad symbol (.kicad_sym).".into());
+        notes.push(if ours {
+            "No symbol is chosen. Choose one from our libraries, or type one the Catalog or KiCad has in Symbol.".into()
+        } else {
+            "The download has no KiCad symbol (.kicad_sym).".into()
+        });
     }
     if footprint.is_none() {
-        notes.push("The download has no KiCad footprint (.kicad_mod).".into());
-        if let Some(model) = models.first() {
+        if ours {
+            notes.push("No footprint is chosen. Choose one from our libraries, or type one the Catalog or KiCad has in Footprint.".into());
+        } else {
+            notes.push("The download has no KiCad footprint (.kicad_mod).".into());
+        }
+        if let Some(model) = models.first().filter(|_| !ours) {
             notes.push(format!(
                 "A 3D model goes with a footprint, so {} is not used.",
                 model.file_name
@@ -192,15 +227,14 @@ pub(crate) fn read(
     let properties = entry.as_deref().map(symbol_fields).unwrap_or_default();
     let (mpn, manufacturer) = manufacturer_part(&properties);
     // A manufacturer part needs both halves; say so now, not at Save.
+    let teller = if ours { "The symbol" } else { "The download" };
     match (manufacturer.is_empty(), mpn.is_empty()) {
-        (false, true) => notes.push(
-            "The download names a manufacturer but no MPN. Type the MPN, or clear Manufacturer."
-                .into(),
-        ),
-        (true, false) => notes.push(
-            "The download names an MPN but no manufacturer. Type the manufacturer, or clear MPN."
-                .into(),
-        ),
+        (false, true) => notes.push(format!(
+            "{teller} names a manufacturer but no MPN. Type the MPN, or clear Manufacturer."
+        )),
+        (true, false) => notes.push(format!(
+            "{teller} names an MPN but no manufacturer. Type the manufacturer, or clear MPN."
+        )),
         _ => {}
     }
     let footprint_info = footprint.and_then(|file| read_footprint_file(&file.bytes).ok());
@@ -248,10 +282,13 @@ pub(crate) fn read(
     let named_library = suggested_footprint_library(&footprint_name)
         .unwrap_or_default()
         .to_owned();
-    let known_footprints = match footprint {
+    let mut known_footprints = match footprint {
         Some(file) => known_footprints(file, &footprint_name, &named_library, context),
         None => Vec::new(),
     };
+    if let Origin::Library { footprint } = origin {
+        known_footprints.retain(|known| known.reference != footprint);
+    }
     let footprint_library = if named_library.is_empty() {
         known_footprints
             .iter()
@@ -296,6 +333,9 @@ pub(crate) fn read(
         .and_then(|info| linked_model(info, &models))
         .or((!models.is_empty()).then_some(0));
     match (footprint, model) {
+        // Our libraries' footprints keep their own links; the caller says
+        // which 3D model that is.
+        _ if ours => {}
         (Some(file), Some(at)) => {
             notes.push(format!(
                 "The footprint will use the 3D model {} from the download.",
@@ -318,7 +358,7 @@ pub(crate) fn read(
         _ => {}
     }
 
-    Ok(TeamDownload {
+    TeamDownload {
         from: download
             .vendor
             .map(|vendor| vendor.name().to_owned())
@@ -345,7 +385,7 @@ pub(crate) fn read(
         footprint_file: footprint.map(|file| team_file(file, FileKind::Footprint)),
         // The 3D models never change with the symbol or footprint chosen, so
         // a read again may leave them out.
-        model_files: if request.without_models {
+        model_files: if without_models {
             Vec::new()
         } else {
             models
@@ -365,7 +405,8 @@ pub(crate) fn read(
         pins,
         pads: footprint.map(|file| pad_count(&file.bytes) as u32),
         notes,
-    })
+        library: None,
+    }
 }
 
 /// About how many bytes a file takes in a save: text as it is, other bytes
