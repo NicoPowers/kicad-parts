@@ -127,27 +127,33 @@ pub(crate) fn ResultList(
         if previous.as_ref() != Some(&now) {
             to_reveal.set_value(now.clone());
         }
-        results.with(|results| {
-            let Load::Ready(response) = results else {
-                return;
-            };
-            let new_search =
-                shown_query.with_value(|shown| shown.as_ref() != Some(&response.query));
-            shown_query.set_value(Some(response.query.clone()));
-            let found = to_reveal
-                .get_value()
-                .and_then(|ipn| section_of(response, &ipn));
-            if let Some(section) = found {
-                let (category, query) = (section.category.clone(), response.query.clone());
-                open.update(|open| open.reveal(&category, &query));
-                to_reveal.set_value(None);
-                scroll_selected_into_view();
-            } else if new_search {
-                // After a new search, or clearing it, the selected part
-                // stays in view if its section is open.
-                scroll_selected_into_view();
+        // Read the results first and change the open sections afterwards,
+        // never while the results are borrowed.
+        let shown = results.with(|results| match results {
+            Load::Ready(response) => {
+                let found = to_reveal.with_value(|ipn| {
+                    ipn.as_ref()
+                        .and_then(|ipn| section_of(response, ipn))
+                        .map(|section| section.category.clone())
+                });
+                Some((response.query.clone(), found))
             }
+            _ => None,
         });
+        let Some((query, found)) = shown else {
+            return now;
+        };
+        let new_search = shown_query.with_value(|shown| shown.as_ref() != Some(&query));
+        shown_query.set_value(Some(query.clone()));
+        if let Some(category) = found {
+            open.update(|open| open.reveal(&category, &query));
+            to_reveal.set_value(None);
+            scroll_selected_into_view();
+        } else if new_search {
+            // After a new search, or clearing it, the selected part stays
+            // in view if its section is open.
+            scroll_selected_into_view();
+        }
         now
     });
     let choose = move |ipn: String| {
