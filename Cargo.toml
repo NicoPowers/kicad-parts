@@ -26,3 +26,11 @@ rust-version = "1.85"
 # Hashing preview libraries in debug builds would otherwise be slow.
 [profile.dev.package.sha2]
 opt-level = 3
+
+# The Libraries browser reads KiCad's 430 MB of libraries in the background;
+# the journeys run debug builds, so these stay fast there too.
+[profile.dev.package.kicad-integration]
+opt-level = 3
+
+[profile.dev.package.serde_json]
+opt-level = 3

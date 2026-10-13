@@ -10,9 +10,17 @@
 //!   them by content hash and KiCad version.
 //! - [`library_file`] reads saved symbol libraries and footprints: one
 //!   symbol's exact bytes, file versions and 3D model references.
+//! - [`lib_table`] reads the person's KiCad library tables
+//!   (`sym-lib-table`, `fp-lib-table`) and expands KiCad's path variables.
+//! - [`library_summary`] reads what a library browser lists about every
+//!   symbol and footprint in one quick pass, and [`footprint_filter`]
+//!   applies KiCad's footprint filters for a symbol.
 
 pub mod discovery;
+pub mod footprint_filter;
+pub mod lib_table;
 pub mod library_file;
+pub mod library_summary;
 pub mod preview;
 mod process;
 pub mod resolver;
