@@ -501,6 +501,26 @@ fn a_footprint_file_linking_a_3d_model_outside_the_library_is_refused() {
             &says,
         );
     }
+    // A KiCad 5 path written without quotes is judged the same way.
+    let unquoted = redrawn(
+        original
+            .replace(&format!("\"{kicad}\""), "${KIPRJMOD}/3D/R_0603.wrl")
+            .as_bytes(),
+    );
+    assert!(String::from_utf8_lossy(&unquoted).contains("(model ${KIPRJMOD}/3D/R_0603.wrl"));
+    refused(
+        submit_edit(
+            &editor,
+            &cad_edit(
+                &before,
+                IPN,
+                &[],
+                vec![footprint_upload(&unquoted, FOOTPRINT, "R.kicad_mod").unwrap()],
+            ),
+        ),
+        400,
+        "he footprint's 3D model link ${KIPRJMOD}/3D/R_0603.wrl is outside the Catalog's library",
+    );
     assert!(team.read() == before, "nothing was written");
     // KiCad's own and embedded models are fine.
     let reply = submit_edit(

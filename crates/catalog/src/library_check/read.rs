@@ -6,9 +6,10 @@ use super::{CheckInputs, CsvReference, KnownCad, Libraries, LibraryCheck, Librar
 use super::{LibrarySymbol, Today, check};
 use crate::cad_item::CadItemKind;
 use crate::csv_import::{is_link, parse_csv};
+use crate::download::model_links;
 use crate::hash::sha256_hex;
 use kicad_integration::footprint_choices;
-use kicad_integration::library_file::{FootprintFile, Sexp, SymbolLibrary, model_references};
+use kicad_integration::library_file::{Sexp, SymbolLibrary};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -119,12 +120,9 @@ pub fn read_libraries(root: &Path) -> Libraries {
             }
             match fs::read(&path) {
                 Ok(bytes) => {
-                    // A footprint that does not parse still names its 3D
-                    // models the way the CSV catalog fixture reads them.
-                    let models = match FootprintFile::parse(&bytes) {
-                        Ok(parsed) => parsed.model_references,
-                        Err(_) => model_references(&String::from_utf8_lossy(&bytes)),
-                    };
+                    // Quoted paths and KiCad 5 paths written without
+                    // quotes, whether or not the footprint parses.
+                    let models = model_links(&String::from_utf8_lossy(&bytes));
                     libraries.footprints.push(LibraryFootprint {
                         library: library.clone(),
                         name,

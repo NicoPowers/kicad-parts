@@ -1671,6 +1671,34 @@ fn a_3d_model_link_outside_the_library_never_reaches_the_catalog() {
             message: "The footprint's 3D model link /home/me/models/C_0603_New.step is outside the Catalog's library, so it only works on one computer. Link the model as ${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_New.step in KiCad's Footprint Editor, or remove the link, then choose the file again. Nothing was saved.".into()
         }
     );
+    // A KiCad 5 path written without quotes is refused the same way, before
+    // anything is sent.
+    let mut unquoted = opened(&part, "Corrected footprint");
+    let text = footprint_named("C_0603_New").replace(
+        "\"${KIPRJMOD}/3D/C_0603_New.stp\"",
+        "${KIPRJMOD}/3D/C_0603_New.wrl",
+    );
+    assert!(text.contains("(model ${KIPRJMOD}/3D/C_0603_New.wrl"));
+    unquoted.files = vec![team_file(
+        FileKind::Footprint,
+        "C_0603_New.kicad_mod",
+        text.replacen(
+            "(tags",
+            "(descr \"corrected\")
+	(tags",
+            1,
+        )
+        .as_bytes(),
+        None,
+    )];
+    let PublishResult::Refused { message } = team.team.edit(unquoted).unwrap() else {
+        panic!("not refused");
+    };
+    assert!(
+        message.starts_with("The footprint's 3D model link ${KIPRJMOD}/3D/C_0603_New.wrl is outside the Catalog's library")
+            && message.ends_with("Nothing was saved."),
+        "{message}"
+    );
     // Linked into the Catalog's folder, but the 3D model is neither in the
     // Catalog nor chosen: refused too.
     let key = "3d-models/g-Capacitor_SMD.3dshapes/C_0603_New.step";

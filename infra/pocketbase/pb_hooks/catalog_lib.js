@@ -717,6 +717,74 @@ function modelLinkProblem(reference, link, available) {
   return "";
 }
 
+// Where the quoted string starting at `start` (its ") ends, just past its
+// closing ", with backslash escapes; the end of the text if not closed.
+function quotedStringEnd(text, start) {
+  let index = start + 1;
+  while (index < text.length) {
+    const character = text.charAt(index);
+    if (character === "\\") {
+      index += 2;
+    } else if (character === '"') {
+      return index + 1;
+    } else {
+      index += 1;
+    }
+  }
+  return text.length;
+}
+
+// Every 3D model path of a footprint's text, as written: each quoted
+// (model "...") path and each KiCad 5 path written without quotes, outside
+// quoted strings (crates/catalog download::model_links). Only the model
+// link rule reads these; snapshots keep modelReferences, which leaves the
+// unquoted ones out, so their hashes never change.
+function modelLinks(text) {
+  const links = [];
+  const space = (character) => /\s/.test(character);
+  let index = 0;
+  while (index < text.length) {
+    const character = text.charAt(index);
+    if (character === '"') {
+      index = quotedStringEnd(text, index);
+      continue;
+    }
+    if (character !== "(") {
+      index += 1;
+      continue;
+    }
+    let head = index + 1;
+    while (head < text.length && space(text.charAt(head))) {
+      head += 1;
+    }
+    const after = head + "model".length;
+    index += 1;
+    const next = text.charAt(after);
+    if (text.substring(head, after) !== "model" || !(space(next) || next === '"')) {
+      continue;
+    }
+    let start = after;
+    while (start < text.length && space(text.charAt(start))) {
+      start += 1;
+    }
+    let end;
+    if (text.charAt(start) === '"') {
+      end = quotedStringEnd(text, start);
+      links.push(text.substring(start + 1, Math.max(start + 1, end - 1)));
+    } else {
+      end = start;
+      while (end < text.length && !space(text.charAt(end)) && text.charAt(end) !== "(" && text.charAt(end) !== ")") {
+        end += 1;
+      }
+      if (end > start) {
+        links.push(text.substring(start, end));
+      }
+    }
+    index = Math.max(end, index);
+  }
+  return links;
+}
+
 // The name after the colon of LIB:NAME, or null.
 function referenceName(reference) {
   const colon = reference.indexOf(":");
@@ -886,7 +954,8 @@ function preparedUploads(txApp, uploads) {
       prepared[upload.kind + "\n" + upload.reference] = prepare(upload, upload.formatVersion, []);
     } else if (upload.kind === "footprint") {
       const read = footprints[upload.reference];
-      for (const link of modelReferences(upload.text)) {
+      // KiCad 5 paths written without quotes count too.
+      for (const link of modelLinks(upload.text)) {
         const problem = modelLinkProblem(upload.reference, link, (key) => {
           if (prepared["model-3d\n" + key]) {
             return true;

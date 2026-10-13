@@ -749,3 +749,44 @@ fn links_are_not_followed_and_are_listed() {
             .any(|f| f.kind == FindingKind::MissingModel)
     );
 }
+
+/// A KiCad 5 footprint writes its 3D model path without quotes; the check
+/// judges it like any other link.
+#[test]
+fn an_unquoted_kicad_5_model_path_is_judged_too() {
+    let old = "(module Old5 (layer F.Cu)\n  (descr \"see (model x) note\")\n  (model ${KIPRJMOD}/3D/Old5.wrl\n    (at (xyz 0 0 0))\n  )\n)\n";
+    let root = small_catalog(&[
+        ("footprints/g-Package_SO.pretty/Old5.kicad_mod", old),
+        (
+            "database/g-old.csv",
+            &format!("{CSV_HEADER}OLD-0001-0001,X,Y,Old part,,g-Package_SO:SOIC-8\n"),
+        ),
+    ]);
+    let known = imported(root.path());
+    fs::write(
+        root.path().join("database/g-old.csv"),
+        format!("{CSV_HEADER}OLD-0001-0001,X,Y,Old part,,g-Package_SO:SOIC-8;g-Package_SO:Old5\n"),
+    )
+    .unwrap();
+    let found = check_folder(root.path(), &known, None).unwrap();
+    let old5: Vec<(Severity, &str)> = found
+        .findings
+        .iter()
+        .filter(|f| f.name() == "Old5" && f.kind != FindingKind::NotInCatalog)
+        .map(|f| (f.severity, f.kind.as_str()))
+        .collect();
+    assert_eq!(
+        old5,
+        [(Severity::Error, "model-outside")],
+        "{}",
+        found.report()
+    );
+    assert!(
+        found
+            .findings
+            .iter()
+            .any(|f| f.message.contains("${KIPRJMOD}/3D/Old5.wrl")),
+        "{}",
+        found.report()
+    );
+}

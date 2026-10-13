@@ -537,6 +537,26 @@ pub fn remove_model_links(footprint: &str, remove: impl Fn(&str) -> bool) -> Str
     kept
 }
 
+/// Every 3D model path of a footprint (the text of a `.kicad_mod`), as
+/// written, without quotes: each quoted `(model "...")` path and each KiCad
+/// 5 path written without quotes, outside quoted strings. The library
+/// check's rule for 3D model links reads these; the CAD snapshot and the
+/// zero-loss report keep reading
+/// [`kicad_integration::library_file::model_references`], which leaves the
+/// unquoted ones out, so their hashes never change.
+pub fn model_links(footprint: &str) -> Vec<String> {
+    model_path_spans(footprint)
+        .into_iter()
+        .map(|span| {
+            let path = &footprint[span];
+            path.strip_prefix('"')
+                .and_then(|path| path.strip_suffix('"'))
+                .unwrap_or(path)
+                .to_owned()
+        })
+        .collect()
+}
+
 /// The byte span of each `(model "...")` path, quotes included, found the
 /// way [`kicad_integration::library_file::model_references`] finds them, and
 /// of each KiCad 5 path written without quotes, which that leaves out (so
@@ -1032,6 +1052,25 @@ mod tests {
         let linked = link_model(only_text, path, "x.step");
         assert!(linked.contains("(descr \"(model x)\")"), "{linked}");
         assert!(linked.contains(&format!("(model \"{path}\"")), "{linked}");
+    }
+
+    #[test]
+    fn lists_quoted_and_unquoted_3d_model_paths() {
+        let footprint = "(module F (layer F.Cu)
+  (descr \"see (model x) note\")
+  (model ${KIPRJMOD}/3D/F.wrl (at (xyz 0 0 0)))
+  (model \"${KICAD9_3DMODEL_DIR}/x.step\")
+  (model_x y)
+)";
+        assert_eq!(
+            model_links(footprint),
+            ["${KIPRJMOD}/3D/F.wrl", "${KICAD9_3DMODEL_DIR}/x.step"]
+        );
+        // The snapshot's reading leaves the unquoted path out, as before.
+        assert_eq!(
+            kicad_integration::library_file::model_references(footprint),
+            ["${KICAD9_3DMODEL_DIR}/x.step"]
+        );
     }
 
     #[test]

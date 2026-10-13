@@ -1388,15 +1388,12 @@ fn model_link_refusal(
         .iter()
         .filter(|upload| upload.role == UploadRole::Footprint)
     {
-        let Ok(file) = catalog::cad_file::read_footprint_file(&upload.bytes) else {
+        if catalog::cad_file::read_footprint_file(&upload.bytes).is_err() {
             continue;
-        };
+        }
         let (library, name) = upload.reference.split_once(':').unwrap_or_default();
-        let links: Vec<String> = file
-            .models
-            .into_iter()
-            .map(|model| model.reference)
-            .collect();
+        // KiCad 5 paths written without quotes count too.
+        let links = catalog::download::model_links(&String::from_utf8_lossy(&upload.bytes));
         // The Catalog's 3D models the links name and the edit does not send.
         let mut in_catalog = BTreeSet::new();
         for link in &links {
