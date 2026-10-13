@@ -461,7 +461,10 @@ const LIBRARY_SOURCE = "library";
 // it says nothing. A symbol is in symbols/<library>.kicad_sym with its
 // byte range; a footprint is the whole file
 // footprints/<library>.pretty/<name>.kicad_mod; a 3D model the whole file
-// at its own path.
+// at its own path. The commit is what the app says it read the file from:
+// the server has no repository, so it checks the commit is written as a
+// full ID, not that it holds the file; the bytes it stores are checked as
+// for any upload.
 function uploadLibrary(upload, which, role, reference, bytes, sha256) {
   const library = upload.library;
   if (library === undefined || library === null) {
