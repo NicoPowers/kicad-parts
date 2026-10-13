@@ -23,6 +23,7 @@ import {
   tempDir,
   textOf,
   waitForLiveUpdates,
+  waitForSelectedInList,
   waitForText,
 } from '../harness.mjs';
 
@@ -237,6 +238,8 @@ describe('team catalog: add a part from a download', () => {
     await waitForText(browser, `${SYMBOL} .provenance`, /^team catalog, symbol revision 1 · /, 60_000);
     await waitForText(browser, `${FOOTPRINT} .provenance`, /^team catalog, footprint revision 1 · /, 60_000);
     await waitForText(browser, '#part-category', 'Category: Capacitors');
+    // The new part is in its category's section, which opened by itself.
+    await waitForSelectedInList(browser, IPN, 'Capacitors', 20_000);
     await searchFor(browser, MPN, '1 matching part');
     assert.match(await textOf(browser, 'ul[aria-label="Search results"]'), new RegExp(IPN));
     await clickButton(COLUMN, 'History (1)');
@@ -263,5 +266,9 @@ describe('team catalog: add a part from a download', () => {
     await clickButton('#add-same-mpn', 'Open CAP-0000-0020');
     await waitForText(browser, '#part-title', KNOWN_MPN);
     assert.equal(await browser.$('#add-heading').isExisting(), false);
+    // Opened from the notice, the part is shown in its section once the
+    // search (still the new part's MPN) no longer hides it.
+    await searchFor(browser, '', /^\d+ matching parts$/);
+    await waitForSelectedInList(browser, 'CAP-0000-0020', 'Capacitors');
   });
 });

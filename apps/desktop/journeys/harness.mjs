@@ -497,7 +497,15 @@ export async function searchFor(browser, query, expectedCount) {
   const input = await browser.$('aria/Search parts');
   assert.equal(await input.getTagName(), 'input', 'the search box is labelled "Search parts"');
   const started = Date.now();
-  await input.setValue(query);
+  if (query === '') {
+    // Clearing the field through WebDriver fires no input event, so the
+    // text is deleted from the keyboard as a person would.
+    await input.click();
+    await browser.keys(['Control', 'a']);
+    await browser.keys('Backspace');
+  } else {
+    await input.setValue(query);
+  }
   // Wait until the list shows the answer to this query, not the last one.
   await browser.waitUntil(
     async () =>
@@ -513,7 +521,8 @@ export async function searchFor(browser, query, expectedCount) {
 }
 
 export async function selectResult(browser, name) {
-  const buttons = await browser.$$('ul[aria-label="Search results"] li button');
+  // The parts' own buttons, not the category section headers.
+  const buttons = await browser.$$('ul[aria-label="Search results"] button.result');
   for (const button of buttons) {
     if ((await button.getText()).includes(name)) {
       await button.click();
@@ -525,6 +534,33 @@ export async function selectResult(browser, name) {
     }
   }
   assert.fail(`no search result mentions ${name}`);
+}
+
+/**
+ * Waits until the part list shows the part `text` (its IPN or MPN) as the
+ * selected one, in the open section named `section`, scrolled into view.
+ */
+export async function waitForSelectedInList(browser, text, section, timeout = 10_000) {
+  let seen;
+  const shown = browser.waitUntil(
+    async () => {
+      seen = await browser.execute((wanted) => {
+        const row = document.querySelector('.results button.result[aria-current="true"]');
+        if (!row || !row.textContent.includes(wanted)) return { row: row?.textContent ?? null };
+        const toggle = row.closest('.result-section').querySelector('.section-toggle');
+        const list = document.querySelector('.results').getBoundingClientRect();
+        const box = row.getBoundingClientRect();
+        return {
+          section: toggle.querySelector('.section-name').textContent,
+          expanded: toggle.getAttribute('aria-expanded'),
+          inView: box.top >= list.top - 1 && box.bottom <= list.bottom + 1,
+        };
+      }, text);
+      return seen.section === section && seen.expanded === 'true' && seen.inView;
+    },
+    { timeout, interval: 50 },
+  );
+  await shown.catch(() => assert.fail(`${text} was not shown selected in ${section}: ${JSON.stringify(seen)}`));
 }
 
 /**

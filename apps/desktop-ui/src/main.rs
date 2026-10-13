@@ -6,6 +6,7 @@
 mod add_part;
 mod backend;
 mod library_check;
+mod part_list;
 mod team;
 
 use add_part::AddPartView;
@@ -17,10 +18,12 @@ use desktop_contract::{
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use library_check::{LibraryCheckLine, LibraryCheckPanel};
+use part_list::ResultList;
 use std::time::Duration;
 use team::{Notice, TeamBadge, TeamColumn, TeamUi, focus_later};
 
-/// Results shown per search. The catalog search itself covers every row.
+/// Parts shown per category section. The catalog search itself covers
+/// every row, and each section counts all its matches.
 const RESULT_LIMIT: usize = 200;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(120);
 /// How often the UI asks whether the team catalog has new Changes. The app
@@ -547,85 +550,6 @@ fn SettingsProblem(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
             </section>
         }
         .into_any()
-    }
-}
-
-#[component]
-fn ResultList(
-    results: RwSignal<Load<SearchResponse>>,
-    selected: RwSignal<Option<String>>,
-    adding: RwSignal<bool>,
-    checking: RwSignal<bool>,
-) -> impl IntoView {
-    view! {
-        <p id="result-count" class="result-count" aria-live="polite">
-            {move || match results.get() {
-                Load::Loading => "Searching…".to_owned(),
-                Load::Failed(error) => format!("Search failed: {error}"),
-                Load::Ready(response) if response.total == 0 => "No parts match.".to_owned(),
-                Load::Ready(response) if response.total > response.hits.len() => {
-                    format!(
-                        "Showing {} of {} matching parts",
-                        grouped(response.hits.len()),
-                        grouped(response.total),
-                    )
-                }
-                Load::Ready(response) => {
-                    let noun = if response.total == 1 { "part" } else { "parts" };
-                    format!("{} matching {noun}", grouped(response.total))
-                }
-            }}
-        </p>
-        <ul
-            class="results"
-            aria-label="Search results"
-            data-query=move || match results.get() {
-                Load::Ready(response) => Some(response.query),
-                _ => None,
-            }
-        >
-            {move || {
-                let Load::Ready(response) = results.get() else {
-                    return Vec::new();
-                };
-                response
-                    .hits
-                    .into_iter()
-                    .map(|hit| {
-                        let ipn = hit.ipn.clone();
-                        let is_selected = {
-                            let ipn = ipn.clone();
-                            move || selected.with(|current| current.as_deref() == Some(&ipn))
-                        };
-                        // Parts without an MPN are titled by IPN; show the
-                        // CSV file beside it instead of repeating the IPN.
-                        let (title, aside) = if hit.mpn.is_empty() {
-                            (hit.ipn.clone(), hit.csv_file.clone())
-                        } else {
-                            (hit.mpn.clone(), hit.ipn.clone())
-                        };
-                        view! {
-                            <li>
-                                <button
-                                    type="button"
-                                    class="result"
-                                    aria-current=move || is_selected().then_some("true")
-                                    on:click=move |_| {
-                                        adding.set(false);
-                                        checking.set(false);
-                                        selected.set(Some(ipn.clone()));
-                                    }
-                                >
-                                    <span class="result-title">{title}</span>
-                                    <span class="result-ipn">{aside}</span>
-                                    <span class="result-description">{hit.description}</span>
-                                </button>
-                            </li>
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            }}
-        </ul>
     }
 }
 
@@ -1238,6 +1162,20 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
             show_modal(&dialog);
         }
     };
+    // A click outside the close-up (on the dim backdrop) closes it, like
+    // Escape and Close; the dialog then gives focus back to what opened it.
+    // Both the press and the release must be outside, so dragging out of
+    // the picture does not close it.
+    let pressed_outside = StoredValue::new(false);
+    let outside = move |event: &leptos::ev::MouseEvent| {
+        dialog.get_untracked().is_some_and(|dialog| {
+            let Some([left, right, top, bottom]) = bounds(&dialog) else {
+                return false;
+            };
+            let (x, y) = (f64::from(event.client_x()), f64::from(event.client_y()));
+            x < left || x > right || y < top || y > bottom
+        })
+    };
     view! {
         <p class="preview-meta">
             <code class="reference">{cad_reference(&set.reference)}</code>
@@ -1292,7 +1230,20 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
                 })
                 .collect_view()}
         </div>
-        <dialog node_ref=dialog class="zoom-dialog" aria-labelledby=format!("{}-zoom-title", title.to_lowercase())>
+        <dialog
+            node_ref=dialog
+            class="zoom-dialog"
+            aria-labelledby=format!("{}-zoom-title", title.to_lowercase())
+            on:pointerdown=move |event| pressed_outside.set_value(outside(&event))
+            on:click=move |event| {
+                if pressed_outside.get_value() && outside(&event) {
+                    if let Some(dialog) = dialog.get_untracked() {
+                        dialog.close();
+                    }
+                }
+                pressed_outside.set_value(false);
+            }
+        >
             <form method="dialog" class="zoom-header">
                 <h4 id=format!("{}-zoom-title", title.to_lowercase())>
                     {move || zoomed.get().map(|(_, alt)| alt).unwrap_or_default()}
@@ -1304,6 +1255,16 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
             </div>
         </dialog>
     }
+}
+
+/// An element's left, right, top and bottom on the screen
+/// (`getBoundingClientRect()`).
+fn bounds(element: &wasm_bindgen::JsValue) -> Option<[f64; 4]> {
+    use wasm_bindgen::JsCast;
+    let method = js_sys::Reflect::get(element, &"getBoundingClientRect".into()).ok()?;
+    let rect = method.dyn_ref::<js_sys::Function>()?.call0(element).ok()?;
+    let side = |name: &str| js_sys::Reflect::get(&rect, &name.into()).ok()?.as_f64();
+    Some([side("left")?, side("right")?, side("top")?, side("bottom")?])
 }
 
 /// `HTMLDialogElement.showModal()`, which traps focus and closes on Escape.

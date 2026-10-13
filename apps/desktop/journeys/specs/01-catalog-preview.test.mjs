@@ -63,9 +63,10 @@ describe('catalog search with exact KiCad previews', () => {
     const token = (name, value) => ({ name, value });
     const changes = [
       ['178 to 176 parts', text('.catalog-summary', '178 parts', '176 parts')],
-      ['1.8V to 7.8V', text('.result-description', '1.8V', '7.8V')],
+      // The list opens with every category section closed.
+      ['Resistors to Resistars', text('.results', 'Resistors', 'Resistars')],
       ['full stop to comma', text('.empty-state p', '.', ',')],
-      ['rail to rall', text('.result-description', 'rail', 'rall')],
+      ['Diodes to Diodas', text('.results', 'Diodes', 'Diodas')],
       ['header colour', token('--brand', '#2a4a75')],
       ['canvas colour', token('--canvas', '#e9edf2')],
       ['corner radius', token('--radius', '6px')],

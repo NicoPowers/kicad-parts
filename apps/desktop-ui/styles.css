@@ -322,6 +322,82 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* One section per category. Its header stays at the top of the list
+   while its parts scroll under it. */
+.result-section,
+.section-parts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.section-toggle {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  padding: 0.5rem 0.9rem;
+  background: #f7f9fb;
+  font-weight: 600;
+}
+
+.section-toggle:hover {
+  background: #eef2f7;
+}
+
+.section-toggle:focus-visible {
+  outline-offset: -3px;
+}
+
+/* A triangle that points down when the section is open. */
+.section-toggle::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 0.3rem solid transparent;
+  border-bottom: 0.3rem solid transparent;
+  border-left: 0.4rem solid var(--muted);
+}
+
+.section-toggle[aria-expanded="true"]::before {
+  transform: rotate(90deg);
+}
+
+.section-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.section-count {
+  flex: none;
+  min-width: 1.6rem;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.8rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.section-more {
+  padding: 0.5rem 0.9rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  border-bottom: 1px solid #edf0f4;
+}
+
 /* Part panel: the header on top, then the previews stacked on the left and
    every catalog field on the right. Positioned so nothing inside it can
    stretch the window. */
