@@ -921,6 +921,27 @@ pub fn AddPartView(
     }
 }
 
+/// `note` with the first of `references` it names shown as a reference that
+/// breaks only after its colon.
+fn note_with_reference(note: &str, references: &[String]) -> AnyView {
+    match references
+        .iter()
+        .find_map(|reference| note.find(reference.as_str()).map(|at| (reference, at)))
+    {
+        Some((reference, at)) => {
+            let before = note[..at].to_owned();
+            let after = note[at + reference.len()..].to_owned();
+            view! {
+                {before}
+                <span class="nowrap-reference">{crate::cad_reference(reference)}</span>
+                {after}
+            }
+            .into_any()
+        }
+        None => note.to_owned().into_any(),
+    }
+}
+
 /// From our libraries: a search over the symbols and footprints of our
 /// libraries that the Catalog does not have yet (the library check's Not in
 /// the Catalog yet), each chosen with one click.
@@ -956,27 +977,55 @@ fn LibraryPicker(form: Form, library_check: RwSignal<Option<LibraryCheckView>>) 
                 items
             })
     };
+    // The items every typed word matches.
+    let found = move || {
+        let query = form.library_query.get().to_lowercase();
+        items().map(|items| {
+            let words: Vec<&str> = query.split_whitespace().collect();
+            items
+                .into_iter()
+                .filter(|(kind, reference)| {
+                    let text = format!("{} {}", kind.to_lowercase(), reference.to_lowercase());
+                    words.iter().all(|word| text.contains(word))
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    // Said to screen readers as the list changes.
+    let count = move || match found().map(|found| found.len()) {
+        None => String::new(),
+        Some(0) => "No symbol or footprint matches.".to_owned(),
+        Some(1) => "1 symbol or footprint matches.".to_owned(),
+        Some(many) => format!("{many} symbols and footprints match."),
+    };
     let results = move || {
-        let Some(items) = items() else {
+        let Some(all) = items() else {
             return view! { <p class="hint">"The library check has not finished yet. Try again in a moment."</p> }.into_any();
         };
-        if items.is_empty() {
+        if all.is_empty() {
             return view! { <p class="hint">"Our libraries have no symbol or footprint that the Catalog does not have."</p> }.into_any();
         }
-        let query = form.library_query.get().to_lowercase();
-        let words: Vec<&str> = query.split_whitespace().collect();
-        let found: Vec<(&str, String)> = items
-            .into_iter()
-            .filter(|(kind, reference)| {
-                let text = format!("{} {}", kind.to_lowercase(), reference.to_lowercase());
-                words.iter().all(|word| text.contains(word))
-            })
-            .collect();
+        let found = found().unwrap_or_default();
         if found.is_empty() {
             return view! { <p class="hint">"Nothing in our libraries matches."</p> }.into_any();
         }
         let more = found.len().saturating_sub(LIBRARY_RESULTS);
-        let chosen = form.library.get().unwrap_or_default();
+        // What the part uses now: the choice as read, which includes the
+        // footprint a symbol brought, else the choice being read.
+        let chosen = form
+            .reading
+            .with(|reading| {
+                reading
+                    .as_ref()
+                    .and_then(|reading| reading.library.as_ref())
+                    .map(|library| TeamLibraryChoice {
+                        symbol: Some(library.symbol.clone()).filter(|symbol| !symbol.is_empty()),
+                        footprint: Some(library.footprint.clone())
+                            .filter(|footprint| !footprint.is_empty()),
+                    })
+            })
+            .or_else(|| form.library.get())
+            .unwrap_or_default();
         view! {
             <ul class="library-results" aria-label="Symbols and footprints not in the Catalog yet">
                 {found.into_iter().take(LIBRARY_RESULTS).map(|(kind, reference)| {
@@ -1030,6 +1079,7 @@ fn LibraryPicker(form: Form, library_check: RwSignal<Option<LibraryCheckView>>) 
             <p class="hint" id="add-library-hint">
                 "Symbols and footprints in our libraries that the Catalog does not have yet. To use one the Catalog has, type it in Symbol or Footprint below."
             </p>
+            <p class="visually-hidden" role="status" aria-live="polite">{count}</p>
             {results}
         </div>
     }
@@ -1257,6 +1307,14 @@ fn DownloadForm(
         .as_ref()
         .map(|library| (library.problems.clone(), library.findings.clone()))
         .unwrap_or_default();
+    // Our libraries' references in the notes break only after their colon.
+    let references: Vec<String> = library
+        .as_ref()
+        .map(|library| vec![library.footprint.clone(), library.symbol.clone()])
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|reference| !reference.is_empty())
+        .collect();
     let license = if ours {
         "License: Unknown, needs review."
     } else {
@@ -1431,7 +1489,7 @@ fn DownloadForm(
                 {footprint_check}
                 {pin_check}
                 <li class="check" id="add-license">{license}</li>
-                {notes.into_iter().map(|note| view! { <li class="check">{note}</li> }).collect_view()}
+                {notes.into_iter().map(|note| view! { <li class="check">{note_with_reference(&note, &references)}</li> }).collect_view()}
             </ul>
         </section>
         <fieldset>

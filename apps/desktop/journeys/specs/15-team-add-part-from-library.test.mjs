@@ -242,9 +242,15 @@ describe('team catalog: add a part from our libraries', () => {
         b.getAttribute('aria-pressed'),
       ]),
     );
+    // Screen readers hear how many match.
+    assert.equal(
+      await textOf(browser, '.library-picker [role="status"]'),
+      '2 symbols and footprints match.',
+    );
     assert.deepEqual(results, [
       ['Symbol', HAND_SYMBOL, 'true'],
-      ['Footprint', HAND_FOOTPRINT, 'false'],
+      // Brought by the symbol, so chosen too.
+      ['Footprint', HAND_FOOTPRINT, 'true'],
     ]);
     await waitForDrawings(`${SYMBOL} .file-preview img`);
     await waitForDrawings(`${FOOTPRINT} .file-preview img`);
