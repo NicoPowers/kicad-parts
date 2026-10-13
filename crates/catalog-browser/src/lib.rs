@@ -15,8 +15,8 @@ use csv_catalog::{CatalogPart, CsvCatalog};
 use desktop_contract::{
     AppStatus, CatalogStatus, Field, FileKind, FilePreviewRequest, KicadStatus, LibraryCheckView,
     PartDetail, PartSummary, PreviewImage, PreviewKind, PreviewOutcome, PreviewProblem,
-    PreviewProblemReason, PreviewRequest, PreviewSet, PublishResult, SearchResponse, SearchSection,
-    TeamDownload, TeamDownloadRequest, TeamIpnCheck, TeamNewPartRequest,
+    PreviewProblemReason, PreviewRequest, PreviewSet, PublishResult, SearchRequest, SearchResponse,
+    SearchSection, TeamDownload, TeamDownloadRequest, TeamIpnCheck, TeamNewPartRequest,
 };
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use kicad_integration::{
@@ -183,9 +183,6 @@ impl CatalogBrowser {
     /// those values, so a search finds what the app shows. `names` are the
     /// team catalog's category names by code; a category it does not name
     /// gets its starting name.
-    ///
-    /// The matches are grouped by category, one section each in name
-    /// order, with at most `limit` parts per section.
     pub fn search_with(
         &self,
         query: &str,
@@ -193,9 +190,31 @@ impl CatalogBrowser {
         current: &BTreeMap<String, PartValues>,
         names: &BTreeMap<String, String>,
     ) -> SearchResponse {
+        let request = SearchRequest {
+            query: query.to_owned(),
+            limit,
+            selected: None,
+            category: None,
+        };
+        self.search_request(&request, current, names)
+    }
+
+    /// The search behind the part list. The matches are grouped by
+    /// category, one section each, with at most `request.limit` parts per
+    /// section (0 for counts only) plus the selected part. Without a
+    /// search the sections are in name order; while searching, the section
+    /// with the best match comes first. With `request.category`, only that
+    /// section is answered.
+    pub fn search_request(
+        &self,
+        request: &SearchRequest,
+        current: &BTreeMap<String, PartValues>,
+        names: &BTreeMap<String, String>,
+    ) -> SearchResponse {
         let started = Instant::now();
+        let query = request.query.trim();
         let replace = |part: &CatalogPart| current.get(&part.ipn).map(|values| values.apply(part));
-        let (total, sections) = match &self.catalog {
+        let (total, sections, selected) = match &self.catalog {
             Ok(catalog) => {
                 // Parts only the team catalog has, such as ones added in the
                 // app, are found too, after the CSV catalog's.
@@ -204,6 +223,10 @@ impl CatalogBrowser {
                 // each section knows its own count.
                 let results = catalog.search_with_extra(query, usize::MAX, replace, &extra.parts);
                 let count = catalog.parts().len();
+                let ipn_at = |position: usize| match position.checked_sub(count) {
+                    Some(at) => &extra.parts[at].ipn,
+                    None => &catalog.parts()[position].ipn,
+                };
                 let category_of = |position: usize| match position.checked_sub(count) {
                     Some(at) => extra.categories[at].clone(),
                     None => {
@@ -216,13 +239,37 @@ impl CatalogBrowser {
                             })
                     }
                 };
-                let groups = group_by_category(
+                let selected_position = request.selected.as_deref().and_then(|selected| {
                     results
                         .hits
                         .iter()
-                        .map(|&position| (category_of(position), position)),
-                    limit.min(MAX_SEARCH_LIMIT),
-                    names,
+                        .copied()
+                        .find(|&position| ipn_at(position) == selected)
+                });
+                let selected = selected_position.map(category_of);
+                let ranked = results
+                    .hits
+                    .iter()
+                    .zip(&results.ranks)
+                    .map(|(&position, &rank)| Ranked {
+                        category: category_of(position),
+                        position,
+                        rank,
+                    })
+                    .filter(|ranked| {
+                        request
+                            .category
+                            .as_ref()
+                            .is_none_or(|wanted| *wanted == ranked.category)
+                    });
+                let groups = group_by_category(
+                    ranked,
+                    &Grouping {
+                        limit: request.limit.min(MAX_SEARCH_LIMIT),
+                        names,
+                        searching: !query.is_empty(),
+                        selected: selected_position,
+                    },
                 );
                 let sections = groups
                     .into_iter()
@@ -243,14 +290,15 @@ impl CatalogBrowser {
                             .collect(),
                     })
                     .collect();
-                (results.total, sections)
+                (results.total, sections, selected)
             }
-            Err(_) => (0, Vec::new()),
+            Err(_) => (0, Vec::new(), None),
         };
         SearchResponse {
-            query: query.to_owned(),
+            query: request.query.clone(),
             total,
             sections,
+            selected,
             elapsed_micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
         }
     }
@@ -1014,6 +1062,27 @@ struct TeamOnlyParts {
     categories: Vec<String>,
 }
 
+/// One match of a search, with its category code and rank (see
+/// [`csv_catalog::SearchResults::ranks`]).
+#[derive(Clone, Debug)]
+struct Ranked {
+    category: String,
+    position: usize,
+    rank: u8,
+}
+
+/// How [`group_by_category`] groups.
+struct Grouping<'a> {
+    /// Most positions kept per section; 0 keeps none (counts only).
+    limit: usize,
+    /// The team catalog's category names, by code.
+    names: &'a BTreeMap<String, String>,
+    /// Whether this is a search, which orders sections by best match.
+    searching: bool,
+    /// The selected part's position, always kept in its section.
+    selected: Option<usize>,
+}
+
 /// The matches of one category, for one section of the part list.
 #[derive(Debug, Eq, PartialEq)]
 struct CategoryGroup {
@@ -1021,37 +1090,49 @@ struct CategoryGroup {
     name: String,
     /// Every match in this category.
     total: usize,
-    /// The first `limit` of them, best first.
+    /// The rank of its best match.
+    best_rank: u8,
+    /// The first `limit` of them, best first, and the selected part.
     positions: Vec<usize>,
 }
 
-/// Groups ranked matches, given best first as (category code, position),
-/// into one group per category, ordered by plain name. Each group keeps
-/// the rank order and at most `limit` positions, but counts every match.
+/// Groups ranked matches, given best first, into one group per category.
+/// Each group keeps the rank order and at most `limit` positions (plus the
+/// selected part), but counts every match. Groups are in name order; while
+/// searching, the group with the best match comes first, ties by name.
+/// "Other parts" (no category) is always last.
 fn group_by_category(
-    ranked: impl IntoIterator<Item = (String, usize)>,
-    limit: usize,
-    names: &BTreeMap<String, String>,
+    ranked: impl IntoIterator<Item = Ranked>,
+    how: &Grouping<'_>,
 ) -> Vec<CategoryGroup> {
     let mut groups: BTreeMap<String, CategoryGroup> = BTreeMap::new();
-    for (code, position) in ranked {
-        let group = groups.entry(code).or_insert_with_key(|code| CategoryGroup {
-            name: category_name(code, names),
-            code: code.clone(),
-            total: 0,
-            positions: Vec::new(),
-        });
+    for Ranked {
+        category,
+        position,
+        rank,
+    } in ranked
+    {
+        let group = groups
+            .entry(category)
+            .or_insert_with_key(|code| CategoryGroup {
+                name: category_name(code, how.names),
+                code: code.clone(),
+                total: 0,
+                best_rank: rank,
+                positions: Vec::new(),
+            });
         group.total += 1;
-        if group.positions.len() < limit {
+        group.best_rank = group.best_rank.min(rank);
+        if group.positions.len() < how.limit || how.selected == Some(position) {
             group.positions.push(position);
         }
     }
     let mut groups: Vec<CategoryGroup> = groups.into_values().collect();
-    // As the team catalog lists its categories.
     groups.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
+        let rank = |g: &CategoryGroup| if how.searching { g.best_rank } else { 0 };
+        (a.code.is_empty(), rank(a))
+            .cmp(&(b.code.is_empty(), rank(b)))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             .then_with(|| a.code.cmp(&b.code))
     });
     groups
@@ -1225,21 +1306,30 @@ impl PartValues {
 mod tests {
     use super::*;
 
-    fn ranked(items: &[(&str, usize)]) -> Vec<(String, usize)> {
+    /// Ranked matches as (category, position, rank), best first.
+    fn ranked(items: &[(&str, usize, u8)]) -> Vec<Ranked> {
         items
             .iter()
-            .map(|(code, position)| ((*code).to_owned(), *position))
+            .map(|(code, position, rank)| Ranked {
+                category: (*code).to_owned(),
+                position: *position,
+                rank: *rank,
+            })
             .collect()
     }
 
-    #[test]
-    fn matches_are_grouped_by_category_in_name_order_keeping_rank_order() {
-        let groups = group_by_category(
-            ranked(&[("res", 7), ("cap", 3), ("res", 1), ("ana", 9), ("cap", 0)]),
-            10,
-            &BTreeMap::new(),
-        );
-        let shown: Vec<(&str, &str, usize, &[usize])> = groups
+    fn grouping(limit: usize, searching: bool) -> Grouping<'static> {
+        static NO_NAMES: BTreeMap<String, String> = BTreeMap::new();
+        Grouping {
+            limit,
+            names: &NO_NAMES,
+            searching,
+            selected: None,
+        }
+    }
+
+    fn summary_of(groups: &[CategoryGroup]) -> Vec<(&str, &str, usize, &[usize])> {
+        groups
             .iter()
             .map(|g| {
                 (
@@ -1249,9 +1339,23 @@ mod tests {
                     g.positions.as_slice(),
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn without_a_search_sections_are_in_name_order_keeping_rank_order() {
+        let groups = group_by_category(
+            ranked(&[
+                ("res", 7, 2),
+                ("cap", 3, 2),
+                ("res", 1, 2),
+                ("ana", 9, 2),
+                ("cap", 0, 2),
+            ]),
+            &grouping(10, false),
+        );
         assert_eq!(
-            shown,
+            summary_of(&groups),
             [
                 ("ana", "Analog ICs", 1, &[9][..]),
                 ("cap", "Capacitors", 2, &[3, 0][..]),
@@ -1261,14 +1365,61 @@ mod tests {
     }
 
     #[test]
+    fn while_searching_the_section_with_the_best_match_comes_first() {
+        // res holds the exact match (rank 0); cap and ana tie on rank 1,
+        // so they go by name; dio has only rank-2 matches.
+        let groups = group_by_category(
+            ranked(&[
+                ("res", 4, 0),
+                ("cap", 3, 1),
+                ("ana", 9, 1),
+                ("dio", 2, 2),
+                ("res", 1, 2),
+            ]),
+            &grouping(10, true),
+        );
+        let codes: Vec<&str> = groups.iter().map(|g| g.code.as_str()).collect();
+        assert_eq!(codes, ["res", "ana", "cap", "dio"]);
+    }
+
+    #[test]
+    fn other_parts_always_come_last() {
+        for searching in [false, true] {
+            let groups = group_by_category(
+                ranked(&[("", 0, 0), ("res", 1, 2), ("zzz", 2, 2)]),
+                &grouping(10, searching),
+            );
+            let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+            assert_eq!(names.last(), Some(&"Other parts"), "searching: {searching}");
+        }
+    }
+
+    #[test]
     fn each_section_shows_at_most_the_limit_but_counts_every_match() {
-        let many: Vec<(String, usize)> = (0..5).map(|n| ("res".to_owned(), n)).collect();
-        let groups = group_by_category(many, 2, &BTreeMap::new());
-        assert_eq!(groups.len(), 1);
+        let many: Vec<Ranked> = (0..5)
+            .map(|n| Ranked {
+                category: "res".to_owned(),
+                position: n,
+                rank: 2,
+            })
+            .collect();
+        let groups = group_by_category(many.clone(), &grouping(2, false));
         assert_eq!(
             (groups[0].total, groups[0].positions.as_slice()),
             (5, &[0, 1][..])
         );
+        // Counts only: no parts at all.
+        let groups = group_by_category(many.clone(), &grouping(0, false));
+        assert_eq!((groups[0].total, groups[0].positions.len()), (5, 0));
+        // The selected part is always among its section's parts.
+        let groups = group_by_category(
+            many,
+            &Grouping {
+                selected: Some(4),
+                ..grouping(2, false)
+            },
+        );
+        assert_eq!(groups[0].positions, [0, 1, 4]);
     }
 
     #[test]
@@ -1276,19 +1427,21 @@ mod tests {
         let names: BTreeMap<String, String> =
             [("res".to_owned(), "Fixed resistors".to_owned())].into();
         let groups = group_by_category(
-            ranked(&[("res", 0), ("cap", 1), ("zzz", 2), ("", 3)]),
-            10,
-            &names,
+            ranked(&[("res", 0, 2), ("cap", 1, 2), ("zzz", 2, 2), ("", 3, 2)]),
+            &Grouping {
+                names: &names,
+                ..grouping(10, false)
+            },
         );
         let shown: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(
             shown,
-            ["Capacitors", "Fixed resistors", "Other parts", "zzz"]
+            ["Capacitors", "Fixed resistors", "zzz", "Other parts"]
         );
     }
 
     #[test]
     fn nothing_matching_makes_no_sections() {
-        assert!(group_by_category(Vec::new(), 10, &BTreeMap::new()).is_empty());
+        assert!(group_by_category(Vec::new(), &grouping(10, true)).is_empty());
     }
 }

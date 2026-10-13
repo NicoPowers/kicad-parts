@@ -79,6 +79,9 @@ pub struct SearchResults {
     pub total: usize,
     /// Indices into [`CsvCatalog::parts`], best match first.
     pub hits: Vec<usize>,
+    /// The rank of each hit: 0 for an exact IPN or MPN, 1 for an IPN or
+    /// MPN that starts with the first term, 2 for any other match.
+    pub ranks: Vec<u8>,
 }
 
 impl CsvCatalog {
@@ -224,10 +227,8 @@ impl CsvCatalog {
         // within each rank.
         ranked.sort_by_key(|(rank, _)| *rank);
         ranked.truncate(limit);
-        SearchResults {
-            total,
-            hits: ranked.into_iter().map(|(_, position)| position).collect(),
-        }
+        let (ranks, hits) = ranked.into_iter().unzip();
+        SearchResults { total, hits, ranks }
     }
 }
 

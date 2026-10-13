@@ -325,3 +325,65 @@ fn search_groups_the_parts_by_category() {
     assert_eq!(section_of(&moved), Some("Capacitors (C)"));
     assert_eq!(section_of("RES-9999-0001"), Some("Resistors"));
 }
+
+#[test]
+fn search_answers_one_section_or_counts_only_and_always_shows_the_selected_part() {
+    use desktop_contract::SearchRequest;
+    use std::collections::BTreeMap;
+    let dir = tempfile::tempdir().unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let browser = open_browser(
+        dir.path(),
+        SearchLocations::Only(vec![empty.path().to_path_buf()]),
+    );
+    let (none, no_names) = (BTreeMap::new(), BTreeMap::new());
+    let request =
+        |query: &str, limit: usize, selected: Option<&str>, category: Option<&str>| SearchRequest {
+            query: query.to_owned(),
+            limit,
+            selected: selected.map(str::to_owned),
+            category: category.map(str::to_owned),
+        };
+
+    // Counts only, as the empty search asks while every section is closed.
+    let counts = browser.search_request(&request("", 0, None, None), &none, &no_names);
+    assert_eq!(
+        (counts.total, counts.shown(), counts.sections.len()),
+        (178, 0, 20)
+    );
+    assert_eq!(counts.selected, None);
+
+    // One section's parts, as opening it asks.
+    let resistors = browser.search_request(&request("", 200, None, Some("res")), &none, &no_names);
+    assert_eq!(resistors.sections.len(), 1);
+    let section = &resistors.sections[0];
+    assert_eq!(
+        (section.category.as_str(), section.hits.len()),
+        ("res", section.total)
+    );
+    assert_eq!(
+        resistors.total, 178,
+        "the count line still counts every match"
+    );
+
+    // The selected part is always among its section's parts, and the answer
+    // says which section holds it.
+    let last = section.hits.last().unwrap().ipn.clone();
+    let found = browser.search_request(&request("", 1, Some(&last), None), &none, &no_names);
+    assert_eq!(found.selected.as_deref(), Some("res"));
+    let res = found.sections.iter().find(|s| s.category == "res").unwrap();
+    assert!(res.hits.iter().any(|hit| hit.ipn == last), "{:?}", res.hits);
+    // A selected part the search does not match is in no section.
+    let hidden = browser.search_request(
+        &request("stm32h723", 25, Some(&last), None),
+        &none,
+        &no_names,
+    );
+    assert_eq!(hidden.selected, None);
+
+    // A trailing space is the same search.
+    assert_eq!(
+        browser.search("stm32h723 ", 25).sections,
+        browser.search("stm32h723", 25).sections
+    );
+}

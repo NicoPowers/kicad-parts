@@ -254,12 +254,7 @@ async fn search_parts(
     // details, as the part header shows them.
     // The list is grouped by the team catalog's category names.
     blocking(move || {
-        browser.search_with(
-            &request.query,
-            request.limit,
-            &team.current_values(),
-            &team.category_names(),
-        )
+        browser.search_request(&request, &team.current_values(), &team.category_names())
     })
     .await
 }

@@ -86,8 +86,15 @@ pub struct CatalogStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SearchRequest {
     pub query: String,
-    /// Most parts shown per category section.
+    /// Most parts shown per category section; 0 asks for counts only.
     pub limit: usize,
+    /// The selected part, which is always among its section's parts when
+    /// the search matches it.
+    #[serde(default)]
+    pub selected: Option<String>,
+    /// Only this category's section, by code, as opening a section asks.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -95,8 +102,13 @@ pub struct SearchResponse {
     pub query: String,
     /// Parts matching the query, in every section.
     pub total: usize,
-    /// One section per category that has matches, in name order.
+    /// One section per category that has matches: in name order, or
+    /// while searching the section with the best match first.
     pub sections: Vec<SearchSection>,
+    /// The category code of the section holding the selected part, when
+    /// the search matches it.
+    #[serde(default)]
+    pub selected: Option<String>,
     pub elapsed_micros: u64,
 }
 
