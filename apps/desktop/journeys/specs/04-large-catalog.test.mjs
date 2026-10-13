@@ -98,6 +98,7 @@ describe(`search over ${ROWS} rows`, () => {
       timeoutMsg: 'Show all did not show 200 parts',
     });
     assert.equal(await textOf(browser, '.section-more'), 'Showing 200 of 3,343. Search to narrow the list.');
+    await browser.execute(() => document.querySelector('.section-more').scrollIntoView({ block: 'end' }));
     await assertAccessible(browser, '30-large-catalog');
     await screenshot(browser, '30-large-catalog');
   });
