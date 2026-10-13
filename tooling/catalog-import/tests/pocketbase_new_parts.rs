@@ -624,3 +624,137 @@ fn a_new_part_whose_footprint_links_a_3d_model_outside_the_library_is_refused() 
     );
     applied(&submit_create(&editor, &with_footprint(kicad, false)).unwrap());
 }
+
+/// A new part from symbols and footprints already in our libraries
+/// (kicad-parts-37a7): each file says where it is in our libraries and the
+/// commit it was read from, and the Source records it the way a CSV import
+/// does (path, the whole file's SHA-256, the commit and, for a symbol, its
+/// byte range). The server checks what it can against the file sent.
+#[test]
+fn a_new_part_from_our_libraries_records_the_file_and_the_commit() {
+    use catalog::pocketbase::LibrarySource;
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    let before = team.read();
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    let library = symbol_library();
+    let start = library.find("\t(symbol \"R_New\"").unwrap() + 1;
+    let mut command = new_part(IPN);
+    let sha = |bytes: &[u8]| catalog::sha256_hex(bytes);
+    for upload in &mut command.uploads {
+        let (path, byte_range) = match upload.role {
+            catalog::pocketbase::UploadRole::Symbol => (
+                "symbols/g-res.kicad_sym".to_owned(),
+                Some([start as u64, (start + upload.bytes.len()) as u64]),
+            ),
+            catalog::pocketbase::UploadRole::Footprint => (
+                "footprints/g-Resistor_SMD.pretty/R_0603_New.kicad_mod".to_owned(),
+                None,
+            ),
+            catalog::pocketbase::UploadRole::Model3d => (MODEL.to_owned(), None),
+        };
+        let whole = match upload.role {
+            catalog::pocketbase::UploadRole::Symbol => sha(library.as_bytes()),
+            _ => sha(&upload.bytes),
+        };
+        upload.file_name = format!("{path} at {}", &COMMIT[..12]);
+        upload.library = Some(LibrarySource {
+            path,
+            byte_sha256: whole,
+            commit: COMMIT.into(),
+            byte_range,
+        });
+    }
+    command.from = "Our libraries".into();
+    command.files = vec!["symbols/g-res.kicad_sym at 0123456789ab".into()];
+
+    // What the server can check is checked, and nothing is written.
+    let base = serde_json::to_value(command.body()).unwrap();
+    let refused = |change: &dyn Fn(&mut Value)| -> String {
+        let mut body = base.clone();
+        change(&mut body);
+        body["correlationId"] = json!(format!("refused-{}", catalog::sha256_hex(body.to_string())));
+        match editor
+            .post_json(NEW_PART_ROUTE, &body)
+            .and_then(|reply| reply.success())
+        {
+            Err(CollabError::Http {
+                status: 400,
+                message,
+            }) => message.to_lowercase(),
+            other => panic!("expected 400, got {other:?}"),
+        }
+    };
+    let cases: Vec<(&str, Change)> = vec![
+        (
+            "is in our libraries at symbols/g-res.kicad_sym, not symbols/g-cap.kicad_sym",
+            Box::new(|body| {
+                body["uploads"][0]["library"]["path"] = json!("symbols/g-cap.kicad_sym")
+            }),
+        ),
+        (
+            "is in our libraries at footprints/g-resistor_smd.pretty/r_0603_new.kicad_mod",
+            Box::new(|body| {
+                body["uploads"][1]["library"]["path"] =
+                    json!("footprints/g-Resistor_SMD.pretty/../../secrets.env")
+            }),
+        ),
+        (
+            "needs the commit it was read from",
+            Box::new(|body| body["uploads"][1]["library"]["commit"] = json!("HEAD")),
+        ),
+        (
+            "needs its byte range",
+            Box::new(|body| body["uploads"][0]["library"]["byteRange"] = json!([0, 3])),
+        ),
+        (
+            "is not the whole file",
+            Box::new(|body| {
+                body["uploads"][2]["library"]["byteSha256"] = json!("0".repeat(64));
+            }),
+        ),
+        (
+            "only a symbol has a byte range",
+            Box::new(|body| body["uploads"][1]["library"]["byteRange"] = json!([0, 1])),
+        ),
+    ];
+    for (says, change) in &cases {
+        let message = refused(change.as_ref());
+        assert!(message.contains(&says.to_lowercase()), "{says}: {message}");
+    }
+    assert_eq!(team.read(), before, "nothing was written");
+
+    applied(&submit_create(&editor, &command).unwrap());
+    let stored = team.read();
+    for (key, path, range) in [
+        (SYMBOL, "symbols/g-res.kicad_sym", true),
+        (
+            FOOTPRINT,
+            "footprints/g-Resistor_SMD.pretty/R_0603_New.kicad_mod",
+            false,
+        ),
+        (MODEL, MODEL, false),
+    ] {
+        let item = stored
+            .cad_items
+            .iter()
+            .find(|item| item.key == key)
+            .unwrap();
+        let revision = stored
+            .cad_item_revisions
+            .iter()
+            .find(|revision| revision.cad_item == item.id)
+            .unwrap();
+        let source: Value = serde_json::from_str(&revision.source).unwrap();
+        assert_eq!(source["source"], "library", "{source}");
+        assert_eq!(source["path"], path);
+        assert_eq!(source["source_commit"], COMMIT);
+        assert_eq!(source["file_name"], format!("{path} at 0123456789ab"));
+        assert_eq!(source["byte_range"].is_array(), range, "{source}");
+        // The same shape as a CSV import's Source, so the zero-loss report
+        // reads it.
+        let read: catalog::csv_import::CadItemSource =
+            serde_json::from_value(source.clone()).unwrap();
+        assert_eq!(read.source_commit.as_deref(), Some(COMMIT));
+    }
+}

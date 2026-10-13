@@ -758,6 +758,7 @@ fn wrong_or_unused_files_are_refused_plainly_and_nothing_is_written() {
         file_name: "big.step".into(),
         format_version: None,
         bytes: vec![b'x'; catalog::pocketbase::EDIT_BODY_LIMIT],
+        library: None,
     };
     let error = submit_edit(&editor, &cad_edit(&before, IPN, &[], vec![big])).unwrap_err();
     assert!(error.to_string().contains("nothing was sent"), "{error}");

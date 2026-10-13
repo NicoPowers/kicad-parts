@@ -450,6 +450,70 @@ const UNKNOWN_LICENSE = "unknown-needs-review";
 // The `source` of CAD item revisions an edit uploads.
 const UPLOAD_SOURCE = "edit";
 
+// The `source` of CAD item revisions read from the CSV catalog's own
+// libraries (Add part from our libraries, kicad-parts-37a7). Like a CSV
+// import's, it names the repository file, the commit it was read from, the
+// whole file's SHA-256 and, for a symbol, its byte range in the file.
+const LIBRARY_SOURCE = "library";
+
+// Where an upload says it was read from in our libraries, checked against
+// the upload itself: { path, byteSha256, commit, byteRange }, or null when
+// it says nothing. A symbol is in symbols/<library>.kicad_sym with its
+// byte range; a footprint is the whole file
+// footprints/<library>.pretty/<name>.kicad_mod; a 3D model the whole file
+// at its own path.
+function uploadLibrary(upload, which, role, reference, bytes, sha256) {
+  const library = upload.library;
+  if (library === undefined || library === null) {
+    return null;
+  }
+  if (typeof library !== "object" || Array.isArray(library)) {
+    fail(`${which} must say where it is in our libraries as an object`);
+  }
+  const colon = reference.indexOf(":");
+  const expected =
+    role === "symbol"
+      ? `symbols/${reference.substring(0, colon)}.kicad_sym`
+      : role === "footprint"
+        ? `footprints/${reference.substring(0, colon)}.pretty/${reference.substring(colon + 1)}.kicad_mod`
+        : reference;
+  if (library.path !== expected) {
+    fail(`the ${role} ${reference} is in our libraries at ${expected}, not ${String(library.path)}`);
+  }
+  if (typeof library.commit !== "string" || !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(library.commit)) {
+    fail(`the ${role} ${reference} needs the commit it was read from, as its full ID`);
+  }
+  if (typeof library.byteSha256 !== "string" || !/^[0-9a-f]{64}$/.test(library.byteSha256)) {
+    fail(`the ${role} ${reference} needs the SHA-256 of ${expected}`);
+  }
+  let byteRange = null;
+  if (role === "symbol") {
+    const range = library.byteRange;
+    const whole = (value) => typeof value === "number" && Number.isInteger(value) && value >= 0;
+    if (!Array.isArray(range) || range.length !== 2 || !whole(range[0]) || !whole(range[1]) || range[1] - range[0] !== bytes.length) {
+      fail(`the symbol ${reference} needs its byte range in ${expected}, as long as the symbol`);
+    }
+    byteRange = [range[0], range[1]];
+  } else {
+    if (library.byteRange !== undefined && library.byteRange !== null) {
+      fail(`only a symbol has a byte range, not the ${role} ${reference}`);
+    }
+    if (library.byteSha256 !== sha256) {
+      fail(`the ${role} ${reference} is not the whole file ${expected}`);
+    }
+  }
+  return { path: expected, byteSha256: library.byteSha256, commit: library.commit, byteRange: byteRange };
+}
+
+// What a request's hash records of an upload.
+function hashedUpload(upload) {
+  const hashed = [upload.role, upload.reference, upload.fileName, upload.formatVersion, upload.sha256];
+  if (upload.library) {
+    hashed.push([upload.library.path, upload.library.byteSha256, upload.library.commit, upload.library.byteRange]);
+  }
+  return hashed;
+}
+
 // The checked uploads of a cad section: role, CAD item kind, reference,
 // file name, KiCad format version (symbols only) and bytes with their
 // SHA-256, each hashed here.
@@ -525,6 +589,7 @@ function editUploads(list) {
       text: hasText ? upload.text : null,
       bytes: bytes,
       sha256: sha256,
+      library: uploadLibrary(upload, which, role, reference, bytes, sha256),
     };
   });
   const seen = {};
@@ -1943,7 +2008,23 @@ function saveNewCadItemRevisions(txApp, entries, changeId, source) {
     made.set("snapshot_sha256", entry.snapshotSha256);
     made.set("snapshot", entry.snapshot);
     made.set("license", UNKNOWN_LICENSE);
-    made.set("source", JSON.stringify({ schema: SOURCE_SCHEMA, source: source, file_name: entry.upload.fileName }));
+    const library = entry.upload.library;
+    made.set(
+      "source",
+      JSON.stringify(
+        library
+          ? {
+              schema: SOURCE_SCHEMA,
+              source: LIBRARY_SOURCE,
+              path: library.path,
+              byte_sha256: library.byteSha256,
+              source_commit: library.commit,
+              byte_range: library.byteRange,
+              file_name: entry.upload.fileName,
+            }
+          : { schema: SOURCE_SCHEMA, source: source, file_name: entry.upload.fileName },
+      ),
+    );
     txApp.save(made);
   }
 }
@@ -2021,13 +2102,7 @@ function publishEdit(e) {
         ? [
             request.cad.expected,
             pairs(request.cad.fields),
-            request.cad.uploads.map((upload) => [
-              upload.role,
-              upload.reference,
-              upload.fileName,
-              upload.formatVersion,
-              upload.sha256,
-            ]),
+            request.cad.uploads.map(hashedUpload),
           ]
         : null,
     ]),
@@ -2504,13 +2579,7 @@ function publishCreate(e) {
       pairs(request.fields),
       request.manufacturerParts.map((part) => [part && part.manufacturer, part && part.mpn]),
       pairs(request.cadFields),
-      request.uploads.map((upload) => [
-        upload.role,
-        upload.reference,
-        upload.fileName,
-        upload.formatVersion,
-        upload.sha256,
-      ]),
+      request.uploads.map(hashedUpload),
       request.from,
       request.files,
     ]),

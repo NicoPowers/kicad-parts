@@ -892,6 +892,26 @@ pub struct CadUpload {
     /// For a symbol, the `(version ...)` of the library it came from.
     pub format_version: Option<String>,
     pub bytes: Vec<u8>,
+    /// Where the file is in our libraries, for a symbol or footprint
+    /// already there (Add part from our libraries, kicad-parts-37a7);
+    /// `None` for a file chosen in the app.
+    pub library: Option<LibrarySource>,
+}
+
+/// Where an upload was read from in the CSV catalog's own libraries: the
+/// repository file, the commit it was read from, and the same facts a CSV
+/// import records about a file (see [`crate::csv_import::CadItemSource`]),
+/// so the Source names them the same way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibrarySource {
+    /// The repository path, such as `symbols/g-ics.kicad_sym`.
+    pub path: String,
+    /// The SHA-256 of that whole file.
+    pub byte_sha256: String,
+    /// The commit (`HEAD`) the file was read from, which holds it as it is.
+    pub commit: String,
+    /// For a symbol, the byte range of its entry in the file.
+    pub byte_range: Option<[u64; 2]>,
 }
 
 impl std::fmt::Debug for CadUpload {
@@ -903,6 +923,7 @@ impl std::fmt::Debug for CadUpload {
             .field("file_name", &self.file_name)
             .field("format_version", &self.format_version)
             .field("size", &self.bytes.len())
+            .field("library", &self.library)
             .finish()
     }
 }
@@ -918,6 +939,14 @@ impl CadUpload {
         });
         if let Some(version) = &self.format_version {
             body["formatVersion"] = json!(version);
+        }
+        if let Some(library) = &self.library {
+            body["library"] = json!({
+                "path": library.path,
+                "byteSha256": library.byte_sha256,
+                "commit": library.commit,
+                "byteRange": library.byte_range,
+            });
         }
         match std::str::from_utf8(&self.bytes) {
             Ok(text) => body["text"] = json!(text),

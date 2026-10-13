@@ -111,6 +111,7 @@ pub fn symbol_upload(
         file_name: file_name.to_owned(),
         format_version: Some(version),
         bytes: bytes[entry.span.clone()].to_vec(),
+        library: None,
     })
 }
 
@@ -151,6 +152,7 @@ pub fn footprint_upload(
         file_name: file_name.to_owned(),
         format_version: None,
         bytes: bytes.to_vec(),
+        library: None,
     })
 }
 
@@ -171,6 +173,7 @@ pub fn model_upload(bytes: &[u8], key: &str, file_name: &str) -> Result<CadUploa
         file_name: file_name.to_owned(),
         format_version: None,
         bytes: bytes.to_vec(),
+        library: None,
     })
 }
 
