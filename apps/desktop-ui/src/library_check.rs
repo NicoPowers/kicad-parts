@@ -1,11 +1,12 @@
 //! The library check (kicad-parts-da65) for people who can edit: a short
 //! line under the search box when it finds something, which opens the
 //! Library check view in the part panel, grouped as To fix, Not in the
-//! Catalog yet, Worth a look and Clean-up.
+//! Catalog yet, Worth a look and Clean-up. A symbol or footprint not in
+//! the Catalog yet can start Add part (kicad-parts-37a7).
 
 use crate::cad_reference;
 use crate::team::focus_later;
-use desktop_contract::{LibraryCheckGroup, LibraryCheckItem, LibraryCheckView};
+use desktop_contract::{LibraryCheckGroup, LibraryCheckItem, LibraryCheckView, TeamLibraryChoice};
 use leptos::prelude::*;
 
 /// The line's words, such as `Library check: 1 to fix, 2 new items`, or
@@ -82,6 +83,8 @@ pub(crate) fn LibraryCheckLine(
 pub(crate) fn LibraryCheckPanel(
     check: RwSignal<Option<LibraryCheckView>>,
     close: Callback<()>,
+    /// Opens Add part with a symbol or footprint of the list chosen.
+    add_from: Callback<TeamLibraryChoice>,
 ) -> impl IntoView {
     // Keyboard and screen reader users land on the view's heading.
     focus_later("library-check-title");
@@ -110,7 +113,7 @@ pub(crate) fn LibraryCheckPanel(
                             .groups
                             .into_iter()
                             .enumerate()
-                            .map(|(index, group)| view! { <GroupView group=group index=index /> })
+                            .map(|(index, group)| view! { <GroupView group=group index=index add_from=add_from /> })
                             .collect_view();
                         view! { {unchecked}{groups} }.into_any()
                     }
@@ -124,14 +127,23 @@ pub(crate) fn LibraryCheckPanel(
 
 /// One group. Clean-up starts folded: those old problems stop nothing.
 #[component]
-fn GroupView(group: LibraryCheckGroup, index: usize) -> impl IntoView {
+fn GroupView(
+    group: LibraryCheckGroup,
+    index: usize,
+    add_from: Callback<TeamLibraryChoice>,
+) -> impl IntoView {
     let heading_id = format!("library-check-group-{index}");
     let to_fix = group.title == "To fix";
+    // Only what is not in the Catalog yet can start a new part.
+    let new_items = group.title == "Not in the Catalog yet";
     let title = format!("{} ({})", group.title, group.items.len());
     let items = view! {
         <p class="hint">{group.hint.clone()}</p>
         <ul class="library-check-items">
-            {group.items.into_iter().map(|item| view! { <ItemView item=item /> }).collect_view()}
+            {group.items.into_iter().map(|item| {
+                let add_from = new_items.then_some(add_from);
+                view! { <ItemView item=item add_from=add_from /> }
+            }).collect_view()}
         </ul>
     };
     if group.title == "Clean-up" {
@@ -154,8 +166,33 @@ fn GroupView(group: LibraryCheckGroup, index: usize) -> impl IntoView {
     }
 }
 
+/// The choice Add part starts from for `item`: its symbol or footprint,
+/// or `None` for anything else, such as a 3D model.
+pub(crate) fn choice_of(item: &LibraryCheckItem) -> Option<TeamLibraryChoice> {
+    if item.library.is_empty() {
+        return None;
+    }
+    let reference = Some(format!("{}:{}", item.library, item.name));
+    if item.file.starts_with("symbols/") {
+        Some(TeamLibraryChoice {
+            symbol: reference,
+            footprint: None,
+        })
+    } else if item.file.starts_with("footprints/") {
+        Some(TeamLibraryChoice {
+            symbol: None,
+            footprint: reference,
+        })
+    } else {
+        None
+    }
+}
+
 #[component]
-fn ItemView(item: LibraryCheckItem) -> impl IntoView {
+fn ItemView(
+    item: LibraryCheckItem,
+    add_from: Option<Callback<TeamLibraryChoice>>,
+) -> impl IntoView {
     // A symbol or footprint is named by its library reference; a 3D model
     // or a file that could not be read by its path.
     let name = if item.library.is_empty() {
@@ -163,9 +200,27 @@ fn ItemView(item: LibraryCheckItem) -> impl IntoView {
     } else {
         cad_reference(&format!("{}:{}", item.library, item.name))
     };
+    let add = add_from.zip(choice_of(&item)).map(|(add_from, choice)| {
+        // Which item, for screen readers; the visible text stays short.
+        let reference = format!("{}:{}", item.library, item.name);
+        view! {
+            <button
+                type="button"
+                class="library-check-add"
+                data-reference=reference.clone()
+                on:click=move |_| add_from.run(choice.clone())
+            >
+                "Add part from it"
+                <span class="visually-hidden">{format!(" ({reference})")}</span>
+            </button>
+        }
+    });
     view! {
         <li class="library-check-item">
-            <p class="library-check-name"><code>{name}</code></p>
+            <div class="library-check-item-head">
+                <p class="library-check-name"><code>{name}</code></p>
+                {add}
+            </div>
             <p class="library-check-file">{item.file}</p>
             <p>{item.message}</p>
         </li>
@@ -185,6 +240,42 @@ mod tests {
             kicad_footprints_checked: true,
             groups: Vec::new(),
         }
+    }
+
+    #[test]
+    fn only_symbols_and_footprints_start_a_part() {
+        let item = |library: &str, name: &str, file: &str| LibraryCheckItem {
+            library: library.into(),
+            name: name.into(),
+            file: file.into(),
+            message: String::new(),
+        };
+        assert_eq!(
+            choice_of(&item("g-ics", "IC_TP4333", "symbols/g-ics.kicad_sym")),
+            Some(TeamLibraryChoice {
+                symbol: Some("g-ics:IC_TP4333".into()),
+                footprint: None,
+            })
+        );
+        assert_eq!(
+            choice_of(&item(
+                "g-Crystal",
+                "X",
+                "footprints/g-Crystal.pretty/X.kicad_mod"
+            )),
+            Some(TeamLibraryChoice {
+                symbol: None,
+                footprint: Some("g-Crystal:X".into()),
+            })
+        );
+        assert_eq!(
+            choice_of(&item(
+                "",
+                "3d-models/g-Crystal.3dshapes/X.step",
+                "3d-models/g-Crystal.3dshapes/X.step"
+            )),
+            None
+        );
     }
 
     #[test]

@@ -6,19 +6,27 @@
 //!
 //! The form takes the part panel: the drawings on the left, the form on
 //! the right, like Edit part.
+//!
+//! Instead of a download, the part can start from a symbol and footprint
+//! already in our libraries (kicad-parts-37a7): From our libraries lists
+//! the library check's symbols and footprints that the Catalog does not
+//! have yet, and the Library check view opens the form with one chosen.
 
 use crate::backend;
 use crate::team::{FilePreview, MAX_FILE_BYTES, RetrySlot, base64, focus_later, shown};
 use desktop_contract::{
-    DownloadedFile, Field, FileKind, FilePreviewRequest, ManufacturerPart, PreviewKind,
-    PreviewOutcome, PreviewRequest, PublishResult, TeamDownload, TeamDownloadRequest, TeamFile,
-    TeamNewCategory, TeamNewPartRequest, TeamSameMpn,
+    DownloadedFile, Field, FileKind, FilePreviewRequest, LibraryCheckView, ManufacturerPart,
+    PreviewKind, PreviewOutcome, PreviewRequest, PublishResult, TeamDownload, TeamDownloadRequest,
+    TeamFile, TeamLibraryChoice, TeamNewCategory, TeamNewPartRequest, TeamSameMpn,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 /// The file types the file input offers.
 const ACCEPTED: &str = ".zip,.kicad_sym,.kicad_mod,.step,.stp,.wrl";
+
+/// How many items of our libraries the search shows at once.
+const LIBRARY_RESULTS: usize = 12;
 
 type Drawing = RwSignal<Option<Result<PreviewOutcome, String>>>;
 
@@ -79,6 +87,17 @@ pub struct Form {
     model: RwSignal<Option<usize>>,
     from: RwSignal<String>,
     reason: RwSignal<String>,
+    /// From our libraries is open instead of a download.
+    from_library: RwSignal<bool>,
+    /// The symbol and footprint chosen in our libraries.
+    library: RwSignal<Option<TeamLibraryChoice>>,
+    /// What is typed in the search of our libraries.
+    library_query: RwSignal<String>,
+    /// Bumped for each new choice in our libraries, and the last one read,
+    /// so the form reads each choice once, also when the Library check view
+    /// opens it.
+    library_asked: RwSignal<u32>,
+    library_read: StoredValue<u32>,
 }
 
 impl Default for Form {
@@ -126,7 +145,33 @@ impl Form {
             model: RwSignal::new(None),
             from: RwSignal::new(String::new()),
             reason: RwSignal::new(String::new()),
+            from_library: RwSignal::new(false),
+            library: RwSignal::new(None),
+            library_query: RwSignal::new(String::new()),
+            library_asked: RwSignal::new(0),
+            library_read: StoredValue::new(0),
         }
+    }
+
+    /// Starts again from `choice` in our libraries, as the Library check
+    /// view's Add part from it does.
+    pub fn start_from_library(&self, choice: TeamLibraryChoice) {
+        self.reset();
+        self.from_library.set(true);
+        self.choose_in_library(choice);
+    }
+
+    /// Reads `choice` in our libraries (once the form is shown).
+    fn choose_in_library(&self, choice: TeamLibraryChoice) {
+        self.library.set(Some(choice));
+        self.library_asked.update(|asked| *asked += 1);
+    }
+
+    /// What our libraries' items say about the part, when it starts from
+    /// them.
+    fn library_reading(&self) -> Option<desktop_contract::TeamLibraryReading> {
+        self.reading
+            .with_untracked(|reading| reading.as_ref().and_then(|reading| reading.library.clone()))
     }
 
     /// Empties the form, after a save or Cancel.
@@ -166,15 +211,25 @@ impl Form {
         self.offered_fields.set_value(Vec::new());
         self.known_footprint.set(None);
         self.model.set(None);
+        self.from_library.set(false);
+        self.library.set(None);
+        self.library_query.set(String::new());
         self.attempt.open();
     }
 
     /// Starts again for newly chosen files: nothing typed for the earlier
-    /// files is kept, but the files themselves are.
+    /// files is kept, but the files themselves are, or the choice in our
+    /// libraries.
     fn reset_for_new_files(&self) {
         let downloads = self.downloads.get_value();
+        let from_library = self.from_library.get_untracked();
+        let library = self.library.get_untracked();
+        let query = self.library_query.get_untracked();
         self.reset();
         self.downloads.set_value(downloads);
+        self.from_library.set(from_library);
+        self.library.set(library);
+        self.library_query.set(query);
     }
 
     /// Sets `value` to `new` if it is still what the app offered before (or
@@ -299,10 +354,12 @@ impl Form {
             self.ipn.set(offer.clone());
         }
         self.offered_ipn.set_value(offer);
-        let symbol = if code.is_empty() || symbol_name.is_empty() {
-            symbol_name
-        } else {
-            format!("g-{code}:{symbol_name}")
+        // Our libraries' items keep their references exactly.
+        let library = self.library_reading();
+        let symbol = match &library {
+            Some(library) => library.symbol.clone(),
+            None if code.is_empty() || symbol_name.is_empty() => symbol_name,
+            None => format!("g-{code}:{symbol_name}"),
         };
         if self.symbol.get_untracked() == self.offered_symbol.get_value() {
             self.symbol.set(symbol.clone());
@@ -314,10 +371,10 @@ impl Form {
             .as_ref()
             .map(|category| category.footprint_library.clone())
             .unwrap_or_default();
-        let footprint = if library.is_empty() || footprint_name.is_empty() {
-            footprint_name
-        } else {
-            format!("{library}:{footprint_name}")
+        let footprint = match &self.library_reading() {
+            Some(reading) => reading.footprint.clone(),
+            None if library.is_empty() || footprint_name.is_empty() => footprint_name,
+            None => format!("{library}:{footprint_name}"),
         };
         if self.footprint.get_untracked() == self.offered_footprint.get_value() {
             self.footprint.set(footprint.clone());
@@ -392,6 +449,9 @@ pub fn AddPartView(
     close: Callback<()>,
     done: Callback<String>,
     open_part: Callback<(String, Option<ManufacturerPart>)>,
+    /// The library check, whose symbols and footprints not in the Catalog
+    /// yet From our libraries offers.
+    library_check: RwSignal<Option<LibraryCheckView>>,
 ) -> impl IntoView {
     let Form {
         downloads,
@@ -479,12 +539,22 @@ pub fn AddPartView(
     let read = move |symbol: Option<usize>, footprint: Option<usize>, first: bool| {
         reading_files.set(true);
         read_problem.set(None);
+        let library = form
+            .from_library
+            .get_untracked()
+            .then(|| form.library.get_untracked())
+            .flatten();
         let request = TeamDownloadRequest {
-            files: downloads.get_value(),
+            files: if library.is_some() {
+                Vec::new()
+            } else {
+                downloads.get_value()
+            },
             symbol,
             footprint,
             // The 3D models do not change with the symbol or footprint.
             without_models: !first,
+            library,
         };
         spawn_local(async move {
             let result = backend::team_read_download(request).await;
@@ -510,12 +580,18 @@ pub fn AddPartView(
             );
             Form::offer(form.mpn, form.offered_mpn, &found.mpn);
             Form::offer(form.from, form.offered_from, &found.from);
-            Form::offer(form.symbol, form.offered_symbol, &found.symbol_name);
-            let footprint = if found.footprint_library.is_empty() {
-                found.footprint_name.clone()
-            } else {
-                format!("{}:{}", found.footprint_library, found.footprint_name)
+            // Our libraries' items keep their references exactly.
+            let (symbol, footprint) = match &found.library {
+                Some(library) => (library.symbol.clone(), library.footprint.clone()),
+                None if found.footprint_library.is_empty() => {
+                    (found.symbol_name.clone(), found.footprint_name.clone())
+                }
+                None => (
+                    found.symbol_name.clone(),
+                    format!("{}:{}", found.footprint_library, found.footprint_name),
+                ),
             };
+            Form::offer(form.symbol, form.offered_symbol, &symbol);
             Form::offer(form.footprint, form.offered_footprint, &footprint);
             // A known footprint chosen stays while it still matches.
             if form.known_footprint.with_untracked(|known| {
@@ -563,6 +639,7 @@ pub fn AddPartView(
                 match read_files(input).await {
                     Ok(chosen) if chosen.is_empty() => {}
                     Ok(chosen) => {
+                        // A download replaces a choice in our libraries.
                         form.reset();
                         downloads.set_value(
                             chosen
@@ -594,8 +671,17 @@ pub fn AddPartView(
             return;
         }
         let known = form.known_footprint.get_untracked();
-        let mut files: Vec<TeamFile> = found.symbol_file.iter().cloned().collect();
-        if known.is_none() {
+        // Our libraries' items are read again from the folder when saving.
+        let library = found.library.as_ref().map(|library| TeamLibraryChoice {
+            symbol: (!library.symbol.is_empty()).then(|| library.symbol.clone()),
+            footprint: (!library.footprint.is_empty()).then(|| library.footprint.clone()),
+        });
+        let mut files: Vec<TeamFile> = if library.is_some() {
+            Vec::new()
+        } else {
+            found.symbol_file.iter().cloned().collect()
+        };
+        if known.is_none() && library.is_none() {
             files.extend(found.footprint_file.iter().cloned());
             if let Some(model) = form
                 .model
@@ -619,8 +705,13 @@ pub fn AddPartView(
             footprint: known.unwrap_or_else(|| form.footprint.get_untracked()),
             files,
             from: form.from.get_untracked(),
-            downloads: downloads
-                .with_value(|files| files.iter().map(|file| file.file_name.clone()).collect()),
+            downloads: if library.is_some() {
+                Vec::new()
+            } else {
+                downloads
+                    .with_value(|files| files.iter().map(|file| file.file_name.clone()).collect())
+            },
+            library,
         };
         request.correlation_id = Some(attempt.id_for(request.clone()));
         saving.set(true);
@@ -681,17 +772,38 @@ pub fn AddPartView(
         });
     };
 
+    // Each new choice in our libraries is read once: a symbol chosen is a
+    // new part, so it starts the form again; a footprint keeps what is
+    // typed.
+    Effect::new(move |_| {
+        let asked = form.library_asked.get();
+        if asked == form.library_read.get_value() || form.library.get_untracked().is_none() {
+            return;
+        }
+        form.library_read.set_value(asked);
+        let chosen = form
+            .library
+            .get_untracked()
+            .and_then(|choice| choice.symbol);
+        let first = match form.library_reading() {
+            None => true,
+            Some(reading) => chosen.is_some_and(|symbol| symbol != reading.symbol),
+        };
+        read(None, None, first);
+    });
+
     let previews = move || {
         let chosen = form.reading.with(Option::is_some);
+        let ours = form.from_library.get();
         view! {
             <section class="preview" aria-labelledby="symbol-heading">
                 <h3 id="symbol-heading">"Symbol"</h3>
-                {(!chosen).then(|| view! { <p class="hint">"Choose the download to see its symbol here."</p> })}
+                {(!chosen).then(|| view! { <p class="hint">{if ours { "Choose a symbol in our libraries to see it here." } else { "Choose the download to see its symbol here." }}</p> })}
                 <FilePreview kind=FileKind::Symbol preview=symbol_drawing previewing=symbol_busy />
             </section>
             <section class="preview" aria-labelledby="footprint-heading">
                 <h3 id="footprint-heading">"Footprint"</h3>
-                {(!chosen).then(|| view! { <p class="hint">"Choose the download to see its footprint here."</p> })}
+                {(!chosen).then(|| view! { <p class="hint">{if ours { "Choose a footprint in our libraries to see it here." } else { "Choose the download to see its footprint here." }}</p> })}
                 <FilePreview kind=FileKind::Footprint preview=footprint_drawing previewing=footprint_busy />
             </section>
         }
@@ -702,7 +814,11 @@ pub fn AddPartView(
             <header class="part-header">
                 <h2 id="part-title">"Add part"</h2>
                 <p class="part-description">
-                    "Add a part from the CAD files you downloaded from SnapEDA, Ultra Librarian, SamacSys or a manufacturer's site."
+                    {move || if form.from_library.get() {
+                        "Add a part from a symbol and footprint already in our libraries."
+                    } else {
+                        "Add a part from the CAD files you downloaded from SnapEDA, Ultra Librarian, SamacSys or a manufacturer's site."
+                    }}
                 </p>
             </header>
             <div class="part-body team">
@@ -728,10 +844,27 @@ pub fn AddPartView(
                                 accept=ACCEPTED
                                 on:change:target=on_choose
                             />
-                            <label for="add-files" class="file-choice">
-                                {move || if form.reading.with(Option::is_some) { "Choose other files…" } else { "Choose the download…" }}
-                            </label>
-                            <p class="hint">"A ZIP file, or its .kicad_sym, .kicad_mod and 3D model files."</p>
+                            <div class="add-sources">
+                                <label for="add-files" class="file-choice">
+                                    {move || if form.reading.with(|reading| reading.as_ref().is_some_and(|reading| reading.library.is_none())) { "Choose other files…" } else { "Choose the download…" }}
+                                </label>
+                                <button
+                                    type="button"
+                                    id="add-from-library"
+                                    aria-expanded=move || if form.from_library.get() { "true" } else { "false" }
+                                    on:click=move |_| {
+                                        if !form.from_library.get_untracked() {
+                                            form.reset();
+                                            form.from_library.set(true);
+                                            focus_later("add-library-search");
+                                        }
+                                    }
+                                >
+                                    "From our libraries"
+                                </button>
+                            </div>
+                            <p class="hint">"A ZIP file, or its .kicad_sym, .kicad_mod and 3D model files; or a symbol and footprint already in our libraries."</p>
+                            {move || form.from_library.get().then(|| view! { <LibraryPicker form=form library_check=library_check /> })}
                             {move || reading_files.get().then(|| view! { <p class="hint" aria-busy="true">"Reading the files…"</p> })}
                             {move || read_problem.get().map(|message| view! { <p class="problem file-problem" role="alert">{message}</p> })}
                         </div>
@@ -788,6 +921,120 @@ pub fn AddPartView(
     }
 }
 
+/// From our libraries: a search over the symbols and footprints of our
+/// libraries that the Catalog does not have yet (the library check's Not in
+/// the Catalog yet), each chosen with one click.
+#[component]
+fn LibraryPicker(form: Form, library_check: RwSignal<Option<LibraryCheckView>>) -> impl IntoView {
+    // Each item: kind, `LIBRARY:NAME`.
+    let items = move || {
+        library_check
+            .with(|check| {
+                check.as_ref().map(|check| {
+                    check
+                        .groups
+                        .iter()
+                        .filter(|group| group.title == "Not in the Catalog yet")
+                        .flat_map(|group| group.items.iter())
+                        .filter_map(|item| {
+                            let kind = if item.file.starts_with("symbols/") {
+                                "Symbol"
+                            } else if item.file.starts_with("footprints/") {
+                                "Footprint"
+                            } else {
+                                return None;
+                            };
+                            Some((kind, format!("{}:{}", item.library, item.name)))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            // Symbols first: a part usually starts from its symbol, which
+            // brings the footprint it names.
+            .map(|mut items| {
+                items.sort_by_key(|(kind, _)| *kind != "Symbol");
+                items
+            })
+    };
+    let results = move || {
+        let Some(items) = items() else {
+            return view! { <p class="hint">"The library check has not finished yet. Try again in a moment."</p> }.into_any();
+        };
+        if items.is_empty() {
+            return view! { <p class="hint">"Our libraries have no symbol or footprint that the Catalog does not have."</p> }.into_any();
+        }
+        let query = form.library_query.get().to_lowercase();
+        let words: Vec<&str> = query.split_whitespace().collect();
+        let found: Vec<(&str, String)> = items
+            .into_iter()
+            .filter(|(kind, reference)| {
+                let text = format!("{} {}", kind.to_lowercase(), reference.to_lowercase());
+                words.iter().all(|word| text.contains(word))
+            })
+            .collect();
+        if found.is_empty() {
+            return view! { <p class="hint">"Nothing in our libraries matches."</p> }.into_any();
+        }
+        let more = found.len().saturating_sub(LIBRARY_RESULTS);
+        let chosen = form.library.get().unwrap_or_default();
+        view! {
+            <ul class="library-results" aria-label="Symbols and footprints not in the Catalog yet">
+                {found.into_iter().take(LIBRARY_RESULTS).map(|(kind, reference)| {
+                    let is_symbol = kind == "Symbol";
+                    let pressed = if is_symbol {
+                        chosen.symbol.as_deref() == Some(reference.as_str())
+                    } else {
+                        chosen.footprint.as_deref() == Some(reference.as_str())
+                    };
+                    let picked = reference.clone();
+                    view! {
+                        <li>
+                            <button
+                                type="button"
+                                class="library-result"
+                                aria-pressed=if pressed { "true" } else { "false" }
+                                on:click=move |_| {
+                                    let mut choice = form.library.get_untracked().unwrap_or_default();
+                                    if is_symbol {
+                                        choice.symbol = Some(picked.clone());
+                                    } else {
+                                        choice.footprint = Some(picked.clone());
+                                    }
+                                    form.choose_in_library(choice);
+                                }
+                            >
+                                <span class="library-kind">{kind}</span>
+                                <code>{crate::cad_reference(&reference)}</code>
+                            </button>
+                        </li>
+                    }
+                }).collect_view()}
+            </ul>
+            {(more > 0).then(|| view! { <p class="hint">{format!("And {more} more. Type to narrow the list.")}</p> })}
+        }
+        .into_any()
+    };
+    view! {
+        <div class="library-picker">
+            <label for="add-library-search">"Search our libraries"</label>
+            <input
+                id="add-library-search"
+                type="search"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Library or name"
+                aria-describedby="add-library-hint"
+                prop:value=move || form.library_query.get()
+                on:input:target=move |event| form.library_query.set(event.target().value())
+            />
+            <p class="hint" id="add-library-hint">
+                "Symbols and footprints in our libraries that the Catalog does not have yet. To use one the Catalog has, type it in Symbol or Footprint below."
+            </p>
+            {results}
+        </div>
+    }
+}
+
 /// The part of the form that follows what the download holds.
 #[component]
 fn DownloadForm(
@@ -801,7 +1048,30 @@ fn DownloadForm(
     draw: Callback<()>,
     open_part: Callback<(String, Option<ManufacturerPart>)>,
 ) -> impl IntoView {
-    let names = {
+    let library = found.library.clone();
+    let ours = library.is_some();
+    let names = if let Some(library) = &library {
+        // The references break after their colon, never at a hyphen.
+        let items: Vec<String> = [&library.symbol, &library.footprint]
+            .into_iter()
+            .filter(|item| !item.is_empty())
+            .cloned()
+            .collect();
+        let read = match library.commit.get(..12) {
+            Some(short) => format!(", read from commit {short}."),
+            None => ".".to_owned(),
+        };
+        let count = items.len();
+        view! {
+            "From our libraries: "
+            {items.into_iter().enumerate().map(|(at, item)| view! {
+                {(at > 0).then_some(if at + 1 == count { " and " } else { ", " })}
+                <span class="nowrap-reference">{crate::cad_reference(&item)}</span>
+            }).collect_view()}
+            {read}
+        }
+        .into_any()
+    } else {
         let used = found.symbol_file.iter().count()
             + found.footprint_file.iter().count()
             + found.model_files.len();
@@ -818,9 +1088,9 @@ fn DownloadForm(
             ));
         }
         words.push('.');
-        words
+        words.into_any()
     };
-    let symbol_choice = (found.symbols.len() > 1).then(|| {
+    let symbol_choice = (found.symbols.len() > 1 && !ours).then(|| {
         let chosen = found.symbol.unwrap_or(0);
         let footprint = found.footprint;
         view! {
@@ -840,7 +1110,7 @@ fn DownloadForm(
             </div>
         }
     });
-    let footprint_choice = (found.footprints.len() > 1).then(|| {
+    let footprint_choice = (found.footprints.len() > 1 && !ours).then(|| {
         let chosen = found.footprint.unwrap_or(0);
         let symbol = found.symbol;
         view! {
@@ -860,7 +1130,7 @@ fn DownloadForm(
             </div>
         }
     });
-    let model_choice = (!found.models.is_empty() && found.footprint_file.is_some()).then(|| {
+    let model_choice = (!found.models.is_empty() && found.footprint_file.is_some() && !ours).then(|| {
         let models = found.models.clone();
         view! {
             <div class="edit-row">
@@ -982,6 +1252,16 @@ fn DownloadForm(
         _ => None,
     };
     let notes = found.notes.clone();
+    // What stops the save, and what else the library check found.
+    let (problems, findings) = library
+        .as_ref()
+        .map(|library| (library.problems.clone(), library.findings.clone()))
+        .unwrap_or_default();
+    let license = if ours {
+        "License: Unknown, needs review."
+    } else {
+        "License: Unknown, needs review. Check the site's terms before you use the part."
+    };
 
     // The category: the best guess with its reason, the next two as quick
     // choices, and every category.
@@ -989,7 +1269,9 @@ fn DownloadForm(
     let guess_line = match guesses.first() {
         Some(best) => view! { <p class="hint" id="add-guess">{guess_words(&best.name, &best.reasons)}</p> }.into_any(),
         None => view! {
-            <p class="hint" id="add-guess">"Nothing in the download says which category this part is in. Choose one."</p>
+            <p class="hint" id="add-guess">
+                {if ours { "Nothing in the symbol or footprint says which category this part is in. Choose one." } else { "Nothing in the download says which category this part is in. Choose one." }}
+            </p>
         }
         .into_any(),
     };
@@ -1105,7 +1387,7 @@ fn DownloadForm(
             .map(|category| category.unused)
             .unwrap_or_default();
         (!unused.is_empty()).then(|| view! {
-            <p class="hint" id="add-unused-heading">"Also in the download (no field of this category holds it):"</p>
+            <p class="hint" id="add-unused-heading">{if ours { "Also in the symbol (no field of this category holds it):" } else { "Also in the download (no field of this category holds it):" }}</p>
             <table class="add-unused" aria-labelledby="add-unused-heading">
                 <tbody>
                     {unused.into_iter().map(|field| view! {
@@ -1143,10 +1425,12 @@ fn DownloadForm(
         <section class="add-checks" aria-labelledby="add-checks-heading">
             <h4 id="add-checks-heading">"Before you save"</h4>
             <ul>
+                {problems.into_iter().map(|problem| view! { <li class="check check-error" role="alert">{problem}</li> }).collect_view()}
+                {findings.into_iter().map(|finding| view! { <li class="check check-warn">{finding}</li> }).collect_view()}
                 {same_mpn}
                 {footprint_check}
                 {pin_check}
-                <li class="check" id="add-license">"License: Unknown, needs review. Check the site's terms before you use the part."</li>
+                <li class="check" id="add-license">{license}</li>
                 {notes.into_iter().map(|note| view! { <li class="check">{note}</li> }).collect_view()}
             </ul>
         </section>
@@ -1210,7 +1494,7 @@ fn DownloadForm(
             {library_hint}
             {model_choice}
         </fieldset>
-        {text_row("add-from", "Where from", form.from)}
+        {(!ours).then(|| text_row("add-from", "Where from", form.from))}
         <label for="add-reason" class="reason-label">"Why are you adding it?"</label>
         <textarea
             id="add-reason"

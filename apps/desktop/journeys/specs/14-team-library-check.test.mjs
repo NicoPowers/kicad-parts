@@ -142,10 +142,22 @@ describe('team catalog: the library check', () => {
     assert.match(await textOf(browser, '.library-check-body'), /Did you mean g-ics:IC_TP4333\?/);
     // Clean-up starts folded: those old problems stop nothing.
     assert.equal(await browser.execute(() => document.querySelector('details.library-check-group').open), false);
-    // There is nothing to add a part from yet.
+    // Only symbols and footprints not in the Catalog yet can start Add part
+    // (kicad-parts-37a7); journey 15 does.
+    const adds = await browser.execute(() =>
+      [...document.querySelectorAll('.library-check-body button')].map((button) => [
+        button.firstChild.textContent.trim(),
+        button.closest('.library-check-group').querySelector('h3').textContent.trim(),
+      ]),
+    );
+    assert.ok(adds.length > 0);
+    assert.ok(
+      adds.every(([text, group]) => text === 'Add part from it' && group.startsWith('Not in the Catalog yet')),
+      JSON.stringify(adds),
+    );
     assert.equal(
-      await browser.execute(() => [...document.querySelectorAll('.library-check-body button')].length),
-      0,
+      await browser.execute(() => document.querySelector('[data-reference="g-Capacitor_SMD:C_0603_Hand"]') !== null),
+      true,
     );
     await assertAccessible(browser, '62-team-library-check');
     await screenshot(browser, '62-team-library-check');

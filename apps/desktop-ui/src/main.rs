@@ -876,6 +876,13 @@ fn PartPanel(
         adding.set(false);
         selected.set(Some(ipn));
     });
+    // The Library check's Add part from it: Add part opens with the symbol
+    // or footprint chosen in our libraries.
+    let add_from = Callback::new(move |choice: desktop_contract::TeamLibraryChoice| {
+        add_form.start_from_library(choice);
+        checking.set(false);
+        adding.set(true);
+    });
     let open_part = Callback::new(move |(ipn, part): (String, Option<ManufacturerPart>)| {
         pending_part.set_value(part.map(|part| (ipn.clone(), part)));
         adding.set(false);
@@ -893,10 +900,10 @@ fn PartPanel(
             }
         >
             {move || adding.get().then(|| view! {
-                <AddPartView form=add_form close=close_adding done=added open_part=open_part />
+                <AddPartView form=add_form close=close_adding done=added open_part=open_part library_check=library_check />
             })}
             {move || (checking.get() && !adding.get()).then(|| view! {
-                <LibraryCheckPanel check=library_check close=close_checking />
+                <LibraryCheckPanel check=library_check close=close_checking add_from=add_from />
             })}
             {move || if adding.get() || checking.get() { ().into_any() } else { match detail.get() {
                 None => view! {

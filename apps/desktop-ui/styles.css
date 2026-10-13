@@ -1277,6 +1277,91 @@ a {
   font-weight: 600;
 }
 
+/* Something that stops the save, such as a 3D model link outside our
+   library. */
+.check-error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* Add part: a download, or From our libraries (kicad-parts-37a7). */
+.add-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.add-sources button {
+  padding: 0.2rem 0.7rem;
+  font-size: inherit;
+}
+
+.add-sources button[aria-expanded="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.library-picker {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.library-picker label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.2rem;
+}
+
+.library-picker input[type="search"] {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+}
+
+.library-results {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.library-result {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  width: 100%;
+  margin: 0.1rem 0;
+  padding: 0.2rem 0.5rem;
+  text-align: left;
+  font-size: inherit;
+  overflow-wrap: anywhere;
+}
+
+.library-result[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* A reference in running text breaks only after its colon, never at a
+   hyphen. */
+.nowrap-reference span {
+  white-space: nowrap;
+}
+
+.library-kind {
+  flex: none;
+  width: 4.8rem;
+  color: var(--muted);
+}
+
 .check-warn li {
   font-weight: normal;
 }
@@ -1400,6 +1485,21 @@ a {
 
 .library-check-name code {
   font-weight: 600;
+}
+
+.library-check-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.2rem 0.6rem;
+}
+
+.library-check-add {
+  /* Holds its visually hidden text, so it never lengthens the panel. */
+  position: relative;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.85rem;
 }
 
 .library-check-file {
