@@ -134,7 +134,7 @@ fn a_library_in_order_finds_only_what_the_catalog_lacks() {
         known: &known,
         csv: &csv,
         kicad_footprints: Some(&kicad),
-        todays_footprints: todays_footprints(),
+        today: today(),
     });
     assert_eq!(
         kinds(&found),
@@ -171,7 +171,7 @@ fn a_library_in_order_finds_only_what_the_catalog_lacks() {
     let empty = BTreeSet::new();
     let without_lm358 = check(CheckInputs {
         kicad_footprints: Some(&empty),
-        todays_footprints: todays_footprints(),
+        today: today(),
         libraries: &libraries,
         known: &known,
         csv: &csv,
@@ -187,7 +187,7 @@ fn a_library_in_order_finds_only_what_the_catalog_lacks() {
         check_folder(root.path(), &known, None).unwrap(),
         check(CheckInputs {
             kicad_footprints: None,
-            todays_footprints: todays_footprints(),
+            today: today(),
             libraries: &libraries,
             known: &known,
             csv: &csv,
@@ -257,11 +257,14 @@ fn every_kind_of_3d_model_link_is_judged() {
     // As today's CSV catalog had them, the first import takes them as they
     // are: their old problems are clean-up.
     let libraries = read_libraries(root.path());
-    let today: BTreeMap<String, String> = libraries
-        .footprints
-        .iter()
-        .map(|f| (f.file(), f.sha256.clone()))
-        .collect();
+    let today = Today {
+        footprints: libraries
+            .footprints
+            .iter()
+            .map(|f| (f.file(), f.sha256.clone()))
+            .collect(),
+        csv_files: ["database/g-ics.csv".to_owned()].into(),
+    };
     let as_today = check_folder_with(root.path(), &KnownCad::default(), None, &today).unwrap();
     assert_eq!(as_today.count(Group::ToFix), 0, "{}", as_today.report());
     assert_eq!(as_today.count(Group::CleanUp), 7, "{}", as_today.report());
@@ -374,16 +377,30 @@ fn only_new_or_changed_footprints_have_errors() {
     .unwrap();
     let first_import = check_folder(root.path(), &known, None).unwrap();
     assert_eq!(severity_of(&first_import, "Unused"), Some(Severity::Error));
-    // Only a footprint still as it was in today's CSV catalog keeps its old
-    // problem as clean-up at its CSV file's first import.
+    // Today's footprint, byte for byte, but used by a CSV file that is not
+    // one of today's (new or renamed): still an error, since no CSV file of
+    // today's catalog brought it in.
     let unused = root
         .path()
         .join("footprints/g-Package_SO.pretty/Unused.kicad_mod");
-    let today: BTreeMap<String, String> = [(
-        "footprints/g-Package_SO.pretty/Unused.kicad_mod".to_owned(),
-        sha256_hex(fs::read(&unused).unwrap()),
-    )]
-    .into();
+    let mut today = Today {
+        footprints: [(
+            "footprints/g-Package_SO.pretty/Unused.kicad_mod".to_owned(),
+            sha256_hex(fs::read(&unused).unwrap()),
+        )]
+        .into(),
+        csv_files: [
+            "database/g-ics.csv".to_owned(),
+            "database/g-old.csv".to_owned(),
+        ]
+        .into(),
+    };
+    let new_file = check_folder_with(root.path(), &known, None, &today).unwrap();
+    assert_eq!(severity_of(&new_file, "Unused"), Some(Severity::Error));
+    // Only a footprint still as today's CSV catalog had it, used only by
+    // today's CSV files, keeps its old problem as clean-up at its CSV
+    // file's first import.
+    today.csv_files.insert("database/g-new.csv".to_owned());
     let as_today = check_folder_with(root.path(), &known, None, &today).unwrap();
     assert_eq!(severity_of(&as_today, "Unused"), Some(Severity::CleanUp));
     fs::remove_file(root.path().join("database/g-new.csv")).unwrap();

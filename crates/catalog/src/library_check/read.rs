@@ -3,13 +3,13 @@
 //! folder, and the footprints KiCad's own libraries have. Only reads.
 
 use super::{CheckInputs, CsvReference, KnownCad, Libraries, LibraryCheck, LibraryFootprint};
-use super::{LibrarySymbol, check};
+use super::{LibrarySymbol, Today, check};
 use crate::cad_item::CadItemKind;
 use crate::csv_import::{is_link, parse_csv};
 use crate::hash::sha256_hex;
 use kicad_integration::footprint_choices;
 use kicad_integration::library_file::{FootprintFile, Sexp, SymbolLibrary, model_references};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,21 +21,16 @@ pub fn check_folder(
     known: &KnownCad,
     kicad_share: Option<&Path>,
 ) -> Result<LibraryCheck, String> {
-    check_folder_with(
-        root,
-        known,
-        kicad_share,
-        super::baseline::todays_footprints(),
-    )
+    check_folder_with(root, known, kicad_share, super::today())
 }
 
-/// [`check_folder`] with `todays_footprints` (repository path to SHA-256)
-/// in place of today's CSV catalog built into the program.
+/// [`check_folder`] with `today` in place of today's CSV catalog built into
+/// the program.
 pub fn check_folder_with(
     root: &Path,
     known: &KnownCad,
     kicad_share: Option<&Path>,
-    todays_footprints: &BTreeMap<String, String>,
+    today: &Today,
 ) -> Result<LibraryCheck, String> {
     let mut libraries = read_libraries(root);
     let csv = read_csv_references(root, &mut libraries.unreadable);
@@ -45,7 +40,7 @@ pub fn check_folder_with(
         known,
         csv: &csv,
         kicad_footprints: kicad.as_ref(),
-        todays_footprints,
+        today,
     }))
 }
 

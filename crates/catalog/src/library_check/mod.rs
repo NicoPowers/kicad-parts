@@ -31,7 +31,8 @@
 //! Catalog has unchanged is clean-up, so today's CSV catalog still imports.
 //! A CSV file never imported has no last import to compare with: its first
 //! import takes the footprints it uses as they are only while their bytes
-//! are those of today's CSV catalog ([`todays_footprints`]), so their old
+//! are those of today's CSV catalog and only today's CSV files use them
+//! ([`today`]), so their old
 //! problems are clean-up and today's CSV files import one by one; a
 //! footprint drawn or changed since is judged like any new one, so a new or
 //! renamed CSV file cannot bring a bad link in. On a footprint that no part uses and the Catalog does not
@@ -39,8 +40,9 @@
 
 mod baseline;
 pub mod read;
+mod today;
 
-pub use baseline::todays_footprints;
+pub use baseline::{Today, today};
 
 #[cfg(test)]
 mod tests;
@@ -398,9 +400,9 @@ pub struct CheckInputs<'a> {
     /// KiCad's libraries were found; `None` leaves symbols naming a
     /// footprint outside our libraries unchecked.
     pub kicad_footprints: Option<&'a BTreeSet<String>>,
-    /// Each footprint file of today's CSV catalog and the SHA-256 of its
-    /// bytes ([`todays_footprints`]).
-    pub todays_footprints: &'a BTreeMap<String, String>,
+    /// Today's CSV catalog ([`today`]): its footprints' bytes and its CSV
+    /// files.
+    pub today: &'a Today,
 }
 
 /// Compares the CSV catalog's own libraries with the Catalog. The same
@@ -411,7 +413,7 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
         known,
         csv,
         kicad_footprints,
-        todays_footprints,
+        today,
     } = inputs;
     let mut findings = Vec::new();
     // Each symbol and footprint the CSV files name, with the files.
@@ -470,8 +472,10 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
                 .iter()
                 .any(|file| known.imported_csv_files.contains(*file))
         });
-        // Still as today's CSV catalog had it, byte for byte.
-        let as_today = todays_footprints.get(&footprint.file()) == Some(&footprint.sha256);
+        // Still as today's CSV catalog had it, byte for byte, and used only
+        // by today's CSV files: an old problem, not a new one.
+        let as_today = today.footprints.get(&footprint.file()) == Some(&footprint.sha256)
+            && files.is_some_and(|files| files.iter().all(|file| today.csv_files.contains(*file)));
         let state = match known.bytes_of(CadItemKind::Footprint, &reference) {
             Some(bytes) if bytes.contains(&footprint.sha256) => FootprintState::Unchanged,
             Some(_) => FootprintState::Changed,
@@ -578,9 +582,9 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
 /// Where a footprint stands against the last import.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FootprintState {
-    /// Not in the Catalog, only CSV files never imported use it, and its
-    /// bytes are still today's CSV catalog's: their first import takes it
-    /// as it is.
+    /// Not in the Catalog, only CSV files never imported use it, its bytes
+    /// are still today's CSV catalog's, and only today's CSV files use it:
+    /// their first import takes it as it is.
     BeforeFirstImport,
     /// The Catalog has these bytes.
     Unchanged,

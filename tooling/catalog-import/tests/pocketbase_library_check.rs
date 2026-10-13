@@ -257,3 +257,40 @@ fn a_new_csv_file_cannot_bring_in_a_new_bad_3d_model_link() {
     assert!(read_back(&admin).unwrap() == before, "nothing was sent");
     server.stop();
 }
+
+/// A new CSV file using one of today's footprints that no CSV file of
+/// today's catalog uses (DFN-12_FTD, linking a model in someone's home
+/// folder) is refused: only footprints used solely by today's CSV files
+/// keep their old problems as clean-up.
+#[test]
+fn a_new_csv_file_cannot_bring_in_todays_unused_footprint_with_a_bad_link() {
+    let copy = tempfile::tempdir().unwrap();
+    let root = copy.path();
+    copy_catalog(root);
+    let csv = fs::read_to_string(root.join("database/g-res.csv")).unwrap();
+    let header = csv.lines().next().unwrap();
+    let row = csv.lines().nth(1).unwrap().replace("RES-", "DFN-").replace(
+        "g-Resistor_SMD:R_0603_1608Metric",
+        "g-Package_DFN_QFN:DFN-12_FTD",
+    );
+    fs::write(
+        root.join("database/g-dfn.csv"),
+        format!("{header}\n{row}\n"),
+    )
+    .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) =
+        services::start(&services::repository_root(), state.path()).unwrap();
+    let import = CsvCatalog::new(root).import("g-dfn", None).unwrap();
+    let Err(refused) =
+        services::prepare_import(&admin, root, &import, "Import DFN", Allow::default())
+    else {
+        panic!("not refused");
+    };
+    assert!(
+        refused.contains("footprints/g-Package_DFN_QFN.pretty/DFN-12_FTD.kicad_mod")
+            && refused.contains("/home/jeffs/"),
+        "{refused}"
+    );
+    server.stop();
+}
