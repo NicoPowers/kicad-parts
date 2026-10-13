@@ -83,10 +83,12 @@ struct Session {
     email: String,
     can_edit: bool,
     follower: Follower,
-    /// The category names last read, and the position of the team catalog
-    /// (checkpoint and imports) they were read at.
-    category_names: Arc<Mutex<Option<((u64, u64), CategoryNames)>>>,
+    category_names: Arc<Mutex<Option<NamesRead>>>,
 }
+
+/// The category names last read, and the position of the team catalog
+/// (checkpoint and imports) they were read at.
+type NamesRead = ((u64, u64), CategoryNames);
 
 struct Live {
     updates: LiveUpdates,

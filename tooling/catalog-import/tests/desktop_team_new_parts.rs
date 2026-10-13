@@ -349,10 +349,12 @@ fn the_desktop_adds_a_part_from_a_download() {
             && after.starts_with("CL10B104/KiCad/C_0603_New.kicad_mod in CL10B104.zip (3D model path set to the Catalog's)")),
         "{rows:?}"
     );
-    let found = browser.search_with(MPN, 10, &team.current_values());
+    let found = browser.search_with(MPN, 10, &team.current_values(), &team.category_names());
     assert_eq!(found.total, 1, "{found:?}");
-    assert_eq!(found.hits[0].ipn, ipn);
-    assert_eq!(found.hits[0].csv_file, "Team catalog");
+    // A part only the team catalog has is in its category's section.
+    assert_eq!(found.sections[0].name, "Capacitors");
+    assert_eq!(found.sections[0].hits[0].ipn, ipn);
+    assert_eq!(found.sections[0].hits[0].csv_file, "Team catalog");
     let detail = browser.part_with(&ipn, &team.current_values()).unwrap();
     // The MPN an engineer types is checked too, without regard to case.
     let typed = team.same_mpn("cl10c020cb8nnnc", "Someone Else");

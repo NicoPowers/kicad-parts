@@ -318,9 +318,12 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         kicad_locations: kicad_integration::SearchLocations::Only(Vec::new()),
     });
     let current = team.current_values();
-    let found = browser.search_with("47R thick", 10, &current);
-    assert_eq!(found.total, 1, "{:?}", found.hits);
-    let hit = &found.hits[0];
+    let names = team.category_names();
+    assert_eq!(names.get("res").map(String::as_str), Some("Resistors"));
+    let found = browser.search_with("47R thick", 10, &current, &names);
+    assert_eq!(found.total, 1, "{:?}", found.sections);
+    assert_eq!(found.sections[0].name, "Resistors");
+    let hit = found.hits().next().unwrap();
     assert_eq!(
         (
             hit.ipn.as_str(),
@@ -334,9 +337,8 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     // Words only the CSV description has no longer find it.
     assert!(
         browser
-            .search_with("1/10W 47", 10, &current)
-            .hits
-            .iter()
+            .search_with("1/10W 47", 10, &current, &names)
+            .hits()
             .all(|hit| hit.ipn != IPN)
     );
 
