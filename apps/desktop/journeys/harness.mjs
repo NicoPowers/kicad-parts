@@ -537,6 +537,31 @@ export async function selectResult(browser, name) {
 }
 
 /**
+ * Focuses the part button `selector` finds, presses Enter, and checks that
+ * it is selected and still has focus once the list has redrawn.
+ */
+export async function expectFocusKeptOnEnter(browser, selector) {
+  const ipn = await browser.execute((s) => {
+    const button = document.querySelector(s);
+    button.focus();
+    return button.querySelector('.result-ipn').textContent;
+  }, selector);
+  await browser.keys('Enter');
+  await browser.waitUntil(
+    async () => browser.execute(() => document.activeElement?.getAttribute('aria-current') === 'true'),
+    { timeout: 5_000, timeoutMsg: 'Enter did not select the part' },
+  );
+  // The search runs again for the selection (120 ms debounce, then IPC).
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  const focused = await browser.execute(() => ({
+    isPart: document.activeElement?.classList.contains('result') ?? false,
+    ipn: document.activeElement?.querySelector('.result-ipn')?.textContent ?? null,
+    selected: document.activeElement?.getAttribute('aria-current') ?? null,
+  }));
+  assert.deepEqual(focused, { isPart: true, ipn, selected: 'true' }, 'focus stays on the chosen part');
+}
+
+/**
  * Waits until the part list shows the part `text` (its IPN or MPN) as the
  * selected one, in the open section named `section`, scrolled into view
  * and not covered by its sticky section header.

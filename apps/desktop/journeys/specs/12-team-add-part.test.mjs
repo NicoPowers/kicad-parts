@@ -258,6 +258,18 @@ describe('team catalog: add a part from a download', () => {
   });
 
   it('shows a part that already has the MPN, and opens it', async () => {
+    // Capacitors closed and a search hiding CAP-0000-0020, so opening it
+    // from the notice must open its section once the search is cleared.
+    await searchFor(browser, '', /^\d+ matching parts$/);
+    await browser.execute(() => {
+      const toggle = document.querySelector('.section-toggle[aria-controls="parts-in-cap"]');
+      if (toggle.getAttribute('aria-expanded') === 'true') toggle.click();
+    });
+    await browser.waitUntil(
+      async () => browser.execute(() => document.querySelector('.section-toggle[aria-controls="parts-in-cap"]').getAttribute('aria-expanded') === 'false'),
+      { timeout: 5_000, timeoutMsg: 'Capacitors did not close' },
+    );
+    await searchFor(browser, MPN, '1 matching part');
     await (await browser.$('#add-part-open')).click();
     await waitForText(browser, '#add-heading', 'Add part');
     await (await browser.$('#add-files')).addValue(download(files, KNOWN_MPN));
@@ -266,8 +278,8 @@ describe('team catalog: add a part from a download', () => {
     await clickButton('#add-same-mpn', 'Open CAP-0000-0020');
     await waitForText(browser, '#part-title', KNOWN_MPN);
     assert.equal(await browser.$('#add-heading').isExisting(), false);
-    // Opened from the notice, the part is shown in its section once the
-    // search (still the new part's MPN) no longer hides it.
+    // Opened from the notice, the part is shown in its section, which
+    // opens once the search (still the new part's MPN) no longer hides it.
     await searchFor(browser, '', /^\d+ matching parts$/);
     await waitForSelectedInList(browser, 'CAP-0000-0020', 'Capacitors');
   });

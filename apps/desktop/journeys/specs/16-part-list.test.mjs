@@ -8,6 +8,7 @@ import { after, before, describe, it } from 'node:test';
 import {
   SYMBOL,
   assertAccessible,
+  expectFocusKeptOnEnter,
   launchApp,
   screenshot,
   searchFor,
@@ -94,6 +95,9 @@ describe('part list grouped by category', () => {
       timeout: 5_000,
       timeoutMsg: 'the opened section did not show its parts',
     });
+    // Choosing a part with the keyboard keeps focus on it, even after the
+    // list hears where the selected part is.
+    await expectFocusKeptOnEnter(browser, '#parts-in-res li:nth-child(3) button.result');
 
     const capacitors = await toggleOf(browser, 'Capacitors');
     await browser.execute((el) => el.focus(), capacitors);

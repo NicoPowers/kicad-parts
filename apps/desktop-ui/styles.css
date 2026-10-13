@@ -15,6 +15,9 @@
   --ok: #1d6b3a;
   --ok-soft: #e4f4ea;
   --radius: 8px;
+  /* The part list's sticky section header, which the list's scroll padding
+     keeps parts clear of. */
+  --section-header-height: 2.6rem;
   color-scheme: light;
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
   font-size: 15px;
@@ -276,8 +279,8 @@ button:disabled {
   overflow-y: auto;
   border-top: 1px solid var(--line);
   /* A part scrolled to, or reached with Tab, stays clear of the sticky
-     section header above it (its height). */
-  scroll-padding-top: 2.6rem;
+     section header above it. */
+  scroll-padding-top: var(--section-header-height);
 }
 
 .result {
@@ -335,6 +338,7 @@ button:disabled {
 }
 
 .section-toggle {
+  min-height: var(--section-header-height);
   position: sticky;
   top: 0;
   z-index: 1;

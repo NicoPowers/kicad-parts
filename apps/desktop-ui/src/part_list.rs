@@ -9,7 +9,7 @@
 //! opens its section and scrolls the part into view.
 
 use crate::{Load, backend, grouped};
-use desktop_contract::{PartSummary, SearchResponse, SearchSection};
+use desktop_contract::{PartSummary, SearchResponse};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::collections::{BTreeMap, BTreeSet};
@@ -99,7 +99,8 @@ impl OpenSections {
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Reveals {
     /// A part just selected, and the search (trimmed) shown then, until a
-    /// result set holds it; a new search forgets it.
+    /// result set holds it; typing another search forgets it, but clearing
+    /// the search does not.
     pending: Option<(String, String)>,
     /// The part last revealed and the section it was in.
     revealed: Option<(String, String)>,
@@ -124,7 +125,7 @@ impl Reveals {
         let selected = selected?;
         if let Some((ipn, asked)) = &self.pending {
             if ipn == selected {
-                if asked != query {
+                if !query.is_empty() && asked != query {
                     self.pending = None;
                     return None;
                 }
@@ -232,28 +233,19 @@ fn section_id(category: &str) -> String {
     format!("parts-in-{safe}")
 }
 
-/// Identifies what a section shows, so a new result set redraws only the
-/// sections that changed.
-fn section_key(query: &str, section: &SearchSection) -> u64 {
+/// Identifies a part row by what it shows, so a list redraws only the
+/// rows that changed and a focused row keeps its focus.
+fn row_key(hit: &PartSummary) -> u64 {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     (
-        query.trim(),
-        &section.category,
-        &section.name,
-        section.total,
+        &hit.ipn,
+        &hit.mpn,
+        &hit.csv_file,
+        &hit.description,
+        &hit.manufacturer,
     )
         .hash(&mut hasher);
-    for hit in &section.hits {
-        (
-            &hit.ipn,
-            &hit.mpn,
-            &hit.csv_file,
-            &hit.description,
-            &hit.manufacturer,
-        )
-            .hash(&mut hasher);
-    }
     hasher.finish()
 }
 
@@ -263,6 +255,9 @@ fn section_key(query: &str, section: &SearchSection) -> u64 {
 struct Loaded {
     key: (String, Option<u64>),
     sections: BTreeMap<String, Load<Vec<PartSummary>>>,
+    /// The sections whose Show all was chosen in this search, loaded again
+    /// after a team catalog change.
+    shown_all: BTreeSet<String>,
 }
 
 #[component]
@@ -283,13 +278,53 @@ pub(crate) fn ResultList(
     let try_scroll = move || {
         if want_scroll.get_value() {
             request_animation_frame(move || {
-                if scroll_selected_into_view() {
+                // Kept only while the part's section is still loading, which
+                // moves it; a part not shown is not scrolled to later.
+                if scroll_selected_into_view() != Scrolled::WhileLoading {
                     want_scroll.set_value(false);
                 }
             });
         }
     };
 
+    // Loads up to SECTION_ROWS parts of `category` for the search shown.
+    let load_section = move |category: String| {
+        let Load::Ready(searched) = results.get_untracked() else {
+            return;
+        };
+        let key = loaded.with_untracked(|loaded| loaded.key.clone());
+        loaded.update(|loaded| {
+            loaded.sections.insert(category.clone(), Load::Loading);
+        });
+        spawn_local(async move {
+            let answer = backend::search(
+                searched.response.query.clone(),
+                SECTION_ROWS,
+                selected.get_untracked(),
+                Some(category.clone()),
+            )
+            .await;
+            let rows = match answer {
+                Ok(response) => Load::Ready(
+                    response
+                        .sections
+                        .into_iter()
+                        .next()
+                        .map(|section| section.hits)
+                        .unwrap_or_default(),
+                ),
+                Err(error) => Load::Failed(error),
+            };
+            // Kept only if the search and team catalog are still the same.
+            let current = loaded.with_untracked(|loaded| loaded.key == key);
+            if current {
+                loaded.update(|loaded| {
+                    loaded.sections.insert(category, rows);
+                });
+                try_scroll();
+            }
+        });
+    };
     Effect::new(move |previous: Option<Option<String>>| {
         let now = selected.get();
         if previous.as_ref() != Some(&now) {
@@ -337,10 +372,22 @@ pub(crate) fn ResultList(
         };
         let key = (query.clone(), version);
         if loaded.with_untracked(|loaded| loaded.key != key) {
+            // The same search after a team catalog change keeps Show all.
+            let shown_all = loaded.with_untracked(|loaded| {
+                if loaded.key.0 == query {
+                    loaded.shown_all.clone()
+                } else {
+                    BTreeSet::new()
+                }
+            });
             loaded.set(Loaded {
                 key,
                 sections: BTreeMap::new(),
+                shown_all: shown_all.clone(),
             });
+            for category in shown_all {
+                load_section(category);
+            }
         }
         // Only an answer asked for with the part selected now says where
         // that part is.
@@ -371,44 +418,6 @@ pub(crate) fn ResultList(
         try_scroll();
     });
 
-    // Loads up to SECTION_ROWS parts of `category` for the search shown.
-    let load_section = move |category: String| {
-        let Load::Ready(searched) = results.get_untracked() else {
-            return;
-        };
-        let key = loaded.with_untracked(|loaded| loaded.key.clone());
-        loaded.update(|loaded| {
-            loaded.sections.insert(category.clone(), Load::Loading);
-        });
-        spawn_local(async move {
-            let answer = backend::search(
-                searched.response.query.clone(),
-                SECTION_ROWS,
-                selected.get_untracked(),
-                Some(category.clone()),
-            )
-            .await;
-            let rows = match answer {
-                Ok(response) => Load::Ready(
-                    response
-                        .sections
-                        .into_iter()
-                        .next()
-                        .map(|section| section.hits)
-                        .unwrap_or_default(),
-                ),
-                Err(error) => Load::Failed(error),
-            };
-            // Kept only if the search and team catalog are still the same.
-            let current = loaded.with_untracked(|loaded| loaded.key == key);
-            if current {
-                loaded.update(|loaded| {
-                    loaded.sections.insert(category, rows);
-                });
-                try_scroll();
-            }
-        });
-    };
     let choose = move |ipn: String| {
         adding.set(false);
         checking.set(false);
@@ -431,26 +440,28 @@ pub(crate) fn ResultList(
                 _ => None,
             })
         >
-            // Keyed by what each section shows, so a new result set redraws
-            // only the sections that changed; a section's parts are drawn
-            // only while it is open.
+            // One section per category, kept while the search and the team
+            // catalog stay the same: a new answer (such as one for a new
+            // selection) updates its contents in place, so focus stays put.
+            // A section's parts are drawn only while it is open.
             <For
                 each=move || results.with(|results| match results {
                     Load::Ready(searched) => {
-                        let query = searched.response.query.clone();
+                        let query = searched.response.query.trim().to_owned();
                         searched
                             .response
                             .sections
                             .iter()
-                            .map(|section| (section_key(&query, section), query.clone(), section.clone()))
+                            .map(|section| (query.clone(), section.category.clone(), searched.version))
                             .collect::<Vec<_>>()
                     }
                     _ => Vec::new(),
                 })
-                key=|(key, _, _)| *key
-                children=move |(_, query, section)| view! {
+                key=|key| key.clone()
+                children=move |(query, category, _)| view! {
                     <Section
-                        section=section
+                        results=results
+                        category=category
                         query=query
                         open=open
                         loaded=loaded
@@ -468,7 +479,8 @@ pub(crate) fn ResultList(
 #[component]
 #[allow(clippy::too_many_arguments)]
 fn Section(
-    section: SearchSection,
+    results: RwSignal<Load<Searched>>,
+    category: String,
     query: String,
     open: RwSignal<OpenSections>,
     loaded: RwSignal<Loaded>,
@@ -477,8 +489,22 @@ fn Section(
     load: impl Fn(String) + Copy + Send + Sync + 'static,
     toggled: impl Fn() + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
-    let category = section.category.clone();
     let is_searching = searching(&query);
+    // This section's contents in the latest answer.
+    let section = {
+        let category = category.clone();
+        Memo::new(move |_| {
+            results.with(|results| match results {
+                Load::Ready(searched) => searched
+                    .response
+                    .sections
+                    .iter()
+                    .find(|section| section.category == category)
+                    .cloned(),
+                _ => None,
+            })
+        })
+    };
     let is_open = {
         let (category, query) = (category.clone(), query.clone());
         // A memo, so opening one section redraws only that one.
@@ -497,15 +523,30 @@ fn Section(
             }
         });
     }
+    let shown = Memo::new(move |_| {
+        section.with(|section| {
+            mine.with(|mine| match section {
+                Some(section) => {
+                    section_rows(is_searching, mine.as_ref(), &section.hits, section.total)
+                }
+                None => (Vec::new(), SectionEnd::Nothing),
+            })
+        })
+    });
     let id = section_id(&category);
-    let noun = if section.total == 1 {
-        " part"
-    } else {
-        " parts"
+    let name = move || {
+        section.with(|section| section.as_ref().map(|s| s.name.clone()).unwrap_or_default())
     };
-    let total = section.total;
-    let hits = StoredValue::new(section.hits);
-    let name = section.name.clone();
+    let total = move || section.with(|section| section.as_ref().map_or(0, |s| s.total));
+    let show_all = {
+        let category = category.clone();
+        move || {
+            loaded.update(|loaded| {
+                loaded.shown_all.insert(category.clone());
+            });
+            load(category.clone());
+        }
+    };
     view! {
         <li class="result-section">
             <button
@@ -521,57 +562,67 @@ fn Section(
                     }
                 }
             >
-                <span class="section-name">{section.name.clone()}</span>
+                <span class="section-name">{name}</span>
                 " "
                 <span class="section-count">
-                    {grouped(total)}
-                    <span class="visually-hidden">{noun}</span>
+                    {move || grouped(total())}
+                    <span class="visually-hidden">
+                        {move || if total() == 1 { " part" } else { " parts" }}
+                    </span>
                 </span>
             </button>
             <ul id=id class="section-parts" aria-label=name hidden=move || !is_open.get()>
                 {move || is_open.get().then(|| {
-                    let (rows, end) = mine.with(|mine| {
-                        hits.with_value(|hits| section_rows(is_searching, mine.as_ref(), hits, total))
-                    });
-                    let rows = rows
-                        .into_iter()
-                        .map(|hit| view! { <PartRow hit=hit selected=selected choose=choose /> })
-                        .collect::<Vec<_>>();
-                    let category = category.clone();
-                    let end = match end {
-                        SectionEnd::Nothing => ().into_any(),
-                        SectionEnd::ShowAll(total) => view! {
-                            <li class="section-more">
-                                <button
-                                    type="button"
-                                    class="section-show-all"
-                                    on:click=move |_| load(category.clone())
-                                >
-                                    {format!("Show all {}", grouped(total))}
-                                </button>
-                            </li>
-                        }
-                        .into_any(),
-                        SectionEnd::Loading => view! {
-                            <li class="section-more" aria-busy="true">"Loading…"</li>
-                        }
-                        .into_any(),
-                        SectionEnd::Failed(error) => view! {
-                            <li class="section-more problem">{format!("Could not load these parts: {error}")}</li>
-                        }
-                        .into_any(),
-                        SectionEnd::Capped { shown, total } => view! {
-                            <li class="section-more">
-                                {format!(
-                                    "Showing {} of {}. Search to narrow the list.",
-                                    grouped(shown),
-                                    grouped(total),
-                                )}
-                            </li>
-                        }
-                        .into_any(),
-                    };
-                    view! { {rows}{end} }
+                    let show_all = show_all.clone();
+                    view! {
+                        // Keyed by what each row shows, so a new answer
+                        // redraws only the rows that changed.
+                        <For
+                            each=move || shown.with(|(rows, _)| {
+                                rows.iter().map(|row| (row_key(row), row.clone())).collect::<Vec<_>>()
+                            })
+                            key=|(key, _)| *key
+                            children=move |(_, hit)| view! {
+                                <PartRow hit=hit selected=selected choose=choose />
+                            }
+                        />
+                        {move || {
+                            let show_all = show_all.clone();
+                            match shown.with(|(_, end)| end.clone()) {
+                                SectionEnd::Nothing => ().into_any(),
+                                SectionEnd::ShowAll(total) => view! {
+                                    <li class="section-more">
+                                        <button
+                                            type="button"
+                                            class="section-show-all"
+                                            on:click=move |_| show_all()
+                                        >
+                                            {format!("Show all {}", grouped(total))}
+                                        </button>
+                                    </li>
+                                }
+                                .into_any(),
+                                SectionEnd::Loading => view! {
+                                    <li class="section-more" aria-busy="true">"Loading…"</li>
+                                }
+                                .into_any(),
+                                SectionEnd::Failed(error) => view! {
+                                    <li class="section-more problem">{format!("Could not load these parts: {error}")}</li>
+                                }
+                                .into_any(),
+                                SectionEnd::Capped { shown, total } => view! {
+                                    <li class="section-more">
+                                        {format!(
+                                            "Showing {} of {}. Search to narrow the list.",
+                                            grouped(shown),
+                                            grouped(total),
+                                        )}
+                                    </li>
+                                }
+                                .into_any(),
+                            }
+                        }}
+                    }
                 })}
             </ul>
         </li>
@@ -612,13 +663,22 @@ fn PartRow(
     }
 }
 
+/// What [`scroll_selected_into_view`] did.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Scrolled {
+    /// No selected part is drawn.
+    NotShown,
+    /// Scrolled, but its section's other parts are still loading, which
+    /// will move it.
+    WhileLoading,
+    Done,
+}
+
 /// Scrolls the selected part into view in the list, if it is drawn. The
 /// list's scroll padding keeps it clear of its sticky section header.
-/// Says whether that is final: not while its section's other parts are
-/// still loading, which moves it.
-fn scroll_selected_into_view() -> bool {
+fn scroll_selected_into_view() -> Scrolled {
     let Ok(Some(row)) = document().query_selector(".results .result[aria-current=\"true\"]") else {
-        return false;
+        return Scrolled::NotShown;
     };
     let loading = row
         .closest(".section-parts")
@@ -634,7 +694,11 @@ fn scroll_selected_into_view() -> bool {
             let _ = method.call1(&row, &options);
         }
     }
-    !loading
+    if loading {
+        Scrolled::WhileLoading
+    } else {
+        Scrolled::Done
+    }
 }
 
 fn scroll_list_to_top() {
@@ -718,11 +782,21 @@ mod tests {
     }
 
     #[test]
-    fn a_new_search_forgets_a_part_it_does_not_hold() {
+    fn clearing_the_search_reveals_a_part_it_hid() {
         let mut reveals = Reveals::default();
         reveals.select(Some("CAP-1".into()), "100n ");
         assert_eq!(reveals.results(Some("CAP-1"), None, "100n"), None);
-        assert_eq!(reveals.results(Some("CAP-1"), Some("cap"), ""), None);
+        assert_eq!(
+            reveals.results(Some("CAP-1"), Some("cap"), ""),
+            Some("cap".into())
+        );
+    }
+
+    #[test]
+    fn typing_another_search_forgets_a_part_it_does_not_hold() {
+        let mut reveals = Reveals::default();
+        reveals.select(Some("CAP-1".into()), "100n");
+        assert_eq!(reveals.results(Some("CAP-1"), None, "100n 0603"), None);
         assert_eq!(reveals.results(Some("CAP-1"), Some("cap"), ""), None);
     }
 

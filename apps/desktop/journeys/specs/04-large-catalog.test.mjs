@@ -7,6 +7,7 @@ import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import {
   assertAccessible,
+  expectFocusKeptOnEnter,
   launchApp,
   record,
   screenshot,
@@ -101,6 +102,8 @@ describe(`search over ${ROWS} rows`, () => {
     await browser.execute(() => document.querySelector('.section-more').scrollIntoView({ block: 'end' }));
     await assertAccessible(browser, '30-large-catalog');
     await screenshot(browser, '30-large-catalog');
+    // A part beyond the first 25, chosen with the keyboard, keeps focus.
+    await expectFocusKeptOnEnter(browser, '.section-parts li:nth-child(30) button.result');
   });
 });
 
