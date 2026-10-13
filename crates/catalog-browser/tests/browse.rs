@@ -41,7 +41,7 @@ fn search_select_and_preview_a_multi_unit_part() {
 
     let results = browser.search("stm32h723", 50);
     assert_eq!(results.total, 1);
-    let ipn = results.hits[0].ipn.clone();
+    let ipn = results.hits().next().unwrap().ipn.clone();
     let part = browser.part(&ipn).unwrap();
     assert_eq!(part.symbol.as_deref(), Some("g-mcu:STM32H723ZG"));
 
@@ -84,7 +84,13 @@ fn missing_kicad_is_explained_and_fixed_by_a_user_override() {
         KicadStatus::Missing { searched } => assert_eq!(searched.len(), 1),
         other => panic!("expected missing, got {other:?}"),
     }
-    let ipn = browser.search("RC0603FR-0747RL", 1).hits[0].ipn.clone();
+    let ipn = browser
+        .search("RC0603FR-0747RL", 1)
+        .hits()
+        .next()
+        .unwrap()
+        .ipn
+        .clone();
     match browser.preview(&ipn, PreviewKind::Symbol) {
         PreviewOutcome::Problem(problem) => {
             assert_eq!(problem.reason, PreviewProblemReason::KicadUnavailable)
@@ -215,7 +221,7 @@ fn a_corrupt_settings_file_is_reported_and_replaced_atomically() {
 fn audit_every_catalog_preview() {
     let dir = tempfile::tempdir().unwrap();
     let browser = open_browser(dir.path(), SearchLocations::Standard);
-    let parts = browser.search("", 500).hits;
+    let parts: Vec<_> = browser.search("", 500).hits().cloned().collect();
     assert_eq!(parts.len(), 178);
     let mut ready_count = 0;
     let mut problems = Vec::new();
@@ -238,4 +244,84 @@ fn audit_every_catalog_preview() {
     for problem in &problems {
         println!("  {problem}");
     }
+}
+
+#[test]
+fn search_groups_the_parts_by_category() {
+    use catalog_browser::PartValues;
+    use std::collections::BTreeMap;
+    let dir = tempfile::tempdir().unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let browser = open_browser(
+        dir.path(),
+        SearchLocations::Only(vec![empty.path().to_path_buf()]),
+    );
+
+    // Every CSV file with parts is one section, by plain name, holding all
+    // its parts; g-mec.csv has none, so 20 of the 21 make a section.
+    let all = browser.search("", 500);
+    assert_eq!((all.total, all.shown(), all.sections.len()), (178, 178, 20));
+    assert!(all.sections.iter().all(|s| s.category != "mec"));
+    let names: Vec<&str> = all.sections.iter().map(|s| s.name.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_by_key(|name| name.to_lowercase());
+    assert_eq!(names, sorted);
+    let resistors = all.sections.iter().find(|s| s.category == "res").unwrap();
+    assert_eq!(resistors.name, "Resistors");
+    assert_eq!(resistors.total, resistors.hits.len());
+    assert!(resistors.hits.iter().all(|hit| hit.csv_file == "g-res.csv"));
+
+    // A search keeps only the sections with matches, each with its count.
+    let found = browser.search("0603", 500);
+    assert!(found.sections.len() < 20);
+    assert!(
+        found
+            .sections
+            .iter()
+            .all(|s| s.total > 0 && s.total == s.hits.len())
+    );
+    assert_eq!(found.shown(), found.total);
+
+    // A section shows at most `limit` parts but counts every match.
+    let limited = browser.search("", 2);
+    let resistors = limited
+        .sections
+        .iter()
+        .find(|s| s.category == "res")
+        .unwrap();
+    assert_eq!(resistors.hits.len(), 2);
+    assert!(resistors.total > 2);
+
+    // The team catalog's category wins, a part only it has is in its
+    // category's section, and its names are used.
+    let moved = resistors.hits[0].ipn.clone();
+    let current: BTreeMap<String, PartValues> = [
+        (
+            moved.clone(),
+            PartValues {
+                category: Some("cap".to_owned()),
+                ..PartValues::default()
+            },
+        ),
+        (
+            "RES-9999-0001".to_owned(),
+            PartValues {
+                category: Some("res".to_owned()),
+                description: Some("New resistor".to_owned()),
+                ..PartValues::default()
+            },
+        ),
+    ]
+    .into();
+    let names: BTreeMap<String, String> = [("cap".to_owned(), "Capacitors (C)".to_owned())].into();
+    let team = browser.search_with("", 500, &current, &names);
+    assert_eq!(team.total, 179);
+    let section_of = |ipn: &str| {
+        team.sections
+            .iter()
+            .find(|s| s.hits.iter().any(|hit| hit.ipn == ipn))
+            .map(|s| s.name.as_str())
+    };
+    assert_eq!(section_of(&moved), Some("Capacitors (C)"));
+    assert_eq!(section_of("RES-9999-0001"), Some("Resistors"));
 }

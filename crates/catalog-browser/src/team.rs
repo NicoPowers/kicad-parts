@@ -83,6 +83,9 @@ struct Session {
     email: String,
     can_edit: bool,
     follower: Follower,
+    /// The category names last read, and the position of the team catalog
+    /// (checkpoint and imports) they were read at.
+    category_names: Arc<Mutex<Option<((u64, u64), CategoryNames)>>>,
 }
 
 struct Live {
@@ -302,6 +305,38 @@ impl TeamCatalog {
         };
         drop(earlier);
         self.status()
+    }
+
+    /// Every category's plain name, by code, for grouping the part list;
+    /// empty while signed out. Read again only when the team catalog has
+    /// moved on (a new Change or import), so searching makes no request.
+    /// If reading fails, the names read before are kept until it moves on.
+    pub fn category_names(&self) -> BTreeMap<String, String> {
+        let (client, cache, position) = {
+            let state = self.lock();
+            let Some(session) = &state.session else {
+                return BTreeMap::new();
+            };
+            let (_, checkpoint, imports) = session.follower.snapshot();
+            (
+                session.client.clone(),
+                session.category_names.clone(),
+                (checkpoint, imports),
+            )
+        };
+        let earlier = cache.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some((at, names)) = &earlier {
+            if *at == position {
+                return names.clone();
+            }
+        }
+        // Read outside the session lock, so status polling never waits.
+        let names = match current_categories(&client) {
+            Ok(categories) => category_names(&categories),
+            Err(_) => earlier.map(|(_, names)| names).unwrap_or_default(),
+        };
+        *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((position, names.clone()));
+        names
     }
 
     /// The team catalog's current values for every part it has, by IPN, as
@@ -1475,6 +1510,7 @@ fn sign_in(request: &SignInRequest) -> Result<(Session, String), String> {
         name,
         email: text("email"),
         can_edit: account["can_edit_catalog"].as_bool().unwrap_or(false),
+        category_names: Arc::default(),
     };
     Ok((session, server_url))
 }

@@ -86,16 +86,43 @@ pub struct CatalogStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SearchRequest {
     pub query: String,
+    /// Most parts shown per category section.
     pub limit: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SearchResponse {
     pub query: String,
-    /// Rows matching the query before `limit` was applied.
+    /// Parts matching the query, in every section.
     pub total: usize,
-    pub hits: Vec<PartSummary>,
+    /// One section per category that has matches, in name order.
+    pub sections: Vec<SearchSection>,
     pub elapsed_micros: u64,
+}
+
+impl SearchResponse {
+    /// Every part shown, section by section.
+    pub fn hits(&self) -> impl Iterator<Item = &PartSummary> {
+        self.sections.iter().flat_map(|section| &section.hits)
+    }
+
+    /// How many parts are shown: at most `limit` per section.
+    pub fn shown(&self) -> usize {
+        self.sections.iter().map(|section| section.hits.len()).sum()
+    }
+}
+
+/// The parts of one category that match a search.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SearchSection {
+    /// The category's code, such as `res`.
+    pub category: String,
+    /// Its plain name, such as `Resistors`.
+    pub name: String,
+    /// Parts of this category matching the query, before `limit`.
+    pub total: usize,
+    /// At most `limit` of them, best match first.
+    pub hits: Vec<PartSummary>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

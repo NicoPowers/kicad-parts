@@ -15,8 +15,8 @@ use csv_catalog::{CatalogPart, CsvCatalog};
 use desktop_contract::{
     AppStatus, CatalogStatus, Field, FileKind, FilePreviewRequest, KicadStatus, LibraryCheckView,
     PartDetail, PartSummary, PreviewImage, PreviewKind, PreviewOutcome, PreviewProblem,
-    PreviewProblemReason, PreviewRequest, PreviewSet, PublishResult, SearchResponse, TeamDownload,
-    TeamDownloadRequest, TeamIpnCheck, TeamNewPartRequest,
+    PreviewProblemReason, PreviewRequest, PreviewSet, PublishResult, SearchResponse, SearchSection,
+    TeamDownload, TeamDownloadRequest, TeamIpnCheck, TeamNewPartRequest,
 };
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use kicad_integration::{
@@ -175,63 +175,101 @@ impl CatalogBrowser {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> SearchResponse {
-        self.search_with(query, limit, &BTreeMap::new())
+        self.search_with(query, limit, &BTreeMap::new(), &BTreeMap::new())
     }
 
     /// Like [`Self::search`], but the parts in `current` (by IPN, such as
     /// the team catalog's current details) are matched on and shown with
-    /// those values, so a search finds what the app shows.
+    /// those values, so a search finds what the app shows. `names` are the
+    /// team catalog's category names by code; a category it does not name
+    /// gets its starting name.
+    ///
+    /// The matches are grouped by category, one section each in name
+    /// order, with at most `limit` parts per section.
     pub fn search_with(
         &self,
         query: &str,
         limit: usize,
         current: &BTreeMap<String, PartValues>,
+        names: &BTreeMap<String, String>,
     ) -> SearchResponse {
         let started = Instant::now();
         let replace = |part: &CatalogPart| current.get(&part.ipn).map(|values| values.apply(part));
-        let (total, hits) = match &self.catalog {
+        let (total, sections) = match &self.catalog {
             Ok(catalog) => {
                 // Parts only the team catalog has, such as ones added in the
                 // app, are found too, after the CSV catalog's.
                 let extra = self.team_only_parts(current);
-                let results = if current.is_empty() {
-                    catalog.search(query, limit.min(MAX_SEARCH_LIMIT))
-                } else {
-                    catalog.search_with_extra(query, limit.min(MAX_SEARCH_LIMIT), replace, &extra)
-                };
+                // Every match is ranked (positions only, which is cheap), so
+                // each section knows its own count.
+                let results = catalog.search_with_extra(query, usize::MAX, replace, &extra.parts);
                 let count = catalog.parts().len();
-                let hits = results
-                    .hits
-                    .iter()
-                    .map(|&position| match position.checked_sub(count) {
-                        Some(at) => summary(&extra[at]),
-                        None => {
-                            let part = &catalog.parts()[position];
-                            summary(&replace(part).unwrap_or_else(|| part.clone()))
-                        }
+                let category_of = |position: usize| match position.checked_sub(count) {
+                    Some(at) => extra.categories[at].clone(),
+                    None => {
+                        let part = &catalog.parts()[position];
+                        current
+                            .get(&part.ipn)
+                            .and_then(|values| values.category.clone())
+                            .unwrap_or_else(|| {
+                                catalog::category::category_code(&part.category).to_owned()
+                            })
+                    }
+                };
+                let groups = group_by_category(
+                    results
+                        .hits
+                        .iter()
+                        .map(|&position| (category_of(position), position)),
+                    limit.min(MAX_SEARCH_LIMIT),
+                    names,
+                );
+                let sections = groups
+                    .into_iter()
+                    .map(|group| SearchSection {
+                        category: group.code,
+                        name: group.name,
+                        total: group.total,
+                        hits: group
+                            .positions
+                            .into_iter()
+                            .map(|position| match position.checked_sub(count) {
+                                Some(at) => summary(&extra.parts[at]),
+                                None => {
+                                    let part = &catalog.parts()[position];
+                                    summary(&replace(part).unwrap_or_else(|| part.clone()))
+                                }
+                            })
+                            .collect(),
                     })
                     .collect();
-                (results.total, hits)
+                (results.total, sections)
             }
             Err(_) => (0, Vec::new()),
         };
         SearchResponse {
             query: query.to_owned(),
             total,
-            hits,
+            sections,
             elapsed_micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
         }
     }
 
     /// The parts in `current` (the team catalog's) that the CSV catalog
     /// does not have, in IPN order.
-    fn team_only_parts(&self, current: &BTreeMap<String, PartValues>) -> Vec<CatalogPart> {
+    fn team_only_parts(&self, current: &BTreeMap<String, PartValues>) -> TeamOnlyParts {
         let csv = self.csv_ipns();
-        current
+        let (parts, categories) = current
             .iter()
             .filter(|(ipn, _)| !csv.contains(*ipn))
-            .map(|(ipn, values)| values.part(ipn))
-            .collect()
+            .map(|(ipn, values)| {
+                (
+                    values.part(ipn),
+                    values.category.clone().unwrap_or_default(),
+                )
+            })
+            .unzip();
+        TeamOnlyParts { parts, categories }
     }
 
     /// Every IPN the CSV catalog has, read once.
@@ -970,6 +1008,68 @@ fn detail(part: &CatalogPart) -> PartDetail {
     }
 }
 
+/// The parts only the team catalog has, with the category code of each.
+struct TeamOnlyParts {
+    parts: Vec<CatalogPart>,
+    categories: Vec<String>,
+}
+
+/// The matches of one category, for one section of the part list.
+#[derive(Debug, Eq, PartialEq)]
+struct CategoryGroup {
+    code: String,
+    name: String,
+    /// Every match in this category.
+    total: usize,
+    /// The first `limit` of them, best first.
+    positions: Vec<usize>,
+}
+
+/// Groups ranked matches, given best first as (category code, position),
+/// into one group per category, ordered by plain name. Each group keeps
+/// the rank order and at most `limit` positions, but counts every match.
+fn group_by_category(
+    ranked: impl IntoIterator<Item = (String, usize)>,
+    limit: usize,
+    names: &BTreeMap<String, String>,
+) -> Vec<CategoryGroup> {
+    let mut groups: BTreeMap<String, CategoryGroup> = BTreeMap::new();
+    for (code, position) in ranked {
+        let group = groups.entry(code).or_insert_with_key(|code| CategoryGroup {
+            name: category_name(code, names),
+            code: code.clone(),
+            total: 0,
+            positions: Vec::new(),
+        });
+        group.total += 1;
+        if group.positions.len() < limit {
+            group.positions.push(position);
+        }
+    }
+    let mut groups: Vec<CategoryGroup> = groups.into_values().collect();
+    // As the team catalog lists its categories.
+    groups.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.code.cmp(&b.code))
+    });
+    groups
+}
+
+/// A category's plain name: the team catalog's, else the one it starts
+/// with, else its code. A part without a category is in "Other parts".
+fn category_name(code: &str, names: &BTreeMap<String, String>) -> String {
+    if code.is_empty() {
+        return "Other parts".to_owned();
+    }
+    names
+        .get(code)
+        .cloned()
+        .or_else(|| catalog::category::starting_category(code).map(|start| start.name.to_owned()))
+        .unwrap_or_else(|| code.to_owned())
+}
+
 fn summary(part: &CatalogPart) -> PartSummary {
     PartSummary {
         ipn: part.ipn.clone(),
@@ -1118,5 +1218,77 @@ impl PartValues {
             footprint: pick_reference(&self.footprint, &part.footprint),
             ..part.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ranked(items: &[(&str, usize)]) -> Vec<(String, usize)> {
+        items
+            .iter()
+            .map(|(code, position)| ((*code).to_owned(), *position))
+            .collect()
+    }
+
+    #[test]
+    fn matches_are_grouped_by_category_in_name_order_keeping_rank_order() {
+        let groups = group_by_category(
+            ranked(&[("res", 7), ("cap", 3), ("res", 1), ("ana", 9), ("cap", 0)]),
+            10,
+            &BTreeMap::new(),
+        );
+        let shown: Vec<(&str, &str, usize, &[usize])> = groups
+            .iter()
+            .map(|g| {
+                (
+                    g.code.as_str(),
+                    g.name.as_str(),
+                    g.total,
+                    g.positions.as_slice(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("ana", "Analog ICs", 1, &[9][..]),
+                ("cap", "Capacitors", 2, &[3, 0][..]),
+                ("res", "Resistors", 2, &[7, 1][..]),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_section_shows_at_most_the_limit_but_counts_every_match() {
+        let many: Vec<(String, usize)> = (0..5).map(|n| ("res".to_owned(), n)).collect();
+        let groups = group_by_category(many, 2, &BTreeMap::new());
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            (groups[0].total, groups[0].positions.as_slice()),
+            (5, &[0, 1][..])
+        );
+    }
+
+    #[test]
+    fn team_names_win_then_starting_names_then_the_code() {
+        let names: BTreeMap<String, String> =
+            [("res".to_owned(), "Fixed resistors".to_owned())].into();
+        let groups = group_by_category(
+            ranked(&[("res", 0), ("cap", 1), ("zzz", 2), ("", 3)]),
+            10,
+            &names,
+        );
+        let shown: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(
+            shown,
+            ["Capacitors", "Fixed resistors", "Other parts", "zzz"]
+        );
+    }
+
+    #[test]
+    fn nothing_matching_makes_no_sections() {
+        assert!(group_by_category(Vec::new(), 10, &BTreeMap::new()).is_empty());
     }
 }

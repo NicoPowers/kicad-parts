@@ -252,8 +252,16 @@ async fn search_parts(
     let (browser, team) = (browser.inner().clone(), team.inner().clone());
     // Parts the team catalog has are found by, and shown with, its current
     // details, as the part header shows them.
-    blocking(move || browser.search_with(&request.query, request.limit, &team.current_values()))
-        .await
+    // The list is grouped by the team catalog's category names.
+    blocking(move || {
+        browser.search_with(
+            &request.query,
+            request.limit,
+            &team.current_values(),
+            &team.category_names(),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
