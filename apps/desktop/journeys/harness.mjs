@@ -538,7 +538,8 @@ export async function selectResult(browser, name) {
 
 /**
  * Waits until the part list shows the part `text` (its IPN or MPN) as the
- * selected one, in the open section named `section`, scrolled into view.
+ * selected one, in the open section named `section`, scrolled into view
+ * and not covered by its sticky section header.
  */
 export async function waitForSelectedInList(browser, text, section, timeout = 10_000) {
   let seen;
@@ -550,13 +551,15 @@ export async function waitForSelectedInList(browser, text, section, timeout = 10
         const toggle = row.closest('.result-section').querySelector('.section-toggle');
         const list = document.querySelector('.results').getBoundingClientRect();
         const box = row.getBoundingClientRect();
+        const header = toggle.getBoundingClientRect();
         return {
           section: toggle.querySelector('.section-name').textContent,
           expanded: toggle.getAttribute('aria-expanded'),
           inView: box.top >= list.top - 1 && box.bottom <= list.bottom + 1,
+          clearOfHeader: box.top >= header.bottom - 0.5,
         };
       }, text);
-      return seen.section === section && seen.expanded === 'true' && seen.inView;
+      return seen.section === section && seen.expanded === 'true' && seen.inView && seen.clearOfHeader;
     },
     { timeout, interval: 50 },
   );

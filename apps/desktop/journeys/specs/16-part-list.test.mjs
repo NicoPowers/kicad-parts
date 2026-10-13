@@ -88,8 +88,12 @@ describe('part list grouped by category', () => {
       timeout: 5_000,
       timeoutMsg: 'Enter did not open Resistors',
     });
+    // Its parts load when it opens.
     const count = Number((await resistors.$('.section-count').getText()).replace(/\D/g, ''));
-    assert.equal(await rowsIn(browser, 'Resistors'), count);
+    await browser.waitUntil(async () => (await rowsIn(browser, 'Resistors')) === count, {
+      timeout: 5_000,
+      timeoutMsg: 'the opened section did not show its parts',
+    });
 
     const capacitors = await toggleOf(browser, 'Capacitors');
     await browser.execute((el) => el.focus(), capacitors);
@@ -116,7 +120,9 @@ describe('part list grouped by category', () => {
     assert.ok(found.length > 1, JSON.stringify(found));
     assert.deepEqual(opened(found), found.map(([name]) => name), 'every section with matches is open');
     for (const [name, count] of found) {
-      assert.equal(await rowsIn(browser, name), Number(count.replace(/\D/g, '')), `${name} shows each match`);
+      // Up to 25 matches each, then "Show all".
+      const n = Number(count.replace(/\D/g, ''));
+      assert.equal(await rowsIn(browser, name), Math.min(n, 25), `${name} shows its first matches`);
     }
     await assertAccessible(browser, '65-part-list-search');
     await screenshot(browser, '65-part-list-search');
@@ -155,9 +161,18 @@ describe('part list grouped by category', () => {
       await drawing.click();
       await browser.waitUntil(isOpen, { timeout: 5_000, timeoutMsg: 'the close-up did not open' });
       if (how === 'backdrop') {
-        // A click inside the close-up keeps it open.
+        // A click inside the close-up keeps it open, and so does a press
+        // inside that is released outside (a drag out of the picture).
         await browser.$(`${dialog} h4`).click();
         assert.equal(await isOpen(), true, 'a click inside keeps the close-up open');
+        await browser
+          .action('pointer')
+          .move({ origin: await browser.$(`${dialog} h4`) })
+          .down()
+          .move({ x: 8, y: 8, origin: 'viewport' })
+          .up()
+          .perform();
+        assert.equal(await isOpen(), true, 'a drag out of the close-up keeps it open');
         await browser.action('pointer').move({ x: 8, y: 8, origin: 'viewport' }).down().up().perform();
       } else if (how === 'Escape') {
         await browser.keys('Escape');

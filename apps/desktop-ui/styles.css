@@ -275,6 +275,9 @@ button:disabled {
   padding: 0;
   overflow-y: auto;
   border-top: 1px solid var(--line);
+  /* A part scrolled to, or reached with Tab, stays clear of the sticky
+     section header above it (its height). */
+  scroll-padding-top: 2.6rem;
 }
 
 .result {
@@ -396,6 +399,11 @@ button:disabled {
   color: var(--muted);
   font-size: 0.85rem;
   border-bottom: 1px solid #edf0f4;
+}
+
+.section-show-all {
+  padding: 0.15rem 0.7rem;
+  font-size: 0.85rem;
 }
 
 /* Part panel: the header on top, then the previews stacked on the left and

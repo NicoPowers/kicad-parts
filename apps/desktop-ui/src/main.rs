@@ -12,25 +12,22 @@ mod team;
 use add_part::AddPartView;
 use desktop_contract::{
     AppStatus, KicadStatus, LibraryCheckView, ManufacturerPart, PartDetail, PreviewKind,
-    PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet,
-    SearchResponse, TeamPart, TeamSession, TeamStatus, unit_label,
+    PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet, TeamPart,
+    TeamSession, TeamStatus, unit_label,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use library_check::{LibraryCheckLine, LibraryCheckPanel};
-use part_list::ResultList;
+use part_list::{ResultList, SEARCH_ROWS, Searched};
 use std::time::Duration;
 use team::{Notice, TeamBadge, TeamColumn, TeamUi, focus_later};
 
-/// Parts shown per category section. The catalog search itself covers
-/// every row, and each section counts all its matches.
-const RESULT_LIMIT: usize = 200;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(120);
 /// How often the UI asks whether the team catalog has new Changes. The app
 /// itself hears about them through PocketBase realtime.
 const TEAM_POLL: Duration = Duration::from_millis(500);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum Load<T> {
     Loading,
     Ready(T),
@@ -48,7 +45,7 @@ fn App() -> impl IntoView {
     // Bumped whenever KiCad discovery changes, so previews reload.
     let kicad_epoch = RwSignal::new(0u32);
     let query = RwSignal::new(String::new());
-    let results = RwSignal::new(Load::<SearchResponse>::Loading);
+    let results = RwSignal::new(Load::<Searched>::Loading);
     let selected = RwSignal::new(None::<String>);
     let search_seq = StoredValue::new(0u64);
     // The kicad-cli path being typed; kept here so it survives the panel
@@ -183,7 +180,10 @@ fn App() -> impl IntoView {
         // sign-out, so team parts show their current details.
         // (Reading the value, not just tracking it, makes the memo follow
         // the team status.)
-        let _ = team_changes.get();
+        let version = team_changes.get();
+        // The answer says which section holds the selected part, and
+        // always includes it there.
+        let chosen = selected.get();
         let seq = search_seq.get_value() + 1;
         search_seq.set_value(seq);
         set_timeout(
@@ -192,10 +192,21 @@ fn App() -> impl IntoView {
                     return;
                 }
                 spawn_local(async move {
-                    let response = backend::search(text, RESULT_LIMIT).await;
+                    // Without a search every section starts closed, so only
+                    // the counts are needed; open sections load their parts.
+                    let limit = if text.trim().is_empty() {
+                        0
+                    } else {
+                        SEARCH_ROWS
+                    };
+                    let response = backend::search(text, limit, chosen.clone(), None).await;
                     // Ignore answers to queries the user has already replaced.
                     if search_seq.get_value() == seq {
-                        results.set(into_load(response));
+                        results.set(into_load(response).map(|response| Searched {
+                            response,
+                            selected: chosen,
+                            version,
+                        }));
                     }
                 });
             },
@@ -286,6 +297,16 @@ fn grouped(n: usize) -> String {
 /// `1 part`, `2 parts`, `20,000 parts`.
 fn counted(n: usize, singular: &str, plural: &str) -> String {
     format!("{} {}", grouped(n), if n == 1 { singular } else { plural })
+}
+
+impl<T> Load<T> {
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> Load<U> {
+        match self {
+            Load::Loading => Load::Loading,
+            Load::Ready(value) => Load::Ready(f(value)),
+            Load::Failed(error) => Load::Failed(error),
+        }
+    }
 }
 
 fn into_load<T>(result: Result<T, String>) -> Load<T> {

@@ -65,11 +65,21 @@ pub async fn set_kicad_override(path: Option<String>) -> Result<AppStatus, Strin
     call(command::SET_KICAD_OVERRIDE, &OverrideArgs { path }).await
 }
 
-pub async fn search(query: String, limit: usize) -> Result<SearchResponse, String> {
+pub async fn search(
+    query: String,
+    limit: usize,
+    selected: Option<String>,
+    category: Option<String>,
+) -> Result<SearchResponse, String> {
     call(
         command::SEARCH_PARTS,
         &SearchArgs {
-            request: SearchRequest { query, limit },
+            request: SearchRequest {
+                query,
+                limit,
+                selected,
+                category,
+            },
         },
     )
     .await

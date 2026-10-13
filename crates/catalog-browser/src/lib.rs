@@ -1100,7 +1100,9 @@ struct CategoryGroup {
 /// Each group keeps the rank order and at most `limit` positions (plus the
 /// selected part), but counts every match. Groups are in name order; while
 /// searching, the group with the best match comes first, ties by name.
-/// "Other parts" (no category) is always last.
+/// "Other parts" (no category) is always last. A category without matches
+/// makes no section, so an empty CSV file (g-mec.csv) has none: 21 CSV
+/// files, 20 sections.
 fn group_by_category(
     ranked: impl IntoIterator<Item = Ranked>,
     how: &Grouping<'_>,
