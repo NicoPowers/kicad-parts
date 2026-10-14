@@ -7,11 +7,12 @@
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
-    AppStatus, FilePreviewRequest, LibraryCheckView, PartDetail, PreviewOutcome, PreviewRequest,
-    PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest,
-    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
-    TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
-    TeamSameMpn, TeamStatus,
+    AppStatus, FilePreviewRequest, LibrariesView, LibraryCheckView, LibraryItemDetail,
+    LibraryItemRequest, LibraryItems, LibraryItemsRequest, PartDetail, PreviewOutcome,
+    PreviewRequest, PublishResult, SearchRequest, SearchResponse, SignInRequest,
+    TeamArchiveRequest, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest,
+    TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest,
+    TeamNewPartRequest, TeamPart, TeamSameMpn, TeamStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -33,6 +34,10 @@ struct LaunchOptions {
     data_dir: Option<PathBuf>,
     /// `--kicad-search-root DIR` (repeatable): look for KiCad only here.
     kicad_search_roots: Vec<PathBuf>,
+    /// `--kicad-config-dir DIR`: KiCad's settings folder whose library
+    /// tables list the person's installed libraries, instead of their own
+    /// (the journeys pass fixture tables). Only ever read.
+    kicad_config_dir: Option<PathBuf>,
     /// `--team-server URL`: the team catalog server to suggest at sign-in.
     team_server: Option<String>,
     /// `--team-email EMAIL`: the email to suggest at sign-in.
@@ -70,6 +75,7 @@ impl LaunchOptions {
                 "--catalog-root" => Target::CatalogRoot,
                 "--data-dir" => Target::DataDir,
                 "--kicad-search-root" => Target::KicadSearchRoot,
+                "--kicad-config-dir" => Target::KicadConfigDir,
                 "--team-server" => Target::TeamServer,
                 "--team-email" => Target::TeamEmail,
                 "--display-scale" => Target::DisplayScale,
@@ -85,6 +91,7 @@ impl LaunchOptions {
                 Target::CatalogRoot => options.catalog_root = Some(PathBuf::from(&value)),
                 Target::DataDir => options.data_dir = Some(PathBuf::from(&value)),
                 Target::KicadSearchRoot => options.kicad_search_roots.push(PathBuf::from(&value)),
+                Target::KicadConfigDir => options.kicad_config_dir = Some(PathBuf::from(&value)),
                 Target::TeamServer => options.team_server = Some(text()),
                 Target::TeamEmail => options.team_email = Some(text()),
                 Target::DisplayScale => options.display_scale = Some(parse_scale(&text())?),
@@ -98,6 +105,7 @@ enum Target {
     CatalogRoot,
     DataDir,
     KicadSearchRoot,
+    KicadConfigDir,
     TeamServer,
     TeamEmail,
     DisplayScale,
@@ -407,6 +415,42 @@ async fn team_library_check(
     blocking(move || browser.library_check(&team)).await?
 }
 
+#[tauri::command]
+async fn libraries(browser: State<'_, Browser>, refresh: bool) -> Result<LibrariesView, String> {
+    let browser = browser.inner().clone();
+    // With refresh, the index checks every library in the background.
+    blocking(move || browser.libraries(refresh)).await
+}
+
+#[tauri::command]
+async fn library_items(
+    browser: State<'_, Browser>,
+    team: State<'_, Team>,
+    request: LibraryItemsRequest,
+) -> Result<LibraryItems, String> {
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    blocking(move || browser.library_items(&request, &team.current_values())).await
+}
+
+#[tauri::command]
+async fn library_item(
+    browser: State<'_, Browser>,
+    team: State<'_, Team>,
+    request: LibraryItemRequest,
+) -> Result<Option<LibraryItemDetail>, String> {
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    blocking(move || browser.library_item(&request, &team.current_values())).await
+}
+
+#[tauri::command]
+async fn library_preview(
+    browser: State<'_, Browser>,
+    request: LibraryItemRequest,
+) -> Result<PreviewOutcome, String> {
+    let browser = browser.inner().clone();
+    blocking(move || browser.library_preview(&request)).await
+}
+
 fn main() {
     let options = match LaunchOptions::parse(std::env::args_os().skip(1)) {
         Ok(options) => options,
@@ -454,6 +498,14 @@ fn main() {
                 cache_dir,
                 settings_file: config_dir.join("settings.json"),
                 kicad_locations,
+                // The person's own KiCad settings, read only.
+                kicad_config_dir: options.kicad_config_dir.clone().or_else(|| {
+                    let environment = std::env::vars().collect();
+                    kicad_integration::lib_table::user_config_dir(
+                        kicad_integration::SUPPORTED_MAJOR,
+                        &environment,
+                    )
+                }),
             });
             app.manage(Arc::new(browser));
             // Only the server address and email are saved; the session
@@ -487,6 +539,10 @@ fn main() {
             team_add_part,
             team_check_mpn,
             team_library_check,
+            libraries,
+            library_items,
+            library_item,
+            library_preview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -505,6 +561,7 @@ mod tests {
             "A",
             "--webview-flag",
             "--kicad-search-root=B",
+            "--kicad-config-dir=K",
             "--catalog-root",
             "C",
             "--team-server=http://127.0.0.1:8090",
@@ -517,6 +574,7 @@ mod tests {
         let options = LaunchOptions::parse(args).unwrap();
         assert_eq!(options.data_dir, Some(PathBuf::from("D")));
         assert_eq!(options.catalog_root, Some(PathBuf::from("C")));
+        assert_eq!(options.kicad_config_dir, Some(PathBuf::from("K")));
         assert_eq!(
             options.kicad_search_roots,
             [PathBuf::from("A"), PathBuf::from("B")]
@@ -597,6 +655,10 @@ mod tests {
             command::TEAM_ADD_PART,
             command::TEAM_CHECK_MPN,
             command::TEAM_LIBRARY_CHECK,
+            command::LIBRARIES,
+            command::LIBRARY_ITEMS,
+            command::LIBRARY_ITEM,
+            command::LIBRARY_PREVIEW,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

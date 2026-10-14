@@ -231,7 +231,7 @@ fn read_unit_pins(
 
 /// A derived symbol takes its root parent's pins and power flag, and any
 /// property it leaves empty.
-fn inherit_from_parents(symbols: &mut [SymbolSummary]) {
+pub fn inherit_from_parents(symbols: &mut [SymbolSummary]) {
     let by_name: BTreeMap<String, usize> = symbols
         .iter()
         .enumerate()

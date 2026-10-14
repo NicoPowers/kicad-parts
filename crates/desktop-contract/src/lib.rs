@@ -27,6 +27,10 @@ pub mod command {
     pub const TEAM_ADD_PART: &str = "team_add_part";
     pub const TEAM_CHECK_MPN: &str = "team_check_mpn";
     pub const TEAM_LIBRARY_CHECK: &str = "team_library_check";
+    pub const LIBRARIES: &str = "libraries";
+    pub const LIBRARY_ITEMS: &str = "library_items";
+    pub const LIBRARY_ITEM: &str = "library_item";
+    pub const LIBRARY_PREVIEW: &str = "library_preview";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -206,6 +210,9 @@ pub struct PreviewSet {
     /// The library file drawn from; blank when drawn from stored bytes.
     pub library_path: String,
     pub from_kicad_bundle: bool,
+    /// Drawn from a library in the person's KiCad library tables.
+    #[serde(default)]
+    pub installed_library: bool,
     /// When drawn from the team catalog's stored bytes, the number of the
     /// CAD item revision they belong to.
     #[serde(default)]
@@ -1084,6 +1091,214 @@ pub fn unit_label(unit: u32) -> String {
         n = (n - 1) / 26;
     }
     letters.iter().rev().collect()
+}
+
+// ---- The Libraries browser -------------------------------------------------
+//
+// Ours (the CSV catalog's g- libraries), KiCad's own installed libraries,
+// and the other libraries the person added to KiCad (their library tables,
+// read only). Symbols and footprints are listed by an index the app builds
+// in the background and keeps in its data folder.
+
+/// Which group a library belongs to, in the order shown.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryGroup {
+    /// The CSV catalog's own `g-` libraries.
+    Ours,
+    /// KiCad's own installed libraries.
+    Kicad,
+    /// Other libraries in the person's KiCad library tables.
+    Installed,
+}
+
+impl LibraryGroup {
+    pub const ALL: [LibraryGroup; 3] = [Self::Ours, Self::Kicad, Self::Installed];
+
+    /// The group's heading, such as `KiCad`.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Ours => "Ours",
+            Self::Kicad => "KiCad",
+            Self::Installed => "Installed",
+        }
+    }
+}
+
+/// A library: its group and its nickname, such as KiCad's `Device`.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct LibraryKey {
+    pub group: LibraryGroup,
+    pub nickname: String,
+}
+
+/// One library in the browser's list.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryEntry {
+    pub key: LibraryKey,
+    pub description: String,
+    /// How many items it has; `None` until it is read.
+    pub items: Option<usize>,
+    /// Why it could not be read, in plain words.
+    pub problem: Option<String>,
+}
+
+/// The libraries, and how far the background reading is.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibrariesView {
+    pub symbols: Vec<LibraryEntry>,
+    pub footprints: Vec<LibraryEntry>,
+    /// Libraries read so far, of `total`.
+    pub done: usize,
+    pub total: usize,
+    /// Things the person should know, such as a library table that could
+    /// not be read or libraries of other kinds that are not shown.
+    pub notes: Vec<String>,
+}
+
+impl LibrariesView {
+    /// Whether every library has been read.
+    pub fn is_ready(&self) -> bool {
+        self.done >= self.total
+    }
+}
+
+/// How a footprint is mounted.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountFilter {
+    #[default]
+    Any,
+    Smd,
+    ThroughHole,
+}
+
+/// The filters of the item list. Each one left at its default filters
+/// nothing.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryFilters {
+    /// Symbols: distinct pin numbers, at least and at most.
+    #[serde(default)]
+    pub pins_min: Option<u32>,
+    #[serde(default)]
+    pub pins_max: Option<u32>,
+    /// Symbols: the reference letter, such as `R` (case ignored).
+    #[serde(default)]
+    pub reference: String,
+    #[serde(default)]
+    pub hide_power: bool,
+    /// Symbols: only those that name a default footprint.
+    #[serde(default)]
+    pub with_footprint: bool,
+    /// Footprints: distinct numbered pads, at least and at most.
+    #[serde(default)]
+    pub pads_min: Option<u32>,
+    #[serde(default)]
+    pub pads_max: Option<u32>,
+    #[serde(default)]
+    pub mount: MountFilter,
+    /// Footprints for a symbol: KiCad's two filters.
+    #[serde(default)]
+    pub match_footprint_filters: bool,
+    #[serde(default)]
+    pub match_pin_count: bool,
+}
+
+/// Asks for the items of one library, or of all of them.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryItemsRequest {
+    pub kind: PreviewKind,
+    /// `None` searches every library.
+    #[serde(default)]
+    pub library: Option<LibraryKey>,
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub filters: LibraryFilters,
+    /// For footprints: the symbol they are for, such as `Device:R`, whose
+    /// footprint filters and pin count the filters use.
+    #[serde(default)]
+    pub for_symbol: Option<String>,
+    pub limit: usize,
+}
+
+/// One row of the item list.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryItemRow {
+    pub library: LibraryKey,
+    pub name: String,
+    pub description: String,
+    /// A Catalog part uses it as its symbol or a footprint choice.
+    pub in_catalog: bool,
+}
+
+impl LibraryItemRow {
+    /// `LIBRARY:NAME`.
+    pub fn reference(&self) -> String {
+        format!("{}:{}", self.library.nickname, self.name)
+    }
+}
+
+/// The symbol footprints are listed for, as the filters see it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SymbolForFootprints {
+    pub reference: String,
+    pub footprint_filters: Vec<String>,
+    pub pin_count: u32,
+    /// Whether the symbol was found in a library.
+    pub found: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryItems {
+    /// Every match.
+    pub total: usize,
+    /// The first `limit` of them.
+    pub rows: Vec<LibraryItemRow>,
+    pub for_symbol: Option<SymbolForFootprints>,
+    /// Some libraries are still being read, so more may match later.
+    pub reading: bool,
+}
+
+/// Asks for one item's details, or its drawing.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryItemRequest {
+    pub kind: PreviewKind,
+    pub library: LibraryKey,
+    pub name: String,
+    /// For drawings: see [`PreviewRequest::selection`].
+    #[serde(default)]
+    pub selection: Option<u64>,
+}
+
+/// A part that uses an item.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PartUse {
+    pub ipn: String,
+    pub description: String,
+}
+
+/// One item's details.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryItemDetail {
+    /// `LIBRARY:NAME`.
+    pub reference: String,
+    pub description: String,
+    pub keywords: String,
+    /// The library file or folder.
+    pub file: String,
+    /// Symbols: distinct pin numbers; footprints: distinct numbered pads.
+    pub count: u32,
+    /// Symbols.
+    pub reference_letter: String,
+    pub power: bool,
+    pub default_footprint: String,
+    pub footprint_filters: Vec<String>,
+    /// Footprints: `SMD`, `Through-hole` or blank.
+    pub mount: String,
+    pub model: String,
+    /// The Catalog parts that use it.
+    pub used_by: Vec<PartUse>,
 }
 
 #[cfg(test)]

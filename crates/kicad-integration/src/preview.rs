@@ -642,20 +642,33 @@ fn write_symbol_library(
             item.lib_ref
         ))
     })?;
-    match parsed.entries.as_slice() {
-        [only] if only.name == item.lib_ref.item => {
-            if let Some(parent) = &only.extends {
+    // One symbol named as asked, or a derived symbol after the parents it
+    // extends (a symbol of a .kicad_symdir library and its parent).
+    let named: Vec<_> = parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.name == item.lib_ref.item)
+        .collect();
+    let [only] = named.as_slice() else {
+        return Err(PreviewError::Unexportable(format!(
+            "The stored revision of {} is not exactly one symbol named {}.",
+            item.lib_ref, item.lib_ref.item
+        )));
+    };
+    if parsed.entries.len() > 1 && only.extends.is_none() {
+        return Err(PreviewError::Unexportable(format!(
+            "The stored revision of {} is not exactly one symbol named {}.",
+            item.lib_ref, item.lib_ref.item
+        )));
+    }
+    for entry in &parsed.entries {
+        if let Some(parent) = &entry.extends {
+            if !parsed.entries.iter().any(|other| other.name == *parent) {
                 return Err(PreviewError::Unexportable(format!(
                     "The stored revision of {} is based on the symbol {parent}, which it does not include, so kicad-cli cannot draw it.",
                     item.lib_ref
                 )));
             }
-        }
-        _ => {
-            return Err(PreviewError::Unexportable(format!(
-                "The stored revision of {} is not exactly one symbol named {}.",
-                item.lib_ref, item.lib_ref.item
-            )));
         }
     }
     let path = symbol_library(staging, &item.lib_ref);

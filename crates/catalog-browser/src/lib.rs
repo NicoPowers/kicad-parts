@@ -6,6 +6,7 @@
 
 mod add_part;
 mod git;
+mod libraries;
 mod library;
 mod library_part;
 pub mod team;
@@ -45,6 +46,10 @@ pub struct BrowserConfig {
     /// JSON file holding user settings such as the kicad-cli override.
     pub settings_file: PathBuf,
     pub kicad_locations: SearchLocations,
+    /// KiCad's settings folder holding the person's library tables (such
+    /// as `%APPDATA%\kicad\10.0`), read only; `None` lists no installed
+    /// libraries. Tests pass a folder of fixture tables or `None`.
+    pub kicad_config_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -74,6 +79,8 @@ pub struct CatalogBrowser {
     csv_ipns: OnceLock<BTreeSet<String>>,
     /// The last library check and what it was worked out for.
     library_check: library::Cached,
+    /// The Libraries browser's index, read in the background.
+    libraries: libraries::LibraryIndex,
 }
 
 impl CatalogBrowser {
@@ -95,6 +102,7 @@ impl CatalogBrowser {
             footprints: OnceLock::new(),
             csv_ipns: OnceLock::new(),
             library_check: library::Cached::default(),
+            libraries: libraries::LibraryIndex::new(config.cache_dir.clone()),
             previews,
             catalog,
             kicad: RwLock::new(KicadState {
@@ -638,6 +646,7 @@ impl CatalogBrowser {
                 Drawn {
                     library_path: String::new(),
                     from_kicad_bundle: false,
+                    installed_library: false,
                     cad_item_revision: None,
                     note: None,
                 },
@@ -747,6 +756,7 @@ impl CatalogBrowser {
                 Drawn {
                     library_path: String::new(),
                     from_kicad_bundle: false,
+                    installed_library: false,
                     cad_item_revision: Some(stored.number),
                     note: None,
                 },
@@ -878,6 +888,7 @@ impl CatalogBrowser {
                 Drawn {
                     library_path: display(&library),
                     from_kicad_bundle: origin == LibraryOrigin::KicadBundled,
+                    installed_library: false,
                     cad_item_revision: None,
                     note,
                 },
@@ -897,14 +908,15 @@ impl CatalogBrowser {
 }
 
 /// Where a preview was drawn from, for [`PreviewSet`].
-struct Drawn {
+pub(crate) struct Drawn {
     library_path: String,
     from_kicad_bundle: bool,
+    installed_library: bool,
     cad_item_revision: Option<u32>,
     note: Option<String>,
 }
 
-fn ready(
+pub(crate) fn ready(
     kind: PreviewKind,
     reference: &str,
     alternates: &[String],
@@ -918,6 +930,7 @@ fn ready(
         alternates: alternates.to_vec(),
         library_path: drawn.library_path,
         from_kicad_bundle: drawn.from_kicad_bundle,
+        installed_library: drawn.installed_library,
         cad_item_revision: drawn.cad_item_revision,
         note: drawn.note,
         kicad_version: install.version.to_string(),
@@ -935,7 +948,7 @@ fn ready(
     })
 }
 
-fn problem(
+pub(crate) fn problem(
     kind: PreviewKind,
     reason: PreviewProblemReason,
     reference: Option<&str>,
@@ -951,7 +964,11 @@ fn problem(
     })
 }
 
-fn export_problem(kind: PreviewKind, reference: &str, error: PreviewError) -> PreviewOutcome {
+pub(crate) fn export_problem(
+    kind: PreviewKind,
+    reference: &str,
+    error: PreviewError,
+) -> PreviewOutcome {
     match error {
         PreviewError::ExportFailed {
             command,
@@ -1285,7 +1302,7 @@ impl PartValues {
         }
     }
 
-    fn apply(&self, part: &CatalogPart) -> CatalogPart {
+    pub(crate) fn apply(&self, part: &CatalogPart) -> CatalogPart {
         let pick = |new: &Option<String>, old: &String| new.clone().unwrap_or_else(|| old.clone());
         let pick_reference = |new: &Option<String>, old: &Option<String>| match new {
             Some(reference) if reference.trim().is_empty() => None,
