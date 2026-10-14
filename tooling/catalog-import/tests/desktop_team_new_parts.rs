@@ -216,6 +216,7 @@ fn the_desktop_adds_a_part_from_a_download() {
         cache_dir: data.path().join("cache"),
         settings_file: data.path().join("settings.json"),
         kicad_locations: SearchLocations::Standard,
+        kicad_config_dir: None,
     });
 
     // Each vendor's layout says where the files came from; files for other

@@ -269,6 +269,7 @@ impl Team {
             cache_dir: data.path().join("cache"),
             settings_file: data.path().join("settings.json"),
             kicad_locations: SearchLocations::Standard,
+            kicad_config_dir: None,
         });
         Self {
             server,

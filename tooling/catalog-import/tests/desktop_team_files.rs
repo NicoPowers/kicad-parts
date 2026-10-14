@@ -207,6 +207,7 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
         cache_dir: data.path().join("cache"),
         settings_file: data.path().join("settings.json"),
         kicad_locations: SearchLocations::Standard,
+        kicad_config_dir: None,
     });
     for (file, reference) in [
         (
