@@ -16,14 +16,34 @@ import {
   assertAccessible,
   launchApp,
   record,
+  repoRoot,
   screenshot,
   searchFor,
   selectResult,
+  tempDir,
   textOf,
   waitForPreview,
+  waitForText,
 } from '../harness.mjs';
 
 const CLOSE_UP = `${FOOTPRINT} dialog.zoom-dialog`;
+const LIBRARIES = 'dialog.libraries-dialog';
+const LIBRARY_PREVIEW = '.libraries-detail .preview';
+
+/**
+ * KiCad settings whose footprint table has one installed library: the
+ * journey's own fixtures, with a footprint whose paste shrinks.
+ */
+function kicadSettings() {
+  const config = tempDir('kicad-settings');
+  const fixtures = path.join(repoRoot, 'apps', 'desktop', 'journeys', 'fixtures', 'Journey.pretty').replaceAll('\\', '/');
+  fs.writeFileSync(path.join(config, 'sym-lib-table'), '(sym_lib_table (version 7)\n)\n');
+  fs.writeFileSync(
+    path.join(config, 'fp-lib-table'),
+    `(fp_lib_table (version 7)\n  (lib (name "Journey")(type "KiCad")(uri "${fixtures}")(options "")(descr "Journey fixtures"))\n)\n`,
+  );
+  return config;
+}
 const AREA = `${CLOSE_UP} .viewer-area`;
 
 /** The viewer's view in `scope`: its viewBox and pixels per millimetre. */
@@ -142,7 +162,7 @@ describe('drawing close-up', () => {
   let dataDir;
 
   before(async () => {
-    ({ browser, dataDir } = await launchApp());
+    ({ browser, dataDir } = await launchApp({ args: [`--kicad-config-dir=${kicadSettings()}`] }));
   });
 
   after(async () => {
@@ -330,7 +350,8 @@ describe('drawing close-up', () => {
     assert.deepEqual(on, { pressed: 'true', cursor: 'crosshair', live: 'polite' });
     assert.match((await readout(browser, CLOSE_UP))[0], /^Click a point to start\./);
 
-    // The pads of KiCad's R_0603_1608Metric are at x = -0.825 and 0.825 mm.
+    // The pads of our g-Resistor_SMD:R_0603_1608Metric are at x = -0.825
+    // and 0.825 mm.
     // A click a few pixels off a pad's centre snaps to it.
     const one = await screenAt(browser, CLOSE_UP, -0.825, 0);
     const two = await screenAt(browser, CLOSE_UP, 0.825, 0);
@@ -406,10 +427,19 @@ describe('drawing close-up', () => {
     assert.equal(await toggle.getAttribute('aria-pressed'), 'false', 'M turns the tool off');
     await browser.keys('m');
     assert.equal(await toggle.getAttribute('aria-pressed'), 'true', 'M turns it on again');
-    // Move the pointer away, so only the keys pick points.
+    // Move the pointer away, so only the keys pick points. Zoomed in, the
+    // view moves to keep the highlighted point in sight.
     await browser.action('pointer').move({ x: 5, y: 5 }).perform();
+    await browser.keys(['+', '+', '+', '+']);
     await highlight(browser, CLOSE_UP, 'Pad 1 centre');
+    const inView = await browser.execute((s) => {
+      const marker = document.querySelector(`${s} g.measure .measure-snap`).getBoundingClientRect();
+      const area = document.querySelector(`${s} .viewer-area`).getBoundingClientRect();
+      return marker.left >= area.left && marker.right <= area.right && marker.top >= area.top && marker.bottom <= area.bottom;
+    }, CLOSE_UP);
+    assert.equal(inView, true, 'the highlighted point is in view');
     await browser.keys('Enter');
+    await browser.keys('0');
     await highlight(browser, CLOSE_UP, 'Pad 2 centre');
     // Shift+N steps back.
     await browser.keys('n');
@@ -425,6 +455,15 @@ describe('drawing close-up', () => {
     await assertAccessible(browser, '81-footprint-measure-keys');
     await screenshot(browser, '81-footprint-measure-keys');
     await browser.execute((s) => document.querySelector(`${s} .viewer-area`).focus(), CLOSE_UP);
+    // A held Escape repeats; a repeat neither clears nor closes.
+    await browser.execute(
+      (s) =>
+        document
+          .querySelector(`${s} .viewer-area`)
+          .dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', repeat: true, bubbles: true, cancelable: true })),
+      CLOSE_UP,
+    );
+    assert.match((await readout(browser, CLOSE_UP))[0], /^Distance /, 'a repeated Escape keeps the measurement');
     await browser.keys('Escape');
     assert.equal(await isOpen(browser, CLOSE_UP), true, 'the first Escape clears');
     await browser.keys('Escape');
@@ -480,5 +519,104 @@ describe('drawing close-up', () => {
     assert.equal(shown.layers, 0);
     await browser.keys('Escape');
     await browser.waitUntil(async () => !(await isOpen(browser, CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
+  });
+
+  it('shows how paste gaps differ from copper gaps, and follows the active layer', async () => {
+    // Paste_Margin_Test, in the journey's own installed library: two 1 mm
+    // pads 2 mm apart, whose paste shrinks by 0.1 mm on each side.
+    await (await browser.$('#libraries-open')).click();
+    await browser.waitUntil(async () => isOpen(browser, LIBRARIES), { timeout: 10_000, timeoutMsg: 'the Libraries browser did not open' });
+    await (await browser.$('#library-tab-footprints')).click();
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() => {
+          const list = document.querySelector('ul[aria-labelledby="library-group-installed"]');
+          const button = list && [...list.querySelectorAll('.library-button')].find((b) => b.querySelector('.library-name')?.textContent === 'Journey');
+          button?.click();
+          return Boolean(button);
+        }),
+      { timeout: 60_000, interval: 250, timeoutMsg: 'no installed library Journey' },
+    );
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() => {
+          const row = [...document.querySelectorAll('#library-items [role="option"]')].find(
+            (r) => r.querySelector('.library-item-name').textContent === 'Paste_Margin_Test',
+          );
+          row?.click();
+          return Boolean(row);
+        }),
+      { timeout: 20_000, interval: 250, timeoutMsg: 'no row Paste_Margin_Test' },
+    );
+    await waitForText(browser, '#library-detail-title', /:Paste_Margin_Test$/);
+    const enlarge = await browser.$(`${LIBRARY_PREVIEW} .viewer-enlarge`);
+    await enlarge.waitForExist({ timeout: 60_000 });
+    await enlarge.click();
+    const closeUp = `${LIBRARY_PREVIEW} dialog.zoom-dialog`;
+    await browser.waitUntil(async () => isOpen(browser, closeUp), { timeout: 5_000, timeoutMsg: 'Enlarge did not open the close-up' });
+    await waitForDrawing(browser, closeUp);
+    await (await browser.$(`${closeUp} .viewer-measure`)).click();
+    const chooseLayer = async (layer) => {
+      const row = await browser.execute(
+        (s, wanted) => [...document.querySelectorAll(`${s} .viewer-layers li`)].findIndex((li) => li.querySelector('.layer-name').textContent === wanted) + 1,
+        closeUp,
+        layer,
+      );
+      await (await browser.$(`${closeUp} .viewer-layers li:nth-child(${row}) label`)).click();
+    };
+
+    // Centre to centre: the distance stays, and the gap grows on paste.
+    await clickAt(browser, await screenAt(browser, closeUp, -1, 0));
+    await clickAt(browser, await screenAt(browser, closeUp, 1, 0));
+    const copper = await readout(browser, closeUp);
+    record({ event: 'measure-paste-margin-copper', copper });
+    assert.deepEqual(copper, [
+      'Distance 2.000 mm, \u0394X 2.000 mm, \u0394Y 0.000 mm.',
+      'From Pad 1 centre to Pad 2 centre.',
+      'Gap between pad 1 and pad 2 on F.Cu: 1.000 mm.',
+    ]);
+    await chooseLayer('F.Paste');
+    const paste = await readout(browser, closeUp);
+    record({ event: 'measure-paste-margin-paste', paste });
+    assert.deepEqual(paste, [
+      'Distance 2.000 mm, \u0394X 2.000 mm, \u0394Y 0.000 mm.',
+      'From Pad 1 centre to Pad 2 centre.',
+      'Gap between pad 1 and pad 2 on F.Paste: 1.200 mm.',
+    ]);
+
+    // Corner to corner on copper; on paste the corners move to the
+    // openings' corners.
+    await chooseLayer('F.Cu');
+    await clickAt(browser, await screenAt(browser, closeUp, -0.5, -0.5));
+    await clickAt(browser, await screenAt(browser, closeUp, 0.5, -0.5));
+    assert.equal((await readout(browser, closeUp))[1], 'From Pad 1 corner to Pad 2 corner.');
+    await chooseLayer('F.Paste');
+    const corners = await readout(browser, closeUp);
+    record({ event: 'measure-paste-margin-corners', corners });
+    assert.deepEqual(corners, [
+      'Distance 1.200 mm, \u0394X 1.200 mm, \u0394Y 0.000 mm.',
+      'From Pad 1 corner to Pad 2 corner.',
+      'Gap between pad 1 and pad 2 on F.Paste: 1.200 mm.',
+    ]);
+    await browser.action('pointer').move({ x: 5, y: 5 }).perform();
+    // The browser behind says how far it has read; wait until it is done.
+    await browser.waitUntil(
+      async () => browser.execute(() => document.querySelector('.libraries-progress')?.dataset.state === 'ready'),
+      { timeout: 120_000, interval: 250, timeoutMsg: 'the Libraries browser never finished reading' },
+    );
+    await screenshot(browser, '82-footprint-measure-paste-margin', { blankOut: ['.library-facts .fact:last-child dd'] });
+    // The courtyard has no pads: the points stay, and say their layer.
+    await chooseLayer('F.CrtYd');
+    const elsewhere = await readout(browser, closeUp);
+    assert.equal(elsewhere[1], 'From Pad 1 corner on F.Paste to Pad 2 corner on F.Paste.');
+    assert.equal(elsewhere.length, 2, `no gap on the courtyard: ${elsewhere}`);
+
+    await browser.execute((s) => document.querySelector(`${s} .viewer-area`).focus(), closeUp);
+    await browser.keys('Escape');
+    assert.equal(await isOpen(browser, closeUp), true, 'the first Escape clears');
+    await browser.keys('Escape');
+    await browser.waitUntil(async () => !(await isOpen(browser, closeUp)), { timeout: 5_000, timeoutMsg: 'the second Escape did not close the close-up' });
+    await browser.keys('Escape');
+    await browser.waitUntil(async () => !(await isOpen(browser, LIBRARIES)), { timeout: 5_000, timeoutMsg: 'Escape did not close the Libraries browser' });
   });
 });
