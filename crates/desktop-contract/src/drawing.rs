@@ -82,6 +82,58 @@ impl Point {
     pub const fn new(x: f64, y: f64) -> Self {
         Self { x, y }
     }
+
+    pub fn dot(self, other: Point) -> f64 {
+        self.x * other.x + self.y * other.y
+    }
+
+    pub fn cross(self, other: Point) -> f64 {
+        self.x * other.y - self.y * other.x
+    }
+
+    pub fn length(self) -> f64 {
+        self.x.hypot(self.y)
+    }
+
+    pub fn distance(self, other: Point) -> f64 {
+        (self - other).length()
+    }
+
+    /// The point halfway to `other`.
+    pub fn middle(self, other: Point) -> Point {
+        Point::new((self.x + other.x) / 2.0, (self.y + other.y) / 2.0)
+    }
+
+    /// This direction with length 1; itself when it has no length.
+    pub fn unit(self) -> Point {
+        let length = self.length();
+        if length > 0.0 {
+            self * (1.0 / length)
+        } else {
+            self
+        }
+    }
+}
+
+impl std::ops::Add for Point {
+    type Output = Point;
+    fn add(self, other: Point) -> Point {
+        Point::new(self.x + other.x, self.y + other.y)
+    }
+}
+
+impl std::ops::Sub for Point {
+    type Output = Point;
+    fn sub(self, other: Point) -> Point {
+        Point::new(self.x - other.x, self.y - other.y)
+    }
+}
+
+impl std::ops::Mul<f64> for Point {
+    type Output = Point;
+    fn mul(self, by: f64) -> Point {
+        Point::new(self.x * by, self.y * by)
+    }
 }
 
 /// One shape. `width` is the stroke width: a stroke is centred on the
@@ -188,9 +240,131 @@ pub fn circle_center(a: Point, b: Point, c: Point) -> Option<Point> {
     (x.is_finite() && y.is_finite()).then_some(Point::new(x, y))
 }
 
+/// The circle an arc lies on and how far the arc turns around it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArcTurn {
+    pub center: Point,
+    pub radius: f64,
+    /// Where the arc starts, in radians from the +X axis, growing towards
+    /// +Y: clockwise on screen.
+    pub start_angle: f64,
+    /// How far the arc turns, in radians: positive is clockwise on screen.
+    pub sweep: f64,
+}
+
+impl ArcTurn {
+    /// The point `share` of the way along the arc (0 is its start).
+    pub fn at(&self, share: f64) -> Point {
+        let a = self.start_angle + self.sweep * share;
+        Point::new(
+            self.center.x + self.radius * a.cos(),
+            self.center.y + self.radius * a.sin(),
+        )
+    }
+}
+
+/// The arc from `start` through `mid` to `end`: a whole circle when
+/// `start` is `end`; `None` when the three points lie on a line.
+pub fn arc_turn(start: Point, mid: Point, end: Point) -> Option<ArcTurn> {
+    let whole = start.distance(end) < 1e-9;
+    let center = if whole {
+        start.middle(mid)
+    } else {
+        circle_center(start, mid, end)?
+    };
+    let radius = start.distance(center);
+    if radius <= 0.0 {
+        return None;
+    }
+    let angle = |p: Point| (p.y - center.y).atan2(p.x - center.x);
+    let tau = std::f64::consts::TAU;
+    let start_angle = angle(start);
+    let sweep = if whole {
+        tau
+    } else {
+        // The way round that passes through the middle.
+        let to_end = (angle(end) - start_angle).rem_euclid(tau);
+        if (angle(mid) - start_angle).rem_euclid(tau) < to_end {
+            to_end
+        } else {
+            to_end - tau
+        }
+    };
+    Some(ArcTurn {
+        center,
+        radius,
+        start_angle,
+        sweep,
+    })
+}
+
+/// `pieces + 1` points along the arc from `start` through `mid` to `end`,
+/// both ends exact; just the three points when they lie on a line.
+pub fn arc_points(start: Point, mid: Point, end: Point, pieces: usize) -> Vec<Point> {
+    let Some(turn) = arc_turn(start, mid, end) else {
+        return vec![start, mid, end];
+    };
+    let pieces = pieces.max(1);
+    let mut points: Vec<Point> = (0..=pieces)
+        .map(|i| turn.at(i as f64 / pieces as f64))
+        .collect();
+    points[0] = start;
+    points[pieces] = end;
+    points
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arcs_turn_the_way_through_their_middle() {
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        // Over the top, counterclockwise on screen: a negative sweep.
+        let top = arc_turn(
+            Point::new(1.0, 0.0),
+            Point::new(0.0, -1.0),
+            Point::new(-1.0, 0.0),
+        )
+        .unwrap();
+        assert!((top.sweep + std::f64::consts::PI).abs() < 1e-12);
+        // Three quarters round, the long way.
+        let long = arc_turn(
+            Point::new(1.0, 0.0),
+            Point::new(-h, -h),
+            Point::new(0.0, 1.0),
+        )
+        .unwrap();
+        assert!((long.sweep + 1.5 * std::f64::consts::PI).abs() < 1e-12);
+        // A whole circle.
+        let whole = arc_turn(
+            Point::new(1.0, 0.0),
+            Point::new(-1.0, 0.0),
+            Point::new(1.0, 0.0),
+        )
+        .unwrap();
+        assert!((whole.sweep - std::f64::consts::TAU).abs() < 1e-12);
+        assert_eq!(whole.center, Point::new(0.0, 0.0));
+        let points = arc_points(
+            Point::new(1.0, 0.0),
+            Point::new(0.0, -1.0),
+            Point::new(-1.0, 0.0),
+            2,
+        );
+        assert!(points[1].distance(Point::new(0.0, -1.0)) < 1e-12);
+        assert_eq!(points[2], Point::new(-1.0, 0.0));
+        // On a line: the three points.
+        assert_eq!(
+            arc_points(
+                Point::new(0.0, 0.0),
+                Point::new(1.0, 1.0),
+                Point::new(2.0, 2.0),
+                8
+            )
+            .len(),
+            3
+        );
+    }
 
     #[test]
     fn finds_the_centre_of_three_points_on_a_circle() {

@@ -18,7 +18,7 @@
 use crate::{backend, bounds, show_modal};
 use desktop_contract::PreviewImage;
 use desktop_contract::drawing::{
-    DrawnText, Edge, FootprintDrawing, PadKind, Point, Shape, TextAlign, circle_center,
+    DrawnText, Edge, FootprintDrawing, PadKind, Point, Shape, TextAlign, arc_turn,
 };
 use desktop_contract::measure::snap_points;
 use leptos::prelude::*;

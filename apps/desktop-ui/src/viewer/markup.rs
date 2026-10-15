@@ -129,7 +129,7 @@ pub(super) fn escape(text: &str) -> String {
 /// `mid` to `end`: an exact elliptical arc, so it stays smooth at any zoom.
 pub(super) fn arc_commands(out: &mut String, start: Point, mid: Point, end: Point) {
     let p = |q: Point| format!("{} {}", number(q.x), number(q.y));
-    let same = (start.x - end.x).hypot(start.y - end.y) < 1e-9;
+    let same = start.distance(end) < 1e-9;
     if same {
         // A whole circle: two half circles through the opposite point.
         let r = number((start.x - mid.x).hypot(start.y - mid.y) / 2.0);
@@ -141,17 +141,15 @@ pub(super) fn arc_commands(out: &mut String, start: Point, mid: Point, end: Poin
         );
         return;
     }
-    let Some(center) = circle_center(start, mid, end) else {
+    let Some(turn) = arc_turn(start, mid, end) else {
         let _ = write!(out, " L {} L {}", p(mid), p(end));
         return;
     };
-    let r = number((start.x - center.x).hypot(start.y - center.y));
-    // Turning from start through mid to end clockwise on screen (Y down)
-    // is SVG's sweep 1; the arc is long when mid and the centre are on the
-    // same side of the chord.
-    let side = |q: Point| (end.x - start.x) * (q.y - start.y) - (end.y - start.y) * (q.x - start.x);
-    let sweep = u8::from(side(mid) < 0.0);
-    let large = u8::from(side(mid) * side(center) > 0.0);
+    let r = number(turn.radius);
+    // Clockwise on screen (Y down) is SVG's sweep 1; more than half a
+    // turn is the long way.
+    let sweep = u8::from(turn.sweep > 0.0);
+    let large = u8::from(turn.sweep.abs() > std::f64::consts::PI);
     let _ = write!(out, " A {r} {r} 0 {large} {sweep} {}", p(end));
 }
 

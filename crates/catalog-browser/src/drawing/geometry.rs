@@ -12,18 +12,10 @@ pub(super) fn rotate(p: Point, angle: f64) -> Point {
     Point::new(p.x * cos + p.y * sin, -p.x * sin + p.y * cos)
 }
 
-pub(super) fn add(a: Point, b: Point) -> Point {
-    Point::new(a.x + b.x, a.y + b.y)
-}
-
-pub(super) fn distance(a: Point, b: Point) -> f64 {
-    (a.x - b.x).hypot(a.y - b.y)
-}
-
 /// `shape`, moved by `offset`, then rotated by `angle` and moved to `at`:
 /// a pad's local shape placed in the footprint.
 pub(super) fn place(shape: &Shape, offset: Point, angle: f64, at: Point) -> Shape {
-    let map = |p: Point| add(rotate(add(p, offset), angle), at);
+    let map = |p: Point| rotate(p + offset, angle) + at;
     map_shape(shape, &map)
 }
 
@@ -138,7 +130,7 @@ pub(super) fn cut_rect(w: f64, h: f64, corners: [Corner; 4]) -> Shape {
         let before = points[(index + 3) % 4];
         let after = points[(index + 1) % 4];
         let toward = |target: Point, length: f64| {
-            let full = distance(corner, target);
+            let full = corner.distance(target);
             let t = if full > 0.0 { length / full } else { 0.0 };
             Point::new(
                 corner.x + (target.x - corner.x) * t,
@@ -149,7 +141,7 @@ pub(super) fn cut_rect(w: f64, h: f64, corners: [Corner; 4]) -> Shape {
             Corner::Round(r) if r > 0.0 => {
                 let (start, end) = (toward(before, r), toward(after, r));
                 // Halfway along the quarter circle.
-                let center = add(start, Point::new(end.x - corner.x, end.y - corner.y));
+                let center = start + (end - corner);
                 let k = std::f64::consts::FRAC_1_SQRT_2;
                 let mid = Point::new(
                     center.x + (corner.x - center.x) * k,
@@ -324,40 +316,13 @@ impl Bounds {
             Point::new(x1, y1),
             Point::new(x0, y1),
         ] {
-            self.point(add(text.at, rotate(corner, text.angle)), 0.0);
+            self.point(text.at + rotate(corner, text.angle), 0.0);
         }
     }
 
     pub(super) fn finish(self) -> [f64; 4] {
         self.box_.unwrap_or([-1.0, -1.0, 1.0, 1.0])
     }
-}
-
-/// `count + 1` points along the arc from `start` through `mid` to `end`;
-/// just the three points when they lie on a line.
-pub(super) fn arc_points(start: Point, mid: Point, end: Point, count: usize) -> Vec<Point> {
-    let Some(center) = circle_center(start, mid, end) else {
-        return vec![start, mid, end];
-    };
-    let radius = distance(center, start);
-    let angle_of = |p: Point| (p.y - center.y).atan2(p.x - center.x);
-    let a0 = angle_of(start);
-    let tau = std::f64::consts::TAU;
-    let positive = |a: f64| a.rem_euclid(tau);
-    // Sweep from start to end, the way that passes through mid.
-    let to_mid = positive(angle_of(mid) - a0);
-    let to_end = positive(angle_of(end) - a0);
-    let sweep = if to_mid <= to_end {
-        if to_end == 0.0 { tau } else { to_end }
-    } else {
-        to_end - tau
-    };
-    (0..=count)
-        .map(|i| {
-            let a = a0 + sweep * i as f64 / count as f64;
-            Point::new(center.x + radius * a.cos(), center.y + radius * a.sin())
-        })
-        .collect()
 }
 
 /// A convex, filled polygon's outline moved out by `by` (in, when
@@ -377,7 +342,7 @@ pub(super) fn offset_convex(shape: &Shape, by: f64) -> Shape {
         .copied()
         .filter(|edge| {
             let (start, end) = ends(edge);
-            distance(start, end) > 1e-12
+            start.distance(end) > 1e-12
         })
         .collect();
     let edges = merge_straight(edges);
@@ -399,10 +364,7 @@ pub(super) fn offset_convex(shape: &Shape, by: f64) -> Shape {
 fn merge_straight(edges: Vec<Edge>) -> Vec<Edge> {
     let same_way = |a: &Edge, b: &Edge| match (*a, *b) {
         (Edge::Line { start: a0, end: a1 }, Edge::Line { start: b0, end: b1 }) => {
-            let (u, v) = (
-                unit(Point::new(a1.x - a0.x, a1.y - a0.y)),
-                unit(Point::new(b1.x - b0.x, b1.y - b0.y)),
-            );
+            let (u, v) = ((a1 - a0).unit(), (b1 - b0).unit());
             (u.x * v.y - u.y * v.x).abs() < 1e-9 && u.x * v.x + u.y * v.y > 0.0
         }
         _ => false,
@@ -435,28 +397,15 @@ fn ends(edge: &Edge) -> (Point, Point) {
     }
 }
 
-/// The unit vector of `p`; `p` itself when it has no length.
-fn unit(p: Point) -> Point {
-    let length = p.x.hypot(p.y);
-    if length > 0.0 {
-        Point::new(p.x / length, p.y / length)
-    } else {
-        p
-    }
-}
-
 /// The outward normals at an edge's start and end.
 fn normals(edge: &Edge) -> (Point, Point) {
     match edge {
         Edge::Line { start, end } => {
-            let n = unit(Point::new(end.y - start.y, start.x - end.x));
+            let n = Point::new(end.y - start.y, start.x - end.x).unit();
             (n, n)
         }
         Edge::Arc { start, mid, end } => match circle_center(*start, *mid, *end) {
-            Some(c) => (
-                unit(Point::new(start.x - c.x, start.y - c.y)),
-                unit(Point::new(end.x - c.x, end.y - c.y)),
-            ),
+            Some(c) => ((*start - c).unit(), (*end - c).unit()),
             None => normals(&Edge::Line {
                 start: *start,
                 end: *end,
@@ -465,43 +414,36 @@ fn normals(edge: &Edge) -> (Point, Point) {
     }
 }
 
-fn shifted(p: Point, normal: Point, by: f64) -> Point {
-    Point::new(p.x + normal.x * by, p.y + normal.y * by)
-}
-
 fn offset_out(edges: &[Edge], by: f64) -> Vec<Edge> {
     let mut out = Vec::new();
     for (index, edge) in edges.iter().enumerate() {
         let (start_normal, end_normal) = normals(edge);
         out.push(match *edge {
             Edge::Line { start, end } => Edge::Line {
-                start: shifted(start, start_normal, by),
-                end: shifted(end, end_normal, by),
+                start: start + start_normal * by,
+                end: end + end_normal * by,
             },
             Edge::Arc { start, mid, end } => {
                 let mid_normal = match circle_center(start, mid, end) {
-                    Some(c) => unit(Point::new(mid.x - c.x, mid.y - c.y)),
+                    Some(c) => (mid - c).unit(),
                     None => start_normal,
                 };
                 Edge::Arc {
-                    start: shifted(start, start_normal, by),
-                    mid: shifted(mid, mid_normal, by),
-                    end: shifted(end, end_normal, by),
+                    start: start + start_normal * by,
+                    mid: mid + mid_normal * by,
+                    end: end + end_normal * by,
                 }
             }
         });
         let next = &edges[(index + 1) % edges.len()];
         let (next_normal, _) = normals(next);
-        if distance(end_normal, next_normal) > 1e-9 {
+        if end_normal.distance(next_normal) > 1e-9 {
             let corner = ends(edge).1;
-            let middle = unit(Point::new(
-                end_normal.x + next_normal.x,
-                end_normal.y + next_normal.y,
-            ));
+            let middle = (end_normal + next_normal).unit();
             out.push(Edge::Arc {
-                start: shifted(corner, end_normal, by),
-                mid: shifted(corner, middle, by),
-                end: shifted(corner, next_normal, by),
+                start: corner + end_normal * by,
+                mid: corner + middle * by,
+                end: corner + next_normal * by,
             });
         }
     }
@@ -516,7 +458,7 @@ fn offset_in(edges: &[Edge], by: f64) -> Vec<Edge> {
             let (start, end) = ends(edge);
             let (normal, _) = normals(edge);
             (
-                shifted(start, normal, -by),
+                start + normal * -by,
                 Point::new(end.x - start.x, end.y - start.y),
             )
         })

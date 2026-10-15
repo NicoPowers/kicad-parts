@@ -13,7 +13,7 @@
 
 use desktop_contract::drawing::{
     DrawnPad, DrawnText, Edge, FootprintDrawing, LayerShape, PadKind, Point, Shape, TextAlign,
-    circle_center,
+    arc_points, circle_center,
 };
 use kicad_integration::library_file::Sexp;
 

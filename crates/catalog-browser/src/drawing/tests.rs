@@ -77,7 +77,7 @@ fn draws_pads_with_their_number_centre_and_layers() {
         let start = match next {
             Edge::Line { start, .. } | Edge::Arc { start, .. } => *start,
         };
-        assert!(distance(end, start) < 1e-9, "{edge:?} then {next:?}");
+        assert!(end.distance(start) < 1e-9, "{edge:?} then {next:?}");
     }
     let [x0, y0, x1, y1] = drawing.bounds;
     assert!(close(x0, -1.225) && close(x1, 1.225) && close(y0, -0.475) && close(y1, 0.475));
@@ -489,7 +489,7 @@ fn arc_radii(shape: &Shape) -> Vec<f64> {
         .iter()
         .filter_map(|edge| match *edge {
             Edge::Arc { start, mid, end } => {
-                circle_center(start, mid, end).map(|c| distance(c, start))
+                circle_center(start, mid, end).map(|c| c.distance(start))
             }
             Edge::Line { .. } => None,
         })
@@ -762,10 +762,10 @@ fn a_grown_arc_keeps_its_middle_on_the_circle() {
     for edge in edges {
         if let Edge::Arc { start, mid, end } = *edge {
             let c = circle_center(start, mid, end).unwrap();
-            if distance(c, start) > 0.3 {
+            if c.distance(start) > 0.3 {
                 let origin = Point::default();
-                assert!(close(distance(origin, mid), 0.6), "{mid:?}");
-                assert!(close(distance(origin, start), 0.6) && close(distance(origin, end), 0.6));
+                assert!(close(origin.distance(mid), 0.6), "{mid:?}");
+                assert!(close(origin.distance(start), 0.6) && close(origin.distance(end), 0.6));
                 checked += 1;
             }
         }

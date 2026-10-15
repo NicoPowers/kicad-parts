@@ -31,7 +31,7 @@ pub(super) fn graphic(head: &str, node: &Sexp, primitive: bool) -> Option<Shape>
             let center = point(node, "center")?;
             Shape::Circle {
                 center,
-                radius: distance(center, point(node, "end")?),
+                radius: center.distance(point(node, "end")?),
                 width,
                 filled: width == 0.0 || filled(node, primitive),
             }
@@ -84,7 +84,7 @@ pub(super) fn old_arc(node: &Sexp, center: Point, from: Point, width: f64) -> Op
     let angle = number(child(node, "angle")?.word_at(1))?;
     let turn = |degrees: f64| {
         let offset = Point::new(from.x - center.x, from.y - center.y);
-        add(center, rotate(offset, -degrees))
+        center + rotate(offset, -degrees)
     };
     Some(Shape::Arc {
         start: from,
