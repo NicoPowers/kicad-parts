@@ -390,9 +390,10 @@ export async function assertAccessible(browser, name) {
         const covering = new Set();
         const seeThrough = new Set();
         const samples = [box.left + 1, box.left + box.width / 2, box.right - 1];
+        // Any part of the text's box inside a viewer could be covered.
         const insideAViewer = viewerAreas.some((area) => {
           const r = area.getBoundingClientRect();
-          return samples.some((x) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom);
+          return box.left < r.right && box.right > r.left && box.top < r.bottom && box.bottom > r.top;
         });
         if (!clipped) {
           recheck.outcome = 'incomplete';
