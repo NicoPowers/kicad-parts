@@ -558,15 +558,19 @@ pub(crate) fn Viewer(
         }
     };
 
-    // The wheel zooms at the pointer. Leptos listens for wheel events on
-    // the whole window, where they cannot be stopped from scrolling, so
-    // this listener is the element's own.
+    // The wheel zooms at the pointer. Leptos handles most events with one
+    // listener for the whole page, and a browser may not let such a wheel
+    // listener stop the page scrolling, so this listener is the element's
+    // own and says it is not passive.
     let wheel = StoredValue::new_local(
         None::<wasm_bindgen::closure::Closure<dyn FnMut(leptos::ev::WheelEvent)>>,
     );
     Effect::new(move |_| {
         use wasm_bindgen::JsCast;
         let Some(element) = area.get() else { return };
+        if wheel.with_value(Option::is_some) {
+            return;
+        }
         let listener = wasm_bindgen::closure::Closure::<dyn FnMut(leptos::ev::WheelEvent)>::new(
             move |event: leptos::ev::WheelEvent| {
                 event.prevent_default();
@@ -714,12 +718,10 @@ pub(crate) fn Viewer(
         let drawing = drawing.clone().expect("a drawing");
         view! { <LayerList drawing=drawing active=active hidden=hidden dim=dim id=id.clone() /> }
     });
-    let with_layers = layer_list.is_some();
     view! {
         <div
             class="viewer"
             class:viewer-footprint=footprint
-            class:viewer-with-layers=with_layers
             data-active-layer=move || has_drawing.then(|| active.get())
             data-ready=move || if ready.get() { "true" } else { "false" }
         >
@@ -838,7 +840,7 @@ fn LayerList(
     let notes = drawing.left_out.clone();
     view! {
         <div class="viewer-layers">
-            <fieldset>
+            <fieldset aria-describedby=format!("{id}-layers-hint")>
                 <legend>"Layers"</legend>
                 <p class="viewer-layers-hint" id=format!("{id}-layers-hint")>
                     "Choose the active layer, drawn on top. Tick a layer to show it."

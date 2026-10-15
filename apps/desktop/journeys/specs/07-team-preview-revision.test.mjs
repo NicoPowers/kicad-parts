@@ -152,7 +152,7 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
     await server.stop();
     server = null;
     // Forget the drawings, so the next view needs the stored bytes again.
-    fs.rmSync(path.join(dataDir, 'cache', 'previews', 'v1'), { recursive: true, force: true });
+    fs.rmSync(path.join(dataDir, 'cache', 'previews', 'v2'), { recursive: true, force: true });
     await browser.execute(() => document.querySelector('.kicad-settings').open = true);
     const buttons = await browser.$$('.kicad-settings-body button');
     for (const button of buttons) {

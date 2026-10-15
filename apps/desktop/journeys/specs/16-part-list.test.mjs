@@ -181,7 +181,7 @@ describe('part list grouped by category', () => {
       } else if (how === 'Escape') {
         await browser.keys('Escape');
       } else {
-        await browser.$(`${dialog} button[type="submit"]`).click();
+        await browser.$(`${dialog} .zoom-header button`).click();
       }
       await browser.waitUntil(async () => !(await isOpen()), {
         timeout: 5_000,
