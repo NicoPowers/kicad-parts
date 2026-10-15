@@ -444,3 +444,18 @@ fn a_text_counts_in_the_box_as_aligned_and_turned() {
     );
     assert_eq!(drawing.bounds, [1.0, 0.0, 5.0, 1.2]);
 }
+
+#[test]
+fn pads_without_copper_get_no_margins() {
+    let drawing = draw(
+        "(footprint \"F\" (solder_paste_margin -0.05) (solder_mask_margin 0.07)
+          (pad \"\" smd rect (at 0 0) (size 0.6 0.9) (layers \"F.Paste\"))
+          (pad \"1\" smd rect (at 3 0) (size 2.4 3.1) (layers \"F.Mask\") (solder_mask_margin 0.1))
+          (pad \"2\" smd rect (at 6 0) (size 1 1) (layers \"F.Cu\" \"F.Paste\" \"F.Mask\")))",
+    );
+    assert_size(size_on(&drawing.pads[0], "F.Paste"), (0.6, 0.9));
+    assert_size(size_on(&drawing.pads[1], "F.Mask"), (2.4, 3.1));
+    // A pad on copper still gets them.
+    assert_size(size_on(&drawing.pads[2], "F.Paste"), (0.9, 0.9));
+    assert_size(size_on(&drawing.pads[2], "F.Mask"), (1.14, 1.14));
+}

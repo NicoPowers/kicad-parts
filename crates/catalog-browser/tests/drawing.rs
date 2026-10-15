@@ -235,10 +235,19 @@ fn drawing_box(drawing: &FootprintDrawing, layer: &str) -> Option<[f64; 4]> {
 }
 
 /// The area of the drawing's filled shapes on `layer` that have no
-/// stroke, and whether there are any other shapes there.
+/// stroke, and whether there are any other shapes there, or overlapping
+/// ones.
 fn drawing_area(drawing: &FootprintDrawing, layer: &str) -> (f64, bool) {
     let mut area = 0.0;
-    let mut others = false;
+    // A custom pad's shapes overlap, and kicad-cli draws their union, so
+    // their areas do not add up.
+    let mut others = drawing.pads.iter().any(|pad| {
+        pad.shapes
+            .iter()
+            .filter(|shape| shape.layer == layer)
+            .count()
+            > 1
+    });
     for shape in on_layer(drawing, layer) {
         match shape {
             Shape::Circle {
@@ -342,6 +351,10 @@ fn real_footprints_match_their_files_and_kicad_cli() {
         "Diode_SMD:D_SMA-SMB_Universal_Handsoldering",
         "Inductor_SMD:L_Bourns_SDR0604",
         "Package_BGA:ST_TFBGA-225_13x13mm_Layout15x15_P0.8mm",
+        // Paste openings and a mask opening drawn as pads of their own,
+        // next to a footprint margin that must not change them.
+        "Package_TO_SOT_SMD:LFPAK56",
+        "Package_SO:Texas_HTSOP-8-1EP_3.9x4.9mm_P1.27mm_EP2.95x4.9mm_Mask2.4x3.1mm_ThermalVias",
         // Ours.
         "g-Resistor_SMD:R_0603_1608Metric",
         "g-Package_DFN_QFN:RSL0048B-IPC_A",

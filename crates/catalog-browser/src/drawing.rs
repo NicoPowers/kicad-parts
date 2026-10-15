@@ -113,7 +113,14 @@ impl Drawer {
         let Some(geometry) = PadGeometry::read(pad) else {
             return;
         };
-        let margins = Margins::read(pad).or(footprint);
+        let layers = pad_layers(pad);
+        // KiCad gives margins only to pads on copper: a paste or mask
+        // opening drawn as a pad of its own is exactly its size.
+        let margins = if layers.iter().any(|layer| layer.ends_with(".Cu")) {
+            Margins::read(pad).or(footprint)
+        } else {
+            Margins::default()
+        };
         let kind = match pad.word_at(2) {
             Some("thru_hole") => PadKind::ThruHole,
             Some("np_thru_hole") => PadKind::NpThruHole,
@@ -122,7 +129,7 @@ impl Drawer {
         };
         let drill = Drill::read(pad);
         let mut shapes = Vec::new();
-        for layer in pad_layers(pad) {
+        for layer in layers {
             let outline = if layer.ends_with(".Paste") {
                 let (dx, dy) = margins.paste(geometry.size);
                 geometry.outline(dx, dy)
