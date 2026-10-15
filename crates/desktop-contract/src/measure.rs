@@ -119,31 +119,8 @@ pub fn pad_name(pad: &DrawnPad) -> String {
 ///   corners, on the line the file draws.
 pub fn snap_points(drawing: &FootprintDrawing, layer: &str) -> Vec<SnapPoint> {
     let mut points = Vec::new();
-    let copper = layer.ends_with(".Cu");
-    for (index, pad) in drawing.pads.iter().enumerate() {
-        let mut add = |at: Point, kind: SnapKind| {
-            points.push(SnapPoint {
-                at,
-                kind,
-                pad: Some(index),
-            });
-        };
-        let mut shapes = pad
-            .shapes
-            .iter()
-            .filter(|shape| shape.layer == layer)
-            .peekable();
-        if shapes.peek().is_some() {
-            add(pad.center, SnapKind::Centre);
-        }
-        for shape in shapes {
-            shape_points(&shape.shape, Some(pad.center), &mut add);
-        }
-        if copper {
-            if let Some(hole) = &pad.hole {
-                add(hole_centre(hole), SnapKind::HoleCentre);
-            }
-        }
+    for index in 0..drawing.pads.len() {
+        pad_points(drawing, index, layer, &mut points);
     }
     for graphic in drawing.graphics.iter().filter(|shape| shape.layer == layer) {
         shape_points(&graphic.shape, None, &mut |at, kind| {
@@ -168,6 +145,50 @@ pub fn snap_points(drawing: &FootprintDrawing, layer: &str) -> Vec<SnapPoint> {
         ay.total_cmp(&by).then(ax.total_cmp(&bx))
     });
     points
+}
+
+/// Adds pad `index`'s snap points on `layer`: its centre and outline
+/// when it is on the layer, and its hole's centre on a copper layer.
+fn pad_points(drawing: &FootprintDrawing, index: usize, layer: &str, points: &mut Vec<SnapPoint>) {
+    let Some(pad) = drawing.pads.get(index) else {
+        return;
+    };
+    let mut add = |at: Point, kind: SnapKind| {
+        points.push(SnapPoint {
+            at,
+            kind,
+            pad: Some(index),
+        });
+    };
+    let mut shapes = pad
+        .shapes
+        .iter()
+        .filter(|shape| shape.layer == layer)
+        .peekable();
+    if shapes.peek().is_some() {
+        add(pad.center, SnapKind::Centre);
+    }
+    for shape in shapes {
+        shape_points(&shape.shape, Some(pad.center), &mut add);
+    }
+    if layer.ends_with(".Cu") {
+        if let Some(hole) = &pad.hole {
+            add(hole_centre(hole), SnapKind::HoleCentre);
+        }
+    }
+}
+
+/// The same kind of point on the same pad on another layer: a centre
+/// stays the centre, and a corner moves to the pad's nearest corner on
+/// `layer`. `None` for a graphic's point, or when the pad has no such
+/// point there.
+pub fn resnap(drawing: &FootprintDrawing, point: &SnapPoint, layer: &str) -> Option<SnapPoint> {
+    let mut points = Vec::new();
+    pad_points(drawing, point.pad?, layer, &mut points);
+    points
+        .into_iter()
+        .filter(|other| other.kind == point.kind)
+        .min_by(|a, b| a.at.distance(point.at).total_cmp(&b.at.distance(point.at)))
 }
 
 /// The index of the snap point nearest `at`, if one is within `radius`.

@@ -607,3 +607,47 @@ fn a_custom_pads_circle_away_from_its_position_is_a_circle_centre() {
     assert!(has(&points, "Pad 4 circle centre", 1.0, 0.0), "{points:?}");
     assert!(!has(&points, "Pad 4 centre", 1.0, 0.0));
 }
+
+#[test]
+fn a_point_moves_to_the_same_kind_of_point_on_another_layer() {
+    let d = drawing(
+        vec![pad(
+            "1",
+            p(0.0, 0.0),
+            &[
+                ("F.Cu", rect(0.0, 0.0, 2.0, 1.0)),
+                ("F.Paste", rect(0.0, 0.0, 1.8, 0.8)),
+            ],
+        )],
+        vec![(
+            "F.SilkS",
+            Shape::Line {
+                start: p(0.0, 2.0),
+                end: p(1.0, 2.0),
+                width: 0.1,
+            },
+        )],
+    );
+    let copper = snap_points(&d, "F.Cu");
+    let corner = copper
+        .iter()
+        .find(|point| {
+            point.kind == SnapKind::Corner && close(point.at.x, 1.0) && close(point.at.y, 0.5)
+        })
+        .unwrap();
+    let moved = resnap(&d, corner, "F.Paste").unwrap();
+    assert_eq!(moved.kind, SnapKind::Corner);
+    assert!(
+        close(moved.at.x, 0.9) && close(moved.at.y, 0.4),
+        "{moved:?}"
+    );
+    let centre = copper
+        .iter()
+        .find(|point| point.kind == SnapKind::Centre)
+        .unwrap();
+    assert_eq!(resnap(&d, centre, "F.Paste").unwrap().at, p(0.0, 0.0));
+    // Nothing on the layer, or a graphic's point: no match.
+    assert_eq!(resnap(&d, corner, "F.Mask"), None);
+    let line_end = snap_points(&d, "F.SilkS")[0];
+    assert_eq!(resnap(&d, &line_end, "F.Fab"), None);
+}
