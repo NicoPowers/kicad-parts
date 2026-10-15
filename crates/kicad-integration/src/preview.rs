@@ -3,9 +3,13 @@
 //! Cache layout, under the preview cache folder:
 //!
 //! ```text
-//! <root>/v1/kicad-<version>/<theme>/<kind>-<sha256>/<item>/*.svg
+//! <root>/v2/kicad-<version>/<theme>/<kind>-<sha256>/<item>/*.svg
 //! <root>/staging/run-<process id>-<n>/        exports in progress
 //! ```
+//!
+//! A footprint's entry also keeps the exact `.kicad_mod` it was drawn from
+//! ([`SOURCE_FILE`]), so the app can draw its layers itself without
+//! fetching stored bytes again. Layout `v1` did not keep it.
 //!
 //! `<kind>` is `sym` or `fp` for a library on disk, keyed by the library's
 //! content SHA-256, and `sym-blob` or `fp-blob` for a CAD item revision's
@@ -45,7 +49,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-const CACHE_LAYOUT: &str = "v1";
+const CACHE_LAYOUT: &str = "v2";
+/// The footprint file kept next to a footprint's SVG.
+const SOURCE_FILE: &str = "source.kicad_mod";
 /// KiCad's built-in colour theme, so exports do not depend on the user's
 /// editor settings. The cache directory name is derived from it, so a theme
 /// change can never serve images exported with another theme.
@@ -81,6 +87,8 @@ pub struct Preview {
     /// stored bytes.
     pub library_sha256: String,
     pub cache: CacheOutcome,
+    /// For a footprint, the exact `.kicad_mod` bytes it was drawn from.
+    pub footprint: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -453,6 +461,7 @@ impl PreviewCache {
             images: read_images(entry)?,
             library_sha256,
             cache,
+            footprint: fs::read(entry.join(SOURCE_FILE)).ok(),
         })
     }
 
@@ -517,7 +526,12 @@ impl PreviewCache {
             library.into(),
         ];
         let expected = format!("{}.svg", output_stem(&lib_ref.item));
-        self.run_export(kicad, &args, &out, |file| file == expected)
+        self.run_export(kicad, &args, &out, |file| file == expected)?;
+        // Kept with the SVG; see SOURCE_FILE.
+        let source = library.join(format!("{}.kicad_mod", lib_ref.item));
+        let kept = out.join(SOURCE_FILE);
+        fs::copy(&source, &kept).map_err(|e| io_error("cannot copy", &source, e))?;
+        Ok(())
     }
 
     /// Runs one export. `expected` decides whether an output file name

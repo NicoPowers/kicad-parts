@@ -320,7 +320,7 @@ fn staging_folders_are_swept_when_a_cache_opens() {
 fn eviction_keeps_the_kicad_version_in_use_and_libraries_just_used() {
     let fixture = fixture(true);
     fixture.request("R", None).join().unwrap().unwrap();
-    let older_kicad = fixture.cache.root().join("v1").join("kicad-9.0.0");
+    let older_kicad = fixture.cache.root().join(CACHE_LAYOUT).join("kicad-9.0.0");
     fs::create_dir_all(older_kicad.join("theme_builtin_default")).unwrap();
     let removed = fixture.cache.evict_unused(&fixture.kicad.version);
     assert_eq!(removed, [older_kicad]);
@@ -364,6 +364,37 @@ fn stored_symbols_are_drawn_from_their_bytes_and_cached_by_blob() {
         .unwrap();
     assert_eq!(second.cache, CacheOutcome::Hit);
     assert_eq!(fixture.cache.export_count(), 1);
+}
+
+#[test]
+fn a_footprint_entry_keeps_the_file_it_was_drawn_from() {
+    let fixture = fixture(true);
+    let bytes = b"(footprint \"SOT\" (pad \"1\" smd rect (at 0 0) (size 1 1)))".to_vec();
+    let item = StoredItem {
+        lib_ref: LibRef {
+            library: "g-sot".into(),
+            item: "SOT".into(),
+        },
+        blob_sha256: sha256_hex(&bytes),
+        format_version: None,
+    };
+    let load = || Ok(bytes.clone());
+    let first = fixture
+        .cache
+        .stored_footprint(&fixture.kicad, &item, load, None)
+        .unwrap();
+    assert_eq!(first.cache, CacheOutcome::Exported);
+    assert_eq!(first.footprint.as_deref(), Some(&bytes[..]));
+    // A cache hit gives the same bytes without fetching them.
+    let second = fixture
+        .cache
+        .stored_footprint(&fixture.kicad, &item, || Err("offline".into()), None)
+        .unwrap();
+    assert_eq!(second.cache, CacheOutcome::Hit);
+    assert_eq!(second.footprint.as_deref(), Some(&bytes[..]));
+    // Symbols keep nothing of the kind.
+    let symbol = fixture.request("R", None).join().unwrap().unwrap();
+    assert_eq!(symbol.footprint, None);
 }
 
 #[test]

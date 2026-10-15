@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod drawing;
+pub use drawing::FootprintDrawing;
+
 /// Tauri command names.
 pub mod command {
     pub const APP_STATUS: &str = "app_status";
@@ -211,14 +214,14 @@ pub struct PreviewRequest {
     pub selection: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum PreviewOutcome {
     Ready(PreviewSet),
     Problem(PreviewProblem),
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PreviewSet {
     pub kind: PreviewKind,
     /// The previewed library reference.
@@ -246,7 +249,7 @@ pub struct PreviewSet {
     pub images: Vec<PreviewImage>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PreviewImage {
     /// Symbol unit number (1-based); `None` for a footprint.
     pub unit: Option<u32>,
@@ -254,6 +257,14 @@ pub struct PreviewImage {
     pub demorgan: bool,
     /// `data:image/svg+xml;base64,...` of the kicad-cli SVG.
     pub data_uri: String,
+    /// The kicad-cli SVG's `viewBox` (x, y, width, height, in
+    /// millimetres), so a close-up can zoom it.
+    #[serde(default)]
+    pub view_box: Option<[f64; 4]>,
+    /// For a footprint, the app's own drawing of the same file, with its
+    /// layers, for the close-up. `None` when the file could not be read.
+    #[serde(default)]
+    pub drawing: Option<FootprintDrawing>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

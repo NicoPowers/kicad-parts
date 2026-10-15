@@ -5,6 +5,7 @@
 //! else, so everything here is testable without a window.
 
 mod add_part;
+pub mod drawing;
 mod git;
 mod libraries;
 mod library;
@@ -1146,6 +1147,14 @@ pub(crate) fn ready(
                 unit: image.unit,
                 demorgan: image.demorgan,
                 data_uri: svg_data_uri(&image.svg),
+                view_box: svg_view_box(&image.svg),
+                drawing: match kind {
+                    PreviewKind::Footprint => preview
+                        .footprint
+                        .as_deref()
+                        .and_then(drawing::footprint_drawing),
+                    PreviewKind::Symbol => None,
+                },
             })
             .collect(),
     })
@@ -1445,6 +1454,26 @@ fn save_settings(path: &Path, settings: &Settings) -> Result<(), String> {
     })
 }
 
+/// The four numbers of the root `<svg>`'s `viewBox`, all finite and the
+/// size positive.
+fn svg_view_box(svg: &str) -> Option<[f64; 4]> {
+    let tag = &svg[svg.find("<svg")?..];
+    let tag = &tag[..tag.find('>')?];
+    let value = tag.split("viewBox=\"").nth(1)?.split('"').next()?;
+    let numbers: Vec<f64> = value
+        .split([' ', ','])
+        .filter(|part| !part.is_empty())
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let [x, y, width, height] = numbers.as_slice() else {
+        return None;
+    };
+    let view_box = [*x, *y, *width, *height];
+    (view_box.iter().all(|value| value.is_finite()) && *width > 0.0 && *height > 0.0)
+        .then_some(view_box)
+}
+
 fn svg_data_uri(svg: &str) -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(svg.as_bytes());
     format!("data:image/svg+xml;base64,{encoded}")
@@ -1539,6 +1568,29 @@ impl PartValues {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_svg_view_box() {
+        let svg = "<?xml version=\"1.0\"?>
+<svg
+  width=\"3.0mm\" viewBox=\"0.000000 0.000000 3.048000 1.549400\">
+<rect viewBox=\"1 2 3 4\"/>";
+        assert_eq!(svg_view_box(svg), Some([0.0, 0.0, 3.048, 1.5494]));
+        assert_eq!(
+            svg_view_box("<svg viewBox=\"0,0,2,1\">"),
+            Some([0.0, 0.0, 2.0, 1.0])
+        );
+        for bad in [
+            "<svg>",
+            "<svg viewBox=\"0 0 0 1\">",
+            "<svg viewBox=\"0 0 NaN 1\">",
+            "<svg viewBox=\"0 0 1\">",
+            "<svg><g viewBox=\"0 0 1 1\">",
+            "no svg",
+        ] {
+            assert_eq!(svg_view_box(bad), None, "{bad}");
+        }
+    }
 
     /// Ranked matches as (category, position, rank), best first.
     fn ranked(items: &[(&str, usize, u8)]) -> Vec<Ranked> {
