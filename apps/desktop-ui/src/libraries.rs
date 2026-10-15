@@ -346,8 +346,14 @@ pub(crate) fn LibrariesDialog(
         for_symbol.set(Some(reference));
         focus_later("library-search");
     });
+    // An action that leaves the browser closes the dialog itself, so focus
+    // goes back to the Libraries button, and then runs; an action that
+    // moves focus (to the part search, say) does so after.
     let done_with = Callback::new(move |after: Box<dyn FnOnce() + Send + Sync>| {
-        open.set(None);
+        match dialog.get_untracked() {
+            Some(dialog) => dialog.close(),
+            None => open.set(None),
+        }
         after();
     });
     let only_role = browse.role;
@@ -364,7 +370,7 @@ pub(crate) fn LibrariesDialog(
                 id=id
                 class="team-tab"
                 aria-selected=move || if is() { "true" } else { "false" }
-                aria-controls="library-items"
+                aria-controls="library-panel"
                 tabindex=move || if is() { "0" } else { "-1" }
                 hidden=only_role.is_some_and(|role| role != kind)
                 on:click=move |_| switch_tab(kind)
@@ -415,10 +421,15 @@ pub(crate) fn LibrariesDialog(
                     </div>
                     <LibraryList view=view tab=tab library=library selected=selected />
                 </nav>
-                <section class="libraries-items" aria-label=move || match tab.get() {
-                    PreviewKind::Symbol => "Symbols",
-                    PreviewKind::Footprint => "Footprints",
-                }>
+                <section
+                    class="libraries-items"
+                    id="library-panel"
+                    role="tabpanel"
+                    aria-labelledby=move || match tab.get() {
+                        PreviewKind::Symbol => "library-tab-symbols",
+                        PreviewKind::Footprint => "library-tab-footprints",
+                    }
+                >
                     <label class="library-search-label" for="library-search">
                         {move || match tab.get() {
                             PreviewKind::Symbol => "Search symbols",
@@ -517,6 +528,8 @@ fn LibraryList(
                 .unwrap_or_default()
         })
     };
+    let installed_note =
+        move || view.with(|view| view.as_ref().and_then(|view| view.installed_note.clone()));
     let pick = move |key: Option<LibraryKey>| {
         if library.get_untracked() != key {
             library.set(key);
@@ -535,18 +548,26 @@ fn LibraryList(
             </button>
             {move || {
                 let entries = entries.get();
+                let installed_note = installed_note();
                 LibraryGroup::ALL
                     .into_iter()
                     .filter_map(|group| {
                         let in_group: Vec<LibraryEntry> =
                             entries.iter().filter(|entry| entry.key.group == group).cloned().collect();
-                        (!in_group.is_empty()).then(|| {
+                        // Installed says why it is empty, such as KiCad's
+                        // settings not being found.
+                        let group_note = (group == LibraryGroup::Installed)
+                            .then(|| installed_note.clone())
+                            .flatten()
+                            .filter(|_| in_group.is_empty());
+                        (!in_group.is_empty() || group_note.is_some()).then(|| {
                             let heading = format!("library-group-{group:?}").to_lowercase();
                             let labelled = heading.clone();
                             view! {
                                 <h3 class="library-group" id=heading>
                                     {format!("{} ({})", group.title(), in_group.len())}
                                 </h3>
+                                {group_note.map(|note| view! { <p class="hint library-note library-group-note">{note}</p> })}
                                 <ul class="library-entries" aria-labelledby=labelled>
                                     {in_group
                                         .into_iter()
@@ -558,10 +579,10 @@ fn LibraryList(
                                                 (None, Some(count)) => grouped(count),
                                                 (None, None) => "…".to_owned(),
                                             };
-                                            let title = entry
-                                                .problem
-                                                .clone()
-                                                .or_else(|| (!entry.description.is_empty()).then(|| entry.description.clone()));
+                                            let title = (!entry.description.is_empty()).then(|| entry.description.clone());
+                                            // A library that could not be read, or only in
+                                            // part, says so under its name.
+                                            let said = entry.problem.clone().or_else(|| entry.note.clone());
                                             view! {
                                                 <li>
                                                     <button
@@ -575,6 +596,7 @@ fn LibraryList(
                                                         <span class="library-name">{entry.key.nickname.clone()}</span>
                                                         <span class="library-count">{count}</span>
                                                     </button>
+                                                    {said.map(|said| view! { <p class="library-entry-note">{said}</p> })}
                                                 </li>
                                             }
                                         })
@@ -826,15 +848,22 @@ fn ItemList(
         event.prevent_default();
         selected.set(all.get(next).cloned());
     };
+    // What the chosen library could not read, said above its items.
     let problem = move || {
         let chosen = library.get()?;
+        let kind = tab.get();
         view.with(|view| {
             let view = view.as_ref()?;
-            view.symbols
-                .iter()
-                .chain(&view.footprints)
-                .find(|entry| entry.key == chosen)
-                .and_then(|entry| entry.problem.clone())
+            let entries = match kind {
+                PreviewKind::Symbol => &view.symbols,
+                PreviewKind::Footprint => &view.footprints,
+            };
+            let entry = entries.iter().find(|entry| entry.key == chosen)?;
+            match (&entry.problem, &entry.note) {
+                (Some(why), _) => Some(format!("This library could not be read. {why}")),
+                (None, Some(note)) => Some(format!("Some of its files were skipped. {note}")),
+                (None, None) => None,
+            }
         })
     };
     view! {
@@ -846,7 +875,7 @@ fn ItemList(
             }}
         </p>
         {move || problem().map(|why| view! {
-            <p class="problem quiet library-unreadable">{format!("This library could not be read. {why}")}</p>
+            <p class="problem quiet library-unreadable">{why}</p>
         })}
         <ul
             node_ref=list
@@ -1195,6 +1224,7 @@ mod tests {
             description: String::new(),
             items: Some(1),
             problem: None,
+            note: None,
         }
     }
 

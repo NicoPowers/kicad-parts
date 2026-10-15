@@ -47,6 +47,9 @@ fn App() -> impl IntoView {
     // Bumped whenever KiCad discovery changes, so previews reload.
     let kicad_epoch = RwSignal::new(0u32);
     let query = RwSignal::new(String::new());
+    // Only the parts using this symbol or footprint, chosen in the
+    // Libraries browser; shown as a chip that removes it.
+    let uses = RwSignal::new(None::<String>);
     let results = RwSignal::new(Load::<Searched>::Loading);
     let selected = RwSignal::new(None::<String>);
     let search_seq = StoredValue::new(0u64);
@@ -182,6 +185,7 @@ fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         let text = query.get();
+        let only_using = uses.get();
         // Search again when anyone saves a Change, or on sign-in and
         // sign-out, so team parts show their current details.
         // (Reading the value, not just tracking it, makes the memo follow
@@ -200,12 +204,13 @@ fn App() -> impl IntoView {
                 spawn_local(async move {
                     // Without a search every section starts closed, so only
                     // the counts are needed; open sections load their parts.
-                    let limit = if text.trim().is_empty() {
+                    let limit = if text.trim().is_empty() && only_using.is_none() {
                         0
                     } else {
                         SEARCH_ROWS
                     };
-                    let response = backend::search(text, limit, chosen.clone(), None).await;
+                    let response =
+                        backend::search(text, limit, chosen.clone(), None, only_using).await;
                     // Ignore answers to queries the user has already replaced.
                     if search_seq.get_value() == seq {
                         results.set(into_load(response).map(|response| Searched {
@@ -269,6 +274,22 @@ fn App() -> impl IntoView {
                         prop:value=move || query.get()
                         on:input:target=move |event| query.set(event.target().value())
                     />
+                    {move || uses.get().map(|reference| view! {
+                        <p class="uses-chip" id="uses-chip">
+                            <span>"Parts using "<code>{cad_reference(&reference)}</code></span>
+                            <button
+                                type="button"
+                                id="uses-chip-remove"
+                                class="link-button"
+                                on:click=move |_| {
+                                    uses.set(None);
+                                    team::focus_later("part-search");
+                                }
+                            >
+                                "Show all parts"
+                            </button>
+                        </p>
+                    })}
                     <LibraryCheckLine
                         check=library_check
                         problem=check_problem
@@ -300,7 +321,8 @@ fn App() -> impl IntoView {
                         can_add,
                         add_from: Callback::new(move |choice| library_add.set(Some(choice))),
                         show_parts: Callback::new(move |reference: String| {
-                            query.set(reference);
+                            query.set(String::new());
+                            uses.set(Some(reference));
                             team::focus_later("part-search");
                         }),
                         open_part: Callback::new(move |ipn: String| {

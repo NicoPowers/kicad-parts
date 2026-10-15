@@ -36,6 +36,17 @@ fn searching(query: &str) -> bool {
     !query.trim().is_empty()
 }
 
+/// What the list's open sections and loaded parts are kept for: the
+/// search, and the reference the parts are limited to, if any. Not empty
+/// whenever either is given, so a limited list counts as a search.
+pub(crate) fn search_key(response: &SearchResponse) -> String {
+    let query = response.query.trim();
+    match response.uses.as_deref() {
+        Some(reference) => format!("{query}\u{1f}uses {reference}"),
+        None => query.to_owned(),
+    }
+}
+
 /// Which sections are open.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct OpenSections {
@@ -305,6 +316,7 @@ pub(crate) fn ResultList(
                 SECTION_ROWS,
                 selected.get_untracked(),
                 Some(category.clone()),
+                searched.response.uses.clone(),
             )
             .await;
             let rows = match answer {
@@ -353,7 +365,7 @@ pub(crate) fn ResultList(
                         .sections
                         .iter()
                         .find(|section| section.hits.iter().any(|hit| hit.ipn == ipn))
-                        .map(|section| (section.category.clone(), searched.response.query.clone())),
+                        .map(|section| (section.category.clone(), search_key(&searched.response))),
                     _ => None,
                 })
             });
@@ -375,7 +387,7 @@ pub(crate) fn ResultList(
     Effect::new(move |_| {
         let Some((query, asked_for, category, version)) = results.with(|results| match results {
             Load::Ready(searched) => Some((
-                searched.response.query.trim().to_owned(),
+                search_key(&searched.response),
                 searched.selected.clone(),
                 searched.response.selected.clone(),
                 searched.version,
@@ -461,7 +473,7 @@ pub(crate) fn ResultList(
             <For
                 each=move || results.with(|results| match results {
                     Load::Ready(searched) => {
-                        let query = searched.response.query.trim().to_owned();
+                        let query = search_key(&searched.response);
                         searched
                             .response
                             .sections
@@ -913,9 +925,27 @@ mod tests {
     }
 
     #[test]
+    fn a_list_limited_to_a_reference_counts_as_a_search() {
+        let response = |query: &str, uses: Option<&str>| SearchResponse {
+            query: query.into(),
+            uses: uses.map(str::to_owned),
+            total: 0,
+            sections: Vec::new(),
+            selected: None,
+            elapsed_micros: 0,
+        };
+        assert_eq!(search_key(&response(" r ", None)), "r");
+        let limited = search_key(&response("", Some("g-res:R_US")));
+        assert!(searching(&limited));
+        assert_ne!(limited, search_key(&response("", Some("g-res:R_Small"))));
+        assert_ne!(limited, search_key(&response("47", Some("g-res:R_US"))));
+    }
+
+    #[test]
     fn the_count_line_counts_every_match() {
         let response = |total| SearchResponse {
             query: String::new(),
+            uses: None,
             total,
             sections: Vec::new(),
             selected: None,

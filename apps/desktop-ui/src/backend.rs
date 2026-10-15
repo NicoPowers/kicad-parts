@@ -71,6 +71,7 @@ pub async fn search(
     limit: usize,
     selected: Option<String>,
     category: Option<String>,
+    uses: Option<String>,
 ) -> Result<SearchResponse, String> {
     call(
         command::SEARCH_PARTS,
@@ -80,6 +81,7 @@ pub async fn search(
                 limit,
                 selected,
                 category,
+                uses,
             },
         },
     )

@@ -345,6 +345,7 @@ fn search_answers_one_section_or_counts_only_and_always_shows_the_selected_part(
             limit,
             selected: selected.map(str::to_owned),
             category: category.map(str::to_owned),
+            uses: None,
         };
 
     // Counts only, as the empty search asks while every section is closed.
@@ -388,4 +389,57 @@ fn search_answers_one_section_or_counts_only_and_always_shows_the_selected_part(
         browser.search("stm32h723 ", 25).sections,
         browser.search("stm32h723", 25).sections
     );
+}
+
+#[test]
+fn shows_only_the_parts_using_a_reference_exactly() {
+    use desktop_contract::SearchRequest;
+    use std::collections::BTreeMap;
+    let dir = tempfile::tempdir().unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let browser = open_browser(
+        dir.path(),
+        SearchLocations::Only(vec![empty.path().to_path_buf()]),
+    );
+    let (none, no_names) = (BTreeMap::new(), BTreeMap::new());
+    let uses = |reference: &str, query: &str, category: Option<&str>| SearchRequest {
+        query: query.to_owned(),
+        limit: 500,
+        selected: None,
+        category: category.map(str::to_owned),
+        uses: Some(reference.to_owned()),
+    };
+    // A footprint: every part listing it as a choice, and no other.
+    let footprint = "g-Resistor_SMD:R_0603_1608Metric";
+    let found = browser.search_request(&uses(footprint, "", None), &none, &no_names);
+    assert_eq!(found.uses.as_deref(), Some(footprint));
+    assert!(found.total > 10, "{}", found.total);
+    assert_eq!(found.total, found.shown());
+    for hit in found.hits() {
+        let part = browser.part(&hit.ipn).unwrap();
+        let choices = part.footprint.unwrap_or_default();
+        assert!(
+            choices.split(';').any(|choice| choice.trim() == footprint),
+            "{choices}"
+        );
+    }
+    // The free-text search finds more, such as the HandSolder variant.
+    let text = browser.search("R_0603_1608Metric", 500);
+    assert!(text.total >= found.total);
+    // A near name finds nothing; a search narrows further; one section.
+    let near = browser.search_request(&uses("g-Resistor_SMD:R_0603", "", None), &none, &no_names);
+    assert_eq!(near.total, 0);
+    let narrowed = browser.search_request(&uses(footprint, "47", None), &none, &no_names);
+    assert!(narrowed.total >= 1 && narrowed.total < found.total);
+    let section = browser.search_request(&uses(footprint, "", Some("res")), &none, &no_names);
+    assert_eq!(section.sections.len(), 1);
+    // A symbol, compared exactly.
+    let symbol = browser.search_request(&uses("g-res:R_US", "", None), &none, &no_names);
+    assert!(symbol.total > 10);
+    for hit in symbol.hits() {
+        assert_eq!(
+            browser.part(&hit.ipn).unwrap().symbol.as_deref(),
+            Some("g-res:R_US")
+        );
+    }
 }

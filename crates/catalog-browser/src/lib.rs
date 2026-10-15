@@ -205,6 +205,7 @@ impl CatalogBrowser {
             limit,
             selected: None,
             category: None,
+            uses: None,
         };
         self.search_request(&request, current, names)
     }
@@ -249,12 +250,33 @@ impl CatalogBrowser {
                             })
                     }
                 };
+                // Only the parts using the reference, compared exactly.
+                let uses = request
+                    .uses
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|reference| !reference.is_empty());
+                let part_at = |position: usize| match position.checked_sub(count) {
+                    Some(at) => extra.parts[at].clone(),
+                    None => {
+                        let part = &catalog.parts()[position];
+                        replace(part).unwrap_or_else(|| part.clone())
+                    }
+                };
+                let wanted = |position: usize| {
+                    uses.is_none_or(|reference| part_uses(&part_at(position), reference))
+                };
+                let total = results
+                    .hits
+                    .iter()
+                    .filter(|&&position| wanted(position))
+                    .count();
                 let selected_position = request.selected.as_deref().and_then(|selected| {
                     results
                         .hits
                         .iter()
                         .copied()
-                        .find(|&position| ipn_at(position) == selected)
+                        .find(|&position| ipn_at(position) == selected && wanted(position))
                 });
                 let selected = selected_position.map(category_of);
                 let ranked = results
@@ -271,13 +293,14 @@ impl CatalogBrowser {
                             .category
                             .as_ref()
                             .is_none_or(|wanted| *wanted == ranked.category)
+                            && wanted(ranked.position)
                     });
                 let groups = group_by_category(
                     ranked,
                     &Grouping {
                         limit: request.limit.min(MAX_SEARCH_LIMIT),
                         names,
-                        searching: !query.is_empty(),
+                        searching: !query.is_empty() || uses.is_some(),
                         selected: selected_position,
                     },
                 );
@@ -300,12 +323,13 @@ impl CatalogBrowser {
                             .collect(),
                     })
                     .collect();
-                (results.total, sections, selected)
+                (total, sections, selected)
             }
             Err(_) => (0, Vec::new(), None),
         };
         SearchResponse {
             query: request.query.clone(),
+            uses: request.uses.clone(),
             total,
             sections,
             selected,
@@ -907,6 +931,16 @@ impl CatalogBrowser {
             install.share_dir.clone(),
         )
     }
+}
+
+/// Whether `part` uses `reference` exactly: as its Symbol, or as one of
+/// its Footprint choices.
+fn part_uses(part: &CatalogPart, reference: &str) -> bool {
+    part.symbol.as_deref().map(str::trim) == Some(reference)
+        || part
+            .footprint
+            .as_deref()
+            .is_some_and(|field| footprint_choices(field).contains(&reference))
 }
 
 /// Where a preview was drawn from, for [`PreviewSet`].

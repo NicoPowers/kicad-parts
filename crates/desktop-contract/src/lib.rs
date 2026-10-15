@@ -99,11 +99,19 @@ pub struct SearchRequest {
     /// Only this category's section, by code, as opening a section asks.
     #[serde(default)]
     pub category: Option<String>,
+    /// Only the parts using this symbol or footprint, such as
+    /// `g-res:R_US`: their Symbol, or one of their Footprint choices, is
+    /// exactly it.
+    #[serde(default)]
+    pub uses: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SearchResponse {
     pub query: String,
+    /// The reference the parts were limited to, as asked.
+    #[serde(default)]
+    pub uses: Option<String>,
     /// Parts matching the query, in every section.
     pub total: usize,
     /// One section per category that has matches: in name order, or

@@ -1968,3 +1968,34 @@ a {
   color: var(--ink);
   font-size: 1.1rem;
 }
+
+/* "Parts using g-res:R_US" from the Libraries browser, with a way back. */
+.uses-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.6rem;
+  margin: 0.45rem 0.9rem 0;
+  padding: 0.25rem 0.6rem;
+  background: var(--accent-soft);
+  border-radius: var(--radius);
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+/* A library that could not be read, or only in part, under its name. */
+.library-entry-note {
+  margin: 0 0.9rem 0.3rem 1.15rem;
+  color: var(--danger);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.library-group-note {
+  margin-top: 0.2rem;
+}
+
+/* The drawing's own reference repeats the heading above it. */
+.library-preview .preview-meta .reference {
+  display: none;
+}

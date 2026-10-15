@@ -36,6 +36,8 @@ function kicadSettings() {
     path.join(symdir, 'Child.kicad_sym'),
     library('(symbol "Child" (extends "Base") (property "Reference" "U" (at 0 5.08 0) (effects (font (size 1.27 1.27)))) (property "Value" "Child" (at 0 -5.08 0) (effects (font (size 1.27 1.27)))) (property "Description" "Child of Base, a fixture symbol" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes))))'),
   );
+  // A file KiCad cannot read either: skipped, the rest of the library kept.
+  fs.writeFileSync(path.join(symdir, 'Broken.kicad_sym'), '(kicad_symbol_lib (symbol "Broken"');
   const config = tempDir('kicad-settings');
   fs.writeFileSync(
     path.join(config, 'kicad_common.json'),
@@ -264,6 +266,12 @@ describe('Libraries browser', () => {
     await chooseLibrary(browser, 'MySymbols');
     await typeSearch(browser, '');
     await waitForText(browser, '#library-count', '2 symbols');
+    // The file that could not be read is named, visibly.
+    assert.match(await textOf(browser, '.library-unreadable'), /^Some of its files were skipped\. Broken\.kicad_sym could not be read/);
+    const said = await browser.execute(() =>
+      [...document.querySelectorAll('.library-entry-note')].map((note) => note.textContent),
+    );
+    assert.ok(said.some((note) => note.startsWith('Broken.kicad_sym could not be read')), JSON.stringify(said));
     await selectRow(browser, 'Child');
     await waitForPreviewImages(browser, PREVIEW);
     assert.match(await textOf(browser, `${PREVIEW} .provenance`), /^installed library · /);
@@ -283,8 +291,22 @@ describe('Libraries browser', () => {
       timeout: 5_000,
       timeoutMsg: 'the browser did not close',
     });
-    assert.equal(await browser.execute(() => document.getElementById('part-search').value), 'g-res:R_US');
-    await waitForText(browser, '#result-count', /^\d+ matching parts$/);
+    // Only the parts using it exactly, shown as a chip, not as search text.
+    assert.equal(await browser.execute(() => document.getElementById('part-search').value), '');
+    await waitForText(browser, '#uses-chip span', 'Parts using g-res:R_US');
+    // The answer limited to the reference, not the one before it.
+    await waitForText(browser, '#result-count', /^(?!178 )\d+ matching parts$/);
+    const using = Number((await textOf(browser, '#result-count')).replace(/\D/g, ''));
+    assert.ok(using > 10 && using < 178, `${using}`);
+    await browser.waitUntil(async () => browser.execute(() => document.activeElement?.id === 'part-search'), {
+      timeout: 5_000,
+      timeoutMsg: 'focus did not move to the part search',
+    });
+    await assertAccessible(browser, '69-parts-using-symbol');
+    await screenshot(browser, '69-parts-using-symbol');
+    await (await browser.$('#uses-chip-remove')).click();
+    await waitForText(browser, '#result-count', '178 matching parts');
+    assert.equal(await browser.execute(() => document.getElementById('uses-chip')), null);
   });
 
   it('closes with Escape and with a click outside, giving focus back', async () => {
