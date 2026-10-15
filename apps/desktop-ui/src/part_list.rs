@@ -194,13 +194,17 @@ enum SectionEnd {
 /// The parts a section shows and how it ends: the loaded parts when it has
 /// them, otherwise the first matches the search sent. The selected part is
 /// among `hits` whenever it is in this section, so it is always shown.
+/// While `reloading`, the loaded parts are from before a team catalog
+/// change and may not match the new count, so nothing ends them.
 fn section_rows(
     searching: bool,
     loaded: Option<&Load<Vec<PartSummary>>>,
+    reloading: bool,
     hits: &[PartSummary],
     total: usize,
 ) -> (Vec<PartSummary>, SectionEnd) {
     let (mut rows, end) = match loaded {
+        Some(Load::Ready(rows)) if reloading => (rows.clone(), Some(SectionEnd::Nothing)),
         Some(Load::Ready(rows)) => (rows.clone(), None),
         Some(Load::Failed(error)) => (Vec::new(), Some(SectionEnd::Failed(error.clone()))),
         Some(Load::Loading) => (Vec::new(), Some(SectionEnd::Loading)),
@@ -261,7 +265,8 @@ fn row_key(hit: &PartSummary) -> u64 {
 }
 
 /// The parts loaded for open sections, for one search and team catalog
-/// position.
+/// position. After a team catalog change in the same search, open
+/// sections keep their parts while they load again.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Loaded {
     key: (String, Option<u64>),
@@ -269,17 +274,23 @@ struct Loaded {
     /// The sections whose Show all was chosen in this search, loaded again
     /// after a team catalog change.
     shown_all: BTreeSet<String>,
+    /// The sections showing their earlier parts while they load again.
+    reloading: BTreeSet<String>,
 }
 
 impl Loaded {
     /// What is kept for a new answer `key`, and the sections to load again.
     /// The same search after a team catalog change keeps Show all. Its open
     /// sections keep their parts while they load again, so the list does
-    /// not shrink and move the selected part out of view.
+    /// not shrink and move the selected part out of view. The part
+    /// `selected` stays only in `selected_in`, the section that holds it
+    /// now, so it is never shown twice.
     fn next(
         &self,
         key: (String, Option<u64>),
         is_open: impl Fn(&str) -> bool,
+        selected: Option<&str>,
+        selected_in: Option<&str>,
     ) -> (Loaded, BTreeSet<String>) {
         if self.key.0 != key.0 {
             return (
@@ -294,15 +305,40 @@ impl Loaded {
             .sections
             .iter()
             .filter(|(category, rows)| matches!(rows, Load::Ready(_)) && is_open(category))
-            .map(|(category, rows)| (category.clone(), rows.clone()))
+            .map(|(category, rows)| {
+                let mut rows = rows.clone();
+                if let (Some(ipn), Load::Ready(rows)) = (selected, &mut rows) {
+                    if selected_in != Some(category.as_str()) {
+                        rows.retain(|row| row.ipn != ipn);
+                    }
+                }
+                (category.clone(), rows)
+            })
             .collect();
         let reload = sections.keys().chain(&self.shown_all).cloned().collect();
         let next = Loaded {
             key,
+            reloading: sections.keys().cloned().collect(),
             sections,
             shown_all: self.shown_all.clone(),
         };
         (next, reload)
+    }
+
+    /// Marks `category` as loading. Parts already shown stay until the new
+    /// ones arrive, and the section counts as loading meanwhile.
+    fn start_load(&mut self, category: &str) {
+        if matches!(self.sections.get(category), Some(Load::Ready(_))) {
+            self.reloading.insert(category.to_owned());
+        } else {
+            self.sections.insert(category.to_owned(), Load::Loading);
+        }
+    }
+
+    /// Takes in the parts loaded for `category`.
+    fn finish_load(&mut self, category: String, rows: Load<Vec<PartSummary>>) {
+        self.reloading.remove(&category);
+        self.sections.insert(category, rows);
     }
 }
 
@@ -342,12 +378,7 @@ pub(crate) fn ResultList(
             return;
         };
         let key = loaded.with_untracked(|loaded| loaded.key.clone());
-        loaded.update(|loaded| {
-            // Parts already shown stay until the new ones arrive.
-            if !matches!(loaded.sections.get(&category), Some(Load::Ready(_))) {
-                loaded.sections.insert(category.clone(), Load::Loading);
-            }
-        });
+        loaded.update(|loaded| loaded.start_load(&category));
         spawn_local(async move {
             let answer = backend::search(
                 searched.response.query.clone(),
@@ -382,9 +413,7 @@ pub(crate) fn ResultList(
                     );
                     focus_when_drawn(first_new);
                 }
-                loaded.update(|loaded| {
-                    loaded.sections.insert(category, rows);
-                });
+                loaded.update(|loaded| loaded.finish_load(category, rows));
                 try_scroll();
             }
         });
@@ -438,7 +467,12 @@ pub(crate) fn ResultList(
         if loaded.with_untracked(|loaded| loaded.key != key) {
             let (next, reload) = loaded.with_untracked(|loaded| {
                 open.with_untracked(|open| {
-                    loaded.next(key, |category| open.is_open(category, &query))
+                    loaded.next(
+                        key,
+                        |category| open.is_open(category, &query),
+                        asked_for.as_deref(),
+                        category.as_deref(),
+                    )
                 })
             });
             loaded.set(next);
@@ -573,6 +607,10 @@ fn Section(
         let category = category.clone();
         Memo::new(move |_| loaded.with(|loaded| loaded.sections.get(&category).cloned()))
     };
+    let reloading = {
+        let category = category.clone();
+        Memo::new(move |_| loaded.with(|loaded| loaded.reloading.contains(&category)))
+    };
     // Without a search, an open section loads its parts the first time.
     {
         let category = category.clone();
@@ -585,9 +623,13 @@ fn Section(
     let shown = Memo::new(move |_| {
         section.with(|section| {
             mine.with(|mine| match section {
-                Some(section) => {
-                    section_rows(is_searching, mine.as_ref(), &section.hits, section.total)
-                }
+                Some(section) => section_rows(
+                    is_searching,
+                    mine.as_ref(),
+                    reloading.get(),
+                    &section.hits,
+                    section.total,
+                ),
                 None => (Vec::new(), SectionEnd::Nothing),
             })
         })
@@ -631,7 +673,13 @@ fn Section(
                     </span>
                 </span>
             </button>
-            <ul id=id class="section-parts" aria-label=name hidden=move || !is_open.get()>
+            <ul
+                id=id
+                class="section-parts"
+                aria-label=name
+                aria-busy=move || reloading.get().then_some("true")
+                hidden=move || !is_open.get()
+            >
                 {move || is_open.get().then(|| {
                     let show_all = show_all.clone();
                     view! {
@@ -740,12 +788,20 @@ fn scroll_selected_into_view() -> Scrolled {
     let Ok(Some(row)) = document().query_selector(".results .result[aria-current=\"true\"]") else {
         return Scrolled::NotShown;
     };
+    // A section loading its parts, or showing its earlier parts while it
+    // loads again, is marked busy.
     let loading = row
         .closest(".section-parts")
         .ok()
         .flatten()
-        .and_then(|list| list.query_selector("[aria-busy=\"true\"]").ok().flatten())
-        .is_some();
+        .is_some_and(|list| {
+            list.get_attribute("aria-busy").as_deref() == Some("true")
+                || list
+                    .query_selector("[aria-busy=\"true\"]")
+                    .ok()
+                    .flatten()
+                    .is_some()
+        });
     let options = js_sys::Object::new();
     let _ = js_sys::Reflect::set(&options, &"block".into(), &"nearest".into());
     if let Ok(method) = js_sys::Reflect::get(&row, &"scrollIntoView".into()) {
@@ -918,16 +974,16 @@ mod tests {
     #[test]
     fn a_searched_section_shows_its_first_matches_then_show_all() {
         let hits = [hit("RES-1"), hit("RES-2")];
-        let (rows, end) = section_rows(true, None, &hits, 30);
+        let (rows, end) = section_rows(true, None, false, &hits, 30);
         assert_eq!(
             (ipns(&rows), end),
             (vec!["RES-1", "RES-2"], SectionEnd::ShowAll(30))
         );
-        let (_, end) = section_rows(true, None, &hits, 2);
+        let (_, end) = section_rows(true, None, false, &hits, 2);
         assert_eq!(end, SectionEnd::Nothing);
         // After "Show all": the loaded parts, capped.
         let all: Vec<PartSummary> = (0..3).map(|n| hit(&format!("RES-{n}"))).collect();
-        let (rows, end) = section_rows(true, Some(&Load::Ready(all)), &hits, 300);
+        let (rows, end) = section_rows(true, Some(&Load::Ready(all)), false, &hits, 300);
         assert_eq!(ipns(&rows), ["RES-0", "RES-1", "RES-2"]);
         assert_eq!(
             end,
@@ -942,16 +998,16 @@ mod tests {
     fn an_opened_section_loads_its_parts_and_always_shows_the_selected_one() {
         // Without a search the answer holds only the selected part.
         let selected = [hit("RES-9")];
-        let (rows, end) = section_rows(false, None, &selected, 10);
+        let (rows, end) = section_rows(false, None, false, &selected, 10);
         assert_eq!((ipns(&rows), end), (vec!["RES-9"], SectionEnd::Loading));
         let loaded = Load::Ready(vec![hit("RES-1"), hit("RES-2")]);
-        let (rows, end) = section_rows(false, Some(&loaded), &selected, 3);
+        let (rows, end) = section_rows(false, Some(&loaded), false, &selected, 3);
         assert_eq!(
             (ipns(&rows), end),
             (vec!["RES-1", "RES-2", "RES-9"], SectionEnd::Nothing)
         );
         let failed = Load::Failed("no".into());
-        let (_, end) = section_rows(false, Some(&failed), &[], 3);
+        let (_, end) = section_rows(false, Some(&failed), false, &[], 3);
         assert_eq!(end, SectionEnd::Failed("no".into()));
     }
 
@@ -965,24 +1021,41 @@ mod tests {
                 ("res".to_owned(), ready()),
                 ("ind".to_owned(), Load::Loading),
             ]),
-            shown_all: BTreeSet::new(),
+            ..Loaded::default()
         };
-        // Only the open, loaded sections are kept, and they load again.
-        let (next, reload) = before.next((String::new(), Some(2)), |category| category != "res");
+        // Only the open, loaded sections are kept, and they load again,
+        // marked as reloading.
+        let (next, reload) = before.next(
+            (String::new(), Some(2)),
+            |category| category != "res",
+            None,
+            None,
+        );
         assert_eq!(next.key, (String::new(), Some(2)));
         assert_eq!(next.sections, BTreeMap::from([("cap".to_owned(), ready())]));
+        assert_eq!(next.reloading, BTreeSet::from(["cap".to_owned()]));
         assert_eq!(reload, BTreeSet::from(["cap".to_owned()]));
-        // Show all is kept, and loaded again, in the same search only.
+        // Show all is kept, and loaded again, in the same search only. A
+        // closed section whose Show all was chosen loads again but keeps
+        // no parts.
         let searched = Loaded {
             key: ("10".to_owned(), Some(1)),
-            sections: BTreeMap::from([("res".to_owned(), ready())]),
-            shown_all: BTreeSet::from(["res".to_owned()]),
+            sections: BTreeMap::from([("res".to_owned(), ready()), ("cap".to_owned(), ready())]),
+            shown_all: BTreeSet::from(["res".to_owned(), "cap".to_owned()]),
+            ..Loaded::default()
         };
-        let (next, reload) = searched.next(("10".to_owned(), Some(2)), |_| true);
+        let (next, reload) = searched.next(
+            ("10".to_owned(), Some(2)),
+            |category| category == "res",
+            None,
+            None,
+        );
         assert_eq!(next.shown_all, searched.shown_all);
-        assert_eq!(reload, BTreeSet::from(["res".to_owned()]));
+        assert_eq!(next.sections, BTreeMap::from([("res".to_owned(), ready())]));
+        assert_eq!(next.reloading, BTreeSet::from(["res".to_owned()]));
+        assert_eq!(reload, BTreeSet::from(["cap".to_owned(), "res".to_owned()]));
         // A new search keeps nothing.
-        let (next, reload) = searched.next(("100".to_owned(), Some(2)), |_| true);
+        let (next, reload) = searched.next(("100".to_owned(), Some(2)), |_| true, None, None);
         assert_eq!(
             next,
             Loaded {
@@ -991,6 +1064,63 @@ mod tests {
             }
         );
         assert!(reload.is_empty());
+    }
+
+    #[test]
+    fn a_selected_part_that_moved_section_is_kept_only_where_it_is_now() {
+        let before = Loaded {
+            key: (String::new(), Some(1)),
+            sections: BTreeMap::from([
+                (
+                    "cap".to_owned(),
+                    Load::Ready(vec![hit("CAP-1"), hit("CAP-2")]),
+                ),
+                (
+                    "res".to_owned(),
+                    Load::Ready(vec![hit("CAP-2"), hit("RES-1")]),
+                ),
+            ]),
+            ..Loaded::default()
+        };
+        let (next, _) = before.next(
+            (String::new(), Some(2)),
+            |_| true,
+            Some("CAP-2"),
+            Some("res"),
+        );
+        let kept = |category: &str| match &next.sections[category] {
+            Load::Ready(rows) => ipns(rows).join(" "),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(kept("cap"), "CAP-1");
+        assert_eq!(kept("res"), "CAP-2 RES-1");
+    }
+
+    #[test]
+    fn loading_a_section_keeps_its_parts_until_the_new_ones_arrive() {
+        let mut loaded = Loaded {
+            sections: BTreeMap::from([("cap".to_owned(), Load::Ready(vec![hit("CAP-1")]))]),
+            ..Loaded::default()
+        };
+        loaded.start_load("cap");
+        loaded.start_load("res");
+        assert_eq!(loaded.sections["cap"], Load::Ready(vec![hit("CAP-1")]));
+        assert_eq!(loaded.sections["res"], Load::Loading);
+        assert_eq!(loaded.reloading, BTreeSet::from(["cap".to_owned()]));
+        loaded.finish_load("cap".to_owned(), Load::Ready(Vec::new()));
+        assert_eq!(loaded.sections["cap"], Load::Ready(Vec::new()));
+        assert!(loaded.reloading.is_empty());
+    }
+
+    #[test]
+    fn a_reloading_section_shows_its_parts_with_nothing_after_them() {
+        // The new count says 41, but the parts are from before.
+        let earlier = Load::Ready(vec![hit("RES-1"), hit("RES-2")]);
+        let (rows, end) = section_rows(false, Some(&earlier), true, &[], 41);
+        assert_eq!(
+            (ipns(&rows), end),
+            (vec!["RES-1", "RES-2"], SectionEnd::Nothing)
+        );
     }
 
     #[test]
