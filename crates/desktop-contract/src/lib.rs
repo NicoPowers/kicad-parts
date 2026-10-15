@@ -1141,6 +1141,10 @@ pub struct LibraryEntry {
     pub items: Option<usize>,
     /// Why it could not be read, in plain words.
     pub problem: Option<String>,
+    /// Something to know about what was read, such as files of the library
+    /// that could not be read and were skipped.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// The libraries, and how far the background reading is.
@@ -1154,6 +1158,10 @@ pub struct LibrariesView {
     /// Things the person should know, such as a library table that could
     /// not be read or libraries of other kinds that are not shown.
     pub notes: Vec<String>,
+    /// Said in the Installed group when it lists nothing, such as KiCad's
+    /// settings not being found.
+    #[serde(default)]
+    pub installed_note: Option<String>,
 }
 
 impl LibrariesView {

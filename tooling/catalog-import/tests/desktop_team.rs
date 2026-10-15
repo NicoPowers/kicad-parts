@@ -317,6 +317,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         settings_file: cache.path().join("settings.json"),
         kicad_locations: kicad_integration::SearchLocations::Only(Vec::new()),
         kicad_config_dir: None,
+        kicad_documents_dir: None,
     });
     let current = team.current_values();
     let names = team.category_names();

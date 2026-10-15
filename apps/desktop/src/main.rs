@@ -506,6 +506,8 @@ fn main() {
                         &environment,
                     )
                 }),
+                // The real Documents folder, which may be under OneDrive.
+                kicad_documents_dir: app.path().document_dir().ok(),
             });
             app.manage(Arc::new(browser));
             // Only the server address and email are saved; the session

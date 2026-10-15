@@ -2,7 +2,7 @@
 //! libraries, list and filter items, show one item's details and draw it.
 
 use super::query::{self, SymbolOrFootprint, Uses};
-use super::read::{MAX_SYMBOL_FILE_BYTES, read_limited};
+use super::read::{Links, MAX_SYMBOL_FILE_BYTES, read_limited};
 use super::sources::{Format, Places, is_link};
 use crate::{CatalogBrowser, Drawn, PartValues, export_problem, problem, ready};
 use desktop_contract::{
@@ -39,6 +39,7 @@ impl CatalogBrowser {
             share,
             kicad_config: self.config.kicad_config_dir.clone(),
             environment: std::env::vars().collect(),
+            documents: self.config.kicad_documents_dir.clone(),
         }
     }
 
@@ -204,7 +205,13 @@ impl CatalogBrowser {
             (SymbolOrFootprint::Symbol(symbol), Format::SymbolFolder) => {
                 // kicad-cli reads only symbol files, so the symbol (and the
                 // parent it extends) is drawn as stored bytes.
-                match symdir_bytes(&source.path, symbol.file.as_deref(), &request.name) {
+                // The parent's file comes from the index, not its name.
+                let file_of =
+                    |name: &str| match query::find_item(&libraries, &request.library, name) {
+                        Some(SymbolOrFootprint::Symbol(parent)) => parent.file.clone(),
+                        _ => None,
+                    };
+                match symdir_bytes(source, symbol.file.as_deref(), &request.name, &file_of) {
                     Ok((bytes, version)) => {
                         let stored = StoredItem {
                             lib_ref,
@@ -230,7 +237,7 @@ impl CatalogBrowser {
             }
             (SymbolOrFootprint::Footprint(_), Format::Footprints) => {
                 let file = source.path.join(format!("{}.kicad_mod", request.name));
-                if !file.is_file() || is_link(&file) {
+                if !file.is_file() || is_link(&file, source.strict_links) {
                     return problem(
                         kind,
                         PreviewProblemReason::Unresolved,
@@ -268,10 +275,15 @@ impl CatalogBrowser {
 /// The bytes of `name` in a `.kicad_symdir` (its file's entry, with the
 /// parents it extends) and the file's version.
 fn symdir_bytes(
-    folder: &std::path::Path,
+    source: &super::sources::Source,
     file: Option<&str>,
     name: &str,
+    file_of: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(Vec<u8>, Option<String>), String> {
+    let folder = &source.path;
+    let links = Links::Refuse {
+        strict: source.strict_links,
+    };
     let read = |file: &str| -> Result<
         (
             Vec<u8>,
@@ -282,7 +294,7 @@ fn symdir_bytes(
         if file.contains(['/', '\\']) || file.starts_with('.') {
             return Err(format!("{file} is not a plain file name."));
         }
-        let bytes = read_limited(&folder.join(file), MAX_SYMBOL_FILE_BYTES)?;
+        let bytes = read_limited(&folder.join(file), MAX_SYMBOL_FILE_BYTES, links)?;
         let summary = read_symbol_file(&bytes)
             .map_err(|error| format!("{file} could not be read: {error}."))?;
         Ok((bytes, summary))
@@ -296,10 +308,13 @@ fn symdir_bytes(
         .ok_or_else(|| format!("{name} is not in {file} any more."))?;
     let mut entries = vec![bytes[symbol.span.clone()].to_vec()];
     let mut parent = symbol.extends.clone();
-    // A parent lives in its own file, named after it.
+    // Each parent is in the file the index recorded for it.
     for _ in 0..8 {
         let Some(name) = parent.take() else { break };
-        let Ok((bytes, summary)) = read(&format!("{name}.kicad_sym")) else {
+        let Some(parent_file) = file_of(&name) else {
+            break;
+        };
+        let Ok((bytes, summary)) = read(&parent_file) else {
             break;
         };
         if let Some(found) = summary.symbols.iter().find(|symbol| symbol.name == name) {

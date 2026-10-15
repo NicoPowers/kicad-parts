@@ -190,6 +190,7 @@ fn open(fixture: &Fixture, config: Option<&Path>) -> CatalogBrowser {
         settings_file: fixture.root.join("settings.json"),
         kicad_locations: SearchLocations::Only(vec![fixture.install.clone()]),
         kicad_config_dir: config.map(Path::to_path_buf),
+        kicad_documents_dir: None,
     })
 }
 
@@ -473,7 +474,7 @@ fn marks_items_the_catalog_uses_and_lists_its_parts() {
 fn reads_a_library_again_only_when_it_changed() {
     let fixture = fixture();
     let browser = indexed(&fixture);
-    let cache = fixture.root.join("cache").join("library-index").join("v1");
+    let cache = cache_folder(&fixture);
     let files: Vec<PathBuf> = fs::read_dir(&cache)
         .unwrap()
         .flatten()
@@ -583,6 +584,7 @@ fn indexes_and_draws_kicads_own_libraries() {
             settings_file: dir.path().join("settings.json"),
             kicad_locations: SearchLocations::Standard,
             kicad_config_dir: Some(fixture.config.clone()),
+            kicad_documents_dir: None,
         })
     };
     let browser = open_real();
@@ -648,4 +650,147 @@ fn indexes_and_draws_kicads_own_libraries() {
         "Child",
     );
     assert!(child.installed_library && !child.images.is_empty());
+}
+
+#[test]
+fn ranks_names_and_keywords_before_descriptions() {
+    let fixture = fixture();
+    let symbol_with = |name: &str, description: &str, keywords: &str| {
+        format!(
+            "(symbol \"{name}\" (property \"Reference\" \"R\") (property \"Description\" \"{description}\") (property \"ki_keywords\" \"{keywords}\") (symbol \"{name}_1_1\" (pin passive line (number \"1\"))))"
+        )
+    };
+    write(
+        &fixture.share.join("symbols").join("Device.kicad_sym"),
+        &library(&[
+            symbol_with("Heater", "Heater, resistor wire", "heater"),
+            symbol_with("R_Small", "Resistor, small symbol", "R res resistor"),
+            symbol_with("R", "Resistor", "R res resistor"),
+            symbol_with("Thermistor", "Temperature dependent resistor", "thermistor"),
+            symbol_with("Varistor", "Voltage dependent", "varistor"),
+            symbol_with("Resistor_Bridge", "Bridge", "bridge"),
+        ]),
+    );
+    let browser = indexed(&fixture);
+    let mut search = request(PreviewKind::Symbol);
+    search.library = Some(key(LibraryGroup::Kicad, "Device"));
+    search.query = "resistor".into();
+    // A name starting with it, then keywords equal to it (shorter name
+    // first), then a description word starting with it.
+    assert_eq!(
+        names(&browser, &search),
+        [
+            "Device:Resistor_Bridge",
+            "Device:R",
+            "Device:R_Small",
+            "Device:Heater",
+            "Device:Thermistor",
+        ]
+    );
+    // A word of the name: "small" finds R_Small first.
+    search.query = "small".into();
+    assert_eq!(names(&browser, &search)[0], "Device:R_Small");
+}
+
+/// The one cache folder of the index.
+fn cache_folder(fixture: &Fixture) -> PathBuf {
+    let folders: Vec<PathBuf> = fs::read_dir(fixture.root.join("cache").join("library-index"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    folders[0].clone()
+}
+
+#[test]
+fn a_bad_file_is_skipped_and_the_rest_of_its_library_kept() {
+    let fixture = fixture();
+    let pretty = fixture.share.join("footprints").join("Resistor_SMD.pretty");
+    write(&pretty.join("Broken.kicad_mod"), "(footprint \"Broken\"");
+    write(&pretty.join("Other.kicad_mod"), "(kicad_symbol_lib)");
+    let symdir = fixture.mine.join("Mine.kicad_symdir");
+    write(
+        &symdir.join("Broken.kicad_sym"),
+        "(kicad_symbol_lib (symbol",
+    );
+    let browser = indexed(&fixture);
+    let view = browser.libraries(false);
+    let resistors = view
+        .footprints
+        .iter()
+        .find(|entry| entry.key.nickname == "Resistor_SMD")
+        .unwrap();
+    assert_eq!(resistors.items, Some(1));
+    assert_eq!(resistors.problem, None);
+    let note = resistors.note.as_deref().unwrap();
+    assert!(note.starts_with("2 files could not be read."), "{note}");
+    assert!(note.contains("Broken.kicad_mod"), "{note}");
+    let mine = view
+        .symbols
+        .iter()
+        .find(|entry| entry.key.nickname == "MySymbols")
+        .unwrap();
+    assert_eq!(mine.items, Some(2));
+    assert!(mine.note.as_deref().unwrap().contains("Broken.kicad_sym"));
+    // The cache keeps the note.
+    let again = indexed(&fixture);
+    let view = again.libraries(false);
+    let resistors = view
+        .footprints
+        .iter()
+        .find(|entry| entry.key.nickname == "Resistor_SMD")
+        .unwrap();
+    assert!(resistors.note.is_some());
+}
+
+#[test]
+fn says_when_kicads_settings_are_not_found() {
+    let fixture = fixture();
+    let missing = fixture.root.join("no-kicad-settings");
+    let browser = open(&fixture, Some(&missing));
+    browser.libraries(true);
+    assert!(browser.wait_for_libraries(WAIT));
+    let note = browser.libraries(false).installed_note.unwrap();
+    assert!(
+        note.contains("were not found at") && note.contains("no-kicad-settings"),
+        "{note}"
+    );
+    let none = open(&fixture, None);
+    none.libraries(true);
+    assert!(none.wait_for_libraries(WAIT));
+    assert!(
+        none.libraries(false)
+            .installed_note
+            .unwrap()
+            .contains("was not found")
+    );
+    // Settings with no other libraries say so too.
+    let empty = fixture.root.join("empty-settings");
+    fs::create_dir_all(&empty).unwrap();
+    let browser = open(&fixture, Some(&empty));
+    browser.libraries(true);
+    assert!(browser.wait_for_libraries(WAIT));
+    assert_eq!(
+        browser.libraries(false).installed_note.as_deref(),
+        Some("Your KiCad library tables add no other libraries.")
+    );
+    // With installed libraries there is no note.
+    assert_eq!(indexed(&fixture).libraries(false).installed_note, None);
+}
+
+#[test]
+fn removes_old_cache_layouts_and_left_over_temporary_files() {
+    let fixture = fixture();
+    let index = fixture.root.join("cache").join("library-index");
+    write(&index.join("v1").join("old.json"), "{}");
+    let browser = indexed(&fixture);
+    drop(browser);
+    let current = cache_folder(&fixture);
+    write(&current.join("abc.json.123.tmp"), "half");
+    let again = indexed(&fixture);
+    drop(again);
+    assert!(!index.join("v1").exists());
+    assert!(!current.join("abc.json.123.tmp").exists());
+    assert!(current.read_dir().unwrap().count() > 0);
 }

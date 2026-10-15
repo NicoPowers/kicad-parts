@@ -8,6 +8,16 @@
 //! - Installed: the other KiCad libraries in the person's library tables.
 //!   Rows pointing into KiCad's data folder or into our libraries are left
 //!   out (they are already listed), as are hidden and disabled rows.
+//!
+//! Finding them touches no installed library itself, so an offline network
+//! share cannot hold up opening the browser; the reader threads find out
+//! whether each one exists.
+//!
+//! Links: our libraries follow the library check's rule (no link or other
+//! reparse point anywhere). Elsewhere only symbolic links and junctions
+//! count as links, never followed inside a library, but the folder or
+//! file an installed library's row names may be one: the person chose it,
+//! and KiCad follows it.
 
 use desktop_contract::{LibraryGroup, LibraryKey, PreviewKind};
 use kicad_integration::lib_table::{
@@ -38,6 +48,8 @@ pub(crate) struct Source {
     pub format: Format,
     /// Why it cannot be read at all, such as a path variable with no value.
     pub problem: Option<String>,
+    /// Our libraries: refuse any reparse point, as the library check does.
+    pub strict_links: bool,
 }
 
 /// Where the libraries are.
@@ -51,6 +63,19 @@ pub(crate) struct Places {
     pub kicad_config: Option<PathBuf>,
     /// The process environment, for path variables.
     pub environment: BTreeMap<String, String>,
+    /// The person's Documents folder, for `KICAD10_3RD_PARTY`.
+    pub documents: Option<PathBuf>,
+}
+
+/// What [`find_sources`] found.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Found {
+    pub sources: Vec<Source>,
+    /// Things the person should know, such as a table that could not be read.
+    pub notes: Vec<String>,
+    /// Said in the Installed group when it lists nothing, such as KiCad's
+    /// settings not being found.
+    pub installed_note: Option<String>,
 }
 
 /// KiCad's version whose variables (`KICAD10_*`) are expanded.
@@ -58,16 +83,28 @@ const KICAD_MAJOR: u32 = kicad_integration::SUPPORTED_MAJOR;
 
 /// Every library, and notes for the person, in display order: symbols
 /// then footprints, each by group and then nickname.
-pub(crate) fn find_sources(places: &Places) -> (Vec<Source>, Vec<String>) {
+pub(crate) fn find_sources(places: &Places) -> Found {
     let mut sources = Vec::new();
     let mut notes = Vec::new();
     ours(&places.catalog_root, &mut sources);
     if let Some(share) = &places.share {
         kicad(share, &mut sources);
     }
-    if let Some(config) = &places.kicad_config {
-        installed(places, config, &mut sources, &mut notes);
-    }
+    let before = sources.len();
+    let installed_note = match &places.kicad_config {
+        Some(config) if config.is_dir() => {
+            installed(places, config, &mut sources, &mut notes);
+            (sources.len() == before)
+                .then(|| "Your KiCad library tables add no other libraries.".to_owned())
+        }
+        Some(config) => Some(format!(
+            "KiCad {KICAD_MAJOR}'s settings were not found at {}, so no installed libraries are listed.",
+            config.display()
+        )),
+        None => Some(format!(
+            "KiCad {KICAD_MAJOR}'s settings folder was not found, so no installed libraries are listed."
+        )),
+    };
     sources.sort_by(|a, b| {
         (a.kind as u8, a.key.group, a.key.nickname.to_lowercase()).cmp(&(
             b.kind as u8,
@@ -75,7 +112,11 @@ pub(crate) fn find_sources(places: &Places) -> (Vec<Source>, Vec<String>) {
             b.key.nickname.to_lowercase(),
         ))
     });
-    (sources, notes)
+    Found {
+        sources,
+        notes,
+        installed_note,
+    }
 }
 
 fn ours(root: &Path, sources: &mut Vec<Source>) {
@@ -84,10 +125,10 @@ fn ours(root: &Path, sources: &mut Vec<Source>) {
         (PreviewKind::Footprint, "footprints"),
     ] {
         let folder = root.join(folder);
-        if is_link(&folder) {
+        if is_link(&folder, true) {
             continue;
         }
-        for (path, name) in plain_entries(&folder) {
+        for (path, name) in plain_entries(&folder, true).0 {
             let found = match kind {
                 PreviewKind::Symbol => name
                     .strip_suffix(".kicad_sym")
@@ -113,6 +154,7 @@ fn ours(root: &Path, sources: &mut Vec<Source>) {
                 path,
                 format,
                 problem: None,
+                strict_links: true,
             });
         }
     }
@@ -136,7 +178,7 @@ fn kicad(share: &Path, sources: &mut Vec<Source>) {
                         .collect()
                 })
                 .unwrap_or_default();
-        for (path, name) in plain_entries(&share.join(folder)) {
+        for (path, name) in plain_entries(&share.join(folder), false).0 {
             let found = match kind {
                 PreviewKind::Symbol => name
                     .strip_suffix(".kicad_sym")
@@ -162,16 +204,14 @@ fn kicad(share: &Path, sources: &mut Vec<Source>) {
                 path,
                 format,
                 problem: None,
+                strict_links: false,
             });
         }
     }
 }
 
 fn installed(places: &Places, config: &Path, sources: &mut Vec<Source>, notes: &mut Vec<String>) {
-    let documents = ["USERPROFILE", "HOME"]
-        .iter()
-        .find_map(|name| places.environment.get(*name))
-        .map(|home| PathBuf::from(home).join("Documents"));
+    let documents = places.documents.clone();
     let (vars, problem) = PathVariables::for_kicad(&VariableSources {
         environment: places.environment.clone(),
         config_dir: Some(config.to_path_buf()),
@@ -209,9 +249,7 @@ fn installed(places: &Places, config: &Path, sources: &mut Vec<Source>, notes: &
                     if listed.iter().any(|folder| is_inside(&path, folder)) {
                         continue;
                     }
-                    let problem = (!path.exists())
-                        .then(|| format!("It was not found at {}.", path.display()));
-                    (path, problem)
+                    (path, None)
                 }
                 Err(why) => (
                     PathBuf::new(),
@@ -220,11 +258,11 @@ fn installed(places: &Places, config: &Path, sources: &mut Vec<Source>, notes: &
             };
             let format = match kind {
                 PreviewKind::Footprint => Format::Footprints,
+                // By its name only: the reader threads touch the library.
                 PreviewKind::Symbol
-                    if path.is_dir()
-                        || path
-                            .extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("kicad_symdir")) =>
+                    if path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("kicad_symdir")) =>
                 {
                     Format::SymbolFolder
                 }
@@ -240,6 +278,7 @@ fn installed(places: &Places, config: &Path, sources: &mut Vec<Source>, notes: &
                 path,
                 format,
                 problem,
+                strict_links: false,
             });
         }
     }
@@ -253,11 +292,16 @@ fn installed(places: &Places, config: &Path, sources: &mut Vec<Source>, notes: &
     }
 }
 
-/// Whether `path` is a link (never followed).
-pub(crate) fn is_link(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|metadata| {
-        metadata.file_type().is_symlink() || is_windows_reparse_point(&metadata)
-    })
+/// Whether `metadata` is a link: a symbolic link or junction, or, with
+/// `strict` (our libraries, as the library check reads them), any reparse
+/// point. OneDrive's online-only files are reparse points but not links.
+pub(crate) fn metadata_is_link(metadata: &fs::Metadata, strict: bool) -> bool {
+    metadata.file_type().is_symlink() || (strict && is_windows_reparse_point(metadata))
+}
+
+/// Whether `path` is a link (see [`metadata_is_link`]).
+pub(crate) fn is_link(path: &Path, strict: bool) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata_is_link(&metadata, strict))
 }
 
 #[cfg(windows)]
@@ -272,22 +316,28 @@ fn is_windows_reparse_point(_: &fs::Metadata) -> bool {
     false
 }
 
-/// The entries of `folder` that are not links, with their names; none if
-/// it cannot be read.
-pub(crate) fn plain_entries(folder: &Path) -> Vec<(PathBuf, String)> {
+/// The entries of `folder` that are not links (see [`metadata_is_link`]),
+/// with their names, and how many links were left out; none if it cannot
+/// be read.
+pub(crate) fn plain_entries(folder: &Path, strict: bool) -> (Vec<(PathBuf, String)>, usize) {
     let Ok(read) = fs::read_dir(folder) else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
-    read.flatten()
-        .filter(|entry| {
-            entry.file_type().is_ok_and(|kind| !kind.is_symlink())
-                && entry
-                    .metadata()
-                    .is_ok_and(|metadata| !is_windows_reparse_point(&metadata))
-        })
-        .filter_map(|entry| {
-            let name = entry.file_name().to_str()?.to_owned();
-            Some((entry.path(), name))
-        })
-        .collect()
+    let mut entries = Vec::new();
+    let mut links = 0;
+    for entry in read.flatten() {
+        // On Windows a directory entry's metadata describes the entry
+        // itself, never what a link points at.
+        if entry
+            .metadata()
+            .is_ok_and(|metadata| metadata_is_link(&metadata, strict))
+        {
+            links += 1;
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            entries.push((entry.path(), name.to_owned()));
+        }
+    }
+    (entries, links)
 }

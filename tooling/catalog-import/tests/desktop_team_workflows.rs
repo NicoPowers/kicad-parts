@@ -270,6 +270,7 @@ impl Team {
             settings_file: data.path().join("settings.json"),
             kicad_locations: SearchLocations::Standard,
             kicad_config_dir: None,
+            kicad_documents_dir: None,
         });
         Self {
             server,

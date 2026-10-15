@@ -1,10 +1,10 @@
 //! Searching and filtering the index in memory.
 //!
 //! A search matches every word typed against an item's name, description
-//! and keywords (ignoring case). Matches are ordered by how well the name
-//! matches (the same, starting with the first word, holding it, or only
-//! the description and keywords), then by group, library and name. Only
-//! the first `limit` rows are sent, with the count of every match.
+//! and keywords (ignoring case). Matches are ordered by [`rank`], then the
+//! shorter name, then group, library and name; without a search, by group,
+//! library and name. Only the first `limit` rows are sent, with the count
+//! of every match.
 
 use super::Library;
 use super::read::{FootprintItem, Items, SymbolItem};
@@ -68,8 +68,7 @@ pub(crate) fn items(
                 ),
             };
             if passes {
-                let name = text.split('\u{1f}').next().unwrap_or_default();
-                matches.push((rank(name, &query, &terms), at, index));
+                matches.push((rank(text, &query, &terms), at, index));
             }
         }
     }
@@ -92,7 +91,13 @@ pub(crate) fn items(
         )
     };
     let limit = request.limit.min(MAX_ROWS);
-    let key = |item: &(u8, usize, usize)| (item.0, name_of(item));
+    let searching = !terms.is_empty();
+    let key = |item: &(u8, usize, usize)| {
+        let (group, library, name) = name_of(item);
+        // While searching, a shorter name is the closer match.
+        let length = if searching { name.chars().count() } else { 0 };
+        (item.0, length, group, library, name)
+    };
     if matches.len() > limit {
         matches.select_nth_unstable_by_key(limit, key);
         matches.truncate(limit);
@@ -124,13 +129,39 @@ pub(crate) fn items(
     }
 }
 
-fn rank(name: &str, query: &str, terms: &[&str]) -> u8 {
-    match terms.first() {
-        None => 0,
-        Some(_) if name == query => 0,
-        Some(first) if name.starts_with(first) => 1,
-        Some(first) if name.contains(first) => 2,
-        Some(_) => 3,
+/// How well an item matches, lowest first: 0 the name is the search,
+/// 1 the name starts with it, 2 a word of the name (split at `_ - .` and
+/// spaces) starts with the first term, 3 a keyword is one of the terms,
+/// 4 a word of the description starts with a term, 5 anything else. `text`
+/// is the item's name, description and keywords, lower case, separated by
+/// `\u{1f}`.
+fn rank(text: &str, query: &str, terms: &[&str]) -> u8 {
+    let Some(first) = terms.first() else {
+        return 0;
+    };
+    let mut parts = text.split('\u{1f}');
+    let name = parts.next().unwrap_or_default();
+    let description = parts.next().unwrap_or_default();
+    let keywords = parts.next().unwrap_or_default();
+    let name_words = || name.split(['_', '-', '.', ' ']);
+    if name == query {
+        0
+    } else if name.starts_with(query) {
+        1
+    } else if name_words().any(|word| word.starts_with(first)) {
+        2
+    } else if keywords
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .any(|keyword| terms.contains(&keyword))
+    {
+        3
+    } else if description
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| terms.iter().any(|term| word.starts_with(term)))
+    {
+        4
+    } else {
+        5
     }
 }
 

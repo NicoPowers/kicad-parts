@@ -50,6 +50,8 @@ pub struct BrowserConfig {
     /// as `%APPDATA%\kicad\10.0`), read only; `None` lists no installed
     /// libraries. Tests pass a folder of fixture tables or `None`.
     pub kicad_config_dir: Option<PathBuf>,
+    /// The person's Documents folder, for KiCad's `KICAD10_3RD_PARTY`.
+    pub kicad_documents_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

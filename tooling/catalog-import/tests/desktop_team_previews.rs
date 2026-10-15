@@ -52,6 +52,7 @@ fn open_browser(catalog_root: &Path, data: &Path) -> CatalogBrowser {
         settings_file: data.join("config").join("settings.json"),
         kicad_locations: SearchLocations::Standard,
         kicad_config_dir: None,
+        kicad_documents_dir: None,
     })
 }
 

@@ -19,6 +19,7 @@ use desktop_contract::{LibrariesView, LibraryEntry, LibraryKey, PreviewKind};
 use read::Loaded;
 use sources::{Places, Source, find_sources};
 use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
@@ -41,6 +42,9 @@ pub(crate) struct Library {
 struct State {
     libraries: Vec<Library>,
     notes: Vec<String>,
+    installed_note: Option<String>,
+    /// Whether old cache layouts were removed this run.
+    cleaned: bool,
     /// Places in `libraries` still to check, the next first.
     queue: VecDeque<usize>,
     /// Bumped by every refresh, so readers of an older one stop.
@@ -83,11 +87,17 @@ impl LibraryIndex {
         if self.lock().readers > 0 {
             return;
         }
-        let (sources, notes) = find_sources(places);
+        let found = find_sources(places);
+        let (sources, notes) = (found.sources, found.notes);
         let mut state = self.lock();
         if state.readers > 0 {
             return;
         }
+        if !state.cleaned {
+            state.cleaned = true;
+            read::clean_cache(&self.shared.cache_dir);
+        }
+        state.installed_note = found.installed_note;
         let old = std::mem::take(&mut state.libraries);
         state.libraries = sources
             .into_iter()
@@ -153,6 +163,10 @@ impl LibraryIndex {
             description: library.source.description.clone(),
             items: library.loaded.as_ref().map(|loaded| loaded.items.len()),
             problem: library.problem.clone(),
+            note: library
+                .loaded
+                .as_ref()
+                .and_then(|loaded| skipped_note(&loaded.skipped)),
         };
         let of_kind = |kind: PreviewKind| {
             state
@@ -172,6 +186,7 @@ impl LibraryIndex {
                 .count(),
             total: state.libraries.len(),
             notes: state.notes.clone(),
+            installed_note: state.installed_note.clone(),
         }
     }
 
@@ -204,8 +219,41 @@ impl LibraryIndex {
     }
 }
 
+/// What a library's skipped files say, such as "3 files could not be
+/// read. ..." with the first reasons; `None` when nothing was skipped.
+fn skipped_note(skipped: &[String]) -> Option<String> {
+    match skipped {
+        [] => None,
+        [only] => Some(only.clone()),
+        many => {
+            let first: Vec<&str> = many.iter().take(3).map(String::as_str).collect();
+            let more = if many.len() > 3 { " ..." } else { "" };
+            Some(format!(
+                "{} files could not be read. {}{more}",
+                many.len(),
+                first.join(" ")
+            ))
+        }
+    }
+}
+
+/// Lowers the count of running readers when a reader thread ends, even
+/// by a panic, so the index never waits for a reader that is gone.
+struct ReaderDone<'a>(&'a Shared);
+
+impl Drop for ReaderDone<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.readers = state.readers.saturating_sub(1);
+        drop(state);
+        self.0.progress.notify_all();
+    }
+}
+
 /// One reader thread: takes the next waiting library until none is left.
+/// A library whose reading panics is marked as not read.
 fn read_libraries(shared: &Shared, generation: u64) {
+    let _done = ReaderDone(shared);
     loop {
         let (at, source, known) = {
             let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -213,15 +261,20 @@ fn read_libraries(shared: &Shared, generation: u64) {
                 .then(|| state.queue.pop_front())
                 .flatten();
             let Some(at) = next else {
-                state.readers = state.readers.saturating_sub(1);
-                drop(state);
-                shared.progress.notify_all();
                 return;
             };
             let library = &state.libraries[at];
             (at, library.source.clone(), library.loaded.clone())
         };
-        let result = read::load(&source, known.as_ref(), &shared.cache_dir);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            read::load(&source, known.as_ref(), &shared.cache_dir)
+        }))
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "{} could not be read: reading it failed unexpectedly.",
+                source.path.display()
+            ))
+        });
         let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.generation == generation {
             let library = &mut state.libraries[at];
@@ -239,5 +292,48 @@ fn read_libraries(shared: &Shared, generation: u64) {
         }
         drop(state);
         shared.progress.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reader_that_panics_still_counts_as_ended() {
+        let shared = Arc::new(Shared {
+            cache_dir: PathBuf::new(),
+            state: Mutex::new(State {
+                readers: 1,
+                ..State::default()
+            }),
+            progress: Condvar::new(),
+        });
+        let reader = shared.clone();
+        let ended = std::thread::spawn(move || {
+            let _done = ReaderDone(&reader);
+            panic!("a reader failed");
+        })
+        .join();
+        assert!(ended.is_err());
+        assert_eq!(shared.state.lock().unwrap().readers, 0);
+    }
+
+    #[test]
+    fn skipped_files_are_counted_with_the_first_reasons() {
+        assert_eq!(skipped_note(&[]), None);
+        assert_eq!(
+            skipped_note(&["a.kicad_mod could not be read.".into()]).as_deref(),
+            Some("a.kicad_mod could not be read.")
+        );
+        let many: Vec<String> = (1..=5)
+            .map(|n| format!("{n}.kicad_mod could not be read."))
+            .collect();
+        assert_eq!(
+            skipped_note(&many).as_deref(),
+            Some(
+                "5 files could not be read. 1.kicad_mod could not be read. 2.kicad_mod could not be read. 3.kicad_mod could not be read. ..."
+            )
+        );
     }
 }

@@ -1,12 +1,15 @@
 //! Reads one library into the index, with the library check's safety: no
 //! link inside a library is followed, files over a size limit are refused,
-//! and so is a file nested too deeply. What was read is cached on disk,
-//! one file per library, with the library's fingerprint (sizes and
+//! and so is a file nested too deeply. In a folder library a file that
+//! cannot be read is skipped and the rest is kept, as KiCad does; the
+//! library then says how many were skipped. What was read is cached on
+//! disk, one file per library, with the library's fingerprint (sizes and
 //! modification times), so it is read again only when it changed.
 
 use super::sources::{Format, Source, plain_entries};
 use kicad_integration::library_summary::{
-    Mount, SymbolSummary, inherit_from_parents, read_footprint_file, read_symbol_file,
+    Mount, SUMMARY_VERSION, SymbolSummary, inherit_from_parents, read_footprint_file,
+    read_symbol_file,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,8 +24,11 @@ pub(crate) const MAX_FOOTPRINT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// The most files read from one library folder.
 pub(crate) const MAX_FILES: usize = 50_000;
 
-/// Bumped whenever what is cached changes shape or meaning.
-const CACHE_LAYOUT: &str = "v1";
+/// The cache folder's name: bumped whenever what is cached changes shape,
+/// and whenever the readers change what they return ([`SUMMARY_VERSION`]).
+fn cache_layout() -> String {
+    format!("v2-summary{SUMMARY_VERSION}")
+}
 
 /// One symbol, as the browser lists and filters it.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -74,13 +80,22 @@ impl Items {
 pub(crate) struct Loaded {
     pub fingerprint: String,
     pub items: Items,
+    /// Why files of a folder library were skipped, one line each.
+    pub skipped: Vec<String>,
     /// Per item, its name, description and keywords in lower case,
     /// separated by a character no search term holds.
     pub search: Vec<String>,
 }
 
+/// What reading a library gave.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct Read {
+    pub items: Option<Items>,
+    pub skipped: Vec<String>,
+}
+
 impl Loaded {
-    fn new(fingerprint: String, items: Items) -> Self {
+    fn new(fingerprint: String, items: Items, skipped: Vec<String>) -> Self {
         let text = |parts: [&str; 3]| {
             parts
                 .iter()
@@ -101,6 +116,7 @@ impl Loaded {
         Self {
             fingerprint,
             items,
+            skipped,
             search,
         }
     }
@@ -117,6 +133,11 @@ pub(crate) fn fingerprint(source: &Source) -> Result<String, String> {
             .map_or(0, |time| time.as_nanos());
         format!("{}:{modified}", metadata.len())
     };
+    // The reader threads, not the browser's opening, find out whether an
+    // installed library is there (it may be on a network share).
+    if !source.path.exists() {
+        return Err(format!("It was not found at {}.", source.path.display()));
+    }
     match source.format {
         Format::SymbolFile => {
             let metadata = fs::metadata(&source.path).map_err(|error| {
@@ -128,7 +149,8 @@ pub(crate) fn fingerprint(source: &Source) -> Result<String, String> {
             if !source.path.is_dir() {
                 return Err(format!("{} is not a folder.", source.path.display()));
             }
-            let mut lines: Vec<String> = plain_entries(&source.path)
+            let mut lines: Vec<String> = plain_entries(&source.path, source.strict_links)
+                .0
                 .into_iter()
                 .filter(|(_, name)| wanted_file(source.format, name))
                 .filter_map(|(path, name)| {
@@ -167,61 +189,115 @@ pub(crate) fn load(
         return Ok(known.clone());
     }
     let file = cache_file(cache_dir, source);
-    if let Some(items) = read_cache(&file, source, &fingerprint) {
-        return Ok(std::sync::Arc::new(Loaded::new(fingerprint, items)));
+    if let Some(read) = read_cache(&file, source, &fingerprint) {
+        if let Some(items) = read.items {
+            return Ok(std::sync::Arc::new(Loaded::new(
+                fingerprint,
+                items,
+                read.skipped,
+            )));
+        }
     }
-    let items = read_library(source)?;
-    write_cache(&file, source, &fingerprint, &items);
-    Ok(std::sync::Arc::new(Loaded::new(fingerprint, items)))
+    let read = read_library(source)?;
+    write_cache(&file, source, &fingerprint, &read);
+    let items = read.items.unwrap_or(Items::Symbols(Vec::new()));
+    Ok(std::sync::Arc::new(Loaded::new(
+        fingerprint,
+        items,
+        read.skipped,
+    )))
 }
 
-/// Reads every item of a library.
-pub(crate) fn read_library(source: &Source) -> Result<Items, String> {
+/// How [`read_limited`] treats a link.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Links {
+    /// The library's own file, which an installed library's row may name
+    /// through a link.
+    Follow,
+    /// A file inside a library; `strict` for our libraries.
+    Refuse { strict: bool },
+}
+
+/// Reads every item of a library. A folder library keeps what it can read
+/// and lists the files it skipped.
+pub(crate) fn read_library(source: &Source) -> Result<Read, String> {
     match source.format {
         Format::SymbolFile => {
-            let bytes = read_limited(&source.path, MAX_SYMBOL_FILE_BYTES)?;
+            let links = if source.strict_links {
+                Links::Refuse { strict: true }
+            } else {
+                Links::Follow
+            };
+            let bytes = read_limited(&source.path, MAX_SYMBOL_FILE_BYTES, links)?;
             let summary = read_symbol_file(&bytes).map_err(|error| {
                 format!("{} could not be read: {error}.", source.path.display())
             })?;
-            Ok(Items::Symbols(
-                summary
-                    .symbols
-                    .into_iter()
-                    .map(|symbol| symbol_item(symbol, None))
-                    .collect(),
-            ))
-        }
-        Format::SymbolFolder => {
-            let mut symbols: Vec<(SymbolSummary, String)> = Vec::new();
-            for (path, name) in folder_files(source)? {
-                let bytes = read_limited(&path, MAX_SYMBOL_FILE_BYTES)?;
-                let summary = read_symbol_file(&bytes)
-                    .map_err(|error| format!("{} could not be read: {error}.", path.display()))?;
-                symbols.extend(
+            Ok(Read {
+                items: Some(Items::Symbols(
                     summary
                         .symbols
                         .into_iter()
-                        .map(|symbol| (symbol, name.clone())),
-                );
+                        .map(|symbol| symbol_item(symbol, None))
+                        .collect(),
+                )),
+                skipped: Vec::new(),
+            })
+        }
+        Format::SymbolFolder => {
+            let (files, mut skipped) = folder_files(source)?;
+            let links = Links::Refuse {
+                strict: source.strict_links,
+            };
+            let mut symbols: Vec<(SymbolSummary, String)> = Vec::new();
+            for (path, name) in files {
+                let summary = read_limited(&path, MAX_SYMBOL_FILE_BYTES, links).and_then(|bytes| {
+                    read_symbol_file(&bytes)
+                        .map_err(|error| format!("{name} could not be read: {error}."))
+                });
+                match summary {
+                    Ok(summary) => symbols.extend(
+                        summary
+                            .symbols
+                            .into_iter()
+                            .map(|symbol| (symbol, name.clone())),
+                    ),
+                    Err(why) => skipped.push(why),
+                }
             }
             // A derived symbol's parent is in another file of the folder.
             let (mut summaries, files): (Vec<SymbolSummary>, Vec<String>) =
                 symbols.into_iter().unzip();
             inherit_from_parents(&mut summaries);
-            Ok(Items::Symbols(
-                summaries
-                    .into_iter()
-                    .zip(files)
-                    .map(|(symbol, file)| symbol_item(symbol, Some(file)))
-                    .collect(),
-            ))
+            Ok(Read {
+                items: Some(Items::Symbols(
+                    summaries
+                        .into_iter()
+                        .zip(files)
+                        .map(|(symbol, file)| symbol_item(symbol, Some(file)))
+                        .collect(),
+                )),
+                skipped,
+            })
         }
         Format::Footprints => {
+            let (files, mut skipped) = folder_files(source)?;
+            let links = Links::Refuse {
+                strict: source.strict_links,
+            };
             let mut footprints = Vec::new();
-            for (path, name) in folder_files(source)? {
-                let bytes = read_limited(&path, MAX_FOOTPRINT_FILE_BYTES)?;
-                let summary = read_footprint_file(&bytes)
-                    .map_err(|error| format!("{} could not be read: {error}.", path.display()))?;
+            for (path, name) in files {
+                let summary =
+                    read_limited(&path, MAX_FOOTPRINT_FILE_BYTES, links).and_then(|bytes| {
+                        read_footprint_file(&bytes)
+                            .map_err(|error| format!("{name} could not be read: {error}."))
+                    });
+                let summary = match summary {
+                    Ok(summary) => summary,
+                    Err(why) => {
+                        skipped.push(why);
+                        continue;
+                    }
+                };
                 footprints.push(FootprintItem {
                     // KiCad names a footprint by its file.
                     name: name.trim_end_matches(".kicad_mod").to_owned(),
@@ -237,7 +313,10 @@ pub(crate) fn read_library(source: &Source) -> Result<Items, String> {
                     model: summary.model,
                 });
             }
-            Ok(Items::Footprints(footprints))
+            Ok(Read {
+                items: Some(Items::Footprints(footprints)),
+                skipped,
+            })
         }
     }
 }
@@ -256,13 +335,17 @@ fn symbol_item(symbol: SymbolSummary, file: Option<String>) -> SymbolItem {
     }
 }
 
-/// The library files of a folder library, in name order; links are left
-/// out.
-fn folder_files(source: &Source) -> Result<Vec<(PathBuf, String)>, String> {
+/// The library files of a folder library, in name order, and a line for
+/// the links left out (never followed).
+/// A folder library's files (path and name) and why others were skipped.
+type FolderFiles = (Vec<(PathBuf, String)>, Vec<String>);
+
+fn folder_files(source: &Source) -> Result<FolderFiles, String> {
     if !source.path.is_dir() {
         return Err(format!("{} is not a folder.", source.path.display()));
     }
-    let mut files: Vec<(PathBuf, String)> = plain_entries(&source.path)
+    let (entries, links) = plain_entries(&source.path, source.strict_links);
+    let mut files: Vec<(PathBuf, String)> = entries
         .into_iter()
         .filter(|(_, name)| wanted_file(source.format, name))
         .collect();
@@ -273,37 +356,75 @@ fn folder_files(source: &Source) -> Result<Vec<(PathBuf, String)>, String> {
         ));
     }
     files.sort_by(|a, b| a.1.cmp(&b.1));
-    Ok(files)
+    let skipped = match links {
+        0 => Vec::new(),
+        1 => vec!["1 link in it was not followed.".to_owned()],
+        n => vec![format!("{n} links in it were not followed.")],
+    };
+    Ok((files, skipped))
 }
 
-/// A file's bytes, refusing a link or one larger than `limit`.
-pub(crate) fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("{} could not be read: {error}.", path.display()))?;
-    if !metadata.is_file() || super::sources::is_link(path) {
-        return Err(format!(
-            "{} is not a file (links are not followed).",
-            path.display()
-        ));
+/// A file's bytes, refusing one larger than `limit` and, unless `links`
+/// says to follow, a link.
+pub(crate) fn read_limited(path: &Path, limit: u64, links: Links) -> Result<Vec<u8>, String> {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let metadata = match links {
+        Links::Follow => fs::metadata(path),
+        Links::Refuse { .. } => fs::symlink_metadata(path),
+    }
+    .map_err(|error| format!("{name} could not be read: {error}."))?;
+    if let Links::Refuse { strict } = links {
+        if super::sources::metadata_is_link(&metadata, strict) {
+            return Err(format!("{name} is a link, which is not followed."));
+        }
+    }
+    if !metadata.is_file() {
+        return Err(format!("{name} is not a file."));
     }
     if metadata.len() > limit {
         return Err(format!(
-            "{} is larger than {} MB, so it was not read.",
-            path.display(),
+            "{name} is larger than {} MB, so it was not read.",
             limit / (1024 * 1024)
         ));
     }
-    fs::read(path).map_err(|error| format!("{} could not be read: {error}.", path.display()))
+    fs::read(path).map_err(|error| format!("{name} could not be read: {error}."))
+}
+
+/// Removes cache folders of other layouts and temporary files a crash left
+/// behind. Run when the index starts.
+pub(crate) fn clean_cache(cache_dir: &Path) {
+    let root = cache_dir.join("library-index");
+    let current = cache_layout();
+    let Ok(entries) = fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name().to_string_lossy() != current {
+            if path.is_dir() {
+                let _ = fs::remove_dir_all(&path);
+            }
+            continue;
+        }
+        for file in fs::read_dir(&path).into_iter().flatten().flatten() {
+            if file.file_name().to_string_lossy().ends_with(".tmp") {
+                let _ = fs::remove_file(file.path());
+            }
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
 struct Cached {
     path: String,
     fingerprint: String,
-    items: Items,
+    read: Read,
 }
 
-/// `<cache>/library-index/v1/<sha256 of what the library is>.json`.
+/// `<cache>/library-index/<layout>/<sha256 of what the library is>.json`.
 pub(crate) fn cache_file(cache_dir: &Path, source: &Source) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(format!(
@@ -315,20 +436,20 @@ pub(crate) fn cache_file(cache_dir: &Path, source: &Source) -> PathBuf {
     ));
     cache_dir
         .join("library-index")
-        .join(CACHE_LAYOUT)
+        .join(cache_layout())
         .join(format!("{:x}.json", hasher.finalize()))
 }
 
-fn read_cache(file: &Path, source: &Source, fingerprint: &str) -> Option<Items> {
+fn read_cache(file: &Path, source: &Source, fingerprint: &str) -> Option<Read> {
     let bytes = fs::read(file).ok()?;
     let cached: Cached = serde_json::from_slice(&bytes).ok()?;
     (cached.fingerprint == fingerprint && cached.path == source.path.display().to_string())
-        .then_some(cached.items)
+        .then_some(cached.read)
 }
 
 /// Writes the cache file through a temporary file, so a crash never
 /// leaves half a file. A cache that cannot be written is only slower.
-fn write_cache(file: &Path, source: &Source, fingerprint: &str, items: &Items) {
+fn write_cache(file: &Path, source: &Source, fingerprint: &str, read: &Read) {
     let Some(folder) = file.parent() else {
         return;
     };
@@ -338,7 +459,7 @@ fn write_cache(file: &Path, source: &Source, fingerprint: &str, items: &Items) {
     let cached = Cached {
         path: source.path.display().to_string(),
         fingerprint: fingerprint.to_owned(),
-        items: items.clone(),
+        read: read.clone(),
     };
     let Ok(bytes) = serde_json::to_vec(&cached) else {
         return;
