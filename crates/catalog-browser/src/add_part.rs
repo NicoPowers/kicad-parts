@@ -976,23 +976,15 @@ mod tests {
     }
 
     fn copied(name: &str, links: &[&str], choice: Option<usize>, library: &str) -> TeamFile {
-        let models: String = links
-            .iter()
-            .map(|link| {
-                format!(
-                    "	(model \"{link}\")
-"
-                )
-            })
-            .collect();
-        let text = format!(
-            "(footprint \"{name}\"
-	(version 20240108)
-	(attr smd)
-	(pad \"1\" smd rect (at 0 0) (size 1 1) (layers \"F.Cu\"))
-{models})
-"
+        let mut text = format!(
+            "(footprint \"{name}\"\n\t(version 20240108)\n\t(attr smd)\n\t(pad \"1\" smd rect (at 0 0) (size 1 1) (layers \"F.Cu\"))\n"
         );
+        for link in links {
+            text.push_str("\t(model \"");
+            text.push_str(link);
+            text.push_str("\")\n");
+        }
+        text.push_str(")\n");
         TeamFile {
             kind: FileKind::Footprint,
             file_name: format!("{name}.kicad_mod"),
