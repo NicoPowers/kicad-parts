@@ -1,11 +1,12 @@
 //! Calls into the Tauri shell. Payload shapes come from `desktop-contract`.
 
 use desktop_contract::{
-    AppStatus, FilePreviewRequest, LibraryCheckView, PartDetail, PreviewOutcome, PreviewRequest,
-    PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest,
-    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
-    TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
-    TeamSameMpn, TeamStatus, command,
+    AppStatus, FilePreviewRequest, LibrariesView, LibraryCheckView, LibraryItemDetail,
+    LibraryItemRequest, LibraryItems, LibraryItemsRequest, PartDetail, PreviewOutcome,
+    PreviewRequest, PublishResult, SearchRequest, SearchResponse, SignInRequest,
+    TeamArchiveRequest, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest,
+    TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest,
+    TeamNewPartRequest, TeamPart, TeamSameMpn, TeamStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -219,4 +220,42 @@ pub async fn team_check_mpn(mpn: String, manufacturer: String) -> Result<Vec<Tea
 /// changed.
 pub async fn team_library_check() -> Result<Option<LibraryCheckView>, String> {
     call(command::TEAM_LIBRARY_CHECK, &NoArgs {}).await
+}
+
+#[derive(Serialize)]
+struct LibrariesArgs {
+    refresh: bool,
+}
+
+#[derive(Serialize)]
+struct LibraryItemsArgs {
+    request: LibraryItemsRequest,
+}
+
+#[derive(Serialize)]
+struct LibraryItemArgs {
+    request: LibraryItemRequest,
+}
+
+/// The Libraries browser's libraries and reading progress; `refresh`
+/// checks every library again in the background.
+pub async fn libraries(refresh: bool) -> Result<LibrariesView, String> {
+    call(command::LIBRARIES, &LibrariesArgs { refresh }).await
+}
+
+/// The browser's list of symbols or footprints.
+pub async fn library_items(request: LibraryItemsRequest) -> Result<LibraryItems, String> {
+    call(command::LIBRARY_ITEMS, &LibraryItemsArgs { request }).await
+}
+
+/// One library item's details.
+pub async fn library_item(
+    request: LibraryItemRequest,
+) -> Result<Option<LibraryItemDetail>, String> {
+    call(command::LIBRARY_ITEM, &LibraryItemArgs { request }).await
+}
+
+/// One library item's drawing.
+pub async fn library_preview(request: LibraryItemRequest) -> Result<PreviewOutcome, String> {
+    call(command::LIBRARY_PREVIEW, &LibraryItemArgs { request }).await
 }

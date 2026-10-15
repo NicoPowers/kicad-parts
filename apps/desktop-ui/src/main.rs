@@ -5,6 +5,7 @@
 
 mod add_part;
 mod backend;
+mod libraries;
 mod library_check;
 mod part_list;
 mod team;
@@ -17,6 +18,7 @@ use desktop_contract::{
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use libraries::{BrowseFor, BrowserActions, LibrariesDialog};
 use library_check::{LibraryCheckLine, LibraryCheckPanel};
 use part_list::{ResultList, SEARCH_ROWS, Searched};
 use std::time::Duration;
@@ -73,6 +75,10 @@ fn App() -> impl IntoView {
     });
     // True while the Library check view is open in the part panel.
     let checking = RwSignal::new(false);
+    // The Libraries browser, while it is open, and what it is open for.
+    let libraries_open = RwSignal::new(None::<BrowseFor>);
+    // The browser's Add part from it, for the part panel to start.
+    let library_add = RwSignal::new(None::<desktop_contract::TeamLibraryChoice>);
     Effect::new(move |_| {
         if !can_add.get() {
             adding.set(false);
@@ -219,6 +225,14 @@ fn App() -> impl IntoView {
             <header class="topbar">
                 <h1 class="brand">"KiCad Parts"</h1>
                 <CatalogBadge status=status />
+                <button
+                    type="button"
+                    id="libraries-open"
+                    class="libraries-open"
+                    on:click=move |_| libraries_open.set(Some(BrowseFor::default()))
+                >
+                    "Libraries"
+                </button>
                 <TeamBadge team=team_badge set_team=team />
                 <KicadBadge status=status kicad_epoch=kicad_epoch override_input=override_input />
             </header>
@@ -275,8 +289,28 @@ fn App() -> impl IntoView {
                     adding=adding
                     checking=checking
                     library_check=library_check
+                    library_add=library_add
                 />
             </main>
+            {move || libraries_open.with(Option::is_some).then(|| view! {
+                <LibrariesDialog
+                    open=libraries_open
+                    library_check=library_check
+                    actions=BrowserActions {
+                        can_add,
+                        add_from: Callback::new(move |choice| library_add.set(Some(choice))),
+                        show_parts: Callback::new(move |reference: String| {
+                            query.set(reference);
+                            team::focus_later("part-search");
+                        }),
+                        open_part: Callback::new(move |ipn: String| {
+                            checking.set(false);
+                            adding.set(false);
+                            selected.set(Some(ipn));
+                        }),
+                    }
+                />
+            })}
         </div>
     }
 }
@@ -582,6 +616,8 @@ fn PartPanel(
     adding: RwSignal<bool>,
     checking: RwSignal<bool>,
     library_check: RwSignal<Option<LibraryCheckView>>,
+    /// Add part from it, chosen in the Libraries browser.
+    library_add: RwSignal<Option<desktop_contract::TeamLibraryChoice>>,
 ) -> impl IntoView {
     let detail = RwSignal::new(None::<Load<Option<PartDetail>>>);
     let symbol = RwSignal::new(Load::<PreviewOutcome>::Loading);
@@ -827,6 +863,13 @@ fn PartPanel(
         add_form.start_from_library(choice);
         checking.set(false);
         adding.set(true);
+    });
+    // The Libraries browser's Add part from it.
+    Effect::new(move |_| {
+        if let Some(choice) = library_add.get() {
+            library_add.set(None);
+            add_from.run(choice);
+        }
     });
     let open_part = Callback::new(move |(ipn, part): (String, Option<ManufacturerPart>)| {
         pending_part.set_value(part.map(|part| (ipn.clone(), part)));
@@ -1098,9 +1141,16 @@ fn kind_title(kind: PreviewKind) -> &'static str {
 }
 
 #[component]
-fn PreviewSection(kind: PreviewKind, state: RwSignal<Load<PreviewOutcome>>) -> impl IntoView {
+fn PreviewSection(
+    kind: PreviewKind,
+    state: RwSignal<Load<PreviewOutcome>>,
+    /// Put before every id, so a second drawing on the page (the Libraries
+    /// browser's) has ids of its own.
+    #[prop(optional)]
+    id_prefix: &'static str,
+) -> impl IntoView {
     let title = kind_title(kind);
-    let heading_id = format!("{}-heading", title.to_lowercase());
+    let heading_id = format!("{id_prefix}{}-heading", title.to_lowercase());
     let labelled_by = heading_id.clone();
     view! {
         <section class="preview" aria-labelledby=labelled_by>
@@ -1116,7 +1166,7 @@ fn PreviewSection(kind: PreviewKind, state: RwSignal<Load<PreviewOutcome>>) -> i
                     <div class="problem" role="alert"><p>{error}</p></div>
                 }
                 .into_any(),
-                Load::Ready(PreviewOutcome::Ready(set)) => view! { <PreviewImages set=set /> }.into_any(),
+                Load::Ready(PreviewOutcome::Ready(set)) => view! { <PreviewImages set=set id_prefix=id_prefix /> }.into_any(),
                 Load::Ready(PreviewOutcome::Problem(problem)) => {
                     view! { <PreviewProblemView problem=problem /> }.into_any()
                 }
@@ -1126,7 +1176,7 @@ fn PreviewSection(kind: PreviewKind, state: RwSignal<Load<PreviewOutcome>>) -> i
 }
 
 #[component]
-fn PreviewImages(set: PreviewSet) -> impl IntoView {
+fn PreviewImages(set: PreviewSet, #[prop(optional)] id_prefix: &'static str) -> impl IntoView {
     let title = kind_title(set.kind);
     let total = set.images.len();
     let units = {
@@ -1141,6 +1191,7 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
             PreviewKind::Footprint => format!("team catalog, footprint revision {number}"),
         },
         None if set.from_kicad_bundle => "KiCad library".to_owned(),
+        None if set.installed_library => "installed library".to_owned(),
         None => "project library".to_owned(),
     };
     // Hovering shows the library file, or the stored bytes' SHA-256.
@@ -1254,7 +1305,7 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
         <dialog
             node_ref=dialog
             class="zoom-dialog"
-            aria-labelledby=format!("{}-zoom-title", title.to_lowercase())
+            aria-labelledby=format!("{id_prefix}{}-zoom-title", title.to_lowercase())
             on:pointerdown=move |event| pressed_outside.set_value(outside(&event))
             on:click=move |event| {
                 if pressed_outside.get_value() && outside(&event) {
@@ -1266,7 +1317,7 @@ fn PreviewImages(set: PreviewSet) -> impl IntoView {
             }
         >
             <form method="dialog" class="zoom-header">
-                <h4 id=format!("{}-zoom-title", title.to_lowercase())>
+                <h4 id=format!("{id_prefix}{}-zoom-title", title.to_lowercase())>
                     {move || zoomed.get().map(|(_, alt)| alt).unwrap_or_default()}
                 </h4>
                 <button type="submit" class="primary">"Close"</button>

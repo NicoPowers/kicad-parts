@@ -133,6 +133,12 @@ export function installedKicadCli() {
  */
 export async function launchApp({ args = [], dataDir = tempDir('data') } = {}) {
   assert.ok(fs.existsSync(appBinary), `build the app first: ${appBinary}`);
+  // The Libraries browser reads KiCad's settings folder for the person's
+  // library tables; journeys never read the developer's own, so each
+  // launch gets an empty folder unless the journey passes fixture tables.
+  if (!args.some((arg) => arg.startsWith('--kicad-config-dir='))) {
+    args = [...args, `--kicad-config-dir=${tempDir('kicad-config')}`];
+  }
   const browser = await remote({
     hostname: '127.0.0.1',
     port: driverPort,
