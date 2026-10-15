@@ -266,7 +266,7 @@ impl CatalogBrowser {
                             footprint: Some(item.reference.clone()),
                         },
                     };
-                    let plan = self.library_plan(&choice, false, team)?;
+                    let plan = self.library_plan(&choice, team)?;
                     let (problems, findings) = plan.said();
                     pick.problems = problems;
                     pick.notes.push(
@@ -525,7 +525,7 @@ impl CatalogBrowser {
             if !in_folder || team.has_cad_item(*kind, reference)? {
                 continue;
             }
-            let plan = self.library_plan(&choice, false, team)?;
+            let plan = self.library_plan(&choice, team)?;
             for upload in plan.uploads()? {
                 let sent = uploads
                     .iter()

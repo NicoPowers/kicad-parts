@@ -146,7 +146,6 @@ fn request(zip: &[u8], name: &str) -> TeamDownloadRequest {
         symbol: None,
         footprint: None,
         without_models: false,
-        library: None,
         picks: Vec::new(),
     }
 }
@@ -189,7 +188,6 @@ fn new_part(reading: &TeamDownload, ipn: &str, category: &str) -> TeamNewPartReq
         files,
         from: reading.from.clone(),
         downloads: vec!["download.zip".into()],
-        library: None,
     }
 }
 

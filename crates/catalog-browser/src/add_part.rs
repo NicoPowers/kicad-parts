@@ -124,9 +124,6 @@ struct SymbolChoice<'a> {
 pub(crate) enum Origin<'a> {
     /// A download the engineer chose.
     Download,
-    /// Our libraries (kicad-parts-37a7): the footprint chosen there, by
-    /// reference, which is never a near-copy of itself.
-    Library { footprint: &'a str },
     /// A symbol, a footprint or both chosen in the Libraries browser
     /// (kicad-parts-bc6f), the rest from a download if any: whether the
     /// symbol was chosen, and the chosen footprint by reference.
@@ -145,10 +142,7 @@ impl<'a> Origin<'a> {
 
     /// Whether the symbol was chosen in a library rather than downloaded.
     fn symbol_chosen(self) -> bool {
-        matches!(
-            self,
-            Self::Library { .. } | Self::Picked { symbol: true, .. }
-        )
+        matches!(self, Self::Picked { symbol: true, .. })
     }
 
     /// The footprint chosen in a library, by reference: never a near-copy
@@ -156,7 +150,6 @@ impl<'a> Origin<'a> {
     fn footprint_chosen(self) -> Option<&'a str> {
         match self {
             Self::Download => None,
-            Self::Library { footprint } => Some(footprint),
             Self::Picked { footprint, .. } => footprint,
         }
     }
@@ -444,7 +437,6 @@ pub(crate) fn read_files(
         pins,
         pads: footprint.map(|file| pad_count(&file.bytes) as u32),
         notes,
-        library: None,
         picks: Vec::new(),
     }
 }

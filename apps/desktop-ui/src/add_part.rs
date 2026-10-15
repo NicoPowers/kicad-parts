@@ -691,7 +691,6 @@ pub fn AddPartView(
             footprint,
             // The 3D models do not change with the symbol or footprint.
             without_models: !first,
-            library: None,
             picks: form.picks.get_untracked(),
         };
         spawn_local(async move {
@@ -935,7 +934,6 @@ pub fn AddPartView(
             from,
             downloads: downloads
                 .with_value(|files| files.iter().map(|file| file.file_name.clone()).collect()),
-            library: None,
         };
         request.correlation_id = Some(attempt.id_for(request.clone()));
         saving.set(true);

@@ -366,7 +366,6 @@ impl Team {
                     symbol: None,
                     footprint: None,
                     without_models: false,
-                    library: None,
                     picks,
                 },
                 &self.team,
@@ -657,7 +656,6 @@ fn add_part_from_kicads_and_an_installed_library() {
                 files,
                 from: reading.from.clone(),
                 downloads: Vec::new(),
-                library: None,
             }
         };
     let generic = added(

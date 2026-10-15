@@ -397,13 +397,10 @@ impl CatalogBrowser {
         team: &TeamCatalog,
     ) -> Result<TeamDownload, String> {
         let context = self.add_part_context(team)?;
-        match &request.library {
-            None if request.picks.is_empty() => add_part::read(request, &context),
-            None => self.read_picks(request, team, &context),
-            Some(choice) => {
-                let plan = self.library_plan(choice, true, team)?;
-                Ok(plan.reading(&context))
-            }
+        if request.picks.is_empty() {
+            add_part::read(request, &context)
+        } else {
+            self.read_picks(request, team, &context)
         }
     }
 
@@ -587,7 +584,6 @@ impl CatalogBrowser {
     fn library_plan(
         &self,
         choice: &desktop_contract::TeamLibraryChoice,
-        follow_symbol: bool,
         team: &TeamCatalog,
     ) -> Result<library_part::Plan, String> {
         let share = self.kicad_share();
@@ -597,13 +593,9 @@ impl CatalogBrowser {
             .ok_or_else(|| {
                 "Sign in as someone who can edit to add a part from our libraries.".to_owned()
             })?;
-        library_part::plan(
-            &self.config.catalog_root,
-            choice,
-            follow_symbol,
-            &check,
-            &|kind, key| team.has_cad_item(kind, key),
-        )
+        library_part::plan(&self.config.catalog_root, choice, &check, &|kind, key| {
+            team.has_cad_item(kind, key)
+        })
     }
 
     /// The library check (kicad-parts-da65) of this app's CSV catalog folder
@@ -645,60 +637,40 @@ impl CatalogBrowser {
         request: TeamNewPartRequest,
         team: &TeamCatalog,
     ) -> Result<PublishResult, String> {
-        let Some(choice) = request.library.clone() else {
-            // Our libraries' items the Catalog lacks, chosen in the
-            // Libraries browser, are added from the folder as committed
-            // (kicad-parts-bc6f).
-            let files = || {
-                let mut uploads = add_part::uploads(&request)?;
-                let mut wanted = Vec::new();
-                for (kind, role, field) in [
-                    (
-                        catalog::CadItemKind::Symbol,
-                        catalog::pocketbase::UploadRole::Symbol,
-                        &request.symbol,
-                    ),
-                    (
-                        catalog::CadItemKind::Footprint,
-                        catalog::pocketbase::UploadRole::Footprint,
-                        &request.footprint,
-                    ),
-                ] {
-                    for reference in footprint_choices(field) {
-                        let sent = uploads
-                            .iter()
-                            .any(|upload| upload.role == role && upload.reference == reference);
-                        if !sent {
-                            wanted.push((kind, reference.to_owned()));
-                        }
+        // Our libraries' items the Catalog lacks, chosen in the
+        // Libraries browser, are added from the folder as committed
+        // (kicad-parts-bc6f).
+        let files = || {
+            let mut uploads = add_part::uploads(&request)?;
+            let mut wanted = Vec::new();
+            for (kind, role, field) in [
+                (
+                    catalog::CadItemKind::Symbol,
+                    catalog::pocketbase::UploadRole::Symbol,
+                    &request.symbol,
+                ),
+                (
+                    catalog::CadItemKind::Footprint,
+                    catalog::pocketbase::UploadRole::Footprint,
+                    &request.footprint,
+                ),
+            ] {
+                for reference in footprint_choices(field) {
+                    let sent = uploads
+                        .iter()
+                        .any(|upload| upload.role == role && upload.reference == reference);
+                    if !sent {
+                        wanted.push((kind, reference.to_owned()));
                     }
                 }
-                let (more, sources) = self.ours_uploads(&wanted, team)?;
-                uploads.extend(more);
-                let mut files = request.downloads.clone();
-                files.extend(sources);
-                Ok((uploads, files))
-            };
-            return team.add_part_with(request.clone(), self.csv_ipns(), files);
+            }
+            let (more, sources) = self.ours_uploads(&wanted, team)?;
+            uploads.extend(more);
+            let mut files = request.downloads.clone();
+            files.extend(sources);
+            Ok((uploads, files))
         };
-        let footprint = footprint_choices(&request.footprint)
-            .first()
-            .map(|choice| (*choice).to_owned());
-        let used = desktop_contract::TeamLibraryChoice {
-            symbol: choice
-                .symbol
-                .filter(|symbol| symbol.trim() == request.symbol.trim()),
-            footprint: choice
-                .footprint
-                .filter(|chosen| Some(chosen.trim()) == footprint.as_deref()),
-        };
-        let mut request = request;
-        request.files.clear();
-        request.from = library_part::FROM_OUR_LIBRARIES.to_owned();
-        team.add_part_with(request, self.csv_ipns(), || {
-            let plan = self.library_plan(&used, false, team)?;
-            Ok((plan.uploads()?, plan.sources()))
-        })
+        team.add_part_with(request.clone(), self.csv_ipns(), files)
     }
 
     pub fn part(&self, ipn: &str) -> Option<PartDetail> {

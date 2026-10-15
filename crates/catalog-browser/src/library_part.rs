@@ -13,20 +13,18 @@
 //! read from, so a later CSV import naming them finds nothing to change.
 //! Symbols and footprints the Catalog already has are used, not sent.
 
-use crate::add_part::{self, Context, Origin};
 use crate::git::commit_holding;
 use catalog::CadItemKind;
 use catalog::cad_file::{
-    footprint_upload, is_catalog_model_key, is_plain_name, model_upload, read_symbol_file,
-    symbol_upload,
+    footprint_upload, is_catalog_model_key, is_plain_name, model_upload, symbol_upload,
 };
-use catalog::download::{Download, DownloadFile, DownloadKind, model_links};
+use catalog::download::model_links;
 use catalog::library_check::read::read_library_file;
 use catalog::library_check::{FindingKind, LibraryCheck, Severity, judge_model_link};
 use catalog::pocketbase::{CadUpload, LibrarySource};
 use catalog::sha256_hex;
-use desktop_contract::{TeamDownload, TeamLibraryChoice, TeamLibraryReading};
-use kicad_integration::library_file::{SymbolLibrary, SymbolLookup, symbol_properties};
+use desktop_contract::TeamLibraryChoice;
+use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::Path;
@@ -45,8 +43,6 @@ struct Symbol {
     file: Vec<u8>,
     /// The symbol's entry in it.
     span: Range<usize>,
-    version: Option<String>,
-    extends: bool,
 }
 
 /// A footprint of our libraries, or the 3D model it links there.
@@ -69,7 +65,6 @@ pub(crate) struct Plan {
     commit: Result<String, String>,
     problems: Vec<String>,
     findings: Vec<String>,
-    notes: Vec<String>,
 }
 
 /// The library and name of `reference`, one of our libraries' symbols or
@@ -108,8 +103,6 @@ fn read_symbol(root: &Path, reference: &str) -> Result<Symbol, String> {
         name: name.to_owned(),
         path,
         span: entry.span.clone(),
-        extends: entry.extends.is_some(),
-        version: parsed.version.clone(),
         file,
     })
 }
@@ -129,13 +122,10 @@ fn read_footprint(root: &Path, reference: &str) -> Result<File, String> {
 /// `root` and works out what saving them needs: whether the Catalog has
 /// each (`has`), the commit holding the files to send, and what stops the
 /// save (`check`'s errors and model problems for these items, files that
-/// are not committed as they are, files the Catalog cannot take). With
-/// `follow_symbol` and no footprint chosen, the footprint is the one the
-/// symbol names, when our libraries have it.
+/// are not committed as they are, files the Catalog cannot take).
 pub(crate) fn plan(
     root: &Path,
     choice: &TeamLibraryChoice,
-    follow_symbol: bool,
     check: &LibraryCheck,
     has: &dyn Fn(CadItemKind, &str) -> Result<bool, String>,
 ) -> Result<Plan, String> {
@@ -146,29 +136,12 @@ pub(crate) fn plan(
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
     };
-    let mut notes = Vec::new();
     let symbol = wanted(&choice.symbol)
         .map(|reference| read_symbol(root, &reference))
         .transpose()?;
-    let mut footprint = wanted(&choice.footprint)
+    let footprint = wanted(&choice.footprint)
         .map(|reference| read_footprint(root, &reference))
         .transpose()?;
-    if footprint.is_none() && follow_symbol {
-        // The footprint the symbol names, when it is one of ours.
-        let named = symbol.as_ref().and_then(|symbol| {
-            symbol_properties(&symbol.file[symbol.span.clone()])
-                .into_iter()
-                .find(|(name, _)| name == "Footprint")
-                .map(|(_, value)| value.trim().to_owned())
-        });
-        if let Some(found) = named.and_then(|named| read_footprint(root, &named).ok()) {
-            notes.push(format!(
-                "The footprint is the one the symbol names, {}.",
-                found.reference
-            ));
-            footprint = Some(found);
-        }
-    }
     // The footprint's own 3D model link into our library, when the file is
     // there.
     let mut model = None;
@@ -215,7 +188,6 @@ pub(crate) fn plan(
         commit: Ok(String::new()),
         problems: Vec::new(),
         findings: Vec::new(),
-        notes,
     };
     // What the library check found about the chosen items. On an item to
     // send, an error, a 3D model link outside our library or a missing 3D
@@ -405,123 +377,5 @@ impl Plan {
                 None => path.to_owned(),
             })
             .collect()
-    }
-
-    /// The download the reading works on: the symbol in a library file of
-    /// its own (with its version, so it is drawn and sent the same), the
-    /// footprint file and its 3D model, each labelled by its repository
-    /// path.
-    fn download(&self) -> (Download, Option<usize>) {
-        let mut files = Vec::new();
-        let mut at = None;
-        if let Some(symbol) = &self.symbol {
-            // A symbol drawn from another needs the whole file to be drawn
-            // and counted; it cannot be sent on its own anyway.
-            let bytes = if symbol.extends {
-                symbol.file.clone()
-            } else {
-                let mut text = b"(kicad_symbol_lib\n".to_vec();
-                if let Some(version) = &symbol.version {
-                    text.extend_from_slice(format!("\t(version {version})\n").as_bytes());
-                }
-                text.extend_from_slice(b"\t(generator \"kicad_parts\")\n\t");
-                text.extend_from_slice(&symbol.file[symbol.span.clone()]);
-                text.extend_from_slice(b"\n)\n");
-                text
-            };
-            at = read_symbol_file(&bytes)
-                .ok()
-                .and_then(|file| file.names.iter().position(|name| *name == symbol.name));
-            files.push(DownloadFile {
-                label: symbol.path.clone(),
-                file_name: symbol
-                    .path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or_default()
-                    .to_owned(),
-                kind: DownloadKind::Symbol,
-                bytes,
-            });
-        }
-        for (file, kind) in [
-            (&self.footprint, DownloadKind::Footprint),
-            (&self.model, DownloadKind::Model3d),
-        ] {
-            if let Some(file) = file {
-                files.push(DownloadFile {
-                    label: file.path.clone(),
-                    file_name: file.path.rsplit('/').next().unwrap_or_default().to_owned(),
-                    kind,
-                    bytes: file.bytes.clone(),
-                });
-            }
-        }
-        (
-            Download {
-                files,
-                vendor: None,
-                ignored: 0,
-            },
-            at,
-        )
-    }
-
-    /// What Add part shows for the chosen items: the same reading as a
-    /// download's, with the references exactly as in our libraries.
-    pub(crate) fn reading(&self, context: &Context<'_>) -> TeamDownload {
-        let footprint_reference = self
-            .footprint
-            .as_ref()
-            .map(|file| file.reference.clone())
-            .unwrap_or_default();
-        let (download, symbol_at) = self.download();
-        let mut reading = add_part::read_files(
-            &download,
-            symbol_at,
-            Some(0),
-            true,
-            context,
-            Origin::Library {
-                footprint: &footprint_reference,
-            },
-        );
-        reading.from = FROM_OUR_LIBRARIES.to_owned();
-        let mut notes = self.notes.clone();
-        // The footprint stays in its own library.
-        if let Some((library, _)) = footprint_reference.split_once(':') {
-            reading.footprint_library = library.to_owned();
-            for category in &mut reading.categories {
-                category.footprint_library = library.to_owned();
-            }
-        }
-        notes.extend(self.model_notes());
-        for item in self.references() {
-            if self.in_catalog.contains(&item) {
-                notes.push(format!(
-                    "The Catalog already has {item}, so the part uses it as the Catalog has it."
-                ));
-            }
-        }
-        notes.append(&mut reading.notes);
-        reading.notes = notes;
-        reading.library = Some(TeamLibraryReading {
-            symbol: self
-                .symbol
-                .as_ref()
-                .map(|symbol| symbol.reference.clone())
-                .unwrap_or_default(),
-            footprint: footprint_reference,
-            model: self
-                .model
-                .as_ref()
-                .map(|file| file.path.clone())
-                .unwrap_or_default(),
-            commit: self.commit.clone().unwrap_or_default(),
-            in_catalog: self.in_catalog.iter().cloned().collect(),
-            problems: self.problems.clone(),
-            findings: self.findings.clone(),
-        });
-        reading
     }
 }

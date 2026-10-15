@@ -753,10 +753,6 @@ pub struct TeamDownloadRequest {
     /// another symbol or footprint chosen does not change.
     #[serde(default)]
     pub without_models: bool,
-    /// Instead of `files`, a symbol and footprint already in our libraries
-    /// (kicad-parts-37a7).
-    #[serde(default)]
-    pub library: Option<TeamLibraryChoice>,
     /// A symbol and a footprint chosen in the Libraries browser
     /// (kicad-parts-bc6f), each used instead of the download's for its
     /// role. A symbol chosen with no footprint brings the footprint it
@@ -841,32 +837,6 @@ pub struct TeamLibraryChoice {
     pub footprint: Option<String>,
 }
 
-/// What Add part makes of a symbol and footprint from our libraries.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TeamLibraryReading {
-    /// The symbol and footprint used, exactly as in our libraries, such as
-    /// `g-ics:IC_TP4333`; blank when none is chosen. The part uses these
-    /// references unchanged.
-    pub symbol: String,
-    pub footprint: String,
-    /// The footprint's 3D model in our library, such as
-    /// `3d-models/g-Package_SO.3dshapes/SOIC-8.step`; blank when it links
-    /// none there.
-    pub model: String,
-    /// The commit the files were read from; blank when they are not all
-    /// committed as they are.
-    pub commit: String,
-    /// The symbol, footprint and 3D model the Catalog already has, which the
-    /// part uses as the Catalog has them.
-    pub in_catalog: Vec<String>,
-    /// What stops the save, in plain words, such as a 3D model link outside
-    /// our library or files with changes that are not committed.
-    pub problems: Vec<String>,
-    /// What the library check found about these items that does not stop
-    /// the save.
-    pub findings: Vec<String>,
-}
-
 /// Which parts already have an MPN, for Add part.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamMpnRequest {
@@ -926,10 +896,6 @@ pub struct TeamDownload {
     /// Plain notes about the files, such as a file that could not be read
     /// or how the footprint finds its 3D model.
     pub notes: Vec<String>,
-    /// For a symbol and footprint from our libraries, what the app made of
-    /// them; `None` for a download.
-    #[serde(default)]
-    pub library: Option<TeamLibraryReading>,
     /// The symbol and footprint chosen in the Libraries browser and how
     /// each is used. For a copy, `symbol_file`, `footprint_file` and
     /// `model_files` are its files; for any other use they are `None` and
@@ -1083,11 +1049,6 @@ pub struct TeamNewPartRequest {
     pub from: String,
     /// The names of the downloaded files.
     pub downloads: Vec<String>,
-    /// For a part from our libraries: the symbol and footprint chosen
-    /// there. The app reads them again from the folder when saving, so
-    /// `files` and `downloads` are not used.
-    #[serde(default)]
-    pub library: Option<TeamLibraryChoice>,
 }
 
 /// A symbol or footprint that a saved edit gave a new revision, which other

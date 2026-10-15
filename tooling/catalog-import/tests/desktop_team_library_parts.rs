@@ -1,5 +1,5 @@
 //! Add part from symbols and footprints already in our libraries
-//! (kicad-parts-37a7), through catalog-browser against a disposable
+//! (kicad-parts-37a7), chosen in the Libraries browser (kicad-parts-bc6f), through catalog-browser against a disposable
 //! PocketBase: a temp copy of the CSV catalog, committed in a git
 //! repository of its own, in which an engineer drew a capacitor symbol and
 //! a footprint with its 3D model by hand in KiCad. The resistors and
@@ -11,9 +11,9 @@ use catalog_browser::{BrowserConfig, CatalogBrowser};
 use catalog_import::services::{self, Allow};
 use collaboration::PocketBaseClient;
 use desktop_contract::{
-    LibraryCheckView, LiveUpdates, ManufacturerPart, PublishResult, SignInRequest,
-    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamLibraryChoice, TeamNewPartRequest,
-    TeamPart, TeamSession,
+    LibraryCheckView, LibraryGroup, LibraryKey, LiveUpdates, ManufacturerPart, PickUse,
+    PreviewKind, PublishResult, SignInRequest, TeamCsvReviewRequest, TeamDownload,
+    TeamDownloadRequest, TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSession,
 };
 use kicad_integration::SearchLocations;
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
@@ -168,11 +168,44 @@ fn import(admin: &PocketBaseClient, root: &Path, csv_file: &str) -> ImportOutcom
     submit_import(admin, &command).unwrap().outcome
 }
 
-fn choice(symbol: Option<&str>, footprint: Option<&str>) -> TeamLibraryChoice {
-    TeamLibraryChoice {
-        symbol: symbol.map(str::to_owned),
-        footprint: footprint.map(str::to_owned),
-    }
+/// The symbol and footprint chosen in our libraries in the Libraries
+/// browser (kicad-parts-bc6f).
+fn choice(symbol: Option<&str>, footprint: Option<&str>) -> Vec<TeamPickRequest> {
+    let pick = |kind: PreviewKind, reference: &str| {
+        let (library, name) = reference.split_once(':').unwrap();
+        TeamPickRequest {
+            kind,
+            library: LibraryKey {
+                group: LibraryGroup::Ours,
+                nickname: library.into(),
+            },
+            name: name.into(),
+        }
+    };
+    symbol
+        .map(|symbol| pick(PreviewKind::Symbol, symbol))
+        .into_iter()
+        .chain(footprint.map(|footprint| pick(PreviewKind::Footprint, footprint)))
+        .collect()
+}
+
+/// The chosen item of `kind` the reading uses.
+fn chosen(reading: &TeamDownload, kind: PreviewKind) -> TeamPick {
+    reading
+        .picks
+        .iter()
+        .find(|pick| pick.kind == kind)
+        .cloned()
+        .unwrap_or_else(|| panic!("no {kind:?} chosen: {:?}", reading.picks))
+}
+
+/// Everything that stops the save of the chosen items.
+fn problems(reading: &TeamDownload) -> Vec<String> {
+    reading
+        .picks
+        .iter()
+        .flat_map(|pick| pick.problems.clone())
+        .collect()
 }
 
 /// A team server with the resistors and capacitors imported from the
@@ -255,7 +288,7 @@ impl Team {
         self.copy.path()
     }
 
-    fn read(&self, choice: TeamLibraryChoice) -> TeamDownload {
+    fn read(&self, picks: Vec<TeamPickRequest>) -> TeamDownload {
         self.browser
             .read_download(
                 &TeamDownloadRequest {
@@ -263,8 +296,7 @@ impl Team {
                     symbol: None,
                     footprint: None,
                     without_models: false,
-                    library: Some(choice),
-                    picks: Vec::new(),
+                    picks,
                 },
                 &self.team,
             )
@@ -309,8 +341,7 @@ fn group(view: &LibraryCheckView, title: &str) -> Vec<String> {
 /// The request Add part sends for `reading` from our libraries, accepting
 /// what it offers, in `category`.
 fn new_part(reading: &TeamDownload, ipn: &str, category: &str) -> TeamNewPartRequest {
-    let library = reading.library.clone().unwrap();
-    let chosen = reading
+    let category_chosen = reading
         .categories
         .iter()
         .find(|offered| offered.code == category)
@@ -320,24 +351,16 @@ fn new_part(reading: &TeamDownload, ipn: &str, category: &str) -> TeamNewPartReq
         ipn: ipn.into(),
         reason: "Drawn in KiCad for the new board".into(),
         category: category.into(),
-        fields: chosen.fields.clone(),
+        fields: category_chosen.fields.clone(),
         manufacturer_parts: vec![ManufacturerPart {
             manufacturer: reading.manufacturer.clone(),
             mpn: reading.mpn.clone(),
         }],
-        symbol: library.symbol.clone(),
-        footprint: library.footprint.clone(),
+        symbol: chosen(reading, PreviewKind::Symbol).reference,
+        footprint: chosen(reading, PreviewKind::Footprint).reference,
         files: Vec::new(),
-        from: String::new(),
+        from: reading.from.clone(),
         downloads: Vec::new(),
-        library: Some(choice(
-            Some(&library.symbol)
-                .filter(|symbol| !symbol.is_empty())
-                .map(String::as_str),
-            Some(&library.footprint)
-                .filter(|footprint| !footprint.is_empty())
-                .map(String::as_str),
-        )),
     }
 }
 
@@ -400,13 +423,31 @@ fn a_part_from_our_libraries_end_to_end() {
     // Choosing the symbol brings the footprint it names, and that
     // footprint's own 3D model.
     let reading = team.read(choice(Some(SYMBOL), None));
-    let library = reading.library.clone().unwrap();
-    assert_eq!(library.symbol, SYMBOL);
-    assert_eq!(library.footprint, FOOTPRINT);
-    assert_eq!(library.model, MODEL_FILE);
-    assert_eq!(library.commit, team.head);
-    assert_eq!(library.problems, Vec::<String>::new());
-    assert!(library.in_catalog.is_empty(), "{library:?}");
+    let symbol = chosen(&reading, PreviewKind::Symbol);
+    let footprint = chosen(&reading, PreviewKind::Footprint);
+    assert_eq!(symbol.reference, SYMBOL);
+    assert_eq!(footprint.reference, FOOTPRINT);
+    // Neither is in the Catalog yet: both are added from the commit.
+    assert_eq!(
+        (symbol.use_as, footprint.use_as),
+        (PickUse::Ours, PickUse::Ours)
+    );
+    assert!(
+        footprint.notes.iter().any(|note| note
+            == &format!(
+                "The footprint's 3D model {MODEL_FILE} from our library is saved with it."
+            )),
+        "{footprint:?}"
+    );
+    let short = &team.head[..12];
+    assert!(
+        symbol
+            .notes
+            .iter()
+            .any(|note| note == &format!("{SYMBOL} is read from commit {short}.")),
+        "{symbol:?}"
+    );
+    assert_eq!(problems(&reading), Vec::<String>::new());
     assert_eq!(reading.from, "Our libraries");
     assert_eq!(reading.mpn, MPN);
     assert_eq!(reading.manufacturer, "Samsung Electro-Mechanics");
@@ -562,7 +603,7 @@ fn problems_stop_the_save_and_the_catalogs_own_items_are_used() {
 
     // A 3D model link that only works on one computer.
     let (reading, message) = refused(SYMBOL, "g-Capacitor_SMD:C_0603_Far");
-    let problems = reading.library.unwrap().problems;
+    let problems = problems(&reading);
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
         problems[0].starts_with("g-Capacitor_SMD:C_0603_Far: The footprint links the 3D model /home/me/models/C_0603_Far.step, which is outside our library"),
@@ -572,7 +613,7 @@ fn problems_stop_the_save_and_the_catalogs_own_items_are_used() {
 
     // A 3D model file missing from our library.
     let (reading, message) = refused(SYMBOL, "g-Capacitor_SMD:C_0603_Gone");
-    let problems = reading.library.unwrap().problems;
+    let problems = self::problems(&reading);
     assert!(
         problems.iter().any(|problem| problem.contains(
             "links the 3D model 3d-models/g-Capacitor_SMD.3dshapes/C_0603_Gone.step, which is not in our library"
@@ -590,14 +631,20 @@ fn problems_stop_the_save_and_the_catalogs_own_items_are_used() {
     )
     .unwrap();
     let (reading, message) = refused(SYMBOL, FOOTPRINT);
-    let library = reading.library.unwrap();
     assert_eq!(
-        library.problems,
+        self::problems(&reading),
         [format!(
             "{FOOTPRINT_FILE} is not committed as it is. Commit it first, then choose it again: the Catalog records the commit each file came from."
         )]
     );
-    assert!(library.commit.is_empty());
+    let picked = chosen(&reading, PreviewKind::Footprint);
+    assert!(
+        !picked
+            .notes
+            .iter()
+            .any(|note| note.contains("is read from commit")),
+        "{picked:?}"
+    );
     assert!(message.contains("is not committed as it is"), "{message}");
     assert_eq!(team.stored_revisions(), revisions, "nothing was saved");
     fs::write(&footprint, committed).unwrap();
@@ -606,21 +653,21 @@ fn problems_stop_the_save_and_the_catalogs_own_items_are_used() {
     // used as the Catalog has it, and only the footprint and its 3D model
     // are sent.
     let reading = team.read(choice(Some("g-cap:C"), Some(FOOTPRINT)));
-    let library = reading.library.clone().unwrap();
-    assert_eq!(library.in_catalog, ["g-cap:C"]);
-    assert!(library.problems.is_empty(), "{library:?}");
-    assert!(
-        reading.notes.iter().any(|note| note
-            == "The Catalog already has g-cap:C, so the part uses it as the Catalog has it."),
-        "{:?}",
-        reading.notes
+    assert_eq!(
+        chosen(&reading, PreviewKind::Symbol).use_as,
+        PickUse::Catalog
     );
+    assert_eq!(
+        chosen(&reading, PreviewKind::Footprint).use_as,
+        PickUse::Ours
+    );
+    assert!(self::problems(&reading).is_empty(), "{:?}", reading.picks);
     let part = added(team.add(new_part(&reading, "CAP-0099-0001", "cap")));
     assert_eq!(part.revision.field("Symbol"), Some("g-cap:C"));
     assert_eq!(team.stored_revisions(), revisions + 2);
 
-    // Typing another symbol than the one chosen uses that one instead, so
-    // the chosen symbol is not sent.
+    // Choosing the Catalog's symbol instead of one of ours leaves ours
+    // unsent.
     let reading = team.read(choice(Some(SYMBOL), Some(FOOTPRINT)));
     let mut request = new_part(&reading, "CAP-0099-0002", "cap");
     request.symbol = "g-cap:C".into();
