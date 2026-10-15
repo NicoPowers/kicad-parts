@@ -402,6 +402,17 @@ export async function assertAccessible(browser, name) {
         }
         // Outside every viewer, no drawing can cover the text.
         if (!insideAViewer) for (const svg of document.querySelectorAll('.viewer-svg')) covering.add(svg);
+        // A modal dialog, such as a close-up, sits above the whole page, but
+        // axe still sees the page under it: text with lines over different
+        // page parts seems to overlap them (elmPartiallyObscuring). The page
+        // outside the dialog, apart from the dialog's own ancestors, is
+        // inert under the backdrop, so it cannot be the text's background.
+        const modal = el.closest('dialog');
+        if (modal?.matches(':modal')) {
+          for (let node = modal; node.parentElement; node = node.parentElement) {
+            for (const sibling of node.parentElement.children) if (sibling !== node) covering.add(sibling);
+          }
+        }
         for (const x of samples) {
           const over = [];
           for (const top of document.elementsFromPoint(x, y)) {

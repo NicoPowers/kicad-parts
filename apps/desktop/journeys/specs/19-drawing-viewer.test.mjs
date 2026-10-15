@@ -3,6 +3,8 @@
 // and the keyboard does the same. A footprint is drawn layer by layer:
 // each layer can be hidden, and one is the active layer, drawn on top.
 // A symbol keeps kicad-cli's drawing and stays sharp when zoomed.
+// The Measure tool (kicad-parts-e95e) measures between points that snap
+// to the active layer, and the gap between two pads.
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -50,6 +52,50 @@ async function drawingPointAt(browser, scope, x, y) {
     x,
     y,
   );
+}
+
+/** The screen position of a drawing point in `scope`'s viewer. */
+async function screenAt(browser, scope, x, y) {
+  return browser.execute(
+    (s, x, y) => {
+      const area = document.querySelector(`${s} .viewer-area`);
+      const [bx, by, bw, bh] = area.querySelector('svg').getAttribute('viewBox').split(' ').map(Number);
+      const rect = area.querySelector('svg').getBoundingClientRect();
+      const scale = Math.min(rect.width / bw, rect.height / bh);
+      const left = rect.left + (rect.width - bw * scale) / 2;
+      const top = rect.top + (rect.height - bh * scale) / 2;
+      return { x: Math.round(left + (x - bx) * scale), y: Math.round(top + (y - by) * scale) };
+    },
+    scope,
+    x,
+    y,
+  );
+}
+
+async function clickAt(browser, at) {
+  await browser
+    .action('pointer', { parameters: { pointerType: 'mouse' } })
+    .move({ x: at.x, y: at.y })
+    .down({ button: 0 })
+    .up({ button: 0 })
+    .perform();
+}
+
+/** The Measure readout's lines. */
+async function readout(browser, scope) {
+  return browser.execute(
+    (s) => [...document.querySelectorAll(`${s} .viewer-readout p`)].map((line) => line.textContent),
+    scope,
+  );
+}
+
+/** Presses N until the readout highlights `name`. */
+async function highlight(browser, scope, name) {
+  for (let n = 0; n < 60; n += 1) {
+    await browser.keys('n');
+    if ((await readout(browser, scope)).includes(`Highlighted: ${name}.`)) return;
+  }
+  assert.fail(`N never highlighted ${name}`);
 }
 
 /** The centre of `selector` on screen. */
@@ -202,9 +248,9 @@ describe('drawing close-up', () => {
 
   it('zooms, moves and fits with the keyboard, with visible focus', async () => {
     const fitted = await view(browser, CLOSE_UP);
-    // Tab from the zoom buttons to the drawing.
+    // Tab from the zoom, Measure and Units buttons to the drawing.
     await browser.execute((s) => document.querySelector(`${s} .viewer-fit`).focus(), CLOSE_UP);
-    await browser.keys(['Tab', 'Tab', 'Tab']);
+    await browser.keys(['Tab', 'Tab', 'Tab', 'Tab', 'Tab']);
     const focus = await browser.execute((s) => {
       const area = document.querySelector(`${s} .viewer-area`);
       return {
@@ -264,6 +310,125 @@ describe('drawing close-up', () => {
     await screenshot(browser, '75-footprint-pad-corner');
     await browser.keys('Escape');
     await browser.waitUntil(async () => !(await isOpen(browser, CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
+  });
+
+  it('measures between pads that snap to the active layer, and the gap between them', async () => {
+    await (await browser.$(`${FOOTPRINT} figure button`)).click();
+    await browser.waitUntil(async () => isOpen(browser, CLOSE_UP), { timeout: 5_000, timeoutMsg: 'the close-up did not open' });
+    await waitForDrawing(browser, CLOSE_UP);
+    const toggle = await browser.$(`${CLOSE_UP} .viewer-measure`);
+    assert.equal(await toggle.getAttribute('aria-pressed'), 'false');
+    await toggle.click();
+    const on = await browser.execute((s) => {
+      const area = document.querySelector(`${s} .viewer-area`);
+      return {
+        pressed: document.querySelector(`${s} .viewer-measure`).getAttribute('aria-pressed'),
+        cursor: getComputedStyle(area).cursor,
+        live: document.querySelector(`${s} .viewer-readout`).getAttribute('aria-live'),
+      };
+    }, CLOSE_UP);
+    assert.deepEqual(on, { pressed: 'true', cursor: 'crosshair', live: 'polite' });
+    assert.match((await readout(browser, CLOSE_UP))[0], /^Click a point to start\./);
+
+    // The pads of KiCad's R_0603_1608Metric are at x = -0.825 and 0.825 mm.
+    // A click a few pixels off a pad's centre snaps to it.
+    const one = await screenAt(browser, CLOSE_UP, -0.825, 0);
+    const two = await screenAt(browser, CLOSE_UP, 0.825, 0);
+    await clickAt(browser, { x: one.x + 3, y: one.y - 2 });
+    assert.deepEqual(await readout(browser, CLOSE_UP), ['From Pad 1 centre. Click the end point.']);
+    await clickAt(browser, { x: two.x - 2, y: two.y + 3 });
+    const copper = await readout(browser, CLOSE_UP);
+    record({ event: 'measure-copper', copper });
+    assert.deepEqual(copper, [
+      'Distance 1.650 mm, \u0394X 1.650 mm, \u0394Y 0.000 mm.',
+      'From Pad 1 centre to Pad 2 centre.',
+      'Gap between pad 1 and pad 2 on F.Cu: 0.850 mm.',
+    ]);
+    const drawn = await browser.execute((s) => {
+      const measure = document.querySelector(`${s} g.measure`);
+      const gap = measure.querySelector('.measure-gap');
+      return {
+        line: measure.querySelectorAll('.measure-line').length,
+        ends: measure.querySelectorAll('.measure-end').length,
+        label: measure.querySelector('.measure-label')?.textContent,
+        gap: gap ? gap.getBBox().width : null,
+      };
+    }, CLOSE_UP);
+    assert.equal(drawn.line, 1);
+    assert.equal(drawn.ends, 2);
+    assert.equal(drawn.label, '1.650 mm');
+    near(drawn.gap, 0.85, 0.001, 'the gap line runs between the copper edges');
+    await assertAccessible(browser, '78-footprint-measure');
+    await screenshot(browser, '78-footprint-measure');
+
+    // Paste: choosing F.Paste makes it active, and a new measurement snaps
+    // to its openings. The third click starts again.
+    const pasteRow = await browser.execute(
+      (s) => [...document.querySelectorAll(`${s} .viewer-layers li`)].findIndex((li) => li.querySelector('.layer-name').textContent === 'F.Paste') + 1,
+      CLOSE_UP,
+    );
+    await (await browser.$(`${CLOSE_UP} .viewer-layers li:nth-child(${pasteRow}) label`)).click();
+    assert.equal(await browser.execute((s) => document.querySelector(`${s} .viewer`).dataset.activeLayer, CLOSE_UP), 'F.Paste');
+    await clickAt(browser, one);
+    await clickAt(browser, two);
+    const paste = await readout(browser, CLOSE_UP);
+    record({ event: 'measure-paste', paste });
+    assert.equal(paste[2], 'Gap between pad 1 and pad 2 on F.Paste: 0.850 mm.');
+    await screenshot(browser, '79-footprint-measure-paste');
+
+    // Hiding the active layer stops snapping, and the readout says so.
+    await (await browser.$(`${CLOSE_UP} input[aria-label="Show F.Paste"]`)).click();
+    assert.equal((await readout(browser, CLOSE_UP)).at(-1), 'F.Paste is hidden. Show it to snap to its points.');
+    await (await browser.$(`${CLOSE_UP} input[aria-label="Show F.Paste"]`)).click();
+
+    // Mils, for the readout and the pointer's position.
+    await (await browser.$(`${CLOSE_UP} .viewer-units`)).click();
+    assert.equal(await textOf(browser, `${CLOSE_UP} .viewer-units`), 'Units: mils');
+    const mils = await readout(browser, CLOSE_UP);
+    assert.deepEqual(mils, [
+      'Distance 65.0 mils, \u0394X 65.0 mils, \u0394Y 0.0 mils.',
+      'From Pad 1 centre to Pad 2 centre.',
+      'Gap between pad 1 and pad 2 on F.Paste: 33.5 mils.',
+    ]);
+    await browser.action('pointer').move({ x: two.x, y: two.y }).perform();
+    assert.match(await textOf(browser, `${CLOSE_UP} .viewer-position`), /^X 32\.5 mils, Y 0\.0 mils/);
+    await screenshot(browser, '80-footprint-measure-mils');
+    await (await browser.$(`${CLOSE_UP} .viewer-units`)).click();
+
+    // The keyboard: Escape clears the measurement and keeps the close-up
+    // open; N steps through the snap points and Enter picks one.
+    await browser.execute((s) => document.querySelector(`${s} .viewer-area`).focus(), CLOSE_UP);
+    await browser.keys('Escape');
+    assert.equal(await isOpen(browser, CLOSE_UP), true, 'Escape cleared the measurement only');
+    assert.match((await readout(browser, CLOSE_UP))[0], /^Click a point to start\./);
+    assert.equal(await browser.execute((s) => document.querySelector(`${s} g.measure .measure-line`), CLOSE_UP), null);
+    await browser.keys('m');
+    assert.equal(await toggle.getAttribute('aria-pressed'), 'false', 'M turns the tool off');
+    await browser.keys('m');
+    assert.equal(await toggle.getAttribute('aria-pressed'), 'true', 'M turns it on again');
+    // Move the pointer away, so only the keys pick points.
+    await browser.action('pointer').move({ x: 5, y: 5 }).perform();
+    await highlight(browser, CLOSE_UP, 'Pad 1 centre');
+    await browser.keys('Enter');
+    await highlight(browser, CLOSE_UP, 'Pad 2 centre');
+    // Shift+N steps back.
+    await browser.keys('n');
+    await browser.keys(['Shift', 'N', 'Shift']);
+    assert.equal((await readout(browser, CLOSE_UP)).at(-1), 'Highlighted: Pad 2 centre.');
+    await browser.keys('Enter');
+    const keyed = await readout(browser, CLOSE_UP);
+    assert.deepEqual(keyed.slice(0, 3), [
+      'Distance 1.650 mm, \u0394X 1.650 mm, \u0394Y 0.000 mm.',
+      'From Pad 1 centre to Pad 2 centre.',
+      'Gap between pad 1 and pad 2 on F.Paste: 0.850 mm.',
+    ]);
+    await assertAccessible(browser, '81-footprint-measure-keys');
+    await screenshot(browser, '81-footprint-measure-keys');
+    await browser.execute((s) => document.querySelector(`${s} .viewer-area`).focus(), CLOSE_UP);
+    await browser.keys('Escape');
+    assert.equal(await isOpen(browser, CLOSE_UP), true, 'the first Escape clears');
+    await browser.keys('Escape');
+    await browser.waitUntil(async () => !(await isOpen(browser, CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'the second Escape did not close the close-up' });
   });
 
   it('zooms a symbol, which stays sharp', async () => {
