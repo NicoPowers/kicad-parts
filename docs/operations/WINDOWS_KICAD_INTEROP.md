@@ -6,12 +6,15 @@ KiCad 10 is a required dependency. The application and automated tests run the i
 
 kicad-cli loads your KiCad settings when it starts and saves them again if they changed. If it reads `kicad_common.json` while another KiCad process saves it, it saves defaults over the whole file. That empties your path variables.
 
-So our code never lets kicad-cli use your settings in `%APPDATA%\kicad` or `%LOCALAPPDATA%\kicad`. Every run gets `KICAD_CONFIG_HOME` and `KICAD_CACHE_HOME` inside a folder of our own:
+So our code never lets kicad-cli use your settings in `%APPDATA%\kicad` or your settings or cache in `%LOCALAPPDATA%\kicad`. Every run gets `KICAD_CONFIG_HOME` and `KICAD_CACHE_HOME` inside a folder of our own:
 
 - **The desktop app** uses `kicad-cli-settings` in its cache folder, next to `previews`.
-- **The tests** use `kicad-parts-tests\kicad-cli-settings` in the temporary folder.
+- **The real-KiCad tests** in `real_kicad.rs` use `kicad-parts-tests\kicad-cli-settings` in the temporary folder.
+- **The catalog-browser, catalog-import and journey tests** use `cache\kicad-cli-settings` in their temporary data folder.
 
 kicad-cli fills that folder with default settings. Previews look the same as with your settings. kicad-cli writes nothing under `Documents\KiCad`, so we leave `KICAD_DOCUMENTS_HOME` unset.
+
+Before each run, our code checks that this folder does not overlap your KiCad folders. If it does, or if the folder cannot be made, kicad-cli does not start. The app then shows the folder and what went wrong.
 
 ## Checklist
 
