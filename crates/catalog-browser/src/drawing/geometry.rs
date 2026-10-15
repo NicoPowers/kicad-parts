@@ -442,11 +442,10 @@ fn offset_out(edges: &[Edge], by: f64) -> Vec<Edge> {
                 end: shifted(end, end_normal, by),
             },
             Edge::Arc { start, mid, end } => {
-                let (_, mid_normal) = normals(&Edge::Arc {
-                    start,
-                    mid: Point::new((start.x + mid.x) / 2.0, (start.y + mid.y) / 2.0),
-                    end: mid,
-                });
+                let mid_normal = match circle_center(start, mid, end) {
+                    Some(c) => unit(Point::new(mid.x - c.x, mid.y - c.y)),
+                    None => start_normal,
+                };
                 Edge::Arc {
                     start: shifted(start, start_normal, by),
                     mid: shifted(mid, mid_normal, by),
@@ -474,7 +473,7 @@ fn offset_out(edges: &[Edge], by: f64) -> Vec<Edge> {
 
 fn offset_in(edges: &[Edge], by: f64) -> Vec<Edge> {
     // Each edge's line, moved in: a point on it and its direction.
-    let lines: Vec<(Point, Point)> = edges
+    let mut lines: Vec<(Point, Point)> = edges
         .iter()
         .map(|edge| {
             let (start, end) = ends(edge);
@@ -493,24 +492,38 @@ fn offset_in(edges: &[Edge], by: f64) -> Vec<Edge> {
         let t = ((p2.x - p1.x) * d2.y - (p2.y - p1.y) * d2.x) / cross;
         Some(Point::new(p1.x + d1.x * t, p1.y + d1.y * t))
     };
-    let count = lines.len();
-    let mut corners = Vec::new();
-    for index in 0..count {
-        let Some(corner) = meet(lines[(index + count - 1) % count], lines[index]) else {
-            return Vec::new();
-        };
-        corners.push(corner);
-    }
-    // Every moved edge must still point the way it did.
-    for index in 0..count {
-        let (start, end) = (corners[index], corners[(index + 1) % count]);
-        let direction = lines[index].1;
-        if (end.x - start.x) * direction.x + (end.y - start.y) * direction.y <= 0.0 {
+    // A short edge can turn inside out; as in KiCad, it is dropped and its
+    // neighbours meet instead, until every edge points the way it did.
+    while lines.len() >= 3 {
+        let count = lines.len();
+        let mut corners = Vec::new();
+        for index in 0..count {
+            let Some(corner) = meet(lines[(index + count - 1) % count], lines[index]) else {
+                return Vec::new();
+            };
+            corners.push(corner);
+        }
+        let turned: Vec<usize> = (0..count)
+            .filter(|&index| {
+                let (start, end) = (corners[index], corners[(index + 1) % count]);
+                let direction = lines[index].1;
+                (end.x - start.x) * direction.x + (end.y - start.y) * direction.y <= 0.0
+            })
+            .collect();
+        if turned.is_empty() {
+            return match polygon(&corners, 0.0, true) {
+                Shape::Polygon { edges, .. } => edges,
+                _ => Vec::new(),
+            };
+        }
+        if turned.len() == count {
             return Vec::new();
         }
+        let mut index = 0;
+        lines.retain(|_| {
+            index += 1;
+            !turned.contains(&(index - 1))
+        });
     }
-    match polygon(&corners, 0.0, true) {
-        Shape::Polygon { edges, .. } => edges,
-        _ => Vec::new(),
-    }
+    Vec::new()
 }
