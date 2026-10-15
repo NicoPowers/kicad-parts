@@ -2,6 +2,19 @@
 
 KiCad 10 is a required dependency. The application and automated tests run the installed `kicad-cli` wherever it is useful. This checklist covers what the command line cannot show: how generated data behaves when opened in KiCad's own editors.
 
+## How our code runs kicad-cli
+
+kicad-cli loads your KiCad settings when it starts and saves them again if they changed. If it reads `kicad_common.json` while another KiCad process saves it, it saves defaults over the whole file. That empties your path variables.
+
+So our code never lets kicad-cli use your settings in `%APPDATA%\kicad` or `%LOCALAPPDATA%\kicad`. Every run gets `KICAD_CONFIG_HOME` and `KICAD_CACHE_HOME` inside a folder of our own:
+
+- **The desktop app** uses `kicad-cli-settings` in its cache folder, next to `previews`.
+- **The tests** use `kicad-parts-tests\kicad-cli-settings` in the temporary folder.
+
+kicad-cli fills that folder with default settings. Previews look the same as with your settings. kicad-cli writes nothing under `Documents\KiCad`, so we leave `KICAD_DOCUMENTS_HOME` unset.
+
+## Checklist
+
 Use a supported KiCad installation on Windows and a disposable copy of the application output. Do not point the application or a test at the user's KiCad configuration directory.
 
 - Record the application commit/build, Windows version, KiCad version shown in the GUI, and the fixture or generated file under review.
