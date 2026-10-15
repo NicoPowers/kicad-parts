@@ -889,10 +889,56 @@ fn a_shrinking_margin_shrinks_a_custom_pads_primitives() {
 
 #[test]
 fn a_trapezoid_shrunk_to_nothing_is_gone() {
-    // The ratio is clamped so the paste is exactly as narrow as nothing.
+    // An X margin of -0.02 leaves the outline, but the Y margin, clamped
+    // to -1, shrinks the pad to nothing; kicad-cli draws no paste.
     let drawing = draw(
-        "(footprint \"T\" (pad \"1\" smd trapezoid (at 0 0) (size 2 1) (rect_delta 0.4 0) (layers \"F.Cu\" \"F.Paste\") (solder_paste_margin_ratio -0.6)))",
+        "(footprint \"T\" (pad \"1\" smd trapezoid (at 0 0) (size 0.2 2) (rect_delta 0.2 0) (layers \"F.Cu\" \"F.Paste\")
+           (solder_paste_margin 0.1) (solder_paste_margin_ratio -0.6)))",
     );
     assert!(size_on(&drawing.pads[0], "F.Paste").is_none());
     assert!(size_on(&drawing.pads[0], "F.Cu").is_some());
+}
+
+#[test]
+fn a_polygon_with_a_point_in_a_side_still_shrinks_and_grows() {
+    let five = "(gr_poly (pts (xy -0.75 -0.5) (xy 0 -0.5) (xy 0.75 -0.5) (xy 0.75 0.5) (xy -0.75 0.5)) (width 0) (fill yes))";
+    // kicad-cli: 1.3 by 0.8.
+    let drawing = custom("0.2 0.2", "(solder_paste_margin -0.1)", five);
+    assert_size(size_on(&drawing.pads[0], "F.Paste"), (1.3, 0.8));
+    let shrunk = on(&drawing.pads[0], "F.Paste").next().unwrap();
+    assert!(matches!(shrunk, Shape::Polygon { edges, .. } if edges.len() == 4));
+    // Grown as a true outline, the two halves of the side make one edge.
+    let grown = offset_convex(
+        &polygon(
+            &[
+                Point::new(-0.75, -0.5),
+                Point::new(0.0, -0.5),
+                Point::new(0.75, -0.5),
+                Point::new(0.75, 0.5),
+                Point::new(-0.75, 0.5),
+            ],
+            0.0,
+            true,
+        ),
+        0.1,
+    );
+    let Shape::Polygon { edges, .. } = &grown else {
+        panic!()
+    };
+    assert_eq!(edges.len(), 8, "four sides and four corner arcs");
+    let [x0, y0, x1, y1] = box_of([&grown]);
+    assert!(close(x1 - x0, 1.7) && close(y1 - y0, 1.2));
+    // Sides that point opposite ways still shrink to nothing.
+    let flat = polygon(
+        &[
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(2.0, 0.0),
+        ],
+        0.0,
+        true,
+    );
+    assert!(
+        matches!(offset_convex(&flat, -0.1), Shape::Polygon { ref edges, .. } if edges.is_empty())
+    );
 }

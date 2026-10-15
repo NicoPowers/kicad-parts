@@ -380,6 +380,7 @@ pub(super) fn offset_convex(shape: &Shape, by: f64) -> Shape {
             distance(start, end) > 1e-12
         })
         .collect();
+    let edges = merge_straight(edges);
     let moved = if by >= 0.0 {
         offset_out(&edges, by)
     } else {
@@ -390,6 +391,42 @@ pub(super) fn offset_convex(shape: &Shape, by: f64) -> Shape {
         width: 0.0,
         filled: true,
     }
+}
+
+/// `edges` with each run of straight edges that point the same way, such
+/// as a side with a point in its middle, made one edge. Moving in needs
+/// it: two such edges never meet.
+fn merge_straight(edges: Vec<Edge>) -> Vec<Edge> {
+    let same_way = |a: &Edge, b: &Edge| match (*a, *b) {
+        (Edge::Line { start: a0, end: a1 }, Edge::Line { start: b0, end: b1 }) => {
+            let (u, v) = (
+                unit(Point::new(a1.x - a0.x, a1.y - a0.y)),
+                unit(Point::new(b1.x - b0.x, b1.y - b0.y)),
+            );
+            (u.x * v.y - u.y * v.x).abs() < 1e-9 && u.x * v.x + u.y * v.y > 0.0
+        }
+        _ => false,
+    };
+    let mut merged: Vec<Edge> = Vec::new();
+    for edge in edges {
+        match merged.last_mut() {
+            Some(last) if same_way(last, &edge) => {
+                if let (Edge::Line { end, .. }, Edge::Line { end: next, .. }) = (last, edge) {
+                    *end = next;
+                }
+            }
+            _ => merged.push(edge),
+        }
+    }
+    // The last run may go on into the first.
+    while merged.len() > 1 && same_way(&merged[merged.len() - 1], &merged[0]) {
+        let last = merged.pop().expect("more than one edge");
+        if let (Edge::Line { start, .. }, Edge::Line { start: first, .. }) = (last, &mut merged[0])
+        {
+            *first = start;
+        }
+    }
+    merged
 }
 
 fn ends(edge: &Edge) -> (Point, Point) {
