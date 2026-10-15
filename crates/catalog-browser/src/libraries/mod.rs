@@ -10,7 +10,7 @@
 //! browsed at once; searches and filters run over the index in memory
 //! ([`query`]), never over the files.
 
-mod browse;
+pub(crate) mod browse;
 pub(crate) mod query;
 pub(crate) mod read;
 pub(crate) mod sources;

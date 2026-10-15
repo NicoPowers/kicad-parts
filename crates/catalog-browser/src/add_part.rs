@@ -127,6 +127,39 @@ pub(crate) enum Origin<'a> {
     /// Our libraries (kicad-parts-37a7): the footprint chosen there, by
     /// reference, which is never a near-copy of itself.
     Library { footprint: &'a str },
+    /// A symbol, a footprint or both chosen in the Libraries browser
+    /// (kicad-parts-bc6f), the rest from a download if any: whether the
+    /// symbol was chosen, and the chosen footprint by reference.
+    Picked {
+        symbol: bool,
+        footprint: Option<&'a str>,
+    },
+}
+
+impl<'a> Origin<'a> {
+    /// Whether the files are not a download's alone, so a missing symbol or
+    /// footprint is one not chosen yet.
+    fn chosen(self) -> bool {
+        !matches!(self, Self::Download)
+    }
+
+    /// Whether the symbol was chosen in a library rather than downloaded.
+    fn symbol_chosen(self) -> bool {
+        matches!(
+            self,
+            Self::Library { .. } | Self::Picked { symbol: true, .. }
+        )
+    }
+
+    /// The footprint chosen in a library, by reference: never a near-copy
+    /// of itself, and it keeps its own 3D model links.
+    fn footprint_chosen(self) -> Option<&'a str> {
+        match self {
+            Self::Download => None,
+            Self::Library { footprint } => Some(footprint),
+            Self::Picked { footprint, .. } => footprint,
+        }
+    }
 }
 
 /// Reads the downloaded files: see [`desktop_contract::TeamDownload`].
@@ -168,7 +201,7 @@ pub(crate) fn read_files(
     context: &Context<'_>,
     origin: Origin<'_>,
 ) -> TeamDownload {
-    let ours = matches!(origin, Origin::Library { .. });
+    let ours = origin.chosen();
     let mut notes = Vec::new();
     let symbols = symbol_choices(download, &mut notes);
     let footprints: Vec<&DownloadFile> = download
@@ -190,14 +223,14 @@ pub(crate) fn read_files(
     let footprint = footprints.get(footprint_at).copied();
     if symbol.is_none() {
         notes.push(if ours {
-            "No symbol is chosen. Choose one from our libraries, or type one the Catalog or KiCad has in Symbol.".into()
+            "No symbol is chosen yet. Choose one under Symbol.".into()
         } else {
             "The download has no KiCad symbol (.kicad_sym).".into()
         });
     }
     if footprint.is_none() {
         if ours {
-            notes.push("No footprint is chosen. Choose one from our libraries, or type one the Catalog or KiCad has in Footprint.".into());
+            notes.push("No footprint is chosen yet. Choose one under Footprint.".into());
         } else {
             notes.push("The download has no KiCad footprint (.kicad_mod).".into());
         }
@@ -227,7 +260,11 @@ pub(crate) fn read_files(
     let properties = entry.as_deref().map(symbol_fields).unwrap_or_default();
     let (mpn, manufacturer) = manufacturer_part(&properties);
     // A manufacturer part needs both halves; say so now, not at Save.
-    let teller = if ours { "The symbol" } else { "The download" };
+    let teller = if origin.symbol_chosen() {
+        "The symbol"
+    } else {
+        "The download"
+    };
     match (manufacturer.is_empty(), mpn.is_empty()) {
         (false, true) => notes.push(format!(
             "{teller} names a manufacturer but no MPN. Type the MPN, or clear Manufacturer."
@@ -286,7 +323,7 @@ pub(crate) fn read_files(
         Some(file) => known_footprints(file, &footprint_name, &named_library, context),
         None => Vec::new(),
     };
-    if let Origin::Library { footprint } = origin {
+    if let Some(footprint) = origin.footprint_chosen() {
         known_footprints.retain(|known| known.reference != footprint);
     }
     let footprint_library = if named_library.is_empty() {
@@ -335,7 +372,7 @@ pub(crate) fn read_files(
     match (footprint, model) {
         // Our libraries' footprints keep their own links; the caller says
         // which 3D model that is.
-        _ if ours => {}
+        _ if origin.footprint_chosen().is_some() => {}
         (Some(file), Some(at)) => {
             notes.push(format!(
                 "The footprint will use the 3D model {} from the download.",
@@ -381,6 +418,8 @@ pub(crate) fn read_files(
             model_key: None,
             replaces: None,
             label: Some(shortened(&symbol.file.label)),
+            installed: None,
+            no_models: false,
         }),
         footprint_file: footprint.map(|file| team_file(file, FileKind::Footprint)),
         // The 3D models never change with the symbol or footprint chosen, so
@@ -406,6 +445,7 @@ pub(crate) fn read_files(
         pads: footprint.map(|file| pad_count(&file.bytes) as u32),
         notes,
         library: None,
+        picks: Vec::new(),
     }
 }
 
@@ -428,6 +468,8 @@ fn team_file(file: &DownloadFile, kind: FileKind) -> TeamFile {
         model_key: None,
         replaces: None,
         label: Some(shortened(&file.label)),
+        installed: None,
+        no_models: false,
     }
 }
 
@@ -690,7 +732,13 @@ fn model_file_name(name: &str) -> String {
 pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, String> {
     let decoded = |file: &TeamFile| crate::team::decoded(&file.base64, &file.file_name);
     let source = |file: &TeamFile| file.label.clone().unwrap_or_else(|| file.file_name.clone());
-    let of_kind = |kind: FileKind| request.files.iter().find(|file| file.kind == kind);
+    // A download's files; a copy from an installed library goes by its
+    // own name (kicad-parts-bc6f).
+    let of_kind = |kind: FileKind| {
+        request.files.iter().find(|file| {
+            file.kind == kind && (kind == FileKind::Symbol || file.installed.is_none())
+        })
+    };
     let mut uploads = Vec::new();
     if let Some(file) = of_kind(FileKind::Symbol) {
         let name = file
@@ -698,18 +746,18 @@ pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, St
             .as_deref()
             .ok_or_else(|| "Choose which symbol of the file to use.".to_owned())?;
         if uses_file(request.symbol.trim(), name) {
-            uploads.push(symbol_upload(
-                &decoded(file)?,
-                name,
-                request.symbol.trim(),
-                &source(file),
-            )?);
+            let mut upload =
+                symbol_upload(&decoded(file)?, name, request.symbol.trim(), &source(file))?;
+            upload.installed = installed_source(file);
+            uploads.push(upload);
         }
     }
-    let footprint = footprint_choices(&request.footprint)
-        .first()
-        .map(|choice| (*choice).to_owned())
-        .unwrap_or_default();
+    let choices: Vec<String> = footprint_choices(&request.footprint)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    uploads.extend(copied_footprints(&request.files, &choices)?);
+    let footprint = choices.first().cloned().unwrap_or_default();
     let footprint_file = match of_kind(FileKind::Footprint) {
         Some(file) => {
             let name = read_footprint_file(&decoded(file)?)?.name;
@@ -776,6 +824,132 @@ pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, St
         };
         uploads.push(footprint_upload(&bytes, &footprint, &label)?);
     }
+    Ok(uploads)
+}
+
+/// Where `file` was copied from, for its upload, when it came from an
+/// installed library.
+pub(crate) fn installed_source(file: &TeamFile) -> Option<catalog::pocketbase::InstalledSource> {
+    file.installed
+        .as_ref()
+        .map(|installed| catalog::pocketbase::InstalledSource {
+            library: installed.library.clone(),
+            path: installed.path.clone(),
+        })
+}
+
+/// The uploads for the footprints among `files` copied from installed
+/// libraries (kicad-parts-bc6f), each for the footprint choice in `choices`
+/// named like it, with the 3D models copied with it.
+pub(crate) fn copied_footprints(
+    files: &[TeamFile],
+    choices: &[String],
+) -> Result<Vec<CadUpload>, String> {
+    let models: Vec<&TeamFile> = files
+        .iter()
+        .filter(|file| file.kind == FileKind::Model3d && file.installed.is_some())
+        .collect();
+    let mut uploads: Vec<CadUpload> = Vec::new();
+    for file in files
+        .iter()
+        .filter(|file| file.kind == FileKind::Footprint && file.installed.is_some())
+    {
+        let bytes = crate::team::decoded(&file.base64, &file.file_name)?;
+        let name = read_footprint_file(&bytes)?.name;
+        let reference = choices
+            .iter()
+            .find(|choice| choice.split_once(':').is_some_and(|(_, item)| item == name))
+            .ok_or_else(|| {
+                format!("The copied footprint {name} is not one of the part's footprints.")
+            })?;
+        for upload in copied_footprint_uploads(file, &models, reference)? {
+            let sent = uploads
+                .iter()
+                .any(|known| known.role == upload.role && known.reference == upload.reference);
+            if !sent {
+                uploads.push(upload);
+            }
+        }
+    }
+    Ok(uploads)
+}
+
+/// The uploads for a footprint copied from an installed library as
+/// `reference`: each 3D model link outside our library pointed at the copy
+/// of its model sent with it, in the Catalog's folder for the footprint's
+/// library, or left out with No 3D model. A link whose model could not be
+/// read stops the save, plainly. Each upload says where it came from.
+fn copied_footprint_uploads(
+    file: &TeamFile,
+    models: &[&TeamFile],
+    reference: &str,
+) -> Result<Vec<CadUpload>, String> {
+    let source = |file: &TeamFile| file.label.clone().unwrap_or_else(|| file.file_name.clone());
+    let original = String::from_utf8(crate::team::decoded(&file.base64, &file.file_name)?)
+        .map_err(|_| {
+            "The footprint file is not text, so it is not a file KiCad saved.".to_owned()
+        })?;
+    // The reference first, so a missing g- library is said plainly.
+    footprint_upload(original.as_bytes(), reference, &source(file))?;
+    let (library, name) = reference.split_once(':').unwrap_or_default();
+    let outside = |link: &str| judge_model_link(library, name, link) == ModelLink::Outside;
+    let mut text = original.clone();
+    let mut uploads: Vec<CadUpload> = Vec::new();
+    if file.no_models {
+        text = remove_model_links(&text, outside);
+    } else {
+        for link in download::model_links(&original)
+            .into_iter()
+            .filter(|link| outside(link))
+        {
+            let model = models
+                .iter()
+                .find(|model| {
+                    model
+                        .installed
+                        .as_ref()
+                        .and_then(|installed| installed.link.as_deref())
+                        == Some(link.as_str())
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "The footprint's 3D model {link} could not be read, so it cannot be copied with it. Choose No 3D model, or fix the link in its library."
+                    )
+                })?;
+            let file_name = model_file_name(&model.file_name);
+            if !is_plain_name(&file_name) {
+                return Err(format!(
+                    "The 3D model's file name {file_name:?} cannot be used: a name cannot be . or .., start with -, or hold / \\ : or control characters."
+                ));
+            }
+            let key = format!("3d-models/{library}.3dshapes/{file_name}");
+            if !is_catalog_model_key(&key) {
+                return Err(
+                    "Choose one of our libraries for the footprint, so its 3D model has a place."
+                        .to_owned(),
+                );
+            }
+            text = download::relink_model(&text, &link, &format!("${{GITPLM_PARTS}}/{key}"));
+            if !uploads.iter().any(|upload| upload.reference == key) {
+                let bytes = crate::team::decoded(&model.base64, &model.file_name)?;
+                let mut upload = model_upload(&bytes, &key, &source(model))?;
+                upload.installed = installed_source(model);
+                uploads.push(upload);
+            }
+        }
+    }
+    // The history says how the file was changed.
+    let label = match (uploads.is_empty(), text == original) {
+        (_, true) => source(file),
+        (false, false) => shortened(&format!(
+            "{} (3D model path set to the Catalog's)",
+            source(file)
+        )),
+        (true, false) => shortened(&format!("{} (3D model links left out)", source(file))),
+    };
+    let mut upload = footprint_upload(text.as_bytes(), reference, &label)?;
+    upload.installed = installed_source(file);
+    uploads.push(upload);
     Ok(uploads)
 }
 

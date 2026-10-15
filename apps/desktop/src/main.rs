@@ -8,11 +8,11 @@ use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
     AppStatus, FilePreviewRequest, LibrariesView, LibraryCheckView, LibraryItemDetail,
-    LibraryItemRequest, LibraryItems, LibraryItemsRequest, PartDetail, PreviewOutcome,
-    PreviewRequest, PublishResult, SearchRequest, SearchResponse, SignInRequest,
+    LibraryItemRequest, LibraryItems, LibraryItemsRequest, OurLibraries, PartDetail,
+    PreviewOutcome, PreviewRequest, PublishResult, SearchRequest, SearchResponse, SignInRequest,
     TeamArchiveRequest, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest,
     TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest,
-    TeamNewPartRequest, TeamPart, TeamSameMpn, TeamStatus,
+    TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSameMpn, TeamStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -323,11 +323,28 @@ async fn team_part(team: State<'_, Team>, ipn: String) -> Result<Option<TeamPart
 
 #[tauri::command]
 async fn team_edit(
+    browser: State<'_, Browser>,
     team: State<'_, Team>,
     request: TeamEditRequest,
 ) -> Result<PublishResult, String> {
-    let team = team.inner().clone();
-    blocking(move || team.edit(request)).await?
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    blocking(move || browser.edit(request, &team)).await?
+}
+
+#[tauri::command]
+async fn team_pick(
+    browser: State<'_, Browser>,
+    team: State<'_, Team>,
+    request: TeamPickRequest,
+) -> Result<TeamPick, String> {
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    blocking(move || browser.pick(&request, &team)).await?
+}
+
+#[tauri::command]
+async fn our_libraries(browser: State<'_, Browser>) -> Result<OurLibraries, String> {
+    let browser = browser.inner().clone();
+    blocking(move || browser.our_libraries()).await
 }
 
 #[tauri::command]
@@ -532,6 +549,8 @@ fn main() {
             team_sign_out,
             team_part,
             team_edit,
+            team_pick,
+            our_libraries,
             team_archive,
             team_csv_review,
             team_read_file,

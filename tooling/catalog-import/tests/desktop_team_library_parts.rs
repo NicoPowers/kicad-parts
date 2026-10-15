@@ -264,6 +264,7 @@ impl Team {
                     footprint: None,
                     without_models: false,
                     library: Some(choice),
+                    picks: Vec::new(),
                 },
                 &self.team,
             )

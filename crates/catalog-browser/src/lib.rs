@@ -9,6 +9,7 @@ mod git;
 mod libraries;
 mod library;
 mod library_part;
+mod pick;
 pub mod team;
 
 use base64::Engine;
@@ -397,12 +398,158 @@ impl CatalogBrowser {
     ) -> Result<TeamDownload, String> {
         let context = self.add_part_context(team)?;
         match &request.library {
-            None => add_part::read(request, &context),
+            None if request.picks.is_empty() => add_part::read(request, &context),
+            None => self.read_picks(request, team, &context),
             Some(choice) => {
                 let plan = self.library_plan(choice, true, team)?;
                 Ok(plan.reading(&context))
             }
         }
+    }
+
+    /// Add part's reading with a symbol or footprint chosen in the Libraries
+    /// browser (kicad-parts-bc6f), each used instead of the download's for
+    /// its role. A chosen symbol brings the footprint it names when no
+    /// footprint is chosen or downloaded.
+    fn read_picks(
+        &self,
+        request: &TeamDownloadRequest,
+        team: &TeamCatalog,
+        context: &add_part::Context<'_>,
+    ) -> Result<TeamDownload, String> {
+        use catalog::download::{Download, DownloadFile, DownloadKind};
+        let mut inputs = Vec::new();
+        for file in &request.files {
+            inputs.push((
+                file.file_name.clone(),
+                team::decoded(&file.base64, &file.file_name)?,
+            ));
+        }
+        let mut download = if inputs.is_empty() {
+            Download::default()
+        } else {
+            catalog::download::read_download(&inputs)?
+        };
+        let find = |kind: PreviewKind| request.picks.iter().find(|pick| pick.kind == kind);
+        let mut notes = Vec::new();
+        let mut symbol_at = request.symbol;
+        let mut chosen = Vec::new();
+        let mut footprint_pick = find(PreviewKind::Footprint).cloned();
+        if let Some(wanted) = find(PreviewKind::Symbol) {
+            let item = self.item(wanted)?;
+            download
+                .files
+                .retain(|file| file.kind != DownloadKind::Symbol);
+            symbol_at = catalog::cad_file::read_symbol_file(&item.bytes)
+                .ok()
+                .and_then(|file| file.names.iter().position(|name| *name == item.name));
+            let has_footprint = download.of_kind(DownloadKind::Footprint).next().is_some();
+            if footprint_pick.is_none() && !has_footprint {
+                if let Some(named) = self.named_footprint(&item) {
+                    notes.push(format!(
+                        "The footprint is the one the symbol names, {}:{}.",
+                        named.library.nickname, named.name
+                    ));
+                    footprint_pick = Some(named);
+                }
+            }
+            download.files.push(DownloadFile {
+                label: item.reference.clone(),
+                file_name: format!("{}.kicad_sym", item.name),
+                kind: DownloadKind::Symbol,
+                bytes: item.bytes,
+            });
+            chosen.push(self.pick(wanted, team)?);
+        }
+        let mut footprint_reference = None;
+        if let Some(wanted) = &footprint_pick {
+            let item = self.item(wanted)?;
+            // A 3D model of the download goes with the download's
+            // footprint only.
+            download.files.retain(|file| {
+                file.kind != DownloadKind::Footprint && file.kind != DownloadKind::Model3d
+            });
+            footprint_reference = Some(item.reference.clone());
+            download.files.push(DownloadFile {
+                label: item.reference.clone(),
+                file_name: format!("{}.kicad_mod", item.name),
+                kind: DownloadKind::Footprint,
+                bytes: item.bytes,
+            });
+            chosen.push(self.pick(wanted, team)?);
+        }
+        let mut reading = add_part::read_files(
+            &download,
+            symbol_at,
+            if footprint_pick.is_some() {
+                Some(0)
+            } else {
+                request.footprint
+            },
+            request.without_models,
+            context,
+            add_part::Origin::Picked {
+                symbol: find(PreviewKind::Symbol).is_some(),
+                footprint: footprint_reference.as_deref(),
+            },
+        );
+        for pick in &chosen {
+            let copy = pick.use_as == desktop_contract::PickUse::Copy;
+            match pick.kind {
+                PreviewKind::Symbol => {
+                    reading.symbol_file = if copy { pick.file.clone() } else { None };
+                    // One symbol is chosen, never a choice of several.
+                    reading.symbols = vec![pick.reference.clone()];
+                    reading.symbol = Some(0);
+                }
+                PreviewKind::Footprint => {
+                    reading.footprint_file = if copy { pick.file.clone() } else { None };
+                    reading.footprints = vec![pick.reference.clone()];
+                    reading.footprint = Some(0);
+                    reading.model_files = if copy {
+                        pick.models.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    reading.models = reading
+                        .model_files
+                        .iter()
+                        .map(|file| file.label.clone().unwrap_or_else(|| file.file_name.clone()))
+                        .collect();
+                    reading.model = (!reading.models.is_empty()).then_some(0);
+                    if !copy {
+                        // The Catalog's, ours and KiCad's are used as they
+                        // are: they keep their own library and links.
+                        if pick.use_as != desktop_contract::PickUse::Ours {
+                            reading.known_footprints.clear();
+                        }
+                        reading.footprint_library = pick.library.nickname.clone();
+                        for category in &mut reading.categories {
+                            category.footprint_library = pick.library.nickname.clone();
+                        }
+                    }
+                }
+            }
+        }
+        // Where the part came from, as its history says it: the symbol's
+        // library, else the footprint's; a download's own site otherwise.
+        let origin = chosen
+            .iter()
+            .find(|pick| pick.kind == PreviewKind::Symbol)
+            .or_else(|| chosen.first().filter(|_| request.files.is_empty()));
+        if let Some(pick) = origin {
+            reading.from = match pick.library.group {
+                desktop_contract::LibraryGroup::Ours => library_part::FROM_OUR_LIBRARIES.to_owned(),
+                desktop_contract::LibraryGroup::Kicad => pick::FROM_KICAD.to_owned(),
+                desktop_contract::LibraryGroup::Installed => {
+                    pick::from_installed(&pick.library.nickname)
+                }
+            };
+        }
+        notes.append(&mut reading.notes);
+        reading.notes = notes;
+        reading.picks = chosen;
+        Ok(reading)
     }
 
     /// What Add part reads besides the files: the team catalog's
@@ -479,13 +626,60 @@ impl CatalogBrowser {
     /// ([`TeamNewPartRequest::library`]) is read again from the CSV catalog
     /// folder, so what is saved is what the folder and its commit hold now;
     /// only the chosen items the Symbol and Footprint still name are used.
+    /// Saves an edit from Edit part. Our libraries' items the edit newly
+    /// names and the Catalog lacks (chosen in the Libraries browser,
+    /// kicad-parts-bc6f) are added from the CSV catalog folder as
+    /// committed, as Add part does (kicad-parts-37a7).
+    pub fn edit(
+        &self,
+        request: desktop_contract::TeamEditRequest,
+        team: &TeamCatalog,
+    ) -> Result<PublishResult, String> {
+        team.edit_with(request, |named| {
+            self.ours_uploads(named, team).map(|(uploads, _)| uploads)
+        })
+    }
+
     pub fn add_part(
         &self,
         request: TeamNewPartRequest,
         team: &TeamCatalog,
     ) -> Result<PublishResult, String> {
         let Some(choice) = request.library.clone() else {
-            return team.add_part(request, self.csv_ipns());
+            // Our libraries' items the Catalog lacks, chosen in the
+            // Libraries browser, are added from the folder as committed
+            // (kicad-parts-bc6f).
+            let files = || {
+                let mut uploads = add_part::uploads(&request)?;
+                let mut wanted = Vec::new();
+                for (kind, role, field) in [
+                    (
+                        catalog::CadItemKind::Symbol,
+                        catalog::pocketbase::UploadRole::Symbol,
+                        &request.symbol,
+                    ),
+                    (
+                        catalog::CadItemKind::Footprint,
+                        catalog::pocketbase::UploadRole::Footprint,
+                        &request.footprint,
+                    ),
+                ] {
+                    for reference in footprint_choices(field) {
+                        let sent = uploads
+                            .iter()
+                            .any(|upload| upload.role == role && upload.reference == reference);
+                        if !sent {
+                            wanted.push((kind, reference.to_owned()));
+                        }
+                    }
+                }
+                let (more, sources) = self.ours_uploads(&wanted, team)?;
+                uploads.extend(more);
+                let mut files = request.downloads.clone();
+                files.extend(sources);
+                Ok((uploads, files))
+            };
+            return team.add_part_with(request.clone(), self.csv_ipns(), files);
         };
         let footprint = footprint_choices(&request.footprint)
             .first()

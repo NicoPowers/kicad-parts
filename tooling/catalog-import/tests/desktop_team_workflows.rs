@@ -147,6 +147,7 @@ fn request(zip: &[u8], name: &str) -> TeamDownloadRequest {
         footprint: None,
         without_models: false,
         library: None,
+        picks: Vec::new(),
     }
 }
 
@@ -224,6 +225,8 @@ fn team_file(kind: FileKind, name: &str, bytes: &[u8], symbol: Option<&str>) -> 
         model_key: None,
         replaces: None,
         label: None,
+        installed: None,
+        no_models: false,
     }
 }
 

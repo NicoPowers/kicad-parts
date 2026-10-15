@@ -505,6 +505,29 @@ pub fn link_model(footprint: &str, path: &str, model_file: &str) -> String {
     )
 }
 
+/// `footprint` (the text of a `.kicad_mod`) with each 3D model path written
+/// as `from` (without its quotes) pointed at `to` instead, quoted. Nothing
+/// else changes.
+pub fn relink_model(footprint: &str, from: &str, to: &str) -> String {
+    let quoted = format!("\"{}\"", to.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut relinked = String::with_capacity(footprint.len());
+    let mut at = 0;
+    for span in model_path_spans(footprint) {
+        let path = &footprint[span.clone()];
+        let bare = path
+            .strip_prefix('"')
+            .and_then(|path| path.strip_suffix('"'))
+            .unwrap_or(path);
+        if bare == from {
+            relinked.push_str(&footprint[at..span.start]);
+            relinked.push_str(&quoted);
+            at = span.end;
+        }
+    }
+    relinked.push_str(&footprint[at..]);
+    relinked
+}
+
 /// `footprint` (the text of a `.kicad_mod`) without the `(model ...)` lists
 /// whose path, as written (without its quotes), `remove` says to leave
 /// out, each with the line it stood on when nothing else was on it.
@@ -1106,6 +1129,29 @@ mod tests {
             "(module F (layer F.Cu)  (attr smd))"
         );
         assert_eq!(remove_model_links(footprint, |_| false), footprint);
+    }
+
+    #[test]
+    fn points_one_3d_model_link_somewhere_else() {
+        let footprint = "(footprint \"F\"\n\t(descr \"(model \\\"${MY}/F.stp\\\")\")\n\t(model \"${MY}/F.stp\" (offset (xyz 0 0 0)))\n\t(model \"${KICAD9_3DMODEL_DIR}/x.step\")\n)\n";
+        assert_eq!(
+            relink_model(
+                footprint,
+                "${MY}/F.stp",
+                "${GITPLM_PARTS}/3d-models/g-Package_SO.3dshapes/F.stp"
+            ),
+            "(footprint \"F\"\n\t(descr \"(model \\\"${MY}/F.stp\\\")\")\n\t(model \"${GITPLM_PARTS}/3d-models/g-Package_SO.3dshapes/F.stp\" (offset (xyz 0 0 0)))\n\t(model \"${KICAD9_3DMODEL_DIR}/x.step\")\n)\n"
+        );
+        // A KiCad 5 path without quotes is quoted.
+        assert_eq!(
+            relink_model(
+                "(module F (model C:/m/F.wrl (at (xyz 0 0 0))))",
+                "C:/m/F.wrl",
+                "a b"
+            ),
+            "(module F (model \"a b\" (at (xyz 0 0 0))))"
+        );
+        assert_eq!(relink_model(footprint, "${OTHER}/F.stp", "x"), footprint);
     }
 
     #[test]

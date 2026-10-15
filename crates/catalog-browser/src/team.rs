@@ -403,6 +403,18 @@ impl TeamCatalog {
     /// Symbol and Footprint when they differ from the revision it started
     /// from. Each is checked only against its own starting number.
     pub fn edit(&self, request: TeamEditRequest) -> Result<PublishResult, String> {
+        self.edit_with(request, |_| Ok(Vec::new()))
+    }
+
+    /// [`Self::edit`], with `more` giving uploads for the symbols and
+    /// footprints the edit newly names that no file is sent for, such as
+    /// our libraries' items the Catalog lacks (kicad-parts-bc6f); what it
+    /// refuses is said and nothing is saved.
+    pub(crate) fn edit_with(
+        &self,
+        request: TeamEditRequest,
+        more: impl FnOnce(&[(CadItemKind, String)]) -> Result<Vec<CadUpload>, String>,
+    ) -> Result<PublishResult, String> {
         let client = self.client()?;
         let part = match part_by_ipn(&client, &request.ipn) {
             Ok(Some(part)) => part,
@@ -430,10 +442,15 @@ impl TeamCatalog {
         let fields = detail_fields(&request.fields);
         let parts = catalog_parts(&request.manufacturer_parts);
         let cad_fields = detail_fields(&request.cad_fields);
-        let uploads = match uploads_of(&request.files, &request.cad_fields) {
+        let mut uploads = match uploads_of(&request.files, &request.cad_fields) {
             Ok(uploads) => uploads,
             Err(message) => return Ok(PublishResult::Refused { message }),
         };
+        let named = newly_named(&request.cad_fields, base_revision, &uploads);
+        match more(&named) {
+            Ok(more) => uploads.extend(more),
+            Err(message) => return Ok(PublishResult::Refused { message }),
+        }
         if let Some(message) = model_link_refusal(&client, &uploads)? {
             return Ok(PublishResult::Refused { message });
         }
@@ -1385,6 +1402,37 @@ pub(crate) fn decoded(base64: &str, file_name: &str) -> Result<Vec<u8>, String> 
         .map_err(|_| format!("The file {file_name} could not be read."))
 }
 
+/// The symbols and footprints `cad_fields` names that `revision` does not
+/// and that no upload is for, by kind and reference.
+pub(crate) fn newly_named(
+    cad_fields: &[Field],
+    revision: &PartRevision,
+    uploads: &[CadUpload],
+) -> Vec<(CadItemKind, String)> {
+    let mut named = Vec::new();
+    for (kind, role, column) in [
+        (CadItemKind::Symbol, UploadRole::Symbol, "Symbol"),
+        (CadItemKind::Footprint, UploadRole::Footprint, "Footprint"),
+    ] {
+        let now = cad_fields
+            .iter()
+            .find(|field| field.name == column)
+            .map(|field| field.value.clone())
+            .unwrap_or_default();
+        let before = revision.field(column).unwrap_or_default();
+        let before = footprint_choices(before);
+        for reference in footprint_choices(&now) {
+            let sent = uploads
+                .iter()
+                .any(|upload| upload.role == role && upload.reference == reference);
+            if !sent && !before.contains(&reference) {
+                named.push((kind, reference.to_owned()));
+            }
+        }
+    }
+    named
+}
+
 /// The uploads for the files of an edit: a symbol or footprint file is for
 /// the reference its field names (a footprint's first choice), and is read
 /// the way the import reads the CSV catalog's files.
@@ -1396,14 +1444,33 @@ fn uploads_of(files: &[TeamFile], cad_fields: &[Field]) -> Result<Vec<CadUpload>
             .map(|field| field.value.trim().to_owned())
             .unwrap_or_default()
     };
+    // A footprint copied from an installed library goes to the choice named
+    // like it (kicad-parts-bc6f); any other footprint file to the first.
     for kind in [FileKind::Symbol, FileKind::Footprint] {
-        if files.iter().filter(|file| file.kind == kind).count() > 1 {
+        let count = files
+            .iter()
+            .filter(|file| {
+                file.kind == kind && (kind == FileKind::Symbol || file.installed.is_none())
+            })
+            .count();
+        if count > 1 {
             return Err("Choose one file for each of the symbol and the footprint.".into());
         }
     }
-    let mut uploads = Vec::new();
+    let footprint = field("Footprint");
+    let choices: Vec<String> = footprint_choices(&footprint)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let mut uploads = crate::add_part::copied_footprints(files, &choices)?;
     for file in files {
+        // Copies of an installed library's footprints and their 3D models
+        // are sent above.
+        if file.kind != FileKind::Symbol && file.installed.is_some() {
+            continue;
+        }
         let bytes = decoded(&file.base64, &file.file_name)?;
+        let source = file.label.clone().unwrap_or_else(|| file.file_name.clone());
         let upload = match file.kind {
             FileKind::Symbol => {
                 let reference = field("Symbol");
@@ -1411,7 +1478,10 @@ fn uploads_of(files: &[TeamFile], cad_fields: &[Field]) -> Result<Vec<CadUpload>
                     .symbol
                     .as_deref()
                     .ok_or_else(|| "Choose which symbol of the file to use.".to_owned())?;
-                catalog::cad_file::symbol_upload(&bytes, name, &reference, &file.file_name)?
+                let mut upload =
+                    catalog::cad_file::symbol_upload(&bytes, name, &reference, &source)?;
+                upload.installed = crate::add_part::installed_source(file);
+                upload
             }
             FileKind::Footprint => {
                 let footprint = field("Footprint");
@@ -1962,8 +2032,12 @@ fn downloaded_from(change: &StoredChange) -> Option<DetailChange> {
         (false, false) => format!("{from}: {}", files.join(", ")),
     };
     Some(DetailChange {
-        // A part from our libraries was not downloaded.
-        label: if from == crate::library_part::FROM_OUR_LIBRARIES {
+        // A part from our libraries, KiCad's or an installed library was
+        // not downloaded.
+        label: if from == crate::library_part::FROM_OUR_LIBRARIES
+            || from == crate::pick::FROM_KICAD
+            || from.starts_with(&crate::pick::from_installed(""))
+        {
             "Added from"
         } else {
             "Downloaded from"

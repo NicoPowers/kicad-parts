@@ -86,6 +86,8 @@ fn file(kind: FileKind, name: &str, bytes: &[u8], symbol: Option<&str>) -> TeamF
         model_key: None,
         replaces: None,
         label: None,
+        installed: None,
+        no_models: false,
     }
 }
 

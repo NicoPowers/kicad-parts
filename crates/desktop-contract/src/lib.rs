@@ -651,6 +651,29 @@ pub struct TeamFile {
     /// the file name.
     #[serde(default)]
     pub label: Option<String>,
+    /// For a symbol, footprint or 3D model copied from another installed
+    /// KiCad library (kicad-parts-bc6f): where it came from.
+    #[serde(default)]
+    pub installed: Option<InstalledFile>,
+    /// For a footprint copied from an installed library: leave out its 3D
+    /// model links outside our library instead of copying the models
+    /// (No 3D model).
+    #[serde(default)]
+    pub no_models: bool,
+}
+
+/// Where a file copied from one of the person's other installed KiCad
+/// libraries came from.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InstalledFile {
+    /// The library's nickname in the person's KiCad library tables.
+    pub library: String,
+    /// The file it was read from.
+    pub path: String,
+    /// For a 3D model: the footprint's link to it, as the footprint writes
+    /// it, which saving points at the copy.
+    #[serde(default)]
+    pub link: Option<String>,
 }
 
 /// Read a chosen symbol library or footprint file, for Edit part.
@@ -732,6 +755,77 @@ pub struct TeamDownloadRequest {
     /// (kicad-parts-37a7).
     #[serde(default)]
     pub library: Option<TeamLibraryChoice>,
+    /// A symbol and a footprint chosen in the Libraries browser
+    /// (kicad-parts-bc6f), each used instead of the download's for its
+    /// role. A symbol chosen with no footprint brings the footprint it
+    /// names, when a library has it.
+    #[serde(default)]
+    pub picks: Vec<TeamPickRequest>,
+}
+
+/// A symbol or footprint chosen in the Libraries browser for Edit part or
+/// Add part.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamPickRequest {
+    pub kind: PreviewKind,
+    pub library: LibraryKey,
+    pub name: String,
+}
+
+/// How a chosen symbol or footprint is used, by where it lives.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickUse {
+    /// The Catalog has it: bound to its current revision.
+    Catalog,
+    /// One of our libraries' items the Catalog does not have yet: added
+    /// from the folder when saving, as it is committed.
+    Ours,
+    /// KiCad's own: referred to as KiCad's, as imported parts are.
+    Kicad,
+    /// Another installed library's: copied into one of our libraries, like
+    /// a download.
+    Copy,
+}
+
+/// What choosing an item in the Libraries browser means for the part.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamPick {
+    pub kind: PreviewKind,
+    pub library: LibraryKey,
+    pub name: String,
+    /// `LIBRARY:NAME` as in its library, such as `Device:R`.
+    pub reference: String,
+    pub use_as: PickUse,
+    /// For a copy: the file to send (a symbol library holding the symbol,
+    /// or the footprint file), saying where it came from.
+    #[serde(default)]
+    pub file: Option<TeamFile>,
+    /// For a copied footprint: the 3D models its links name that could be
+    /// read, each copied with it.
+    #[serde(default)]
+    pub models: Vec<TeamFile>,
+    /// For a copied footprint: its 3D model links that could not be read,
+    /// in plain words; they stop the save unless No 3D model is chosen.
+    #[serde(default)]
+    pub model_problems: Vec<String>,
+    /// What stops the save, in plain words, such as files of ours that are
+    /// not committed.
+    #[serde(default)]
+    pub problems: Vec<String>,
+    /// What else to know, in plain words.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// Our libraries (the CSV catalog's `g-` libraries), by role, for the
+/// library a copied or downloaded file goes into.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OurLibraries {
+    /// Such as `g-res`.
+    pub symbols: Vec<String>,
+    /// Such as `g-Resistor_SMD`.
+    pub footprints: Vec<String>,
 }
 
 /// A symbol and a footprint chosen from our libraries (the CSV catalog's
@@ -834,6 +928,12 @@ pub struct TeamDownload {
     /// them; `None` for a download.
     #[serde(default)]
     pub library: Option<TeamLibraryReading>,
+    /// The symbol and footprint chosen in the Libraries browser and how
+    /// each is used. For a copy, `symbol_file`, `footprint_file` and
+    /// `model_files` are its files; for any other use they are `None` and
+    /// empty, as nothing is sent for it.
+    #[serde(default)]
+    pub picks: Vec<TeamPick>,
 }
 
 /// A category as Add part offers it.

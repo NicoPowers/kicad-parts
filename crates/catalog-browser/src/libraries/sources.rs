@@ -210,15 +210,41 @@ fn kicad(share: &Path, sources: &mut Vec<Source>) {
     }
 }
 
-fn installed(places: &Places, config: &Path, sources: &mut Vec<Source>, notes: &mut Vec<String>) {
-    let documents = places.documents.clone();
-    let (vars, problem) = PathVariables::for_kicad(&VariableSources {
+/// KiCad's path variables as the person's KiCad has them, read from
+/// `config` (their settings folder), and why `kicad_common.json` could not
+/// be read, if it could not.
+pub(crate) fn path_variables(places: &Places, config: &Path) -> (PathVariables, Option<String>) {
+    PathVariables::for_kicad(&VariableSources {
         environment: places.environment.clone(),
         config_dir: Some(config.to_path_buf()),
         share_dir: places.share.clone(),
-        documents_dir: documents,
+        documents_dir: places.documents.clone(),
         major: KICAD_MAJOR,
-    });
+    })
+}
+
+/// The nicknames of our libraries under `root`, by role, in name order.
+pub(crate) fn our_library_names(root: &Path) -> desktop_contract::OurLibraries {
+    let mut sources = Vec::new();
+    ours(root, &mut sources);
+    let names = |kind: PreviewKind| {
+        let mut names: Vec<String> = sources
+            .iter()
+            .filter(|source| source.kind == kind)
+            .map(|source| source.key.nickname.clone())
+            .collect();
+        names.sort_by_key(|name| name.to_lowercase());
+        names.dedup();
+        names
+    };
+    desktop_contract::OurLibraries {
+        symbols: names(PreviewKind::Symbol),
+        footprints: names(PreviewKind::Footprint),
+    }
+}
+
+fn installed(places: &Places, config: &Path, sources: &mut Vec<Source>, notes: &mut Vec<String>) {
+    let (vars, problem) = path_variables(places, config);
     notes.extend(problem);
     // Already listed under Ours or KiCad.
     let mut listed: Vec<PathBuf> = vec![

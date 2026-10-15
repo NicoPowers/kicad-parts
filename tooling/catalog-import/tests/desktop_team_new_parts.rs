@@ -144,6 +144,7 @@ fn request(zip: &[u8], name: &str) -> TeamDownloadRequest {
         footprint: None,
         without_models: false,
         library: None,
+        picks: Vec::new(),
     }
 }
 

@@ -30,7 +30,7 @@ impl CatalogBrowser {
     /// Where the libraries are: our CSV catalog folder, KiCad's data
     /// folder (found even when kicad-cli cannot run) and the person's
     /// KiCad settings folder.
-    fn library_places(&self) -> Places {
+    pub(crate) fn library_places(&self) -> Places {
         let share = self
             .kicad_share()
             .or_else(|| installed_share_dir(&self.config.kicad_locations));
@@ -274,7 +274,7 @@ impl CatalogBrowser {
 
 /// The bytes of `name` in a `.kicad_symdir` (its file's entry, with the
 /// parents it extends) and the file's version.
-fn symdir_bytes(
+pub(crate) fn symdir_bytes(
     source: &super::sources::Source,
     file: Option<&str>,
     name: &str,

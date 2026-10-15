@@ -262,6 +262,12 @@ pub(crate) fn plan(
 }
 
 impl Plan {
+    /// What stops saving the chosen items, and what else the library check
+    /// found about them.
+    pub(crate) fn said(&self) -> (Vec<String>, Vec<String>) {
+        (self.problems.clone(), self.findings.clone())
+    }
+
     /// The chosen symbol and footprint references.
     fn references(&self) -> Vec<String> {
         self.symbol
