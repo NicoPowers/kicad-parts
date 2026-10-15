@@ -189,6 +189,8 @@ impl Drawer {
             add_layer(&graphic.layer);
             bounds.shape(&graphic.shape);
         }
+        // Texts count too, as in KiCad's zoom to fit, so a close-up that
+        // fits the drawing shows all of it.
         for text in &self.texts {
             add_layer(&text.layer);
             bounds.text(text);
@@ -1239,11 +1241,29 @@ impl Bounds {
         }
     }
 
-    /// Roughly the box a text covers, ignoring its angle.
+    /// Roughly the box a text covers: each letter about 0.8 of its
+    /// height wide, placed as it is aligned, then turned.
     fn text(&mut self, text: &DrawnText) {
-        let half_width = text.text.chars().count() as f64 * text.height * 0.4;
-        let reach = half_width.max(text.height);
-        self.point(text.at, reach);
+        let width = text.text.chars().count() as f64 * text.height * 0.8;
+        let height = text.height * 1.2;
+        let span = |align: TextAlign, size: f64| match align {
+            TextAlign::Start => (0.0, size),
+            TextAlign::Center => (-size / 2.0, size / 2.0),
+            TextAlign::End => (-size, 0.0),
+        };
+        let (mut x0, mut x1) = span(text.horizontal, width);
+        if text.mirrored {
+            (x0, x1) = (-x1, -x0);
+        }
+        let (y0, y1) = span(text.vertical, height);
+        for corner in [
+            Point::new(x0, y0),
+            Point::new(x1, y0),
+            Point::new(x1, y1),
+            Point::new(x0, y1),
+        ] {
+            self.point(add(text.at, rotate(corner, text.angle)), 0.0);
+        }
     }
 
     fn finish(self) -> [f64; 4] {

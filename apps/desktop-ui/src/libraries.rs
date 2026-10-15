@@ -1032,7 +1032,7 @@ fn Detail(
                 <code>{cad_reference(&reference)}</code>
             </h3>
             <div class="library-preview">
-                <PreviewSection kind=kind state=preview id_prefix="library-" />
+                <PreviewSection kind=kind state=preview id_prefix="library-" interactive=true />
             </div>
             {move || match detail.get() {
                 None | Some(Load::Loading) => view! { <p class="loading" aria-busy="true">"Loading details…"</p> }.into_any(),

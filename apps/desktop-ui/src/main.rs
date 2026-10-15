@@ -11,6 +11,7 @@ mod libraries;
 mod library_check;
 mod part_list;
 mod team;
+mod viewer;
 
 use add_part::AddPartView;
 use desktop_contract::{
@@ -25,6 +26,7 @@ use library_check::{LibraryCheckLine, LibraryCheckPanel};
 use part_list::{ResultList, SEARCH_ROWS, Searched};
 use std::time::Duration;
 use team::{Notice, TeamBadge, TeamColumn, TeamUi, focus_later};
+use viewer::{CloseUp, CloseUpDialog, Picture, Viewer};
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(120);
 /// How often the UI asks whether the team catalog has new Changes. The app
@@ -1190,6 +1192,10 @@ fn PreviewSection(
     /// browser's) has ids of its own.
     #[prop(optional)]
     id_prefix: &'static str,
+    /// Show each drawing in a viewer that zooms and moves, with an
+    /// Enlarge button, instead of a picture that opens the close-up.
+    #[prop(optional)]
+    interactive: bool,
 ) -> impl IntoView {
     let title = kind_title(kind);
     let heading_id = format!("{id_prefix}{}-heading", title.to_lowercase());
@@ -1208,7 +1214,7 @@ fn PreviewSection(
                     <div class="problem" role="alert"><p>{error}</p></div>
                 }
                 .into_any(),
-                Load::Ready(PreviewOutcome::Ready(set)) => view! { <PreviewImages set=set id_prefix=id_prefix /> }.into_any(),
+                Load::Ready(PreviewOutcome::Ready(set)) => view! { <PreviewImages set=set interactive=interactive /> }.into_any(),
                 Load::Ready(PreviewOutcome::Problem(problem)) => {
                     view! { <PreviewProblemView problem=problem /> }.into_any()
                 }
@@ -1218,7 +1224,7 @@ fn PreviewSection(
 }
 
 #[component]
-fn PreviewImages(set: PreviewSet, #[prop(optional)] id_prefix: &'static str) -> impl IntoView {
+fn PreviewImages(set: PreviewSet, #[prop(optional)] interactive: bool) -> impl IntoView {
     let title = kind_title(set.kind);
     let total = set.images.len();
     let units = {
@@ -1267,29 +1273,9 @@ fn PreviewImages(set: PreviewSet, #[prop(optional)] id_prefix: &'static str) -> 
         PreviewKind::Symbol => "canvas canvas-symbol",
         PreviewKind::Footprint => "canvas canvas-footprint",
     };
-    // One enlarge dialog per preview section, showing the clicked image.
-    let dialog = NodeRef::<leptos::html::Dialog>::new();
-    let zoomed = RwSignal::new(None::<(String, String)>);
-    let open = move |src: String, alt: String| {
-        zoomed.set(Some((src, alt)));
-        if let Some(dialog) = dialog.get() {
-            show_modal(&dialog);
-        }
-    };
-    // A click outside the close-up (on the dim backdrop) closes it, like
-    // Escape and Close; the dialog then gives focus back to what opened it.
-    // Both the press and the release must be outside, so dragging out of
-    // the picture does not close it.
-    let pressed_outside = StoredValue::new(false);
-    let outside = move |event: &leptos::ev::MouseEvent| {
-        dialog.get_untracked().is_some_and(|dialog| {
-            let Some([left, right, top, bottom]) = bounds(&dialog) else {
-                return false;
-            };
-            let (x, y) = (f64::from(event.client_x()), f64::from(event.client_y()));
-            x < left || x > right || y < top || y > bottom
-        })
-    };
+    // One close-up per preview section, showing the clicked image.
+    let close_up = CloseUp::new();
+    let footprint = set.kind == PreviewKind::Footprint;
     view! {
         <p class="preview-meta">
             <code class="reference">{cad_reference(&set.reference)}</code>
@@ -1326,54 +1312,40 @@ fn PreviewImages(set: PreviewSet, #[prop(optional)] id_prefix: &'static str) -> 
                         }
                         _ => (title.to_owned(), format!("{title} {reference}")),
                     };
-                    let src = image.data_uri;
-                    let (zoom_src, zoom_alt) = (src.clone(), alt.clone());
-                    view! {
-                        <figure class="preview-figure">
+                    let picture = Picture::new(&image, alt.clone(), footprint);
+                    let drawing = if interactive {
+                        let enlarged = picture.clone();
+                        let enlarge = Callback::new(move |()| close_up.open(enlarged.clone()));
+                        view! { <Viewer picture=picture enlarge=enlarge /> }.into_any()
+                    } else {
+                        view! {
                             <button
                                 type="button"
                                 class=canvas
                                 title="Enlarge"
-                                on:click=move |_| open(zoom_src.clone(), zoom_alt.clone())
+                                on:click=move |_| close_up.open(picture.clone())
                             >
-                                <img src=src alt=alt decoding="async" />
+                                <img src=image.data_uri alt=alt decoding="async" />
                             </button>
+                        }
+                        .into_any()
+                    };
+                    view! {
+                        <figure class="preview-figure">
+                            {drawing}
                             {(total > 1).then(|| view! { <figcaption>{caption}</figcaption> })}
                         </figure>
                     }
                 })
                 .collect_view()}
         </div>
-        <dialog
-            node_ref=dialog
-            class="zoom-dialog"
-            aria-labelledby=format!("{id_prefix}{}-zoom-title", title.to_lowercase())
-            on:pointerdown=move |event| pressed_outside.set_value(outside(&event))
-            on:click=move |event| {
-                if pressed_outside.get_value() && outside(&event) {
-                    if let Some(dialog) = dialog.get_untracked() {
-                        dialog.close();
-                    }
-                }
-                pressed_outside.set_value(false);
-            }
-        >
-            <form method="dialog" class="zoom-header">
-                <h4 id=format!("{id_prefix}{}-zoom-title", title.to_lowercase())>
-                    {move || zoomed.get().map(|(_, alt)| alt).unwrap_or_default()}
-                </h4>
-                <button type="submit" class="primary">"Close"</button>
-            </form>
-            <div class=canvas>
-                {move || zoomed.get().map(|(src, alt)| view! { <img src=src alt=alt /> })}
-            </div>
-        </dialog>
+        <CloseUpDialog close_up=close_up />
     }
 }
 
 /// An element's left, right, top and bottom on the screen
 /// (`getBoundingClientRect()`).
-fn bounds(element: &wasm_bindgen::JsValue) -> Option<[f64; 4]> {
+pub(crate) fn bounds(element: &wasm_bindgen::JsValue) -> Option<[f64; 4]> {
     use wasm_bindgen::JsCast;
     let method = js_sys::Reflect::get(element, &"getBoundingClientRect".into()).ok()?;
     let rect = method.dyn_ref::<js_sys::Function>()?.call0(element).ok()?;
@@ -1382,7 +1354,7 @@ fn bounds(element: &wasm_bindgen::JsValue) -> Option<[f64; 4]> {
 }
 
 /// `HTMLDialogElement.showModal()`, which traps focus and closes on Escape.
-fn show_modal(dialog: &wasm_bindgen::JsValue) {
+pub(crate) fn show_modal(dialog: &wasm_bindgen::JsValue) {
     use wasm_bindgen::JsCast;
     if let Ok(method) = js_sys::Reflect::get(dialog, &"showModal".into()) {
         if let Some(method) = method.dyn_ref::<js_sys::Function>() {

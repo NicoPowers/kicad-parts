@@ -429,3 +429,18 @@ fn our_footprints_draw_their_pads_where_the_file_says() {
     }
     assert!(checked > 50, "only {checked} footprints");
 }
+
+#[test]
+fn a_text_counts_in_the_box_as_aligned_and_turned() {
+    let drawing = draw(
+        "(footprint \"T\" (fp_text user \"ABCDE\" (at 0 0 90) (layer \"F.Fab\") (effects (font (size 1 1)))))",
+    );
+    // Five letters about 4 mm wide, turned upright, and 1.2 mm high.
+    let [x0, y0, x1, y1] = drawing.bounds;
+    assert!(close(x0, -0.6) && close(x1, 0.6), "{x0} {x1}");
+    assert!(close(y0, -2.0) && close(y1, 2.0), "{y0} {y1}");
+    let drawing = draw(
+        "(footprint \"T\" (fp_text user \"ABCDE\" (at 1 0) (layer \"F.Fab\") (effects (font (size 1 1)) (justify left top))))",
+    );
+    assert_eq!(drawing.bounds, [1.0, 0.0, 5.0, 1.2]);
+}

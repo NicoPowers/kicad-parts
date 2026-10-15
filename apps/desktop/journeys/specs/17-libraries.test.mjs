@@ -261,6 +261,74 @@ describe('Libraries browser', () => {
     await browser.waitUntil(async () => (await browser.$$('.for-symbol')).length === 0, { timeout: 5_000 });
   });
 
+  it('zooms and moves the drawing in its pane, and enlarges it', async () => {
+    await typeSearch(browser, 'R_0603_1608Metric');
+    await selectRow(browser, 'R_0603_1608Metric');
+    await waitForPreviewImages(browser, PREVIEW);
+    const pane = `${PREVIEW} .preview-figure`;
+    const view = () =>
+      browser.execute((s) => {
+        const area = document.querySelector(`${s} .viewer-area`);
+        const box = area.querySelector('svg').getAttribute('viewBox').split(' ').map(Number);
+        const rect = area.getBoundingClientRect();
+        return {
+          box,
+          scale: Math.min(rect.width / box[2], rect.height / box[3]),
+          centre: { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) },
+        };
+      }, pane);
+    const shown = await browser.execute((s) => {
+      const viewer = document.querySelector(`${s} .viewer`);
+      return {
+        active: viewer.dataset.activeLayer,
+        layers: [...viewer.querySelectorAll('g.layer')].length,
+        list: viewer.querySelectorAll('.viewer-layers').length,
+      };
+    }, pane);
+    assert.equal(shown.active, 'F.Cu');
+    assert.ok(shown.layers >= 4, `${shown.layers} layers drawn`);
+    assert.equal(shown.list, 0, 'the pane has no room for the layer list');
+    const fitted = await view();
+    await browser.action('wheel').scroll({ x: fitted.centre.x, y: fitted.centre.y, deltaX: 0, deltaY: -300, duration: 0 }).perform();
+    const zoomed = await view();
+    assert.ok(zoomed.scale > fitted.scale * 1.5, `${zoomed.scale} against ${fitted.scale}`);
+    await browser
+      .action('pointer', { parameters: { pointerType: 'mouse' } })
+      .move({ x: zoomed.centre.x, y: zoomed.centre.y })
+      .down({ button: 0 })
+      .move({ x: zoomed.centre.x + 60, y: zoomed.centre.y, duration: 50 })
+      .up({ button: 0 })
+      .perform();
+    const moved = await view();
+    assert.ok(Math.abs(moved.box[0] - (zoomed.box[0] - 60 / zoomed.scale)) < 0.01, 'the drag moved the drawing');
+    assert.equal(await browser.execute((s) => document.querySelector(s)?.open === true, DIALOG), true, 'the browser stays open');
+    await (await browser.$(`${pane} .viewer-fit`)).click();
+    assert.deepEqual((await view()).box, fitted.box);
+
+    // Enlarge opens the close-up, with the layer list, over the browser.
+    await (await browser.$(`${pane} .viewer-enlarge`)).click();
+    const closeUp = `${PREVIEW} dialog.zoom-dialog`;
+    await browser.waitUntil(async () => browser.execute((s) => document.querySelector(s)?.open === true, closeUp), {
+      timeout: 5_000,
+      timeoutMsg: 'Enlarge did not open the close-up',
+    });
+    const layers = await browser.execute(
+      (s) => [...document.querySelectorAll(`${s} .viewer-layers .layer-name`)].map((name) => name.textContent),
+      closeUp,
+    );
+    for (const layer of ['F.Cu', 'F.Paste', 'F.Mask', 'F.CrtYd', 'F.Fab']) assert.ok(layers.includes(layer), `${layer} in ${layers}`);
+    // axe checks the close-up in 19-drawing-viewer; here, over the
+    // browser's own modal dialog, it cannot tell which dialog is on top.
+    await screenshot(browser, '77-libraries-close-up', { blankOut: ['.library-facts .fact:last-child dd'] });
+    // Escape closes the close-up, and only the close-up.
+    await browser.keys('Escape');
+    await browser.waitUntil(async () => browser.execute((s) => document.querySelector(s)?.open === false, closeUp), {
+      timeout: 5_000,
+      timeoutMsg: 'Escape did not close the close-up',
+    });
+    assert.equal(await browser.execute((s) => document.querySelector(s)?.open === true, DIALOG), true, 'the browser stays open');
+  });
+
   it("draws a symbol from the person's own folder library", async () => {
     await (await browser.$('#library-tab-symbols')).click();
     await chooseLibrary(browser, 'MySymbols');

@@ -341,7 +341,10 @@ export async function assertAccessible(browser, name) {
       const axe = window.axe;
       const reasonsOf = (node) => [...node.any, ...node.all, ...node.none].map((c) => c.data?.messageKey ?? c.message);
       const describe = (el) => el.tagName.toLowerCase() + [...el.classList].map((c) => '.' + c).join('');
-      const first = await axe.run(document, { resultTypes: ['violations', 'incomplete'] });
+      // A drawing in a viewer (kicad-parts-34df) is a picture, hidden from
+      // assistive technology; its text, such as a footprint's reference, is
+      // part of the picture, as it is in kicad-cli's images.
+      const first = await axe.run({ exclude: [['.viewer-svg']] }, { resultTypes: ['violations', 'incomplete'] });
       const violations = first.violations.map((v) => ({
         id: v.id,
         impact: v.impact,
@@ -633,8 +636,11 @@ export async function waitForPreview(browser, section, timeout = 60_000) {
         (s) => {
           const el = document.querySelector(s);
           if (!el || el.querySelector('[aria-busy="true"]')) return false;
+          // Pictures, and drawing viewers (kicad-parts-34df) outside a close-up.
           const imgs = [...el.querySelectorAll('img')];
-          return el.querySelector('.problem') !== null || (imgs.length > 0 && imgs.every((i) => i.complete));
+          const viewers = [...el.querySelectorAll('.viewer')].filter((v) => !v.closest('dialog.zoom-dialog'));
+          const drawn = imgs.length + viewers.length > 0 && imgs.every((i) => i.complete) && viewers.every((v) => v.dataset.ready === 'true');
+          return el.querySelector('.problem') !== null || drawn;
         },
         section,
       ),
@@ -667,7 +673,12 @@ async function waitForDrawnImages(browser, section, timeout) {
           const el = document.querySelector(s);
           if (!el || el.querySelector('[aria-busy="true"]') || el.querySelector('.problem')) return false;
           const imgs = [...el.querySelectorAll('img')];
-          return imgs.length > 0 && imgs.every((i) => i.complete && i.naturalWidth > 0);
+          const viewers = [...el.querySelectorAll('.viewer')].filter((v) => !v.closest('dialog.zoom-dialog'));
+          return (
+            imgs.length + viewers.length > 0 &&
+            imgs.every((i) => i.complete && i.naturalWidth > 0) &&
+            viewers.every((v) => v.dataset.ready === 'true')
+          );
         },
         section,
       ),
@@ -885,8 +896,9 @@ export async function chooseInLibraries(browser, { group, library, name, enter =
     async () =>
       browser.execute(() => {
         const detail = document.querySelector('.libraries-detail');
-        const images = [...(detail?.querySelectorAll('.preview img') ?? [])];
-        return (images.length > 0 && images.every((img) => img.complete && img.naturalWidth > 0)) || detail?.querySelector('.problem') != null;
+        // The browser shows each drawing in a viewer (kicad-parts-34df).
+        const viewers = [...(detail?.querySelectorAll('.preview .viewer') ?? [])].filter((v) => !v.closest('dialog.zoom-dialog'));
+        return (viewers.length > 0 && viewers.every((v) => v.dataset.ready === 'true')) || detail?.querySelector('.problem') != null;
       }),
     { timeout: 60_000, interval: 100, timeoutMsg: `${library}:${name} was never drawn in the browser` },
   );

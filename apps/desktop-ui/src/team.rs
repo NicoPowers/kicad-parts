@@ -11,6 +11,7 @@
 
 use crate::backend;
 use crate::edit_cad::CadFields;
+use crate::viewer::{CloseUp, CloseUpDialog, Picture};
 use desktop_contract::{
     CsvChangeRow, CsvChanges, DetailChange, Field, FileKind, HistoryEntry, LiveUpdates,
     ManufacturerPart, OlderUse, PreviewKind, PreviewOutcome, PublishResult, SignInRequest,
@@ -1389,7 +1390,8 @@ pub(crate) fn base64(bytes: &[u8]) -> String {
     text
 }
 
-/// The drawing of a chosen symbol or footprint file.
+/// The drawing of a chosen symbol or footprint file. A click on it opens
+/// the close-up.
 #[component]
 pub(crate) fn FilePreview(
     kind: FileKind,
@@ -1404,7 +1406,9 @@ pub(crate) fn FilePreview(
     } else {
         ("footprint", "canvas canvas-footprint file-canvas")
     };
-    move || {
+    // A click on a drawing opens it in a close-up that zooms.
+    let close_up = CloseUp::new();
+    let drawings = move || {
         if previewing.get() {
             return view! {
                 <p class="loading" aria-busy="true">{format!("Drawing the {what} with kicad-cli…")}</p>
@@ -1418,13 +1422,24 @@ pub(crate) fn FilePreview(
                 } else {
                     format!("Preview of the {what} {} from the file", set.reference)
                 };
+                let footprint = kind == FileKind::Footprint;
                 view! {
                     <div class="file-preview">
                         {set
                             .images
                             .into_iter()
-                            .map(|image| view! {
-                                <div class=canvas><img src=image.data_uri alt=alt.clone() /></div>
+                            .map(|image| {
+                                let picture = Picture::new(&image, alt.clone(), footprint);
+                                view! {
+                                    <button
+                                        type="button"
+                                        class=canvas
+                                        title="Enlarge"
+                                        on:click=move |_| close_up.open(picture.clone())
+                                    >
+                                        <img src=image.data_uri alt=alt.clone() />
+                                    </button>
+                                }
                             })
                             .collect_view()}
                     </div>
@@ -1440,6 +1455,10 @@ pub(crate) fn FilePreview(
             }
             None => ().into_any(),
         }
+    };
+    view! {
+        {drawings}
+        <CloseUpDialog close_up=close_up />
     }
 }
 

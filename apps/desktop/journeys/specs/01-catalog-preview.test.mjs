@@ -152,9 +152,15 @@ describe('catalog search with exact KiCad previews', () => {
       timeoutMsg: 'the enlarge dialog did not open',
     });
     assert.equal(await textOf(browser, `${dialog} h4`), 'Symbol g-mcu:STM32H723ZG, unit A (1 of 5)');
-    await browser.waitUntil(async () => (await images(browser, `${dialog} img`))[0]?.loaded === true, {
-      timeout: 5_000,
-    });
+    // The close-up's viewer (kicad-parts-34df) shows kicad-cli's drawing.
+    await browser.waitUntil(
+      async () =>
+        browser.execute((s) => {
+          const viewer = document.querySelector(`${s} .viewer`);
+          return viewer?.dataset.ready === 'true' && viewer.querySelector('svg image')?.getAttribute('href')?.startsWith('data:image/svg+xml;base64,');
+        }, dialog),
+      { timeout: 5_000, timeoutMsg: 'the close-up never showed the drawing' },
+    );
     await assertAccessible(browser, '04-symbol-enlarged');
     await screenshot(browser, '04-symbol-enlarged');
     await browser.keys('Escape');
