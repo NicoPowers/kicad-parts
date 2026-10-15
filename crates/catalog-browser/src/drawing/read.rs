@@ -76,12 +76,15 @@ pub(super) fn layer_of(node: &Sexp) -> Option<String> {
 
 /// Whether a text item is hidden: a bare `hide`, `(hide)` or `(hide yes)`
 /// on the item or in its `effects`.
+///
+/// A text's own words (its kind or name, and its text) come first, so a
+/// text that reads "hide" is not hidden.
 pub(super) fn hidden(node: &Sexp) -> bool {
-    let says_hide = |node: &Sexp| {
-        node.items().iter().skip(1).any(|item| match item {
+    let says_hide = |node: &Sexp, skip: usize| {
+        node.items().iter().skip(skip).any(|item| match item {
             Sexp::Word(word) => word == "hide",
             Sexp::List(_) => item.head() == Some("hide") && item.word_at(1) != Some("no"),
         })
     };
-    says_hide(node) || child(node, "effects").is_some_and(says_hide)
+    says_hide(node, 3) || child(node, "effects").is_some_and(|effects| says_hide(effects, 1))
 }

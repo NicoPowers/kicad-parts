@@ -161,6 +161,14 @@ impl Drawer {
             return;
         };
         let layers = pad_layers(pad);
+        // KiCad 9 and later can give a pad a different shape on inner and
+        // back copper; the pad's own shape is its front copper.
+        if child(pad, "padstack")
+            .and_then(|stack| child(stack, "mode"))
+            .is_some_and(|mode| mode.word_at(1) != Some("normal"))
+        {
+            self.note("Pads with a shape of their own on each copper layer are drawn with their front shape.");
+        }
         // KiCad gives margins only to pads on copper: a paste or mask
         // opening drawn as a pad of its own is exactly its size.
         let margins = if layers.iter().any(|layer| layer.ends_with(".Cu")) {
@@ -206,14 +214,17 @@ impl Drawer {
                 });
             }
         }
-        let hole = drill.map(|drill| {
-            place(
-                &drill.shape(),
-                Point::default(),
-                geometry.angle,
-                geometry.at,
-            )
-        });
+        // An SMD pad can have a drill with only an offset: no hole.
+        let hole = drill
+            .filter(|drill| drill.size.0 > 0.0 && drill.size.1 > 0.0)
+            .map(|drill| {
+                place(
+                    &drill.shape(),
+                    Point::default(),
+                    geometry.angle,
+                    geometry.at,
+                )
+            });
         self.pads.push(DrawnPad {
             number: pad.word_at(1).unwrap_or_default().to_owned(),
             kind,

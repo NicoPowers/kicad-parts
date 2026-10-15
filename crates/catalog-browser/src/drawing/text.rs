@@ -69,6 +69,20 @@ pub(super) fn text(node: &Sexp, reference: &str, value: &str) -> Option<DrawnTex
     } else {
         TextAlign::Center
     };
+    // KiCad keeps footprint text readable: text turned past upright is
+    // turned back by half a turn, its alignment swapped so it stays put.
+    let mut angle = angle.rem_euclid(360.0);
+    let (mut horizontal, mut vertical) = (horizontal, vertical);
+    if angle > 90.0 && angle <= 270.0 {
+        angle -= 180.0;
+        let swap = |align| match align {
+            TextAlign::Start => TextAlign::End,
+            TextAlign::End => TextAlign::Start,
+            TextAlign::Center => TextAlign::Center,
+        };
+        horizontal = swap(horizontal);
+        vertical = swap(vertical);
+    }
     Some(DrawnText {
         layer,
         text: shown,

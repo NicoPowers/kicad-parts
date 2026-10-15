@@ -617,3 +617,49 @@ fn hostile_files_send_the_ui_only_a_few_megabytes() {
     assert_eq!(drawing.graphics.len(), 1);
     assert_eq!(drawing.left_out, [TOO_MANY]);
 }
+
+#[test]
+fn texts_read_hide_literally_and_stay_upright() {
+    let drawing = draw(
+        "(footprint \"T\"
+          (fp_text user \"hide\" (at 0 0) (layer \"F.Fab\") (effects (font (size 1 1))))
+          (property \"Note\" \"hide\" (at 0 1) (layer \"F.Fab\") (effects (font (size 1 1))))
+          (fp_text user \"Upside\" (at 0 2 180) (layer \"F.SilkS\") (effects (font (size 1 1)) (justify left)))
+          (fp_text user \"Down\" (at 0 3 270) (layer \"F.SilkS\") (effects (font (size 1 1))))
+          (fp_text user \"Side\" (at 0 4 90) (layer \"F.SilkS\") (effects (font (size 1 1)))))",
+    );
+    let texts: Vec<(&str, f64, TextAlign)> = drawing
+        .texts
+        .iter()
+        .map(|text| (text.text.as_str(), text.angle, text.horizontal))
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            ("hide", 0.0, TextAlign::Center),
+            ("hide", 0.0, TextAlign::Center),
+            ("Upside", 0.0, TextAlign::End),
+            ("Down", 90.0, TextAlign::Center),
+            ("Side", 90.0, TextAlign::Center),
+        ]
+    );
+}
+
+#[test]
+fn an_smd_pad_with_a_drill_offset_has_no_hole() {
+    let drawing = draw(
+        "(footprint \"P\"
+          (pad \"1\" smd rect (at 0 0) (size 1 2) (drill (offset 0 -0.5)) (layers \"F.Cu\"))
+          (pad \"2\" thru_hole circle (at 3 0) (size 2 2) (drill 1) (layers \"*.Cu\")
+            (padstack (mode front_inner_back) (layer \"Inner\" (shape circle) (size 1.5 1.5)))))",
+    );
+    assert!(drawing.pads[0].hole.is_none());
+    // The offset still moves the pad's shape.
+    let [_, y0, _, y1] = box_of(on(&drawing.pads[0], "F.Cu"));
+    assert!(close(y0, -1.5) && close(y1, 0.5), "{y0} {y1}");
+    assert!(drawing.pads[1].hole.is_some());
+    assert_eq!(
+        drawing.left_out,
+        ["Pads with a shape of their own on each copper layer are drawn with their front shape."]
+    );
+}
