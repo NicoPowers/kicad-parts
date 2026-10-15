@@ -271,6 +271,41 @@ struct Loaded {
     shown_all: BTreeSet<String>,
 }
 
+impl Loaded {
+    /// What is kept for a new answer `key`, and the sections to load again.
+    /// The same search after a team catalog change keeps Show all. Its open
+    /// sections keep their parts while they load again, so the list does
+    /// not shrink and move the selected part out of view.
+    fn next(
+        &self,
+        key: (String, Option<u64>),
+        is_open: impl Fn(&str) -> bool,
+    ) -> (Loaded, BTreeSet<String>) {
+        if self.key.0 != key.0 {
+            return (
+                Loaded {
+                    key,
+                    ..Loaded::default()
+                },
+                BTreeSet::new(),
+            );
+        }
+        let sections: BTreeMap<_, _> = self
+            .sections
+            .iter()
+            .filter(|(category, rows)| matches!(rows, Load::Ready(_)) && is_open(category))
+            .map(|(category, rows)| (category.clone(), rows.clone()))
+            .collect();
+        let reload = sections.keys().chain(&self.shown_all).cloned().collect();
+        let next = Loaded {
+            key,
+            sections,
+            shown_all: self.shown_all.clone(),
+        };
+        (next, reload)
+    }
+}
+
 #[component]
 pub(crate) fn ResultList(
     results: RwSignal<Load<Searched>>,
@@ -308,7 +343,10 @@ pub(crate) fn ResultList(
         };
         let key = loaded.with_untracked(|loaded| loaded.key.clone());
         loaded.update(|loaded| {
-            loaded.sections.insert(category.clone(), Load::Loading);
+            // Parts already shown stay until the new ones arrive.
+            if !matches!(loaded.sections.get(&category), Some(Load::Ready(_))) {
+                loaded.sections.insert(category.clone(), Load::Loading);
+            }
         });
         spawn_local(async move {
             let answer = backend::search(
@@ -398,20 +436,13 @@ pub(crate) fn ResultList(
         };
         let key = (query.clone(), version);
         if loaded.with_untracked(|loaded| loaded.key != key) {
-            // The same search after a team catalog change keeps Show all.
-            let shown_all = loaded.with_untracked(|loaded| {
-                if loaded.key.0 == query {
-                    loaded.shown_all.clone()
-                } else {
-                    BTreeSet::new()
-                }
+            let (next, reload) = loaded.with_untracked(|loaded| {
+                open.with_untracked(|open| {
+                    loaded.next(key, |category| open.is_open(category, &query))
+                })
             });
-            loaded.set(Loaded {
-                key,
-                sections: BTreeMap::new(),
-                shown_all: shown_all.clone(),
-            });
-            for category in shown_all {
+            loaded.set(next);
+            for category in reload {
                 load_section(category);
             }
         }
@@ -922,6 +953,44 @@ mod tests {
         let failed = Load::Failed("no".into());
         let (_, end) = section_rows(false, Some(&failed), &[], 3);
         assert_eq!(end, SectionEnd::Failed("no".into()));
+    }
+
+    #[test]
+    fn a_team_catalog_change_keeps_the_open_sections_parts_while_they_load_again() {
+        let ready = || Load::Ready(vec![hit("CAP-1"), hit("CAP-2")]);
+        let before = Loaded {
+            key: (String::new(), Some(1)),
+            sections: BTreeMap::from([
+                ("cap".to_owned(), ready()),
+                ("res".to_owned(), ready()),
+                ("ind".to_owned(), Load::Loading),
+            ]),
+            shown_all: BTreeSet::new(),
+        };
+        // Only the open, loaded sections are kept, and they load again.
+        let (next, reload) = before.next((String::new(), Some(2)), |category| category != "res");
+        assert_eq!(next.key, (String::new(), Some(2)));
+        assert_eq!(next.sections, BTreeMap::from([("cap".to_owned(), ready())]));
+        assert_eq!(reload, BTreeSet::from(["cap".to_owned()]));
+        // Show all is kept, and loaded again, in the same search only.
+        let searched = Loaded {
+            key: ("10".to_owned(), Some(1)),
+            sections: BTreeMap::from([("res".to_owned(), ready())]),
+            shown_all: BTreeSet::from(["res".to_owned()]),
+        };
+        let (next, reload) = searched.next(("10".to_owned(), Some(2)), |_| true);
+        assert_eq!(next.shown_all, searched.shown_all);
+        assert_eq!(reload, BTreeSet::from(["res".to_owned()]));
+        // A new search keeps nothing.
+        let (next, reload) = searched.next(("100".to_owned(), Some(2)), |_| true);
+        assert_eq!(
+            next,
+            Loaded {
+                key: ("100".to_owned(), Some(2)),
+                ..Loaded::default()
+            }
+        );
+        assert!(reload.is_empty());
     }
 
     #[test]
