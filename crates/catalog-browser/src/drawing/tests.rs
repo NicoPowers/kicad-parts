@@ -663,3 +663,21 @@ fn an_smd_pad_with_a_drill_offset_has_no_hole() {
         ["Pads with a shape of their own on each copper layer are drawn with their front shape."]
     );
 }
+
+#[test]
+fn the_fit_leaves_out_texts_unless_nothing_else_is_drawn() {
+    let drawing = draw(
+        "(footprint \"F\" (pad \"1\" smd rect (at 0 0) (size 1 1) (layers \"F.Cu\"))
+          (fp_text value \"A_LONG_VALUE_TEXT\" (at 0 2) (layer \"F.Fab\") (effects (font (size 1 1)))))",
+    );
+    assert_eq!(drawing.fit, [-0.5, -0.5, 0.5, 0.5]);
+    assert!(
+        drawing.bounds[0] < -5.0 && drawing.bounds[3] > 2.0,
+        "{:?}",
+        drawing.bounds
+    );
+    let only_text = draw(
+        "(footprint \"T\" (fp_text user \"AB\" (at 0 0) (layer \"F.Fab\") (effects (font (size 1 1)))))",
+    );
+    assert_eq!(only_text.fit, only_text.bounds);
+}

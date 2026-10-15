@@ -851,6 +851,13 @@ impl CatalogBrowser {
         }
     }
 
+    /// The app's own drawing of a footprint preview, by the
+    /// [`PreviewImage::drawing_key`] it came with; `None` when the key names
+    /// no footprint preview or its file cannot be drawn.
+    pub fn footprint_drawing(&self, key: &str) -> Option<desktop_contract::FootprintDrawing> {
+        drawing::footprint_drawing(&self.previews.footprint_source(key)?)
+    }
+
     /// How many times kicad-cli has exported a preview in this session.
     pub fn export_count(&self) -> usize {
         self.previews.export_count()
@@ -1148,11 +1155,8 @@ pub(crate) fn ready(
                 demorgan: image.demorgan,
                 data_uri: svg_data_uri(&image.svg),
                 view_box: svg_view_box(&image.svg),
-                drawing: match kind {
-                    PreviewKind::Footprint => preview
-                        .footprint
-                        .as_deref()
-                        .and_then(drawing::footprint_drawing),
+                drawing_key: match kind {
+                    PreviewKind::Footprint => preview.footprint_key.clone(),
                     PreviewKind::Symbol => None,
                 },
             })

@@ -27,7 +27,7 @@ async function view(browser, scope) {
   return browser.execute((s) => {
     const area = document.querySelector(`${s} .viewer-area`);
     const box = area.querySelector('svg').getAttribute('viewBox').split(' ').map(Number);
-    const rect = area.getBoundingClientRect();
+    const rect = area.querySelector('svg').getBoundingClientRect();
     return { box, scale: Math.min(rect.width / box[2], rect.height / box[3]) };
   }, scope);
 }
@@ -38,7 +38,7 @@ async function drawingPointAt(browser, scope, x, y) {
     (s, x, y) => {
       const area = document.querySelector(`${s} .viewer-area`);
       const [bx, by, bw, bh] = area.querySelector('svg').getAttribute('viewBox').split(' ').map(Number);
-      const rect = area.getBoundingClientRect();
+      const rect = area.querySelector('svg').getBoundingClientRect();
       const scale = Math.min(rect.width / bw, rect.height / bh);
       const left = rect.left + (rect.width - bw * scale) / 2;
       const top = rect.top + (rect.height - bh * scale) / 2;
@@ -73,6 +73,14 @@ async function drag(browser, from, to, button) {
     .perform();
 }
 
+/** Waits until the viewer in `scope` has its drawing, which comes when shown. */
+async function waitForDrawing(browser, scope) {
+  await browser.waitUntil(
+    async () => browser.execute((s) => document.querySelector(`${s} .viewer`)?.dataset.ready === 'true', scope),
+    { timeout: 10_000, timeoutMsg: `${scope} never got its drawing` },
+  );
+}
+
 async function isOpen(browser, dialog) {
   return browser.execute((s) => document.querySelector(s)?.open === true, dialog);
 }
@@ -98,6 +106,7 @@ describe('drawing close-up', () => {
     await waitForPreview(browser, FOOTPRINT);
     await (await browser.$(`${FOOTPRINT} figure button`)).click();
     await browser.waitUntil(async () => isOpen(browser, CLOSE_UP), { timeout: 5_000, timeoutMsg: 'the close-up did not open' });
+    await waitForDrawing(browser, CLOSE_UP);
     assert.equal(await textOf(browser, `${CLOSE_UP} h4`), 'Footprint Package_DFN_QFN:DFN-14-1EP_3x4mm_P0.5mm_EP1.7x3.3mm');
     const shown = await browser.execute((s) => {
       const dialog = document.querySelector(s);
@@ -223,6 +232,7 @@ describe('drawing close-up', () => {
     await waitForPreview(browser, FOOTPRINT);
     await (await browser.$(`${FOOTPRINT} figure button`)).click();
     await browser.waitUntil(async () => isOpen(browser, CLOSE_UP), { timeout: 5_000, timeoutMsg: 'the close-up did not open' });
+    await waitForDrawing(browser, CLOSE_UP);
     // Halfway along the first pad's top left corner, on screen.
     const corner = await browser.execute((s) => {
       const pad = document.querySelector(`${s} g.layer[data-layer="F.Cu"] path`);

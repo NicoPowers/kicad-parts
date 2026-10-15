@@ -345,6 +345,12 @@ export async function assertAccessible(browser, name) {
       // assistive technology; its text, such as a footprint's reference, is
       // part of the picture, as it is in kicad-cli's images.
       const first = await axe.run({ exclude: [['.viewer-svg']] }, { resultTypes: ['violations', 'incomplete'] });
+      // axe places an element in its grid by its box clipped to overflow:
+      // hidden parents, then tests the unclipped box, so a drawing zoomed
+      // past its viewer seems to cover text near the viewer. A drawing can
+      // cover only text inside a viewer whose overflow is hidden.
+      const viewerAreas = [...document.querySelectorAll('.viewer-area')];
+      const clipped = viewerAreas.every((area) => getComputedStyle(area).overflow === 'hidden');
       const violations = first.violations.map((v) => ({
         id: v.id,
         impact: v.impact,
@@ -383,7 +389,19 @@ export async function assertAccessible(browser, name) {
         const y = box.top + box.height / 2;
         const covering = new Set();
         const seeThrough = new Set();
-        for (const x of [box.left + 1, box.left + box.width / 2, box.right - 1]) {
+        const samples = [box.left + 1, box.left + box.width / 2, box.right - 1];
+        const insideAViewer = viewerAreas.some((area) => {
+          const r = area.getBoundingClientRect();
+          return samples.some((x) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom);
+        });
+        if (!clipped) {
+          recheck.outcome = 'incomplete';
+          recheck.stillIncompleteBecause = ['a drawing viewer does not hide what overflows it'];
+          continue;
+        }
+        // Outside every viewer, no drawing can cover the text.
+        if (!insideAViewer) for (const svg of document.querySelectorAll('.viewer-svg')) covering.add(svg);
+        for (const x of samples) {
           const over = [];
           for (const top of document.elementsFromPoint(x, y)) {
             if (top === el || el.contains(top)) break;

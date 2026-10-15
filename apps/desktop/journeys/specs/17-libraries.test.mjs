@@ -270,7 +270,7 @@ describe('Libraries browser', () => {
       browser.execute((s) => {
         const area = document.querySelector(`${s} .viewer-area`);
         const box = area.querySelector('svg').getAttribute('viewBox').split(' ').map(Number);
-        const rect = area.getBoundingClientRect();
+        const rect = area.querySelector('svg').getBoundingClientRect();
         return {
           box,
           scale: Math.min(rect.width / box[2], rect.height / box[3]),
@@ -312,6 +312,10 @@ describe('Libraries browser', () => {
       timeout: 5_000,
       timeoutMsg: 'Enlarge did not open the close-up',
     });
+    await browser.waitUntil(async () => browser.execute((s) => document.querySelector(`${s} .viewer`)?.dataset.ready === 'true', closeUp), {
+      timeout: 10_000,
+      timeoutMsg: 'the close-up never got its drawing',
+    });
     const layers = await browser.execute(
       (s) => [...document.querySelectorAll(`${s} .viewer-layers .layer-name`)].map((name) => name.textContent),
       closeUp,
@@ -346,7 +350,7 @@ describe('Libraries browser', () => {
     // One wheel step, timed until the next frame is drawn.
     const timing = await browser.executeAsync((s, done) => {
       const area = document.querySelector(`${s} .viewer-area`);
-      const rect = area.getBoundingClientRect();
+      const rect = area.querySelector('svg').getBoundingClientRect();
       const pads = area.querySelector('g.layer[data-layer="F.Cu"] g').children.length;
       const before = performance.now();
       area.dispatchEvent(

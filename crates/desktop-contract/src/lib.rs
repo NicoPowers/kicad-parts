@@ -37,6 +37,7 @@ pub mod command {
     pub const TEAM_PICK: &str = "team_pick";
     pub const OUR_LIBRARIES: &str = "our_libraries";
     pub const TEAM_ITEM_PREVIEW: &str = "team_item_preview";
+    pub const FOOTPRINT_DRAWING: &str = "footprint_drawing";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -261,10 +262,11 @@ pub struct PreviewImage {
     /// millimetres), so a close-up can zoom it.
     #[serde(default)]
     pub view_box: Option<[f64; 4]>,
-    /// For a footprint, the app's own drawing of the same file, with its
-    /// layers, for the close-up. `None` when the file could not be read.
+    /// For a footprint, what to ask the `footprint_drawing` command for to
+    /// get the app's own drawing of the same file, with its layers. Asked
+    /// only when a close-up or the Libraries browser shows it.
     #[serde(default)]
-    pub drawing: Option<FootprintDrawing>,
+    pub drawing_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

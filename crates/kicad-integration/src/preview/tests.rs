@@ -384,17 +384,38 @@ fn a_footprint_entry_keeps_the_file_it_was_drawn_from() {
         .stored_footprint(&fixture.kicad, &item, load, None)
         .unwrap();
     assert_eq!(first.cache, CacheOutcome::Exported);
-    assert_eq!(first.footprint.as_deref(), Some(&bytes[..]));
-    // A cache hit gives the same bytes without fetching them.
+    let key = first.footprint_key.clone().expect("a key");
+    assert_eq!(
+        fixture.cache.footprint_source(&key).as_deref(),
+        Some(&bytes[..])
+    );
+    // A cache hit gives the same key, and the bytes without fetching them.
     let second = fixture
         .cache
         .stored_footprint(&fixture.kicad, &item, || Err("offline".into()), None)
         .unwrap();
     assert_eq!(second.cache, CacheOutcome::Hit);
-    assert_eq!(second.footprint.as_deref(), Some(&bytes[..]));
+    assert_eq!(second.footprint_key.as_deref(), Some(key.as_str()));
     // Symbols keep nothing of the kind.
     let symbol = fixture.request("R", None).join().unwrap().unwrap();
-    assert_eq!(symbol.footprint, None);
+    assert_eq!(symbol.footprint_key, None);
+    // A key names a footprint entry and nothing else.
+    let parts: Vec<&str> = key.split('/').collect();
+    for bad in [
+        String::new(),
+        "../../etc".to_owned(),
+        format!("{}/..", key),
+        format!(
+            "{}/{}/{}/{}/../{}",
+            parts[0], parts[1], parts[2], parts[3], parts[4]
+        ),
+        format!("v1/{}/{}/{}/{}", parts[1], parts[2], parts[3], parts[4]),
+        format!("{}/{}/{}/sym-x/{}", parts[0], parts[1], parts[2], parts[4]),
+        format!("{}/{}/{}/{}/C:\\x", parts[0], parts[1], parts[2], parts[3]),
+        key.replace('/', "\\"),
+    ] {
+        assert_eq!(fixture.cache.footprint_source(&bad), None, "{bad}");
+    }
 }
 
 #[test]

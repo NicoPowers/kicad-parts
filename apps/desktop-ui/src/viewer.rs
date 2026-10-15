@@ -12,16 +12,23 @@
 //! `xMidYMid meet`. So a view needs no size to be drawn; only zooming and
 //! moving read the element's size.
 
-use crate::{bounds, show_modal};
+use crate::{backend, bounds, show_modal};
 use desktop_contract::PreviewImage;
 use desktop_contract::drawing::{
     DrawnText, Edge, FootprintDrawing, PadKind, Point, Shape, TextAlign, circle_center,
 };
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+mod markup;
+mod view;
+
+use markup::*;
+use view::*;
 
 /// The closest zoom, in screen pixels per millimetre: enough to inspect a
 /// 0.1 mm gap across 500 pixels.
@@ -46,8 +53,9 @@ pub(crate) struct Picture {
     pub data_uri: String,
     /// kicad-cli's `viewBox`, in millimetres.
     pub view_box: Option<[f64; 4]>,
-    /// For a footprint, the app's own drawing, with layers.
-    pub drawing: Option<Arc<FootprintDrawing>>,
+    /// For a footprint, the key to ask the app's own drawing for, with
+    /// layers.
+    pub drawing_key: Option<String>,
     /// Drawn on KiCad's dark board, not on white paper.
     pub footprint: bool,
 }
@@ -58,412 +66,16 @@ impl Picture {
             label,
             data_uri: image.data_uri.clone(),
             view_box: image.view_box,
-            drawing: image.drawing.clone().map(Arc::new),
+            drawing_key: image.drawing_key.clone(),
             footprint,
         }
     }
 
-    /// The box around what is drawn: `[min_x, min_y, max_x, max_y]`.
-    fn content(&self) -> [f64; 4] {
-        if let Some(drawing) = &self.drawing {
-            return drawing.bounds;
-        }
+    /// kicad-cli's drawing's box: `[min_x, min_y, max_x, max_y]`.
+    fn image_box(&self) -> [f64; 4] {
         let [x, y, w, h] = self.view_box.unwrap_or([0.0, 0.0, 100.0, 100.0]);
         [x, y, x + w, y + h]
     }
-}
-
-// ---- The view ------------------------------------------------------------
-
-/// The drawing area shown: `[x, y, width, height]` in drawing units.
-type View = [f64; 4];
-
-/// The view that shows all of `content`, with a margin.
-fn fit_view([x0, y0, x1, y1]: [f64; 4]) -> View {
-    let (w, h) = ((x1 - x0).max(1e-3), (y1 - y0).max(1e-3));
-    let margin = w.max(h) * FIT_MARGIN;
-    [x0 - margin, y0 - margin, w + 2.0 * margin, h + 2.0 * margin]
-}
-
-/// Screen pixels per drawing unit when `view` is shown in an element of
-/// `size` pixels.
-fn scale(view: View, size: (f64, f64)) -> f64 {
-    (size.0 / view[2]).min(size.1 / view[3])
-}
-
-/// The drawing point at `pixel`, measured from the element's top left.
-fn to_drawing(view: View, size: (f64, f64), pixel: (f64, f64)) -> Point {
-    let s = scale(view, size);
-    let left = (size.0 - view[2] * s) / 2.0;
-    let top = (size.1 - view[3] * s) / 2.0;
-    Point::new(
-        view[0] + (pixel.0 - left) / s,
-        view[1] + (pixel.1 - top) / s,
-    )
-}
-
-/// `view` zoomed by `factor` around the drawing point `at`, which stays
-/// where it is on screen. The zoom stays within `limits` (pixels per unit).
-fn zoomed(view: View, size: (f64, f64), factor: f64, at: Point, limits: (f64, f64)) -> View {
-    let s = scale(view, size);
-    if !(s.is_finite() && s > 0.0 && factor.is_finite() && factor > 0.0) {
-        return view;
-    }
-    let k = (s * factor).clamp(limits.0, limits.1) / s;
-    [
-        at.x - (at.x - view[0]) / k,
-        at.y - (at.y - view[1]) / k,
-        view[2] / k,
-        view[3] / k,
-    ]
-}
-
-/// `view` with the drawing moved by `dx`, `dy` screen pixels.
-fn panned(view: View, size: (f64, f64), dx: f64, dy: f64) -> View {
-    let s = scale(view, size);
-    if !(s.is_finite() && s > 0.0) {
-        return view;
-    }
-    [view[0] - dx / s, view[1] - dy / s, view[2], view[3]]
-}
-
-/// How far the view may zoom in an element of `size`: from half the fit
-/// out, to [`MAX_SCALE`] in (or the fit, for a tiny drawing).
-fn limits(fit: View, size: (f64, f64)) -> (f64, f64) {
-    let fitted = scale(fit, size);
-    (fitted * MIN_SHARE_OF_FIT, MAX_SCALE.max(fitted))
-}
-
-fn view_box_text(view: View) -> String {
-    view.map(number).join(" ")
-}
-
-// ---- Layers --------------------------------------------------------------
-
-/// KiCad's built-in colour for `layer`, its opacity, and a plain
-/// description.
-pub(crate) fn layer_look(layer: &str) -> (&'static str, f64, String) {
-    let inner = |n: u32| {
-        // KiCad's first inner copper colours, repeated.
-        const INNER: [&str; 8] = [
-            "#7FC87F", "#CE7D2C", "#4FCBCB", "#DB628B", "#A7A5C6", "#28CCD9", "#E8B2A7", "#8DCB81",
-        ];
-        INNER[(n.saturating_sub(1) % 8) as usize]
-    };
-    let (color, alpha, what) = match layer {
-        "F.Cu" => ("#C83434", 1.0, "Front copper"),
-        "B.Cu" => ("#4D7FC4", 1.0, "Back copper"),
-        "F.Paste" => ("#B4A09A", 0.9, "Front paste (stencil)"),
-        "B.Paste" => ("#00C2C2", 0.9, "Back paste (stencil)"),
-        "F.Mask" => ("#D864FF", 0.4, "Front solder mask"),
-        "B.Mask" => ("#02FFEE", 0.4, "Back solder mask"),
-        "F.SilkS" => ("#F2EDA1", 1.0, "Front silkscreen"),
-        "B.SilkS" => ("#E8B2A7", 1.0, "Back silkscreen"),
-        "F.Fab" => ("#AFAFAF", 1.0, "Front fabrication"),
-        "B.Fab" => ("#585D84", 1.0, "Back fabrication"),
-        "F.CrtYd" => ("#FF26E2", 1.0, "Front courtyard"),
-        "B.CrtYd" => ("#26E9FF", 1.0, "Back courtyard"),
-        "F.Adhes" => ("#840084", 1.0, "Front adhesive"),
-        "B.Adhes" => ("#000084", 1.0, "Back adhesive"),
-        "Edge.Cuts" => ("#D0D2CD", 1.0, "Board edge"),
-        "Margin" => ("#FF26E2", 1.0, "Margin"),
-        "Dwgs.User" => ("#C2C2C2", 1.0, "User drawings"),
-        "Cmts.User" => ("#5994DC", 1.0, "User comments"),
-        "Eco1.User" => ("#B4DBD2", 1.0, "User Eco 1"),
-        "Eco2.User" => ("#D8C852", 1.0, "User Eco 2"),
-        _ => {
-            let number = |prefix: &str, suffix: &str| {
-                layer
-                    .strip_prefix(prefix)?
-                    .strip_suffix(suffix)?
-                    .parse::<u32>()
-                    .ok()
-            };
-            if let Some(n) = number("In", ".Cu") {
-                return (inner(n), 1.0, format!("Inner copper {n}"));
-            }
-            if let Some(n) = number("User.", "") {
-                return ("#C2C2C2", 1.0, format!("User layer {n}"));
-            }
-            return ("#C2C2C2", 1.0, "Other layer".to_owned());
-        }
-    };
-    (color, alpha, what.to_owned())
-}
-
-/// The order layers are drawn in, bottom first: the back of the board,
-/// inner copper, user layers, then the front, with the active layer on top.
-fn draw_order(layers: &[String], active: &str) -> Vec<String> {
-    let rank = |layer: &str| -> (u32, u32) {
-        const BACK: [&str; 7] = [
-            "B.Cu", "B.Mask", "B.Paste", "B.Adhes", "B.SilkS", "B.Fab", "B.CrtYd",
-        ];
-        const FRONT: [&str; 8] = [
-            "F.Cu",
-            "F.Mask",
-            "F.Paste",
-            "F.Adhes",
-            "F.SilkS",
-            "F.Fab",
-            "F.CrtYd",
-            "Edge.Cuts",
-        ];
-        if let Some(at) = BACK.iter().position(|known| *known == layer) {
-            (0, at as u32)
-        } else if layer.starts_with("In") && layer.ends_with(".Cu") {
-            (1, 0)
-        } else if let Some(at) = FRONT.iter().position(|known| *known == layer) {
-            (3, at as u32)
-        } else {
-            (2, 0)
-        }
-    };
-    let mut order: Vec<String> = layers
-        .iter()
-        .filter(|layer| *layer != active)
-        .cloned()
-        .collect();
-    order.sort_by_key(|layer| rank(layer));
-    if layers.iter().any(|layer| layer == active) {
-        order.push(active.to_owned());
-    }
-    order
-}
-
-/// The layer that starts active: front copper, else the first copper
-/// layer, else the first layer.
-fn first_active(layers: &[String]) -> String {
-    layers
-        .iter()
-        .find(|layer| *layer == "F.Cu")
-        .or_else(|| layers.iter().find(|layer| layer.ends_with(".Cu")))
-        .or_else(|| layers.first())
-        .cloned()
-        .unwrap_or_default()
-}
-
-// ---- SVG markup ----------------------------------------------------------
-
-/// A number for SVG: at most six decimals, without trailing zeros.
-fn number(value: f64) -> String {
-    let text = format!("{value:.6}");
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    match text {
-        "-0" | "" => "0".to_owned(),
-        text => text.to_owned(),
-    }
-}
-
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-/// SVG path commands for the arc from `start` (already reached) through
-/// `mid` to `end`: an exact elliptical arc, so it stays smooth at any zoom.
-fn arc_commands(out: &mut String, start: Point, mid: Point, end: Point) {
-    let p = |q: Point| format!("{} {}", number(q.x), number(q.y));
-    let same = (start.x - end.x).hypot(start.y - end.y) < 1e-9;
-    if same {
-        // A whole circle: two half circles through the opposite point.
-        let r = number((start.x - mid.x).hypot(start.y - mid.y) / 2.0);
-        let _ = write!(
-            out,
-            " A {r} {r} 0 0 1 {} A {r} {r} 0 0 1 {}",
-            p(mid),
-            p(start)
-        );
-        return;
-    }
-    let Some(center) = circle_center(start, mid, end) else {
-        let _ = write!(out, " L {} L {}", p(mid), p(end));
-        return;
-    };
-    let r = number((start.x - center.x).hypot(start.y - center.y));
-    // Turning from start through mid to end clockwise on screen (Y down)
-    // is SVG's sweep 1; the arc is long when mid and the centre are on the
-    // same side of the chord.
-    let side = |q: Point| (end.x - start.x) * (q.y - start.y) - (end.y - start.y) * (q.x - start.x);
-    let sweep = u8::from(side(mid) < 0.0);
-    let large = u8::from(side(mid) * side(center) > 0.0);
-    let _ = write!(out, " A {r} {r} 0 {large} {sweep} {}", p(end));
-}
-
-/// The stroke and fill attributes of a shape. A zero width draws the
-/// thinnest line the screen shows, as KiCad does.
-fn paint(out: &mut String, width: f64, filled: bool) {
-    out.push_str(if filled {
-        " fill=\"currentColor\""
-    } else {
-        " fill=\"none\""
-    });
-    if width > 0.0 {
-        let _ = write!(
-            out,
-            " stroke=\"currentColor\" stroke-width=\"{}\"",
-            number(width)
-        );
-    } else if !filled {
-        out.push_str(
-            " stroke=\"currentColor\" stroke-width=\"1\" vector-effect=\"non-scaling-stroke\"",
-        );
-    }
-}
-
-fn shape_markup(out: &mut String, shape: &Shape) {
-    let p = |q: &Point| format!("{} {}", number(q.x), number(q.y));
-    match shape {
-        Shape::Line { start, end, width } => {
-            let _ = write!(out, "<path d=\"M {} L {}\"", p(start), p(end));
-            paint(out, *width, false);
-        }
-        Shape::Arc {
-            start,
-            mid,
-            end,
-            width,
-        } => {
-            let _ = write!(out, "<path d=\"M {}", p(start));
-            arc_commands(out, *start, *mid, *end);
-            out.push('"');
-            paint(out, *width, false);
-        }
-        Shape::Circle {
-            center,
-            radius,
-            width,
-            filled,
-        } => {
-            let _ = write!(
-                out,
-                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\"",
-                number(center.x),
-                number(center.y),
-                number(*radius)
-            );
-            paint(out, *width, *filled);
-        }
-        Shape::Polygon {
-            edges,
-            width,
-            filled,
-        } => {
-            let Some(first) = edges.first() else {
-                return;
-            };
-            let start = match first {
-                Edge::Line { start, .. } | Edge::Arc { start, .. } => start,
-            };
-            let _ = write!(out, "<path d=\"M {}", p(start));
-            for edge in edges {
-                match edge {
-                    Edge::Line { end, .. } => {
-                        let _ = write!(out, " L {}", p(end));
-                    }
-                    Edge::Arc { start, mid, end } => arc_commands(out, *start, *mid, *end),
-                }
-            }
-            out.push_str(" Z\"");
-            paint(out, *width, *filled);
-        }
-        Shape::Curve {
-            start,
-            control1,
-            control2,
-            end,
-            width,
-        } => {
-            let _ = write!(
-                out,
-                "<path d=\"M {} C {} {} {}\"",
-                p(start),
-                p(control1),
-                p(control2),
-                p(end)
-            );
-            paint(out, *width, false);
-        }
-    }
-    out.push_str("/>");
-}
-
-fn text_markup(out: &mut String, text: &DrawnText) {
-    let anchor = match text.horizontal {
-        TextAlign::Start => "start",
-        TextAlign::Center => "middle",
-        TextAlign::End => "end",
-    };
-    let baseline = match text.vertical {
-        TextAlign::Start => "text-before-edge",
-        TextAlign::Center => "central",
-        TextAlign::End => "text-after-edge",
-    };
-    let mirror = if text.mirrored { " scale(-1 1)" } else { "" };
-    // A capital letter is about 0.7 of the font size.
-    let _ = write!(
-        out,
-        "<text transform=\"translate({} {}) rotate({}){mirror}\" font-size=\"{}\" text-anchor=\"{anchor}\" dominant-baseline=\"{baseline}\" fill=\"currentColor\"{}{}>{}</text>",
-        number(text.at.x),
-        number(text.at.y),
-        number(-text.angle),
-        number(text.height / 0.7),
-        if text.bold {
-            " font-weight=\"bold\""
-        } else {
-            ""
-        },
-        if text.italic {
-            " font-style=\"italic\""
-        } else {
-            ""
-        },
-        escape(&text.text)
-    );
-}
-
-/// Everything on `layer`: pads' shapes, graphics and texts.
-fn layer_markup(drawing: &FootprintDrawing, layer: &str) -> String {
-    let mut out = String::new();
-    for graphic in drawing.graphics.iter().filter(|shape| shape.layer == layer) {
-        shape_markup(&mut out, &graphic.shape);
-    }
-    for pad in &drawing.pads {
-        for shape in pad.shapes.iter().filter(|shape| shape.layer == layer) {
-            shape_markup(&mut out, &shape.shape);
-        }
-    }
-    for text in drawing.texts.iter().filter(|text| text.layer == layer) {
-        text_markup(&mut out, text);
-    }
-    out
-}
-
-/// The holes, above every layer, as KiCad shows them: the board's
-/// background colour, with a plated hole's wall around it.
-fn holes_markup(drawing: &FootprintDrawing) -> String {
-    let mut out = String::new();
-    for pad in &drawing.pads {
-        let Some(hole) = &pad.hole else { continue };
-        let wall = if pad.kind == PadKind::NpThruHole {
-            "#1AC4D2"
-        } else {
-            "#ECECEC"
-        };
-        let mut shape = String::new();
-        shape_markup(&mut shape, hole);
-        // A hairline wall around the filled hole.
-        let wall =
-            format!(" stroke=\"{wall}\" stroke-width=\"1\" vector-effect=\"non-scaling-stroke\"/>");
-        let _ = write!(
-            out,
-            "<g color=\"{BOARD}\">{}</g>",
-            shape.replacen("/>", &wall, 1)
-        );
-    }
-    out
 }
 
 // ---- Events --------------------------------------------------------------
@@ -475,7 +87,9 @@ pub(crate) fn next_id(prefix: &str) -> String {
     format!("{prefix}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
-/// The size of an element on screen and its top left corner.
+/// The size of an element on screen and its top left corner. Measure the
+/// SVG itself, inside the drawing area's border, so a pointer maps to the
+/// exact drawing point.
 fn measure(element: &wasm_bindgen::JsValue) -> Option<((f64, f64), (f64, f64))> {
     let [left, right, top, bottom] = bounds(element)?;
     let size = (right - left, bottom - top);
@@ -502,6 +116,9 @@ fn call(target: &wasm_bindgen::JsValue, method: &str, args: &[wasm_bindgen::JsVa
 
 /// A zoomable, movable drawing. With `layers`, a footprint also shows its
 /// layer list. `enlarge` adds an Enlarge button that opens a close-up.
+///
+/// A footprint's own drawing is asked for only now, when it is shown, not
+/// with every thumbnail; until it comes, the viewer says it is busy.
 #[component]
 pub(crate) fn Viewer(
     picture: Picture,
@@ -510,15 +127,51 @@ pub(crate) fn Viewer(
     layers: bool,
     #[prop(optional)] enlarge: Option<Callback<()>>,
 ) -> impl IntoView {
+    // None while the drawing is on its way.
+    let loaded = RwSignal::new(None::<Option<Arc<FootprintDrawing>>>);
+    match picture.drawing_key.clone() {
+        Some(key) => spawn_local(async move {
+            let drawing = backend::footprint_drawing(&key).await.ok().flatten();
+            loaded.try_set(Some(drawing.map(Arc::new)));
+        }),
+        None => loaded.set(Some(None)),
+    }
+    move || match loaded.get() {
+        None => view! {
+            <div class="viewer" data-ready="false">
+                <p class="loading" aria-busy="true">"Drawing the layers…"</p>
+            </div>
+        }
+        .into_any(),
+        Some(drawing) => view! {
+            <DrawingView picture=picture.clone() drawing=drawing layers=layers enlarge=enlarge />
+        }
+        .into_any(),
+    }
+}
+
+/// The viewer once its drawing is known: the app's own footprint drawing,
+/// or kicad-cli's when there is none.
+#[component]
+fn DrawingView(
+    picture: Picture,
+    drawing: Option<Arc<FootprintDrawing>>,
+    layers: bool,
+    enlarge: Option<Callback<()>>,
+) -> impl IntoView {
     let id = next_id("viewer");
-    let fit = fit_view(picture.content());
+    let (content, everything) = match &drawing {
+        Some(drawing) => (drawing.fit, drawing.bounds),
+        None => (picture.image_box(), picture.image_box()),
+    };
+    let fit = fit_view(content);
+    let outer = fit_view(everything);
     let view = RwSignal::new(fit);
     let area = NodeRef::<leptos::html::Div>::new();
     let pointer = RwSignal::new(None::<Point>);
     // The pointer id and last position of a drag that moves the drawing.
     let drag = StoredValue::new(None::<(i32, f64, f64)>);
     let dragging = RwSignal::new(false);
-    let drawing = picture.drawing.clone();
     let all_layers: Vec<String> = drawing
         .as_ref()
         .map(|drawing| drawing.layers.clone())
@@ -529,7 +182,11 @@ pub(crate) fn Viewer(
     // An SVG <image> loads in the background; the journeys wait for it.
     let ready = RwSignal::new(drawing.is_some());
 
-    let size = move || area.get_untracked().and_then(|element| measure(&element));
+    let size = move || {
+        area.get_untracked()
+            .and_then(|area| area.first_element_child())
+            .and_then(|svg| measure(&svg))
+    };
     let zoom_by = move |factor: f64, at_pixel: Option<(f64, f64)>| {
         let Some((size, (left, top))) = size() else {
             return;
@@ -537,7 +194,7 @@ pub(crate) fn Viewer(
         view.update(|current| {
             let pixel = at_pixel.map_or((size.0 / 2.0, size.1 / 2.0), |(x, y)| (x - left, y - top));
             let at = to_drawing(*current, size, pixel);
-            *current = zoomed(*current, size, factor, at, limits(fit, size));
+            *current = zoomed(*current, size, factor, at, limits(fit, outer, size));
         });
     };
     let pan_by = move |dx: f64, dy: f64| {
@@ -623,8 +280,17 @@ pub(crate) fn Viewer(
             call(&element, "focus", &[]);
         }
     };
+    let stop_drag = move || {
+        drag.set_value(None);
+        dragging.set(false);
+    };
     let on_pointer_move = move |event: leptos::ev::PointerEvent| {
         let (x, y) = (f64::from(event.client_x()), f64::from(event.client_y()));
+        // A release the viewer never heard of, such as one outside the
+        // window, ends the drag.
+        if event.buttons() == 0 {
+            stop_drag();
+        }
         if let Some((pointer_id, last_x, last_y)) = drag.get_value() {
             if pointer_id == event.pointer_id() {
                 drag.set_value(Some((pointer_id, x, y)));
@@ -644,11 +310,15 @@ pub(crate) fn Viewer(
             .get_value()
             .is_some_and(|(pointer_id, ..)| pointer_id == event.pointer_id())
         {
-            drag.set_value(None);
-            dragging.set(false);
+            stop_drag();
         }
     };
     let on_key = move |event: leptos::ev::KeyboardEvent| {
+        // Ctrl, Alt and the Windows key with these keys belong to others,
+        // such as the WebView's own zoom.
+        if event.ctrl_key() || event.alt_key() || event.meta_key() {
+            return;
+        }
         let step = size().map_or(40.0, |(size, _)| size.0.min(size.1) * PAN_STEP);
         match event.key().as_str() {
             "+" | "=" => zoom_by(ZOOM_STEP, None),
@@ -738,6 +408,7 @@ pub(crate) fn Viewer(
                     on:pointermove=on_pointer_move
                     on:pointerup=end_drag
                     on:pointercancel=end_drag
+                    on:lostpointercapture=end_drag
                     on:pointerleave=move |_| pointer.set(None)
                     on:mousedown=move |event: leptos::ev::MouseEvent| {
                         if event.button() == 1 {
@@ -755,21 +426,11 @@ pub(crate) fn Viewer(
     }
 }
 
-/// A coordinate in millimetres, to the micrometre, with a real minus sign.
-fn format_mm(value: f64) -> String {
-    let text = format!("{value:.3}");
-    match text.strip_prefix('-') {
-        Some("0.000") => "0.000".to_owned(),
-        Some(rest) => format!("\u{2212}{rest}"),
-        None => text,
-    }
-}
-
 /// The footprint's SVG: one group per layer, in drawing order, with the
 /// holes on top.
 fn footprint_svg(
     drawing: Arc<FootprintDrawing>,
-    view: RwSignal<View>,
+    view: RwSignal<ViewBox>,
     active: RwSignal<String>,
     hidden: RwSignal<BTreeSet<String>>,
     dim: RwSignal<bool>,
@@ -1007,8 +668,12 @@ mod tests {
         assert!(close(moved[0], -1.0) && close(moved[1], 2.0));
         let fit = fit_view([-1.0, -0.5, 1.0, 0.5]);
         assert!(close(fit[2], 2.24) && close(fit[0], -1.12));
-        let (low, high) = limits(fit, size);
+        let (low, high) = limits(fit, fit, size);
         assert!(close(low, scale(fit, size) * 0.5) && close(high, MAX_SCALE));
+        // A long text far beyond the shapes can still be zoomed out to.
+        let wide = fit_view([-20.0, -1.0, 20.0, 1.0]);
+        let (low, _) = limits(fit, wide, size);
+        assert!(close(low, scale(wide, size)));
     }
 
     #[test]

@@ -87,8 +87,9 @@ pub struct Preview {
     /// stored bytes.
     pub library_sha256: String,
     pub cache: CacheOutcome,
-    /// For a footprint, the exact `.kicad_mod` bytes it was drawn from.
-    pub footprint: Option<Vec<u8>>,
+    /// For a footprint, the key [`PreviewCache::footprint_source`] reads
+    /// the exact `.kicad_mod` it was drawn from by.
+    pub footprint_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -461,8 +462,46 @@ impl PreviewCache {
             images: read_images(entry)?,
             library_sha256,
             cache,
-            footprint: fs::read(entry.join(SOURCE_FILE)).ok(),
+            footprint_key: self.footprint_key(entry),
         })
+    }
+
+    /// The key of a footprint entry that keeps its source: its folder
+    /// below the cache root, with `/` between the parts.
+    fn footprint_key(&self, entry: &Path) -> Option<String> {
+        if !entry.join(SOURCE_FILE).is_file() {
+            return None;
+        }
+        let parts: Vec<String> = entry
+            .strip_prefix(&self.root)
+            .ok()?
+            .components()
+            .map(|part| part.as_os_str().to_str().map(str::to_owned))
+            .collect::<Option<_>>()?;
+        Some(parts.join("/"))
+    }
+
+    /// The `.kicad_mod` a footprint preview was drawn from, by the key its
+    /// [`Preview`] gave. `None` for a key that is not exactly a footprint
+    /// entry of this cache, so a key can never name another file.
+    pub fn footprint_source(&self, key: &str) -> Option<Vec<u8>> {
+        let parts: Vec<&str> = key.split('/').collect();
+        let [layout, _kicad, _theme, kind, _item] = parts.as_slice() else {
+            return None;
+        };
+        let plain = parts.iter().all(|part| {
+            !part.is_empty()
+                && *part != "."
+                && *part != ".."
+                && !part.contains(['\\', ':'])
+                && !part.chars().any(char::is_control)
+        });
+        if !plain || *layout != CACHE_LAYOUT || !kind.starts_with("fp-") {
+            return None;
+        }
+        let mut path = self.root.clone();
+        path.extend(&parts);
+        fs::read(path.join(SOURCE_FILE)).ok()
     }
 
     /// Updates the library folder's last-used time, once per process, so

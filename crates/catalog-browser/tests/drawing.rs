@@ -47,8 +47,11 @@ fn drawn(browser: &CatalogBrowser, reference: &str) -> (FootprintDrawing, String
     let name = reference.split_once(':').unwrap().1;
     let file = std::fs::read(Path::new(&set.library_path).join(format!("{name}.kicad_mod")))
         .expect("the footprint file");
-    let drawing = image
-        .drawing
+    let key = image
+        .drawing_key
+        .unwrap_or_else(|| panic!("{reference} has no drawing key"));
+    let drawing = browser
+        .footprint_drawing(&key)
         .unwrap_or_else(|| panic!("{reference} has no drawing"));
     let view_box = image.view_box.expect("a view box");
     assert!(view_box[2] > 0.0 && view_box[3] > 0.0);

@@ -257,6 +257,18 @@ pub async fn library_item(
     call(command::LIBRARY_ITEM, &LibraryItemArgs { request }).await
 }
 
+#[derive(Serialize)]
+struct DrawingArgs<'a> {
+    key: &'a str,
+}
+
+/// The app's own drawing of a footprint preview, by its drawing key.
+pub async fn footprint_drawing(
+    key: &str,
+) -> Result<Option<desktop_contract::FootprintDrawing>, String> {
+    call(command::FOOTPRINT_DRAWING, &DrawingArgs { key }).await
+}
+
 /// One library item's drawing.
 pub async fn library_preview(request: LibraryItemRequest) -> Result<PreviewOutcome, String> {
     call(command::LIBRARY_PREVIEW, &LibraryItemArgs { request }).await

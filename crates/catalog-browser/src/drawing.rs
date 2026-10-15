@@ -255,16 +255,20 @@ impl Drawer {
             add_layer(&graphic.layer);
             bounds.shape(&graphic.shape);
         }
-        // Texts count too, as in KiCad's zoom to fit, so a close-up that
-        // fits the drawing shows all of it.
+        // The close-up fits the footprint's shapes; a long value text can
+        // reach far beyond them, so texts count only when nothing else is
+        // drawn. The bounds take in everything.
+        let shapes_only = bounds.box_;
         for text in &self.texts {
             add_layer(&text.layer);
             bounds.text(text);
         }
+        let bounds = bounds.finish();
         layers.sort_by_key(|layer| layer_rank(layer));
         FootprintDrawing {
             layers,
-            bounds: bounds.finish(),
+            fit: shapes_only.unwrap_or(bounds),
+            bounds,
             pads: self.pads,
             graphics: self.graphics,
             texts: self.texts,

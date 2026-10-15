@@ -17,9 +17,13 @@ pub struct FootprintDrawing {
     /// Every layer something is drawn on, in KiCad's layer order, such as
     /// `F.Cu`, `F.Paste`, `F.SilkS`.
     pub layers: Vec<String>,
-    /// The box around everything drawn, which a close-up fits:
-    /// `[min_x, min_y, max_x, max_y]`. A text's box is a rough guess.
+    /// The box around everything drawn: `[min_x, min_y, max_x, max_y]`.
+    /// A text's box is a rough guess.
     pub bounds: [f64; 4],
+    /// The box a close-up fits: the pads, holes and graphics, without the
+    /// texts, which can reach far beyond them; the texts' box only when
+    /// nothing else is drawn.
+    pub fit: [f64; 4],
     pub pads: Vec<DrawnPad>,
     /// Lines, arcs, circles, rectangles, polygons and curves that are not
     /// pads, each on its layer.

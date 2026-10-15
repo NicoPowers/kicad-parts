@@ -7,12 +7,13 @@
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
-    AppStatus, FilePreviewRequest, LibrariesView, LibraryCheckView, LibraryItemDetail,
-    LibraryItemRequest, LibraryItems, LibraryItemsRequest, OurLibraries, PartDetail,
-    PreviewOutcome, PreviewRequest, PublishResult, SearchRequest, SearchResponse, SignInRequest,
-    TeamArchiveRequest, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest,
-    TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest,
-    TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSameMpn, TeamStatus,
+    AppStatus, FilePreviewRequest, FootprintDrawing, LibrariesView, LibraryCheckView,
+    LibraryItemDetail, LibraryItemRequest, LibraryItems, LibraryItemsRequest, OurLibraries,
+    PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest, SearchResponse,
+    SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest,
+    TeamEditRequest, TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest,
+    TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSameMpn,
+    TeamStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -298,6 +299,16 @@ async fn part_preview(
 }
 
 #[tauri::command]
+async fn footprint_drawing(
+    browser: State<'_, Browser>,
+    key: String,
+) -> Result<Option<FootprintDrawing>, String> {
+    let browser = browser.inner().clone();
+    // Read only when a close-up or the Libraries browser shows it.
+    blocking(move || browser.footprint_drawing(&key)).await
+}
+
+#[tauri::command]
 async fn team_status(team: State<'_, Team>) -> Result<TeamStatus, String> {
     let team = team.inner().clone();
     blocking(move || team.status()).await
@@ -554,6 +565,7 @@ fn main() {
             search_parts,
             part_detail,
             part_preview,
+            footprint_drawing,
             team_status,
             team_sign_in,
             team_sign_out,
@@ -673,6 +685,7 @@ mod tests {
             command::SEARCH_PARTS,
             command::PART_DETAIL,
             command::PART_PREVIEW,
+            command::FOOTPRINT_DRAWING,
             command::TEAM_STATUS,
             command::TEAM_SIGN_IN,
             command::TEAM_SIGN_OUT,
