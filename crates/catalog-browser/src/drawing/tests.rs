@@ -482,3 +482,92 @@ fn polygons_without_a_fill_and_shapes_without_a_width_are_filled() {
     assert_eq!(filled, [true, true, true, false, false, true]);
     assert_eq!(drawing.left_out, ["Hatched fills are drawn solid."]);
 }
+
+/// The radius of each arc edge of a polygon.
+fn arc_radii(shape: &Shape) -> Vec<f64> {
+    let Shape::Polygon { edges, .. } = shape else {
+        panic!("a polygon: {shape:?}");
+    };
+    edges
+        .iter()
+        .filter_map(|edge| match *edge {
+            Edge::Arc { start, mid, end } => {
+                circle_center(start, mid, end).map(|c| distance(c, start))
+            }
+            Edge::Line { .. } => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_margin_changes_a_rounded_corner_by_the_margin() {
+    // LFPAK56's pad 1, with the footprint's paste margin of -0.05.
+    let drawing = draw(
+        "(footprint \"F\" (solder_paste_margin -0.05) (solder_mask_margin 0.05)
+          (pad \"1\" smd roundrect (at 0 0) (size 0.7 1.15) (layers \"F.Cu\" \"F.Paste\" \"F.Mask\") (roundrect_rratio 0.25))
+          (pad \"2\" smd roundrect (at 3 0) (size 0.7 1.15) (layers \"F.Cu\" \"F.Paste\") (roundrect_rratio 0.25)
+            (solder_paste_margin 0) (solder_paste_margin_ratio -0.1)))",
+    );
+    let pad = &drawing.pads[0];
+    let radius = |layer| arc_radii(on(pad, layer).next().unwrap());
+    assert!(radius("F.Cu").iter().all(|r| close(*r, 0.175)));
+    assert!(
+        radius("F.Paste").iter().all(|r| close(*r, 0.125)),
+        "{:?}",
+        radius("F.Paste")
+    );
+    assert!(radius("F.Mask").iter().all(|r| close(*r, 0.225)));
+    assert_size(size_on(pad, "F.Paste"), (0.6, 1.05));
+    // Different margins (-0.07 and -0.115): the radius changes by the larger.
+    let pad = &drawing.pads[1];
+    let radii = arc_radii(on(pad, "F.Paste").next().unwrap());
+    assert!(radii.iter().all(|r| close(*r, 0.105)), "{radii:?}");
+    assert_size(size_on(pad, "F.Paste"), (0.56, 0.92));
+}
+
+#[test]
+fn trapezoid_and_chamfered_openings_are_true_outlines() {
+    let drawing = draw(
+        "(footprint \"F\" (solder_mask_margin 0.1) (solder_paste_margin -0.05)
+          (pad \"1\" smd trapezoid (at 0 0) (size 3.6 1.7) (rect_delta 0.6 0) (layers \"F.Cu\" \"F.Mask\" \"F.Paste\"))
+          (pad \"2\" smd roundrect (at 10 0) (size 5.8 2.1) (layers \"F.Cu\" \"F.Mask\") (roundrect_rratio 0)
+            (chamfer_ratio 0.2) (chamfer top_left top_right)))",
+    );
+    // Four sides moved out, joined by four arcs of the margin's radius.
+    let trapezoid = &drawing.pads[0];
+    let mask = on(trapezoid, "F.Mask").next().unwrap();
+    let Shape::Polygon { width, .. } = mask else {
+        panic!()
+    };
+    assert_eq!(*width, 0.0, "a true outline, not a wide stroke");
+    let radii = arc_radii(mask);
+    assert_eq!(radii.len(), 4);
+    assert!(radii.iter().all(|r| close(*r, 0.1)), "{radii:?}");
+    let [x0, _, x1, _] = box_of([mask]);
+    assert!(close(x0, -1.9) && close(x1, 1.9), "{x0} {x1}");
+    // Moved in by 0.05: straight sides only, each 0.05 inside.
+    let paste = on(trapezoid, "F.Paste").next().unwrap();
+    assert!(arc_radii(paste).is_empty());
+    let [x0, _, x1, _] = box_of([paste]);
+    assert!(close(x0, -1.75) && close(x1, 1.75), "{x0} {x1}");
+    // Two chamfers and two sharp corners: six sides and six arcs.
+    let chamfered = on(&drawing.pads[1], "F.Mask").next().unwrap();
+    let radii = arc_radii(chamfered);
+    assert_eq!(radii.len(), 6);
+    assert!(radii.iter().all(|r| close(*r, 0.1)));
+    assert_size(size_on(&drawing.pads[1], "F.Mask"), (6.0, 2.3));
+    // Shrinking past nothing leaves no opening.
+    let gone = offset_convex(
+        &polygon(
+            &[
+                Point::new(0.0, 0.0),
+                Point::new(1.0, 0.0),
+                Point::new(1.0, 1.0),
+            ],
+            0.0,
+            true,
+        ),
+        -1.0,
+    );
+    assert!(matches!(gone, Shape::Polygon { ref edges, .. } if edges.is_empty()));
+}

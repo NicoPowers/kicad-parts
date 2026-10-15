@@ -40,8 +40,11 @@ pub struct DrawnPad {
     pub center: Point,
     /// The pad's outline on each layer it is on. Copper layers get the
     /// pad's own shape; paste and mask layers get the opening, after the
-    /// pad's and footprint's margins. A custom pad has several shapes per
-    /// layer: its anchor and its primitives.
+    /// pad's and footprint's margins, as true outlines. A custom pad has
+    /// several shapes per layer: its anchor and its primitives. Its
+    /// primitives grow by a positive margin as a wider stroke, so their
+    /// outline stays where the file draws it and the shape reaches
+    /// `width / 2` beyond it.
     pub shapes: Vec<LayerShape>,
     /// The drilled hole, if the pad has one: a circle, or a slot drawn as
     /// a polygon.

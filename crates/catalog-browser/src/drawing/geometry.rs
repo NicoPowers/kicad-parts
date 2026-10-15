@@ -359,3 +359,158 @@ pub(super) fn arc_points(start: Point, mid: Point, end: Point, count: usize) -> 
         })
         .collect()
 }
+
+/// A convex, filled polygon's outline moved out by `by` (in, when
+/// negative), as a margin moves a pad's outline. Its edges must go
+/// clockwise on screen, as [`cut_rect`] and [`polygon`] make them.
+///
+/// Moving out keeps every edge's length and joins each corner with an arc
+/// of radius `by`; an arc edge grows its radius. Moving in works for
+/// straight edges only: each corner is where the moved edges meet. An
+/// outline that would turn inside out comes back with no edges.
+pub(super) fn offset_convex(shape: &Shape, by: f64) -> Shape {
+    let Shape::Polygon { edges, .. } = shape else {
+        return shape.clone();
+    };
+    let edges: Vec<Edge> = edges
+        .iter()
+        .copied()
+        .filter(|edge| {
+            let (start, end) = ends(edge);
+            distance(start, end) > 1e-12
+        })
+        .collect();
+    let moved = if by >= 0.0 {
+        offset_out(&edges, by)
+    } else {
+        offset_in(&edges, -by)
+    };
+    Shape::Polygon {
+        edges: moved,
+        width: 0.0,
+        filled: true,
+    }
+}
+
+fn ends(edge: &Edge) -> (Point, Point) {
+    match edge {
+        Edge::Line { start, end } | Edge::Arc { start, end, .. } => (*start, *end),
+    }
+}
+
+/// The unit vector of `p`; `p` itself when it has no length.
+fn unit(p: Point) -> Point {
+    let length = p.x.hypot(p.y);
+    if length > 0.0 {
+        Point::new(p.x / length, p.y / length)
+    } else {
+        p
+    }
+}
+
+/// The outward normals at an edge's start and end.
+fn normals(edge: &Edge) -> (Point, Point) {
+    match edge {
+        Edge::Line { start, end } => {
+            let n = unit(Point::new(end.y - start.y, start.x - end.x));
+            (n, n)
+        }
+        Edge::Arc { start, mid, end } => match circle_center(*start, *mid, *end) {
+            Some(c) => (
+                unit(Point::new(start.x - c.x, start.y - c.y)),
+                unit(Point::new(end.x - c.x, end.y - c.y)),
+            ),
+            None => normals(&Edge::Line {
+                start: *start,
+                end: *end,
+            }),
+        },
+    }
+}
+
+fn shifted(p: Point, normal: Point, by: f64) -> Point {
+    Point::new(p.x + normal.x * by, p.y + normal.y * by)
+}
+
+fn offset_out(edges: &[Edge], by: f64) -> Vec<Edge> {
+    let mut out = Vec::new();
+    for (index, edge) in edges.iter().enumerate() {
+        let (start_normal, end_normal) = normals(edge);
+        out.push(match *edge {
+            Edge::Line { start, end } => Edge::Line {
+                start: shifted(start, start_normal, by),
+                end: shifted(end, end_normal, by),
+            },
+            Edge::Arc { start, mid, end } => {
+                let (_, mid_normal) = normals(&Edge::Arc {
+                    start,
+                    mid: Point::new((start.x + mid.x) / 2.0, (start.y + mid.y) / 2.0),
+                    end: mid,
+                });
+                Edge::Arc {
+                    start: shifted(start, start_normal, by),
+                    mid: shifted(mid, mid_normal, by),
+                    end: shifted(end, end_normal, by),
+                }
+            }
+        });
+        let next = &edges[(index + 1) % edges.len()];
+        let (next_normal, _) = normals(next);
+        if distance(end_normal, next_normal) > 1e-9 {
+            let corner = ends(edge).1;
+            let middle = unit(Point::new(
+                end_normal.x + next_normal.x,
+                end_normal.y + next_normal.y,
+            ));
+            out.push(Edge::Arc {
+                start: shifted(corner, end_normal, by),
+                mid: shifted(corner, middle, by),
+                end: shifted(corner, next_normal, by),
+            });
+        }
+    }
+    out
+}
+
+fn offset_in(edges: &[Edge], by: f64) -> Vec<Edge> {
+    // Each edge's line, moved in: a point on it and its direction.
+    let lines: Vec<(Point, Point)> = edges
+        .iter()
+        .map(|edge| {
+            let (start, end) = ends(edge);
+            let (normal, _) = normals(edge);
+            (
+                shifted(start, normal, -by),
+                Point::new(end.x - start.x, end.y - start.y),
+            )
+        })
+        .collect();
+    let meet = |(p1, d1): (Point, Point), (p2, d2): (Point, Point)| {
+        let cross = d1.x * d2.y - d1.y * d2.x;
+        if cross.abs() < 1e-12 {
+            return None;
+        }
+        let t = ((p2.x - p1.x) * d2.y - (p2.y - p1.y) * d2.x) / cross;
+        Some(Point::new(p1.x + d1.x * t, p1.y + d1.y * t))
+    };
+    let count = lines.len();
+    let mut corners = Vec::new();
+    for index in 0..count {
+        let Some(corner) = meet(lines[(index + count - 1) % count], lines[index]) else {
+            return Vec::new();
+        };
+        corners.push(corner);
+    }
+    // Every moved edge must still point the way it did.
+    for index in 0..count {
+        let (start, end) = (corners[index], corners[(index + 1) % count]);
+        let direction = lines[index].1;
+        if (end.x - start.x) * direction.x + (end.y - start.y) * direction.y <= 0.0 {
+            return Vec::new();
+        }
+    }
+    match polygon(&corners, 0.0, true) {
+        Shape::Polygon { edges, .. } => edges,
+        _ => Vec::new(),
+    }
+}
