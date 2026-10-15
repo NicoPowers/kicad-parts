@@ -101,30 +101,36 @@ impl PadGeometry {
 
     /// The pad's outline grown by `dx` and `dy` on each side along its own
     /// axes (shrunk when negative), in its own frame. Empty when it shrinks
-    /// to nothing. These follow KiCad:
+    /// to nothing. These follow kicad-cli:
     ///
-    /// - An equal margin moves the outline out (or in) by the margin: a
-    ///   corner gets a rounding of the margin, and a rounded corner's
-    ///   radius grows (or shrinks, never below 0) by it.
-    /// - Different margins resize the pad: its sides by twice each margin,
-    ///   a rounded corner's radius by the larger margin, a chamfer and a
-    ///   trapezoid's slant as before.
-    /// - A custom pad's anchor follows the same rules; a positive margin
-    ///   grows its primitives by widening their stroke, and a negative one
-    ///   leaves them as they are.
+    /// - An equal margin on a round, oval, rectangular or rounded pad moves
+    ///   the outline by the margin: a sharp corner gets a rounding of the
+    ///   margin, and a rounded corner's radius changes by it, never below 0.
+    /// - A chamfered pad grows by an equal margin as a true outline, with
+    ///   arcs at its corners. Otherwise it is resized by twice each margin,
+    ///   keeping its rounding and chamfer ratios; so is a rounded pad with
+    ///   different margins.
+    /// - A trapezoid and a custom pad move their whole outline by the X
+    ///   margin. A custom pad's primitives grow by widening their stroke
+    ///   and keep their size when it shrinks; its anchor follows the rules.
     pub(super) fn outline(&self, dx: f64, dy: f64) -> Vec<Shape> {
         let (w, h) = self.size;
         let equal = dx == dy;
-        let grow = if equal { dx } else { 0.0 };
         let (w2, h2) = (w + 2.0 * dx, h + 2.0 * dy);
-        if w2 <= 0.0 || h2 <= 0.0 {
-            return Vec::new();
-        }
-        let rect = |radius: f64| {
-            let radius = radius.clamp(0.0, w2.min(h2) / 2.0);
-            cut_rect(w2, h2, [Corner::Round(radius); 4])
+        let resized_away = w2 <= 0.0 || h2 <= 0.0;
+        let rect = |w: f64, h: f64, radius: f64| {
+            let radius = radius.clamp(0.0, w.min(h) / 2.0);
+            cut_rect(w, h, [Corner::Round(radius); 4])
         };
         let shapes = match &self.form {
+            _ if resized_away
+                && !matches!(
+                    self.form,
+                    PadForm::Trapezoid { .. } | PadForm::Custom { .. }
+                ) =>
+            {
+                Vec::new()
+            }
             PadForm::Circle => vec![Shape::Circle {
                 center: Point::default(),
                 radius: w2 / 2.0,
@@ -132,81 +138,87 @@ impl PadGeometry {
                 filled: true,
             }],
             PadForm::Oval => vec![oval(w2, h2)],
-            PadForm::Rect => vec![rect(grow.max(0.0))],
+            PadForm::Rect => vec![rect(w2, h2, if equal { dx.max(0.0) } else { 0.0 })],
             PadForm::RoundRect {
                 radius_ratio,
                 chamfer_ratio,
                 chamfered,
             } if !chamfered.contains(&true) || *chamfer_ratio == 0.0 => {
-                let radius = radius_ratio * w.min(h);
-                vec![rect(radius + if equal { dx } else { dx.max(dy) })]
+                let radius = if equal {
+                    radius_ratio * w.min(h) + dx
+                } else {
+                    radius_ratio * w2.min(h2)
+                };
+                vec![rect(w2, h2, radius)]
             }
             PadForm::RoundRect {
                 radius_ratio,
                 chamfer_ratio,
                 chamfered,
             } => {
-                let corners = |w: f64, h: f64, radius: f64| {
+                let corners = |w: f64, h: f64| {
+                    let short = w.min(h);
                     chamfered.map(|chamfer| {
                         if chamfer {
-                            Corner::Chamfer(chamfer_ratio * w.min(h))
+                            Corner::Chamfer(chamfer_ratio * short)
                         } else {
-                            Corner::Round(radius.clamp(0.0, w.min(h) / 2.0))
+                            Corner::Round((radius_ratio * short).clamp(0.0, short / 2.0))
                         }
                     })
                 };
-                let radius = radius_ratio * w.min(h);
-                if equal && grow > 0.0 {
-                    let pad = cut_rect(w, h, corners(w, h, radius));
-                    vec![offset_convex(&pad, grow)]
+                if equal && dx > 0.0 {
+                    vec![offset_convex(&cut_rect(w, h, corners(w, h)), dx)]
                 } else {
-                    let grown = radius + dx.max(dy);
-                    vec![cut_rect(w2, h2, corners(w2, h2, grown))]
+                    vec![cut_rect(w2, h2, corners(w2, h2))]
                 }
             }
             PadForm::Trapezoid { delta } => {
-                let corners = |w: f64, h: f64| {
-                    let (hw, hh) = (w / 2.0, h / 2.0);
-                    // KiCad's corners: delta.x changes the left and right
-                    // sides' heights, delta.y the top and bottom widths.
-                    let (ddx, ddy) = (
-                        (delta.0 / 2.0).clamp(-hh, hh),
-                        (delta.1 / 2.0).clamp(-hw, hw),
-                    );
-                    [
+                let (hw, hh) = (w / 2.0, h / 2.0);
+                // KiCad's corners: delta.x changes the left and right
+                // sides' heights, delta.y the top and bottom widths.
+                let (ddx, ddy) = (
+                    (delta.0 / 2.0).clamp(-hh, hh),
+                    (delta.1 / 2.0).clamp(-hw, hw),
+                );
+                let pad = polygon(
+                    &[
                         Point::new(-hw + ddy, -hh - ddx),
                         Point::new(hw - ddy, -hh + ddx),
                         Point::new(hw + ddy, hh - ddx),
                         Point::new(-hw - ddy, hh + ddx),
-                    ]
-                };
-                if equal && grow != 0.0 {
-                    let pad = polygon(&corners(w, h), 0.0, true);
-                    let moved = offset_convex(&pad, grow);
-                    match &moved {
-                        Shape::Polygon { edges, .. } if edges.is_empty() => Vec::new(),
-                        _ => vec![moved],
-                    }
+                    ],
+                    0.0,
+                    true,
+                );
+                if dx == 0.0 {
+                    vec![pad]
                 } else {
-                    vec![polygon(&corners(w2, h2), 0.0, true)]
+                    match offset_convex(&pad, dx) {
+                        Shape::Polygon { edges, .. } if edges.is_empty() => Vec::new(),
+                        moved => vec![moved],
+                    }
                 }
             }
             PadForm::Custom {
                 circle_anchor,
                 primitives,
             } => {
-                let anchor = if *circle_anchor {
-                    Shape::Circle {
+                let (aw, ah) = (w + 2.0 * dx, h + 2.0 * dx);
+                let anchor = if aw <= 0.0 || ah <= 0.0 {
+                    None
+                } else if *circle_anchor {
+                    Some(Shape::Circle {
                         center: Point::default(),
-                        radius: w2 / 2.0,
+                        radius: aw / 2.0,
                         width: 0.0,
                         filled: true,
-                    }
+                    })
                 } else {
-                    rect(grow.max(0.0))
+                    Some(rect(aw, ah, dx.max(0.0)))
                 };
-                std::iter::once(anchor)
-                    .chain(primitives.iter().map(|shape| stroked(shape.clone(), grow)))
+                anchor
+                    .into_iter()
+                    .chain(primitives.iter().map(|shape| stroked(shape.clone(), dx)))
                     .collect()
             }
         };

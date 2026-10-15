@@ -515,10 +515,11 @@ fn a_margin_changes_a_rounded_corner_by_the_margin() {
     );
     assert!(radius("F.Mask").iter().all(|r| close(*r, 0.225)));
     assert_size(size_on(pad, "F.Paste"), (0.6, 1.05));
-    // Different margins (-0.07 and -0.115): the radius changes by the larger.
+    // Different margins (-0.07 and -0.115) resize the pad and keep its
+    // corner ratio: 0.25 of its shorter side, 0.56.
     let pad = &drawing.pads[1];
     let radii = arc_radii(on(pad, "F.Paste").next().unwrap());
-    assert!(radii.iter().all(|r| close(*r, 0.105)), "{radii:?}");
+    assert!(radii.iter().all(|r| close(*r, 0.14)), "{radii:?}");
     assert_size(size_on(pad, "F.Paste"), (0.56, 0.92));
 }
 
@@ -680,4 +681,138 @@ fn the_fit_leaves_out_texts_unless_nothing_else_is_drawn() {
         "(footprint \"T\" (fp_text user \"AB\" (at 0 0) (layer \"F.Fab\") (effects (font (size 1 1)))))",
     );
     assert_eq!(only_text.fit, only_text.bounds);
+}
+
+/// The area inside a polygon, its arcs followed closely.
+fn area(shape: &Shape) -> f64 {
+    let Shape::Polygon { edges, .. } = shape else {
+        panic!("a polygon: {shape:?}");
+    };
+    let mut points = Vec::new();
+    for edge in edges {
+        match *edge {
+            Edge::Line { end, .. } => points.push(end),
+            Edge::Arc { start, mid, end } => {
+                points.extend(arc_points(start, mid, end, 256).into_iter().skip(1))
+            }
+        }
+    }
+    let twice: f64 = points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .map(|(a, b)| a.x * b.y - b.x * a.y)
+        .sum();
+    twice.abs() / 2.0
+}
+
+/// The one shape of the first pad on `layer`.
+fn only<'a>(drawing: &'a FootprintDrawing, layer: &'a str) -> &'a Shape {
+    let mut shapes = on(&drawing.pads[0], layer);
+    let shape = shapes.next().expect("a shape");
+    assert!(shapes.next().is_none());
+    shape
+}
+
+// The cases below were measured with kicad-cli by the round 2 review.
+
+#[test]
+fn different_margins_keep_a_rounded_pads_corner_ratio() {
+    for (ratio, radius) in [(-0.1, 0.20), (0.1, 0.30)] {
+        let drawing = draw(&format!(
+            "(footprint \"F\" (pad \"1\" smd roundrect (at 0 0) (size 2 1) (layers \"F.Cu\" \"F.Paste\") (roundrect_rratio 0.25) (solder_paste_margin_ratio {ratio})))"
+        ));
+        let radii = arc_radii(only(&drawing, "F.Paste"));
+        assert!(
+            radii.iter().all(|r| close(*r, radius)),
+            "{ratio}: {radii:?}"
+        );
+    }
+}
+
+#[test]
+fn a_shrinking_or_uneven_margin_resizes_a_chamfered_pad() {
+    // The other corners keep their rounding: 0.25 of the shorter side, 0.08.
+    let drawing = draw(
+        "(footprint \"F\" (pad \"1\" smd roundrect (at 0 0) (size 0.3 0.2) (layers \"F.Cu\" \"F.Paste\")
+           (roundrect_rratio 0.25) (chamfer_ratio 0.25) (chamfer top_left) (solder_paste_margin -0.06)))",
+    );
+    let radii = arc_radii(only(&drawing, "F.Paste"));
+    assert_eq!(radii.len(), 3);
+    assert!(radii.iter().all(|r| close(*r, 0.02)), "{radii:?}");
+    // kicad-cli: 2.781 mm2, its arcs drawn as short lines inside the curve.
+    let drawing = draw(
+        "(footprint \"F\" (pad \"1\" smd roundrect (at 0 0) (size 2 1) (layers \"F.Cu\" \"F.Paste\")
+           (roundrect_rratio 0.25) (chamfer_ratio 0.2) (chamfer top_left top_right) (solder_paste_margin_ratio 0.1)))",
+    );
+    let paste = area(only(&drawing, "F.Paste"));
+    assert!((paste - 2.781).abs() < 0.005, "{paste}");
+}
+
+#[test]
+fn a_grown_arc_keeps_its_middle_on_the_circle() {
+    // Rounded corners of radius 0.5 round the centre, grown by 0.1.
+    let drawing = draw(
+        "(footprint \"F\" (solder_mask_margin 0.1) (pad \"1\" smd roundrect (at 0 0) (size 1 1) (layers \"F.Cu\" \"F.Mask\")
+           (roundrect_rratio 0.5) (chamfer_ratio 0.2) (chamfer top_left bottom_right)))",
+    );
+    let Shape::Polygon { edges, .. } = only(&drawing, "F.Mask") else {
+        panic!()
+    };
+    let mut checked = 0;
+    for edge in edges {
+        if let Edge::Arc { start, mid, end } = *edge {
+            let c = circle_center(start, mid, end).unwrap();
+            if distance(c, start) > 0.3 {
+                let origin = Point::default();
+                assert!(close(distance(origin, mid), 0.6), "{mid:?}");
+                assert!(close(distance(origin, start), 0.6) && close(distance(origin, end), 0.6));
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 2);
+}
+
+#[test]
+fn a_trapezoid_moves_by_its_x_margin_and_keeps_what_remains() {
+    // Margins of -0.2 (X) and -0.1 (Y): the outline moves in by 0.2.
+    let drawing = draw(
+        "(footprint \"F\" (pad \"1\" smd trapezoid (at 0 0) (size 2 1) (rect_delta 0.4 0) (layers \"F.Cu\" \"F.Paste\") (solder_paste_margin_ratio -0.1)))",
+    );
+    let paste = only(&drawing, "F.Paste");
+    let [x0, y0, x1, y1] = box_of([paste]);
+    assert!(close(x1 - x0, 1.6), "{}", x1 - x0);
+    assert!((y1 - y0 - 0.912).abs() < 0.001, "{}", y1 - y0);
+    assert!((area(paste) - 0.947).abs() < 0.001, "{}", area(paste));
+    // The short right side turns inside out: a triangle remains.
+    let drawing = draw(
+        "(footprint \"F\" (pad \"1\" smd trapezoid (at 0 0) (size 0.4 0.3) (rect_delta 0.2 0) (layers \"F.Cu\" \"F.Paste\") (solder_paste_margin -0.1)))",
+    );
+    let triangle = only(&drawing, "F.Paste");
+    let Shape::Polygon { edges, .. } = triangle else {
+        panic!()
+    };
+    assert_eq!(edges.len(), 3);
+    assert!(
+        (area(triangle) - 0.0156).abs() < 0.0001,
+        "{}",
+        area(triangle)
+    );
+}
+
+#[test]
+fn a_custom_pad_moves_by_its_x_margin() {
+    let drawing = draw(
+        "(footprint \"F\" (pad \"1\" smd custom (at 0 0) (size 1 2) (layers \"F.Cu\" \"F.Paste\") (solder_paste_margin_ratio -0.1)
+           (options (anchor rect)) (primitives (gr_poly (pts (xy 0 0) (xy 2 0) (xy 2 1)) (width 0) (fill yes)))))",
+    );
+    // X margin -0.1 on both sides of the anchor; the primitive keeps its size.
+    let anchor = on(&drawing.pads[0], "F.Paste").next().unwrap();
+    let [x0, y0, x1, y1] = box_of([anchor]);
+    assert!(
+        close(x1 - x0, 0.8) && close(y1 - y0, 1.8),
+        "{} {}",
+        x1 - x0,
+        y1 - y0
+    );
 }
