@@ -1846,3 +1846,101 @@ fn ExtraFootprints(form: Form) -> impl IntoView {
         />
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pick(kind: PreviewKind, group: LibraryGroup, nickname: &str, name: &str) -> TeamPick {
+        TeamPick {
+            kind,
+            library: LibraryKey {
+                group,
+                nickname: nickname.into(),
+            },
+            name: name.into(),
+            reference: format!("{nickname}:{name}"),
+            use_as: match group {
+                LibraryGroup::Ours => PickUse::Ours,
+                LibraryGroup::Kicad => PickUse::Kicad,
+                LibraryGroup::Installed => PickUse::Copy,
+            },
+            file: None,
+            models: Vec::new(),
+            model_problems: Vec::new(),
+            problems: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+
+    fn file(kind: FileKind) -> TeamFile {
+        TeamFile {
+            kind,
+            file_name: "x".into(),
+            base64: String::new(),
+            symbol: None,
+            model_key: None,
+            replaces: None,
+            label: None,
+            installed: None,
+            no_models: false,
+        }
+    }
+
+    #[test]
+    fn a_file_goes_into_the_library_chosen_and_a_chosen_item_keeps_its_reference() {
+        // A download: the names from the files, the libraries from the list.
+        let download = TeamDownload {
+            symbol_file: Some(file(FileKind::Symbol)),
+            footprint_file: Some(file(FileKind::Footprint)),
+            symbol_name: "C_New".into(),
+            footprint_name: "C_0603_New".into(),
+            ..TeamDownload::default()
+        };
+        assert_eq!(symbol_reference(&download, "g-cap"), "g-cap:C_New");
+        assert_eq!(symbol_reference(&download, ""), "C_New");
+        assert_eq!(
+            footprint_reference(&download, "g-Capacitor_SMD", None),
+            "g-Capacitor_SMD:C_0603_New"
+        );
+        // A footprint the Catalog already has, used instead.
+        assert_eq!(
+            footprint_reference(&download, "g-Capacitor_SMD", Some("g-Capacitor_SMD:C_0603")),
+            "g-Capacitor_SMD:C_0603"
+        );
+        // KiCad's own items keep their references; a copy goes into the
+        // library chosen.
+        let kicad = TeamDownload {
+            picks: vec![
+                pick(PreviewKind::Symbol, LibraryGroup::Kicad, "Device", "C"),
+                pick(
+                    PreviewKind::Footprint,
+                    LibraryGroup::Installed,
+                    "Mine",
+                    "C_Mine",
+                ),
+            ],
+            footprint_file: Some(file(FileKind::Footprint)),
+            footprint_name: "C_Mine".into(),
+            ..TeamDownload::default()
+        };
+        assert_eq!(symbol_reference(&kicad, "g-cap"), "Device:C");
+        assert_eq!(
+            footprint_reference(&kicad, "g-Capacitor_SMD", None),
+            "g-Capacitor_SMD:C_Mine"
+        );
+        let extra = Extra {
+            key: 1,
+            pick: pick(
+                PreviewKind::Footprint,
+                LibraryGroup::Installed,
+                "Mine",
+                "C_Mine",
+            ),
+            library: "g-Capacitor_SMD".into(),
+            no_models: false,
+        };
+        assert_eq!(extra.reference(), "g-Capacitor_SMD:C_Mine");
+        assert_eq!(joined("", "C_Mine"), "C_Mine");
+    }
+}

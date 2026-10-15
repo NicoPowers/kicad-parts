@@ -406,6 +406,7 @@ impl TeamUi {
 
     pub(crate) fn start_editing(&self, draft: Draft) {
         self.edit_attempt.open();
+        self.cad_problem.set(None);
         self.draft.set_value(draft);
         self.close_review();
         self.conflict.set(None);

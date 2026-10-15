@@ -30,10 +30,10 @@ pub(crate) enum Change {
     None,
     /// Chosen in the Libraries browser and used by reference: the
     /// Catalog's, ours or KiCad's.
-    Pick(TeamPick),
+    Pick(Box<TeamPick>),
     /// A file chosen with Use a file..., or the copy of an installed
     /// library's item.
-    File(FileChoice),
+    File(Box<FileChoice>),
 }
 
 /// A file a choice sends, as read.
@@ -262,11 +262,20 @@ pub(crate) fn CadFields(ui: TeamUi, ipn: String, before: Vec<(String, String)>) 
         let kind = file_kind(rows.kind);
         for file in draft.files.iter().filter(|file| file.kind == kind) {
             let name = file.symbol.clone();
+            // A symbol file goes with the symbol; a downloaded footprint file
+            // with the first choice; a copied footprint with the choice named
+            // like its file, as KiCad names a footprint's file.
+            let wanted = match kind {
+                FileKind::Footprint if file.installed.is_none() => None,
+                FileKind::Footprint => file.file_name.strip_suffix(".kicad_mod").map(str::to_owned),
+                _ => name.clone(),
+            };
             let row = rows.rows.with_untracked(|list| {
                 list.iter()
                     .find(|row| {
-                        row.reference.rsplit(':').next() == name.as_deref()
-                            || kind == FileKind::Footprint && file.installed.is_none()
+                        wanted
+                            .as_deref()
+                            .is_some_and(|wanted| row.reference.rsplit(':').next() == Some(wanted))
                     })
                     .map(|row| row.key)
             });
@@ -406,7 +415,7 @@ fn read_file(
         };
         rows.set(key, |row| {
             row.reference = choice.reference();
-            row.change = Change::File(choice);
+            row.change = Change::File(Box::new(choice));
         });
         ui.cad_problem.set(None);
         changed.run(());
@@ -506,7 +515,7 @@ fn choose(
             _ => {
                 rows.set(key, |row| {
                     row.reference = pick.reference.clone();
-                    row.change = Change::Pick(pick);
+                    row.change = Change::Pick(Box::new(pick));
                 });
                 changed.run(());
             }
@@ -662,7 +671,7 @@ fn RowView(
     let set_choice = move |update: Box<dyn FnOnce(&mut FileChoice)>| {
         rows.set(key, |row| {
             if let Change::File(choice) = &mut row.change {
-                update(choice);
+                update(choice.as_mut());
                 row.reference = choice.reference();
             }
         });
@@ -898,5 +907,41 @@ fn ModelFileInput(
             }}
             {move || problem.get().map(|message| view! { <p class="problem file-problem" role="alert">{message}</p> })}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_files_reference_is_its_own_name_in_the_library_chosen() {
+        let mut choice = FileChoice {
+            file: TeamFile {
+                kind: FileKind::Symbol,
+                file_name: "two.kicad_sym".into(),
+                base64: String::new(),
+                symbol: Some("R_Round".into()),
+                model_key: None,
+                replaces: None,
+                label: None,
+                installed: None,
+                no_models: false,
+            },
+            names: vec!["R_Box".into(), "R_Round".into()],
+            library: String::new(),
+            missing_models: Vec::new(),
+            model_files: Vec::new(),
+            copy: None,
+            no_models: false,
+        };
+        // No library chosen yet: just the name, which saving refuses.
+        assert_eq!(choice.reference(), "R_Round");
+        choice.library = "g-res".into();
+        assert_eq!(choice.reference(), "g-res:R_Round");
+        // A footprint file is named by the footprint in it.
+        choice.file.symbol = None;
+        choice.names = vec!["R_0603_Mine".into()];
+        assert_eq!(choice.reference(), "g-res:R_0603_Mine");
     }
 }
