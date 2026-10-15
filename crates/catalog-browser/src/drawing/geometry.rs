@@ -527,3 +527,53 @@ fn offset_in(edges: &[Edge], by: f64) -> Vec<Edge> {
     }
     Vec::new()
 }
+
+/// A polygon's edges going clockwise on screen, as [`offset_convex`] needs
+/// them: reversed when they go the other way.
+pub(super) fn clockwise(edges: &[Edge]) -> Vec<Edge> {
+    // Twice the area, positive for clockwise on screen (Y down).
+    let twice: f64 = edges
+        .iter()
+        .map(|edge| {
+            let (a, b) = ends(edge);
+            a.x * b.y - b.x * a.y
+        })
+        .sum();
+    if twice >= 0.0 {
+        return edges.to_vec();
+    }
+    edges
+        .iter()
+        .rev()
+        .map(|edge| match *edge {
+            Edge::Line { start, end } => Edge::Line {
+                start: end,
+                end: start,
+            },
+            Edge::Arc { start, mid, end } => Edge::Arc {
+                start: end,
+                mid,
+                end: start,
+            },
+        })
+        .collect()
+}
+
+/// Whether clockwise, straight `edges` make a convex polygon: every corner
+/// turns the same way.
+pub(super) fn convex(edges: &[Edge]) -> bool {
+    if edges.len() < 3 || edges.iter().any(|edge| matches!(edge, Edge::Arc { .. })) {
+        return false;
+    }
+    edges
+        .iter()
+        .zip(edges.iter().cycle().skip(1))
+        .all(|(a, b)| {
+            let ((a0, a1), (b0, b1)) = (ends(a), ends(b));
+            let (u, v) = (
+                Point::new(a1.x - a0.x, a1.y - a0.y),
+                Point::new(b1.x - b0.x, b1.y - b0.y),
+            );
+            u.x * v.y - u.y * v.x >= -1e-12
+        })
+}

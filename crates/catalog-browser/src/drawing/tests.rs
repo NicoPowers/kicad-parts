@@ -816,3 +816,73 @@ fn a_custom_pad_moves_by_its_x_margin() {
         y1 - y0
     );
 }
+
+/// A custom pad with `primitives`, its paste shrunk by `margin`.
+fn custom(size: &str, margin: &str, primitives: &str) -> FootprintDrawing {
+    draw(&format!(
+        "(footprint \"C\" (pad \"1\" smd custom (at 0 0) (size {size}) (layers \"F.Cu\" \"F.Paste\") {margin}
+           (options (anchor rect)) (primitives {primitives})))"
+    ))
+}
+
+#[test]
+fn a_shrinking_margin_shrinks_a_custom_pads_primitives() {
+    // A line 0.3 wide loses 0.05 on each side; its round ends too.
+    let drawing = custom(
+        "0.4 0.4",
+        "(solder_paste_margin -0.05)",
+        "(gr_line (start -0.75 0) (end 0.75 0) (width 0.3))",
+    );
+    assert_size(size_on(&drawing.pads[0], "F.Paste"), (1.7, 0.3));
+    // The anchor shrinks to nothing; the polygon still shrinks by 0.1.
+    let drawing = custom(
+        "0.2 0.2",
+        "(solder_paste_margin -0.1)",
+        "(gr_poly (pts (xy -0.75 -0.5) (xy 0.75 -0.5) (xy 0.75 0.5) (xy -0.75 0.5)) (width 0) (fill yes))",
+    );
+    assert_eq!(on(&drawing.pads[0], "F.Paste").count(), 1);
+    assert_size(size_on(&drawing.pads[0], "F.Paste"), (1.3, 0.8));
+    // Margins of -0.1 (X) and -0.06 (Y): the polygon shrinks by 0.1, and
+    // the anchor resized by each margin, 0.8 by 0.48, still shows.
+    let drawing = custom(
+        "1 0.6",
+        "(solder_paste_margin_ratio -0.1)",
+        "(gr_poly (pts (xy -1 -0.3) (xy 1 -0.3) (xy 1 0.3) (xy -1 0.3)) (width 0) (fill yes))",
+    );
+    assert_size(size_on(&drawing.pads[0], "F.Paste"), (1.8, 0.48));
+    let sizes: Vec<(f64, f64)> = on(&drawing.pads[0], "F.Paste")
+        .map(|shape| {
+            let [x0, y0, x1, y1] = box_of([shape]);
+            (x1 - x0, y1 - y0)
+        })
+        .collect();
+    assert!(
+        sizes.iter().any(|(w, h)| close(*w, 0.8) && close(*h, 0.48)),
+        "{sizes:?}"
+    );
+    // A stroke is used up first, then a filled circle's radius.
+    let drawing = custom(
+        "0.4 0.4",
+        "(solder_paste_margin -0.1)",
+        "(gr_poly (pts (xy 1 0) (xy 2 0) (xy 2 1)) (width 0.4) (fill yes)) (gr_circle (center -1 0) (end -0.7 0) (width 0) (fill yes)) (gr_line (start 0 0) (end 0 2) (width 0.2))",
+    );
+    let shapes: Vec<&Shape> = on(&drawing.pads[0], "F.Paste").collect();
+    assert_eq!(shapes.len(), 3, "the line, 0.2 wide, is gone");
+    assert!(matches!(shapes[1], Shape::Polygon { width, .. } if close(*width, 0.2)));
+    assert!(matches!(shapes[2], Shape::Circle { radius, .. } if close(*radius, 0.2)));
+    // A polygon drawn counterclockwise shrinks the same; one that is not
+    // convex is left as it is.
+    let drawing = custom(
+        "0.2 0.2",
+        "(solder_paste_margin -0.1)",
+        "(gr_poly (pts (xy -0.75 0.5) (xy 0.75 0.5) (xy 0.75 -0.5) (xy -0.75 -0.5)) (width 0) (fill yes)) (gr_poly (pts (xy 0 0) (xy 2 0) (xy 2 2) (xy 1 1) (xy 0 2)) (width 0) (fill yes))",
+    );
+    let boxes: Vec<[f64; 4]> = on(&drawing.pads[0], "F.Paste")
+        .map(|shape| box_of([shape]))
+        .collect();
+    assert!(
+        close(boxes[0][2] - boxes[0][0], 1.3) && close(boxes[0][3] - boxes[0][1], 0.8),
+        "{boxes:?}"
+    );
+    assert_eq!(boxes[1], [0.0, 0.0, 2.0, 2.0]);
+}

@@ -357,6 +357,9 @@ fn real_footprints_match_their_files_and_kicad_cli() {
         // Paste openings and a mask opening drawn as pads of their own,
         // next to a footprint margin that must not change them.
         "Package_TO_SOT_SMD:LFPAK56",
+        // Custom pads whose paste shrinks, primitives too.
+        "Package_DFN_QFN:Texas_RGY_R-PVQFN-N16_EP2.05x2.55mm",
+        "Package_DFN_QFN:Texas_RGY_R-PVQFN-N16_EP2.05x2.55mm_ThermalVias",
         "Package_SO:Texas_HTSOP-8-1EP_3.9x4.9mm_P1.27mm_EP2.95x4.9mm_Mask2.4x3.1mm_ThermalVias",
         // Ours.
         "g-Resistor_SMD:R_0603_1608Metric",
@@ -425,4 +428,82 @@ fn a_bga_with_two_thousand_pads_draws_quickly() {
     let size = serde_json::to_vec(&drawing).unwrap().len();
     assert!(size < 2_000_000, "{size} bytes");
     assert!(elapsed.as_secs_f64() < 5.0, "{elapsed:?}");
+}
+
+/// The drawing and kicad-cli's SVG of a footprint file's text, drawn as a
+/// chosen file is.
+fn drawn_file(browser: &CatalogBrowser, name: &str, text: &str) -> (FootprintDrawing, String) {
+    let base64 = base64::engine::general_purpose::STANDARD.encode(text);
+    let request: desktop_contract::FilePreviewRequest = serde_json::from_value(serde_json::json!({
+        "file": { "kind": "footprint", "file_name": format!("{name}.kicad_mod"), "base64": base64 },
+        "reference": format!("g-test:{name}"),
+    }))
+    .unwrap();
+    let set = match browser.preview_file(&request) {
+        PreviewOutcome::Ready(set) => set,
+        PreviewOutcome::Problem(problem) => panic!("{name}: {problem:?}"),
+    };
+    let image = set.images.into_iter().next().unwrap();
+    let svg = base64::engine::general_purpose::STANDARD
+        .decode(
+            image
+                .data_uri
+                .trim_start_matches("data:image/svg+xml;base64,"),
+        )
+        .unwrap();
+    let drawing = browser
+        .footprint_drawing(&image.drawing_key.unwrap())
+        .unwrap();
+    (drawing, String::from_utf8(svg).unwrap())
+}
+
+/// Custom pads with shrinking margins, like those the round 3 review
+/// measured: the paste opening's box matches kicad-cli's.
+#[test]
+fn custom_pads_shrink_as_kicad_cli_draws_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let browser = open_browser(dir.path());
+    let pad = |margin: &str, body: &str| {
+        format!(
+            "(footprint \"P\" (version 20241229) (layer \"F.Cu\") (attr smd)
+               (pad \"1\" smd custom (at 0 0) (size {body} (layers \"F.Cu\" \"F.Paste\") {margin}
+                 (options (clearance outline) (anchor rect))
+                 (primitives PRIMITIVES))
+               (fp_line (start -3 -3) (end 3 3) (stroke (width 0.05) (type solid)) (layer \"F.CrtYd\")))"
+        )
+    };
+    for (name, text) in [
+        (
+            "line",
+            pad("(solder_paste_margin -0.05)", "0.4 0.4)").replace(
+                "PRIMITIVES",
+                "(gr_line (start -0.75 0) (end 0.75 0) (width 0.3))",
+            ),
+        ),
+        (
+            "anchor_gone",
+            pad("(solder_paste_margin -0.1)", "0.2 0.2)").replace(
+                "PRIMITIVES",
+                "(gr_poly (pts (xy -0.75 -0.5) (xy 0.75 -0.5) (xy 0.75 0.5) (xy -0.75 0.5)) (width 0) (fill yes))",
+            ),
+        ),
+        (
+            "ratio",
+            pad("(solder_paste_margin_ratio -0.1)", "1 0.6)").replace(
+                "PRIMITIVES",
+                "(gr_poly (pts (xy -1 -0.3) (xy 1 -0.3) (xy 1 0.3) (xy -1 0.3)) (width 0) (fill yes))",
+            ),
+        ),
+    ] {
+        let (drawing, svg) = drawn_file(&browser, name, &text);
+        let ours = drawing_box(&drawing, "F.Paste").unwrap();
+        let theirs = svg_layer(&svg, "#B4A09A").unwrap().bounds;
+        let size = |b: [f64; 4]| (b[2] - b[0], b[3] - b[1]);
+        let (ours, theirs) = (size(ours), size(theirs));
+        eprintln!("{name}: ours {ours:?}, kicad-cli {theirs:?}");
+        // kicad-cli draws round ends as short lines, inside the curve.
+        for (a, b) in [(ours.0, theirs.0), (ours.1, theirs.1)] {
+            assert!((a - b).abs() < 0.01, "{name}: ours {ours:?}, kicad-cli {theirs:?}");
+        }
+    }
 }

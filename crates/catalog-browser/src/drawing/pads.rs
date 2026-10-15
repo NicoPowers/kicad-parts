@@ -110,9 +110,15 @@ impl PadGeometry {
     ///   arcs at its corners. Otherwise it is resized by twice each margin,
     ///   keeping its rounding and chamfer ratios; so is a rounded pad with
     ///   different margins.
-    /// - A trapezoid and a custom pad move their whole outline by the X
-    ///   margin. A custom pad's primitives grow by widening their stroke
-    ///   and keep their size when it shrinks; its anchor follows the rules.
+    /// - A trapezoid moves its whole outline by the X margin.
+    /// - A custom pad is its anchor resized by both margins, together with
+    ///   the whole pad moved by the X margin. Each primitive moves on its
+    ///   own: a growing margin widens its stroke, a shrinking one uses up
+    ///   its stroke, then a filled circle's radius, then a filled convex
+    ///   polygon's outline. Where primitives meet, kicad-cli rounds the
+    ///   inside corners of their union; moving each one alone comes close.
+    ///   A shrinking margin leaves a filled polygon that is not convex as
+    ///   it is, which draws its opening slightly too large.
     pub(super) fn outline(&self, dx: f64, dy: f64) -> Vec<Shape> {
         let (w, h) = self.size;
         let equal = dx == dy;
@@ -123,6 +129,7 @@ impl PadGeometry {
             cut_rect(w, h, [Corner::Round(radius); 4])
         };
         let shapes = match &self.form {
+            // A custom pad's primitives can outlast its anchor.
             _ if resized_away
                 && !matches!(
                     self.form,
@@ -203,26 +210,138 @@ impl PadGeometry {
                 circle_anchor,
                 primitives,
             } => {
+                let mut shapes = Vec::new();
                 let (aw, ah) = (w + 2.0 * dx, h + 2.0 * dx);
-                let anchor = if aw <= 0.0 || ah <= 0.0 {
-                    None
-                } else if *circle_anchor {
-                    Some(Shape::Circle {
-                        center: Point::default(),
-                        radius: aw / 2.0,
-                        width: 0.0,
-                        filled: true,
-                    })
-                } else {
-                    Some(rect(aw, ah, dx.max(0.0)))
-                };
-                anchor
-                    .into_iter()
-                    .chain(primitives.iter().map(|shape| stroked(shape.clone(), dx)))
-                    .collect()
+                if aw > 0.0 && ah > 0.0 {
+                    shapes.push(if *circle_anchor {
+                        Shape::Circle {
+                            center: Point::default(),
+                            radius: aw / 2.0,
+                            width: 0.0,
+                            filled: true,
+                        }
+                    } else {
+                        rect(aw, ah, dx.max(0.0))
+                    });
+                }
+                // The anchor resized by each margin, when they differ.
+                if !equal && !*circle_anchor && !resized_away {
+                    shapes.push(rect(w2, h2, 0.0));
+                }
+                shapes.extend(
+                    primitives
+                        .iter()
+                        .filter_map(|shape| moved_primitive(shape, dx)),
+                );
+                shapes
             }
         };
         shapes
+    }
+}
+
+/// A custom pad's primitive moved out by `by` (in, when negative); `None`
+/// when it shrinks to nothing. See [`PadGeometry::outline`].
+pub(super) fn moved_primitive(shape: &Shape, by: f64) -> Option<Shape> {
+    if by >= 0.0 {
+        return Some(stroked(shape.clone(), by));
+    }
+    let shrink = -by;
+    let thinner = |width: f64| (width - 2.0 * shrink > 0.0).then_some(width - 2.0 * shrink);
+    match shape.clone() {
+        Shape::Line { start, end, width } => Some(Shape::Line {
+            start,
+            end,
+            width: thinner(width)?,
+        }),
+        Shape::Arc {
+            start,
+            mid,
+            end,
+            width,
+        } => Some(Shape::Arc {
+            start,
+            mid,
+            end,
+            width: thinner(width)?,
+        }),
+        Shape::Curve {
+            start,
+            control1,
+            control2,
+            end,
+            width,
+        } => Some(Shape::Curve {
+            start,
+            control1,
+            control2,
+            end,
+            width: thinner(width)?,
+        }),
+        Shape::Circle {
+            center,
+            radius,
+            width,
+            filled: true,
+        } => {
+            let radius = radius + width / 2.0 - shrink;
+            (radius > 0.0).then_some(Shape::Circle {
+                center,
+                radius,
+                width: 0.0,
+                filled: true,
+            })
+        }
+        Shape::Circle {
+            center,
+            radius,
+            width,
+            filled: false,
+        } => Some(Shape::Circle {
+            center,
+            radius,
+            width: thinner(width)?,
+            filled: false,
+        }),
+        Shape::Polygon {
+            edges,
+            width,
+            filled: true,
+        } => {
+            if width >= 2.0 * shrink {
+                return Some(Shape::Polygon {
+                    edges,
+                    width: width - 2.0 * shrink,
+                    filled: true,
+                });
+            }
+            let outline = clockwise(&edges);
+            if !convex(&outline) {
+                return Some(Shape::Polygon {
+                    edges,
+                    width: 0.0,
+                    filled: true,
+                });
+            }
+            let solid = Shape::Polygon {
+                edges: outline,
+                width: 0.0,
+                filled: true,
+            };
+            match offset_convex(&solid, width / 2.0 - shrink) {
+                Shape::Polygon { edges, .. } if edges.is_empty() => None,
+                moved => Some(moved),
+            }
+        }
+        Shape::Polygon {
+            edges,
+            width,
+            filled: false,
+        } => Some(Shape::Polygon {
+            edges,
+            width: thinner(width)?,
+            filled: false,
+        }),
     }
 }
 
