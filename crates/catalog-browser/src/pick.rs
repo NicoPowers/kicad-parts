@@ -427,13 +427,7 @@ impl CatalogBrowser {
                 "it names no folder and no path variable, so where it is is not known.".into(),
             );
         }
-        let bytes = read_limited(&path, MAX_MODEL_BYTES, Links::Follow).map_err(|why| {
-            if why.contains("larger than") {
-                format!("{why} One save can send at most 24 MB.")
-            } else {
-                why
-            }
-        })?;
+        let bytes = read_model(&path)?;
         Ok((path, bytes))
     }
 
@@ -544,9 +538,141 @@ impl CatalogBrowser {
     }
 }
 
+/// The bytes of the 3D model file at `path`, only when it really is one.
+/// The path, or a folder on it, may be a link (a library cloned with
+/// links, say): the real file must then also be named as a 3D model, and
+/// its content must start as one, so a key or other file behind a model's
+/// name is never copied to the team server.
+fn read_model(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let shown = |path: &std::path::Path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let real = std::fs::canonicalize(path)
+        .map_err(|error| format!("{} could not be read: {error}.", shown(path)))?;
+    let real_name = shown(&real);
+    if !is_model_file_name(&real_name) {
+        return Err(format!(
+            "it leads to the file {real_name}, which is not a 3D model file."
+        ));
+    }
+    let bytes = read_limited(&real, MAX_MODEL_BYTES, Links::Follow).map_err(|why| {
+        if why.contains("larger than") {
+            format!("{why} One save can send at most 24 MB.")
+        } else {
+            why
+        }
+    })?;
+    if !starts_as_model(&real_name, &bytes) {
+        return Err(format!(
+            "the file {real_name} does not hold a 3D model of its kind."
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Whether `bytes` start as the 3D model their file `name` says: STEP with
+/// `ISO-10303-21;`, VRML with `#VRML` (each after an optional BOM and
+/// white space), and the gzipped .stpz and .wrz with gzip's mark.
+fn starts_as_model(name: &str, bytes: &[u8]) -> bool {
+    let extension = std::path::Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+    let text = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let start = text
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(text.len());
+    let text = &text[start..];
+    match extension.as_str() {
+        "step" | "stp" => text.starts_with(b"ISO-10303-21;"),
+        "wrl" => text.starts_with(b"#VRML"),
+        "stpz" | "wrz" => bytes.starts_with(&[0x1f, 0x8b]),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_real_3d_model_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let step = write(
+            "x.step",
+            b"\xEF\xBB\xBF\n ISO-10303-21;\nEND-ISO-10303-21;\n",
+        );
+        assert!(read_model(&step).is_ok());
+        assert!(read_model(&write("x.WRL", b"#VRML V2.0 utf8\n")).is_ok());
+        assert!(read_model(&write("x.stpz", &[0x1f, 0x8b, 8, 0])).is_ok());
+        // Something else under a 3D model's name.
+        let key = write("id.step", b"-----BEGIN OPENSSH PRIVATE KEY-----\n");
+        let refused = read_model(&key).unwrap_err();
+        assert!(refused.contains("does not hold a 3D model"), "{refused}");
+        assert!(read_model(&write("id.wrz", b"not gzip")).is_err());
+    }
+
+    /// A folder junction (Windows makes one without special rights) to a
+    /// folder whose `x.step` is a key: read through the junction, its
+    /// content still decides.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_to_a_file_that_is_no_3d_model_is_not_read() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::write(
+            elsewhere.join("x.step"),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        let models = dir.path().join("models");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&models)
+            .arg(&elsewhere)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !made {
+            eprintln!("junctions cannot be made here; skipped");
+            return;
+        }
+        let refused = read_model(&models.join("x.step")).unwrap_err();
+        assert!(refused.contains("does not hold a 3D model"), "{refused}");
+    }
+
+    #[test]
+    fn a_link_to_a_file_that_is_no_3d_model_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("id_rsa");
+        std::fs::write(&key, "ISO-10303-21; but really a key\n").unwrap();
+        let link = dir.path().join("x.step");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&key, &link).is_ok();
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(&key, &link).is_ok();
+        if !made {
+            eprintln!("links cannot be made here; skipped");
+            return;
+        }
+        let refused = read_model(&link).unwrap_err();
+        assert!(
+            refused.contains("leads to the file id_rsa, which is not a 3D model file"),
+            "{refused}"
+        );
+    }
 
     #[test]
     fn a_symbol_library_file_keeps_the_version_and_every_entry() {

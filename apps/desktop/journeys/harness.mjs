@@ -886,7 +886,7 @@ export async function chooseInLibraries(browser, { group, library, name, enter =
       browser.execute(() => {
         const detail = document.querySelector('.libraries-detail');
         const images = [...(detail?.querySelectorAll('.preview img') ?? [])];
-        return (images.length > 0 && images.every((img) => img.complete && img.naturalWidth > 0)) || detail?.querySelector('.problem') !== null;
+        return (images.length > 0 && images.every((img) => img.complete && img.naturalWidth > 0)) || detail?.querySelector('.problem') != null;
       }),
     { timeout: 60_000, interval: 100, timeoutMsg: `${library}:${name} was never drawn in the browser` },
   );

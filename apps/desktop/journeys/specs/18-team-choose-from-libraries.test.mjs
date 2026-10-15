@@ -24,6 +24,7 @@ import {
   textOf,
   waitForLibraries,
   waitForLiveUpdates,
+  waitForSelectedInList,
   waitForText,
 } from '../harness.mjs';
 
@@ -234,6 +235,9 @@ describe('team catalog: choose symbols and footprints from the libraries', () =>
       async () => browser.execute(() => [...document.querySelectorAll('.edit-form .file-preview img')].some((img) => img.complete && img.naturalWidth > 0)),
       { timeout: 60_000, interval: 100, timeoutMsg: 'the copied footprint was never drawn' },
     );
+    // The new part shows in its open section, as it does once the list has
+    // caught up, so the screenshot is the same every run.
+    await waitForSelectedInList(browser, ipn, 'Capacitors', 20_000);
     await browser.execute(() => document.getElementById('edit-cad-1-2').scrollIntoView({ block: 'start' }));
     await assertAccessible(browser, '71-team-edit-installed-copy');
     await screenshot(browser, '71-team-edit-installed-copy');
