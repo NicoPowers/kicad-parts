@@ -5,7 +5,7 @@
 //! Like [`crate::drawing`], everything is in footprint millimetres, with Y
 //! pointing down.
 
-use crate::drawing::{DrawnPad, Edge, FootprintDrawing, Point, Shape, circle_center};
+use crate::drawing::{DrawnPad, Edge, FootprintDrawing, Point, Shape, arc_turn, circle_center};
 
 /// How far a curved edge may stray from its straight pieces when a gap is
 /// measured: 0.1 micrometre, well under the 1 micrometre the readout shows.
@@ -16,6 +16,8 @@ const MAX_ARC_PIECES: usize = 4096;
 const CURVE_PIECES: usize = 64;
 /// Two snap points closer than this are one point.
 const SAME_POINT: f64 = 1e-6;
+/// A gap shorter than this shows as 0.000 mm, so it counts as touching.
+pub const TOUCHING: f64 = 0.0005;
 
 /// A point a measurement can snap to.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,7 +137,7 @@ pub fn snap_points(drawing: &FootprintDrawing, layer: &str) -> Vec<SnapPoint> {
             add(pad.center, SnapKind::Centre);
         }
         for shape in shapes {
-            shape_points(&shape.shape, true, &mut add);
+            shape_points(&shape.shape, Some(pad.center), &mut add);
         }
         if copper {
             if let Some(hole) = &pad.hole {
@@ -144,7 +146,7 @@ pub fn snap_points(drawing: &FootprintDrawing, layer: &str) -> Vec<SnapPoint> {
         }
     }
     for graphic in drawing.graphics.iter().filter(|shape| shape.layer == layer) {
-        shape_points(&graphic.shape, false, &mut |at, kind| {
+        shape_points(&graphic.shape, None, &mut |at, kind| {
             points.push(SnapPoint {
                 at,
                 kind,
@@ -195,6 +197,14 @@ pub struct Gap {
     pub to: Point,
 }
 
+impl Gap {
+    /// Whether the pads touch or overlap, to the micrometre the readout
+    /// shows.
+    pub fn touching(&self) -> bool {
+        self.distance < TOUCHING
+    }
+}
+
 /// The gap between pads `a` and `b` (indexes into
 /// [`FootprintDrawing::pads`]) on `layer`, counting each shape's stroke
 /// width; `None` when either pad has nothing on the layer.
@@ -209,7 +219,7 @@ pub fn pad_gap(drawing: &FootprintDrawing, a: usize, b: usize, layer: &str) -> O
     let (pad_a, pad_b) = (drawing.pads.get(a)?, drawing.pads.get(b)?);
     let (first, second) = (regions(pad_a), regions(pad_b));
     // Of equally short gaps, the one nearest halfway between the pads.
-    let near = middle(pad_a.center, pad_b.center);
+    let near = pad_a.center.middle(pad_b.center);
     let mut best: Option<Gap> = None;
     for one in &first {
         for other in &second {
@@ -225,20 +235,21 @@ pub fn pad_gap(drawing: &FootprintDrawing, a: usize, b: usize, layer: &str) -> O
 /// Whether gap `a` is shorter than `b`, or as short and nearer `near`.
 fn shorter(a: Gap, b: Gap, near: Point) -> bool {
     const SAME: f64 = 1e-9;
-    let off = |gap: Gap| distance(middle(gap.from, gap.to), near);
+    let off = |gap: Gap| gap.from.middle(gap.to).distance(near);
     a.distance < b.distance - SAME || (a.distance <= b.distance + SAME && off(a) < off(b) - SAME)
 }
 
 // ---- Snap points ---------------------------------------------------------
 
-/// The snap points of one shape. On a pad (`pad`), a filled shape's
-/// stroke moves its outline points out by half its width.
-fn shape_points(shape: &Shape, pad: bool, add: &mut impl FnMut(Point, SnapKind)) {
+/// The snap points of one shape. On a pad (`pad` is its position), a
+/// filled shape's stroke moves its outline points out by half its width,
+/// and a circle at the pad's position gives the pad's centre.
+fn shape_points(shape: &Shape, pad: Option<Point>, add: &mut impl FnMut(Point, SnapKind)) {
     match shape {
         Shape::Line { start, end, .. } => {
             add(*start, SnapKind::LineEnd);
             add(*end, SnapKind::LineEnd);
-            add(middle(*start, *end), SnapKind::LineMiddle);
+            add(start.middle(*end), SnapKind::LineMiddle);
         }
         Shape::Arc {
             start, mid, end, ..
@@ -256,10 +267,15 @@ fn shape_points(shape: &Shape, pad: bool, add: &mut impl FnMut(Point, SnapKind))
             width,
             ..
         } => {
-            let r = if pad { radius + width / 2.0 } else { *radius };
+            let r = if pad.is_some() {
+                radius + width / 2.0
+            } else {
+                *radius
+            };
+            let at_pad = pad.is_some_and(|pad| pad.distance(*center) < SAME_POINT);
             add(
                 *center,
-                if pad {
+                if at_pad {
                     SnapKind::Centre
                 } else {
                     SnapKind::CircleCentre
@@ -275,8 +291,12 @@ fn shape_points(shape: &Shape, pad: bool, add: &mut impl FnMut(Point, SnapKind))
             width,
             filled,
         } => {
-            let grow = if pad && *filled { width / 2.0 } else { 0.0 };
-            polygon_points(edges, grow, pad, add);
+            let grow = if pad.is_some() && *filled {
+                width / 2.0
+            } else {
+                0.0
+            };
+            polygon_points(edges, grow, pad.is_some(), add);
         }
         Shape::Curve { start, end, .. } => {
             add(*start, SnapKind::CurveEnd);
@@ -298,23 +318,19 @@ fn polygon_points(edges: &[Edge], grow: f64, pad: bool, add: &mut impl FnMut(Poi
             _ => SnapKind::ArcEnd,
         };
         let start = edge_start(edge);
-        let normal = unit(add_points(
-            outward.normal(tangent_at_end(before)),
-            outward.normal(tangent_at_start(edge)),
-        ));
-        add(moved(start, normal, grow), corner);
+        let normal = (outward.normal(tangent_at_end(before))
+            + outward.normal(tangent_at_start(edge)))
+        .unit();
+        add(start + normal * grow, corner);
         match *edge {
             Edge::Line { start, end } if pad => {
-                let normal = outward.normal(sub(end, start));
-                add(
-                    moved(middle(start, end), normal, grow),
-                    SnapKind::EdgeMiddle,
-                );
+                let normal = outward.normal(end - start);
+                add(start.middle(end) + normal * grow, SnapKind::EdgeMiddle);
             }
             Edge::Line { .. } => {}
             Edge::Arc { start, mid, end } => {
                 let normal = outward.normal(arc_tangent(mid, start, mid, end));
-                add(moved(mid, normal, grow), SnapKind::ArcMiddle);
+                add(mid + normal * grow, SnapKind::ArcMiddle);
                 if let Some(centre) = circle_center(start, mid, end) {
                     add(centre, SnapKind::ArcCentre);
                 }
@@ -346,7 +362,7 @@ impl Outward {
     /// The unit normal pointing out of the polygon, for an edge running in
     /// direction `tangent`.
     fn normal(&self, tangent: Point) -> Point {
-        let t = unit(tangent);
+        let t = tangent.unit();
         Point::new(self.0 * t.y, -self.0 * t.x)
     }
 }
@@ -359,14 +375,14 @@ fn edge_start(edge: &Edge) -> Point {
 
 fn tangent_at_start(edge: &Edge) -> Point {
     match *edge {
-        Edge::Line { start, end } => sub(end, start),
+        Edge::Line { start, end } => end - start,
         Edge::Arc { start, mid, end } => arc_tangent(start, start, mid, end),
     }
 }
 
 fn tangent_at_end(edge: &Edge) -> Point {
     match *edge {
-        Edge::Line { start, end } => sub(end, start),
+        Edge::Line { start, end } => end - start,
         Edge::Arc { start, mid, end } => arc_tangent(end, start, mid, end),
     }
 }
@@ -375,19 +391,19 @@ fn tangent_at_end(edge: &Edge) -> Point {
 /// one of those three points. At the middle it runs along the chord.
 fn arc_tangent(at: Point, start: Point, mid: Point, end: Point) -> Point {
     let Some(centre) = circle_center(start, mid, end) else {
-        return sub(end, start);
+        return end - start;
     };
-    let radial = sub(at, centre);
+    let radial = at - centre;
     let across = Point::new(-radial.y, radial.x);
     let along = if at == start {
-        sub(mid, start)
+        mid - start
     } else if at == end {
-        sub(end, mid)
+        end - mid
     } else {
-        sub(end, start)
+        end - start
     };
-    if dot(across, along) < 0.0 {
-        Point::new(-across.x, -across.y)
+    if across.dot(along) < 0.0 {
+        across * -1.0
     } else {
         across
     }
@@ -506,9 +522,9 @@ impl Region {
         });
         let distance = d - self.grow - other.grow;
         // From each line out to its grown edge, towards the other.
-        let toward = unit(sub(q, p));
-        let from = moved(p, toward, self.grow);
-        let to = moved(q, toward, -other.grow);
+        let toward = (q - p).unit();
+        let from = p + toward * self.grow;
+        let to = q - toward * other.grow;
         let inside = (self.filled && contains(&self.path, other.path[0]))
             || (other.filled && contains(&other.path, self.path[0]));
         Gap {
@@ -570,47 +586,19 @@ fn outline(shape: &Shape) -> Vec<Point> {
 /// included, close enough that no piece strays more than
 /// [`ARC_TOLERANCE`] from the arc. A whole circle when `start` is `end`.
 fn arc_points(points: &mut Vec<Point>, start: Point, mid: Point, end: Point) {
-    let whole = distance(start, end) < 1e-9;
-    let centre = if whole {
-        Some(middle(start, mid))
-    } else {
-        circle_center(start, mid, end)
-    };
-    let Some(centre) = centre else {
+    let Some(turn) = arc_turn(start, mid, end) else {
         points.extend([start, mid, end]);
         return;
     };
-    let radius = distance(start, centre);
-    let angle = |p: Point| (p.y - centre.y).atan2(p.x - centre.x);
-    let tau = std::f64::consts::TAU;
-    let (a0, am, a1) = (angle(start), angle(mid), angle(end));
-    let sweep = if whole {
-        tau
+    let step = if turn.radius > ARC_TOLERANCE {
+        2.0 * (1.0 - ARC_TOLERANCE / turn.radius).acos()
     } else {
-        let to_end = (a1 - a0).rem_euclid(tau);
-        if (am - a0).rem_euclid(tau) < to_end {
-            to_end
-        } else {
-            to_end - tau
-        }
-    };
-    let step = if radius > ARC_TOLERANCE {
-        2.0 * (1.0 - ARC_TOLERANCE / radius).acos()
-    } else {
-        tau
+        std::f64::consts::TAU
     };
     // An even count keeps the arc's middle exact, such as an oval's tip.
-    let pieces = ((sweep.abs() / step).ceil() as usize).clamp(2, MAX_ARC_PIECES);
+    let pieces = ((turn.sweep.abs() / step).ceil() as usize).clamp(2, MAX_ARC_PIECES);
     let pieces = pieces + pieces % 2;
-    points.push(start);
-    for i in 1..pieces {
-        let a = a0 + sweep * i as f64 / pieces as f64;
-        points.push(Point::new(
-            centre.x + radius * a.cos(),
-            centre.y + radius * a.sin(),
-        ));
-    }
-    points.push(end);
+    points.extend(crate::drawing::arc_points(start, mid, end, pieces));
 }
 
 /// Whether `p` is inside the closed outline `path`, by the even-odd rule.
@@ -637,16 +625,15 @@ fn segment_distance(a0: Point, a1: Point, b0: Point, b1: Point) -> (f64, Point, 
     }
     // Side by side, such as two pads' facing edges: the middle of the
     // stretch where they face each other.
-    let (r, s) = (sub(a1, a0), sub(b1, b0));
-    let (rr, ss) = (dot(r, r), dot(s, s));
-    if rr > 0.0 && ss > 0.0 && cross(r, s).abs() <= 1e-12 * (rr * ss).sqrt() {
-        let (t0, t1) = (dot(sub(b0, a0), r) / rr, dot(sub(b1, a0), r) / rr);
+    let (r, s) = (a1 - a0, b1 - b0);
+    let (rr, ss) = (r.dot(r), s.dot(s));
+    if rr > 0.0 && ss > 0.0 && r.cross(s).abs() <= 1e-12 * (rr * ss).sqrt() {
+        let (t0, t1) = ((b0 - a0).dot(r) / rr, (b1 - a0).dot(r) / rr);
         let (low, high) = (t0.min(t1).max(0.0), t0.max(t1).min(1.0));
         if low <= high {
-            let t = (low + high) / 2.0;
-            let p = Point::new(a0.x + t * r.x, a0.y + t * r.y);
+            let p = a0 + r * ((low + high) / 2.0);
             let q = nearest_on(b0, b1, p);
-            return (distance(p, q), p, q);
+            return (p.distance(q), p, q);
         }
     }
     let mut best = (f64::MAX, a0, b0);
@@ -657,7 +644,7 @@ fn segment_distance(a0: Point, a1: Point, b0: Point, b1: Point) -> (f64, Point, 
         (b1, a0, a1, true),
     ] {
         let q = nearest_on(a, b, p);
-        let d = distance(p, q);
+        let d = p.distance(q);
         if d < best.0 {
             best = if flip { (d, q, p) } else { (d, p, q) };
         }
@@ -667,67 +654,24 @@ fn segment_distance(a0: Point, a1: Point, b0: Point, b1: Point) -> (f64, Point, 
 
 /// Where two straight pieces cross, if they do.
 fn crossing(a0: Point, a1: Point, b0: Point, b1: Point) -> Option<Point> {
-    let r = sub(a1, a0);
-    let s = sub(b1, b0);
-    let across = cross(r, s);
+    let (r, s) = (a1 - a0, b1 - b0);
+    let across = r.cross(s);
     if across.abs() < 1e-18 {
         return None;
     }
-    let t = cross(sub(b0, a0), s) / across;
-    let u = cross(sub(b0, a0), r) / across;
-    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u))
-        .then(|| Point::new(a0.x + t * r.x, a0.y + t * r.y))
+    let t = (b0 - a0).cross(s) / across;
+    let u = (b0 - a0).cross(r) / across;
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then(|| a0 + r * t)
 }
 
 /// The point on the piece from `a` to `b` nearest `p`.
 fn nearest_on(a: Point, b: Point, p: Point) -> Point {
-    let ab = sub(b, a);
-    let length = dot(ab, ab);
+    let ab = b - a;
+    let length = ab.dot(ab);
     if length == 0.0 {
         return a;
     }
-    let t = (dot(sub(p, a), ab) / length).clamp(0.0, 1.0);
-    Point::new(a.x + t * ab.x, a.y + t * ab.y)
-}
-
-// ---- Small vector helpers ------------------------------------------------
-
-fn sub(a: Point, b: Point) -> Point {
-    Point::new(a.x - b.x, a.y - b.y)
-}
-
-fn add_points(a: Point, b: Point) -> Point {
-    Point::new(a.x + b.x, a.y + b.y)
-}
-
-fn dot(a: Point, b: Point) -> f64 {
-    a.x * b.x + a.y * b.y
-}
-
-fn cross(a: Point, b: Point) -> f64 {
-    a.x * b.y - a.y * b.x
-}
-
-fn distance(a: Point, b: Point) -> f64 {
-    (a.x - b.x).hypot(a.y - b.y)
-}
-
-fn middle(a: Point, b: Point) -> Point {
-    Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
-}
-
-/// `p` unit length, or zero.
-fn unit(p: Point) -> Point {
-    let length = p.x.hypot(p.y);
-    if length > 0.0 {
-        Point::new(p.x / length, p.y / length)
-    } else {
-        Point::default()
-    }
-}
-
-fn moved(p: Point, direction: Point, by: f64) -> Point {
-    Point::new(p.x + direction.x * by, p.y + direction.y * by)
+    a + ab * ((p - a).dot(ab) / length).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]

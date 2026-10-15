@@ -576,3 +576,34 @@ fn a_big_ball_grid_snaps_quickly() {
         "{per_move:?} per move, {found:?} to find"
     );
 }
+
+#[test]
+fn a_gap_under_half_a_micrometre_is_touching() {
+    let at = |distance: f64| Gap {
+        distance,
+        from: p(0.0, 0.0),
+        to: p(distance, 0.0),
+    };
+    assert!(at(0.0004).touching());
+    assert!(at(-0.1).touching());
+    assert!(!at(0.0005).touching());
+}
+
+#[test]
+fn a_custom_pads_circle_away_from_its_position_is_a_circle_centre() {
+    let d = drawing(
+        vec![pad(
+            "4",
+            p(0.0, 0.0),
+            &[
+                ("F.Cu", rect(0.0, 0.0, 1.0, 1.0)),
+                ("F.Cu", circle(1.0, 0.0, 0.3)),
+            ],
+        )],
+        vec![],
+    );
+    let points = names(&d, "F.Cu");
+    assert!(has(&points, "Pad 4 centre", 0.0, 0.0));
+    assert!(has(&points, "Pad 4 circle centre", 1.0, 0.0), "{points:?}");
+    assert!(!has(&points, "Pad 4 centre", 1.0, 0.0));
+}
