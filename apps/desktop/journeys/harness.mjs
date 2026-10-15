@@ -406,9 +406,10 @@ export async function assertAccessible(browser, name) {
         // axe still sees the page under it: text with lines over different
         // page parts seems to overlap them (elmPartiallyObscuring). The page
         // outside the dialog, apart from the dialog's own ancestors, is
-        // inert under the backdrop, so it cannot be the text's background.
+        // inert under the backdrop, so it cannot be the text's background,
+        // as long as the dialog itself is solid, not see-through.
         const modal = el.closest('dialog');
-        if (modal?.matches(':modal')) {
+        if (modal?.matches(':modal') && solid(modal)) {
           for (let node = modal; node.parentElement; node = node.parentElement) {
             for (const sibling of node.parentElement.children) if (sibling !== node) covering.add(sibling);
           }
