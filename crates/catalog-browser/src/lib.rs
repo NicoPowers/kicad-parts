@@ -1227,11 +1227,15 @@ fn local_bytes(
 }
 
 fn discovery_options(config: &BrowserConfig, settings: &Settings) -> DiscoveryOptions {
+    // Never the person's KiCad settings, which kicad-cli can overwrite.
+    let mut cli_settings = CliSettingsFolder::new(config.cache_dir.join("kicad-cli-settings"));
+    if let Some(folder) = &config.kicad_config_dir {
+        cli_settings = cli_settings.keep_away_from(folder.clone());
+    }
     DiscoveryOptions {
         user_override: settings.kicad_cli_override.clone(),
         locations: config.kicad_locations.clone(),
-        // Never the person's KiCad settings, which kicad-cli can overwrite.
-        settings: CliSettingsFolder::new(config.cache_dir.join("kicad-cli-settings")),
+        settings: cli_settings,
     }
 }
 
