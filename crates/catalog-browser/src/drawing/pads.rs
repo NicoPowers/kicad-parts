@@ -74,6 +74,12 @@ impl PadGeometry {
                         primitives
                             .items()
                             .iter()
+                            .take(MAX_SHAPES)
+                            .filter(|item| {
+                                item.children("pts")
+                                    .next()
+                                    .is_none_or(|pts| pts.items().len() <= MAX_EDGES)
+                            })
                             .filter_map(|item| graphic(item.head()?, item, true))
                             .collect()
                     })

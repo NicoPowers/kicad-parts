@@ -20,10 +20,15 @@ use kicad_integration::library_file::Sexp;
 /// The largest coordinate or size read, in millimetres. A footprint is
 /// never 10 m across, so anything larger is a broken or hostile file.
 const MAX_MM: f64 = 10_000.0;
-/// The most shapes drawn, counting each pad's shape on each layer.
-const MAX_SHAPES: usize = 200_000;
+/// The most items drawn, counting each pad, each pad's shape on each
+/// layer, each graphic and each text. KiCad's largest footprints, BGAs
+/// with nearly 2,000 pads, have under 10,000; the limit keeps what a
+/// hostile file sends the UI to about 16 MB at most.
+const MAX_SHAPES: usize = 50_000;
 /// The most polygon edges drawn, over all polygons.
-const MAX_EDGES: usize = 1_000_000;
+const MAX_EDGES: usize = 200_000;
+/// What the close-up says when a limit is reached.
+const TOO_MANY: &str = "The footprint has too many shapes; only some are drawn.";
 /// The most characters of one text drawn.
 const MAX_TEXT_CHARS: usize = 200;
 
@@ -39,7 +44,7 @@ pub fn footprint_drawing(bytes: &[u8]) -> Option<FootprintDrawing> {
     let (reference, value) = reference_and_value(&tree);
     for item in tree.items() {
         if drawer.full() {
-            drawer.note("The footprint has too many shapes; only some are drawn.");
+            drawer.note(TOO_MANY);
             break;
         }
         match item.head() {
@@ -50,13 +55,16 @@ pub fn footprint_drawing(bytes: &[u8]) -> Option<FootprintDrawing> {
                 if hatched(item) {
                     drawer.note("Hatched fills are drawn solid.");
                 }
+                if drawer.too_many_points(item) {
+                    continue;
+                }
                 if let (Some(layer), Some(shape)) = (layer_of(item), graphic(head, item, false)) {
                     drawer.graphic(layer, shape);
                 }
             }
             Some("fp_text" | "property") => {
                 if let Some(text) = text(item, &reference, &value) {
-                    drawer.texts.push(text);
+                    drawer.text(text);
                 }
             }
             // Rule areas and copper zones are board features a footprint
@@ -106,13 +114,49 @@ impl Drawer {
         true
     }
 
+    /// Counts one more item that is not a shape, such as a pad or a text;
+    /// false, with a note, when it does not fit.
+    fn admit_item(&mut self) -> bool {
+        if self.shapes + 1 > MAX_SHAPES {
+            self.note(TOO_MANY);
+            return false;
+        }
+        self.shapes += 1;
+        true
+    }
+
+    /// Whether a polygon lists more points than the edges left allow; it
+    /// is then left out, with a note, before its points are read.
+    fn too_many_points(&mut self, node: &Sexp) -> bool {
+        let points = node
+            .children("pts")
+            .next()
+            .map_or(0, |pts| pts.items().len().saturating_sub(1));
+        if self.edges + points > MAX_EDGES {
+            self.note(TOO_MANY);
+            return true;
+        }
+        false
+    }
+
     fn graphic(&mut self, layer: String, shape: Shape) {
         if self.admit(&shape) {
             self.graphics.push(LayerShape { layer, shape });
+        } else {
+            self.note(TOO_MANY);
+        }
+    }
+
+    fn text(&mut self, text: DrawnText) {
+        if self.admit_item() {
+            self.texts.push(text);
         }
     }
 
     fn pad(&mut self, pad: &Sexp, footprint: &Margins) {
+        if !self.admit_item() {
+            return;
+        }
         let Some(geometry) = PadGeometry::read(pad) else {
             return;
         };
@@ -153,7 +197,7 @@ impl Drawer {
             for shape in outline {
                 let shape = place(&shape, drill_offset(&drill), geometry.angle, geometry.at);
                 if !self.admit(&shape) {
-                    self.note("The footprint has too many shapes; only some are drawn.");
+                    self.note(TOO_MANY);
                     break;
                 }
                 shapes.push(LayerShape {

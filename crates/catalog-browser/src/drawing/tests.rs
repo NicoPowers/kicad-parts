@@ -341,10 +341,7 @@ fn hostile_files_are_refused_or_drawn_in_part() {
     many.push(')');
     let drawing = draw(&many);
     assert_eq!(drawing.graphics.len(), MAX_SHAPES);
-    assert_eq!(
-        drawing.left_out,
-        ["The footprint has too many shapes; only some are drawn."]
-    );
+    assert_eq!(drawing.left_out, [TOO_MANY]);
     // An empty footprint still has a box to fit.
     assert_eq!(draw("(footprint \"E\")").bounds, [-1.0, -1.0, 1.0, 1.0]);
 }
@@ -570,4 +567,53 @@ fn trapezoid_and_chamfered_openings_are_true_outlines() {
         -1.0,
     );
     assert!(matches!(gone, Shape::Polygon { ref edges, .. } if edges.is_empty()));
+}
+
+/// The size of the drawing as the UI receives it.
+fn json_size(drawing: &FootprintDrawing) -> usize {
+    serde_json::to_vec(drawing).unwrap().len()
+}
+
+#[test]
+fn hostile_files_send_the_ui_only_a_few_megabytes() {
+    let footprint = |items: &str, count: usize| {
+        let mut text = String::from("(footprint \"X\"");
+        for index in 0..count {
+            text.push_str(&items.replace("N", &(index % 1000).to_string()));
+        }
+        text.push(')');
+        text
+    };
+    for (name, items, count) in [
+        (
+            "pads with no layers",
+            "(pad \"1\" smd rect (at N 0) (size 1 1))",
+            200_000,
+        ),
+        (
+            "texts",
+            "(fp_text user \"ABCDEFGHIJKLMNOPQRSTUVWXYZ\" (at N 0) (layer \"F.SilkS\"))",
+            200_000,
+        ),
+        (
+            "pads on six layers",
+            "(pad \"1\" smd rect (at N 0) (size 1 1) (layers \"F.Cu\" \"B.Cu\" \"F.Paste\" \"B.Paste\" \"F.Mask\" \"B.Mask\"))",
+            100_000,
+        ),
+    ] {
+        let drawing = draw(&footprint(items, count));
+        let size = json_size(&drawing);
+        assert!(size < 25_000_000, "{name}: {size} bytes");
+        assert_eq!(drawing.left_out, [TOO_MANY], "{name}");
+    }
+    // A polygon with too many points is left out, and the drawing says so.
+    let mut points = String::new();
+    for index in 0..(MAX_EDGES + 10) {
+        points.push_str(&format!("(xy {} {})", index % 100, index % 7));
+    }
+    let drawing = draw(&format!(
+        "(footprint \"X\" (fp_poly (pts {points}) (layer \"F.SilkS\")) (fp_line (start 0 0) (end 1 1) (layer \"F.SilkS\")))"
+    ));
+    assert_eq!(drawing.graphics.len(), 1);
+    assert_eq!(drawing.left_out, [TOO_MANY]);
 }
