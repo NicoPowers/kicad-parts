@@ -131,8 +131,9 @@ pub struct StoredItem {
     pub format_version: Option<String>,
 }
 
-/// Runs kicad-cli. Tests replace it to control timing.
-type Runner = Arc<dyn Fn(&Path, &[OsString], Duration) -> io::Result<CliOutput> + Send + Sync>;
+/// Runs the install's kicad-cli. Tests replace it to control timing.
+type Runner =
+    Arc<dyn Fn(&KicadInstall, &[OsString], Duration) -> io::Result<CliOutput> + Send + Sync>;
 
 /// A cheap stand-in for library content: names, sizes and modification
 /// times. The content hash is recomputed only when this changes.
@@ -157,7 +158,9 @@ impl PreviewCache {
     pub fn new(root: PathBuf) -> Self {
         Self::with_runner(
             root,
-            Arc::new(|cli, args, timeout| run_kicad_cli(cli, args, timeout)),
+            Arc::new(|kicad, args, timeout| {
+                run_kicad_cli(&kicad.cli, &kicad.settings, args, timeout)
+            }),
         )
     }
 
@@ -528,7 +531,7 @@ impl PreviewCache {
     ) -> Result<(), PreviewError> {
         let command = describe_command(args);
         self.exports.fetch_add(1, Ordering::SeqCst);
-        let output = (self.runner)(&kicad.cli, args, EXPORT_TIMEOUT).map_err(|error| {
+        let output = (self.runner)(kicad, args, EXPORT_TIMEOUT).map_err(|error| {
             PreviewError::ExportFailed {
                 command: command.clone(),
                 cli_message: format!("could not start {}: {error}", kicad.cli.display()),

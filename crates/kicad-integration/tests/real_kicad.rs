@@ -2,8 +2,8 @@
 //! dependency for development and CI (see docs/operations).
 
 use kicad_integration::{
-    CacheOutcome, Discovery, DiscoveryOptions, InstallSource, KicadInstall, LibraryOrigin,
-    LibraryResolver, PreviewCache, PreviewError, SearchLocations, discover,
+    CacheOutcome, CliSettingsFolder, Discovery, DiscoveryOptions, InstallSource, KicadInstall,
+    LibraryOrigin, LibraryResolver, PreviewCache, PreviewError, SearchLocations, discover,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,8 +14,23 @@ fn repo_root() -> PathBuf {
         .unwrap()
 }
 
+/// A settings folder of the tests' own, so kicad-cli never loads or saves
+/// the person's KiCad settings. Every test run shares it.
+fn cli_settings() -> CliSettingsFolder {
+    CliSettingsFolder::new(
+        std::env::temp_dir()
+            .join("kicad-parts-tests")
+            .join("kicad-cli-settings"),
+    )
+}
+
 fn installed_kicad() -> KicadInstall {
-    match discover(&DiscoveryOptions::default()) {
+    let options = DiscoveryOptions {
+        user_override: None,
+        locations: SearchLocations::Standard,
+        settings: cli_settings(),
+    };
+    match discover(&options) {
         Discovery::Ready(install) => install,
         other => panic!(
             "KiCad 10 is required for these tests; install it from https://www.kicad.org/download/ ({other:?})"
@@ -47,6 +62,7 @@ fn user_override_accepts_the_cli_its_bin_directory_or_install_root() {
         let options = DiscoveryOptions {
             user_override: Some(path.clone()),
             locations: SearchLocations::Only(Vec::new()),
+            settings: cli_settings(),
         };
         match discover(&options) {
             Discovery::Ready(found) => {
@@ -66,6 +82,7 @@ fn search_roots_shaped_like_program_files_find_kicad() {
     let options = DiscoveryOptions {
         user_override: None,
         locations: SearchLocations::Only(vec![program_files]),
+        settings: cli_settings(),
     };
     assert!(matches!(discover(&options), Discovery::Ready(_)));
 }

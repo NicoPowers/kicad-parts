@@ -2,7 +2,8 @@
 //! Tauri dependency:
 //!
 //! - [`discovery`] finds kicad-cli (standard locations or a user override)
-//!   and records its version.
+//!   and records its version. Every kicad-cli run keeps its settings in a
+//!   [`CliSettingsFolder`] of our own, never in the person's KiCad folders.
 //! - [`resolver`] turns catalog references such as `g-res:R_US` into library
 //!   files, searching project libraries before KiCad's bundled ones.
 //! - [`preview`] exports symbol and footprint SVGs with kicad-cli, from
@@ -33,6 +34,7 @@ pub use preview::{
     CacheOutcome, MAX_RUNNING, Preview, PreviewCache, PreviewError, PreviewImage, Selection,
     StoredItem, remove_old_cache, sha256_hex,
 };
+pub use process::CliSettingsFolder;
 pub use resolver::{
     LibRef, LibraryOrigin, LibraryResolver, ResolveError, ResolvedFootprint, ResolvedSymbol,
     footprint_choices,

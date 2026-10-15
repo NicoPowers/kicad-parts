@@ -1,6 +1,6 @@
 //! Finds the installed kicad-cli and records its version.
 
-use crate::process::run_kicad_cli;
+use crate::process::{CliSettingsFolder, run_kicad_cli};
 use std::cmp::Reverse;
 use std::env;
 use std::fmt;
@@ -74,6 +74,8 @@ pub struct KicadInstall {
     /// KiCad's bundled data directory (contains `symbols/` and
     /// `footprints/`), when it can be located next to the CLI.
     pub share_dir: Option<PathBuf>,
+    /// Where every run of this kicad-cli keeps its settings.
+    pub settings: CliSettingsFolder,
 }
 
 /// Outcome of looking for kicad-cli. Every non-ready state carries enough
@@ -115,19 +117,22 @@ pub enum SearchLocations {
     Only(Vec<PathBuf>),
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiscoveryOptions {
     /// A user-chosen kicad-cli file, KiCad `bin` directory, or install root.
     /// When set, only this location is used.
     pub user_override: Option<PathBuf>,
     pub locations: SearchLocations,
+    /// Where kicad-cli keeps its settings, for the version check and for
+    /// every run of the install found.
+    pub settings: CliSettingsFolder,
 }
 
 /// Looks for kicad-cli and probes its version.
 pub fn discover(options: &DiscoveryOptions) -> Discovery {
     if let Some(path) = &options.user_override {
         return match override_candidate(path) {
-            Some(cli) => probe(cli, InstallSource::UserOverride),
+            Some(cli) => probe(cli, InstallSource::UserOverride, &options.settings),
             None => Discovery::OverrideInvalid {
                 path: path.clone(),
                 problem: if path.exists() {
@@ -169,7 +174,7 @@ pub fn discover(options: &DiscoveryOptions) -> Discovery {
             continue;
         }
         seen.push(cli.clone());
-        match probe(cli, InstallSource::Discovered) {
+        match probe(cli, InstallSource::Discovered, &options.settings) {
             ready @ Discovery::Ready(_) => return ready,
             problem => {
                 first_problem.get_or_insert(problem);
@@ -194,8 +199,8 @@ pub fn installed_share_dir(locations: &SearchLocations) -> Option<PathBuf> {
         .find_map(|cli| share_dir_for(&cli))
 }
 
-fn probe(cli: PathBuf, source: InstallSource) -> Discovery {
-    let output = match run_kicad_cli(&cli, ["version"], VERSION_TIMEOUT) {
+fn probe(cli: PathBuf, source: InstallSource, settings: &CliSettingsFolder) -> Discovery {
+    let output = match run_kicad_cli(&cli, settings, ["version"], VERSION_TIMEOUT) {
         Ok(output) => output,
         Err(error) => {
             return Discovery::Broken {
@@ -215,6 +220,7 @@ fn probe(cli: PathBuf, source: InstallSource) -> Discovery {
             cli,
             version,
             source,
+            settings: settings.clone(),
         }),
         Some(version) => Discovery::Unsupported {
             cli,
@@ -359,6 +365,7 @@ mod tests {
         let options = DiscoveryOptions {
             user_override: None,
             locations: SearchLocations::Only(vec![root.path().to_path_buf()]),
+            settings: CliSettingsFolder::new(root.path().join("settings")),
         };
         assert_eq!(
             discover(&options),
@@ -378,6 +385,7 @@ mod tests {
         let options = DiscoveryOptions {
             user_override: Some(gui.clone()),
             locations: SearchLocations::Only(Vec::new()),
+            settings: CliSettingsFolder::new(dir.path().join("settings")),
         };
         match discover(&options) {
             Discovery::OverrideInvalid { path, problem } => {
@@ -395,6 +403,7 @@ mod tests {
         let options = DiscoveryOptions {
             user_override: Some(missing.clone()),
             locations: SearchLocations::Standard,
+            settings: CliSettingsFolder::new(root.path().join("settings")),
         };
         match discover(&options) {
             Discovery::OverrideInvalid { path, problem } => {

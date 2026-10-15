@@ -1,5 +1,6 @@
 use super::*;
 use crate::discovery::InstallSource;
+use crate::process::CliSettingsFolder;
 use crate::resolver::LibraryOrigin;
 use std::sync::Condvar;
 use std::thread;
@@ -144,6 +145,7 @@ fn fixture(gate_open: bool) -> Fixture {
             },
             source: InstallSource::Discovered,
             share_dir: None,
+            settings: CliSettingsFolder::new(dir.path().join("kicad-cli-settings")),
         },
         library,
         fake,

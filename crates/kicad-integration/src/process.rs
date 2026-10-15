@@ -1,8 +1,17 @@
 //! The single place this crate starts a process. Only kicad-cli is launched.
+//!
+//! kicad-cli loads the person's KiCad settings at start and saves them
+//! again when they changed. When it reads `kicad_common.json` while
+//! another KiCad process is saving it, it saves defaults over the whole
+//! file. That empties the person's path variables. So every run gets its
+//! own settings folder, a [`CliSettingsFolder`], and never sees theirs.
 
+use crate::lib_table::is_inside;
+use std::env;
 use std::ffi::OsStr;
-use std::io::Read;
-use std::path::Path;
+use std::fs;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -44,16 +53,81 @@ impl CliOutput {
     }
 }
 
+/// A folder our code owns, where kicad-cli keeps its settings and cache
+/// instead of the person's KiCad folders. kicad-cli fills it with default
+/// settings the first time. Several runs may share one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CliSettingsFolder(PathBuf);
+
+impl CliSettingsFolder {
+    /// The folder `path`, created on the first run. Choose a folder of the
+    /// app's own, such as one next to the preview cache, or a temporary
+    /// folder in tests.
+    pub fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// kicad-cli's settings folder: `KICAD_CONFIG_HOME`.
+    fn config_home(&self) -> PathBuf {
+        self.0.join("config")
+    }
+
+    /// kicad-cli's cache folder: `KICAD_CACHE_HOME`.
+    fn cache_home(&self) -> PathBuf {
+        self.0.join("cache")
+    }
+
+    /// Refuses a folder inside the person's own KiCad settings or cache,
+    /// which is exactly what this type keeps kicad-cli away from.
+    fn check(&self) -> io::Result<()> {
+        let get = |name: &str| env::var_os(name).filter(|value| !value.is_empty());
+        let mut theirs: Vec<PathBuf> = ["KICAD_CONFIG_HOME", "KICAD_CACHE_HOME"]
+            .into_iter()
+            .filter_map(|name| get(name).map(PathBuf::from))
+            .collect();
+        for base in ["APPDATA", "LOCALAPPDATA"] {
+            theirs.extend(get(base).map(|base| PathBuf::from(base).join("kicad")));
+        }
+        match theirs.iter().find(|folder| is_inside(&self.0, folder)) {
+            Some(folder) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "kicad-cli must not use {} for its settings: it is inside your KiCad folder {}",
+                    self.0.display(),
+                    folder.display()
+                ),
+            )),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Runs `cli` with `args`, capturing output, and kills it after `timeout`.
-pub fn run_kicad_cli<I, S>(cli: &Path, args: I, timeout: Duration) -> std::io::Result<CliOutput>
+/// kicad-cli keeps its settings and cache in `settings`.
+pub fn run_kicad_cli<I, S>(
+    cli: &Path,
+    settings: &CliSettingsFolder,
+    args: I,
+    timeout: Duration,
+) -> io::Result<CliOutput>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    settings.check()?;
+    let (config_home, cache_home) = (settings.config_home(), settings.cache_home());
+    fs::create_dir_all(&config_home)?;
+    fs::create_dir_all(&cache_home)?;
     #[allow(clippy::disallowed_methods)] // The one sanctioned spawn point.
     let mut command = Command::new(cli);
     command
         .args(args)
+        .env("KICAD_CONFIG_HOME", &config_home)
+        .env("KICAD_CACHE_HOME", &cache_home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

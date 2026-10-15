@@ -22,9 +22,9 @@ use desktop_contract::{
 };
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use kicad_integration::{
-    CacheOutcome, Discovery, DiscoveryOptions, InstallSource, KicadInstall, LibRef, LibraryOrigin,
-    LibraryResolver, Preview, PreviewCache, PreviewError, ResolveError, SUPPORTED_MAJOR,
-    SearchLocations, StoredItem, discover, footprint_choices, sha256_hex,
+    CacheOutcome, CliSettingsFolder, Discovery, DiscoveryOptions, InstallSource, KicadInstall,
+    LibRef, LibraryOrigin, LibraryResolver, Preview, PreviewCache, PreviewError, ResolveError,
+    SUPPORTED_MAJOR, SearchLocations, StoredItem, discover, footprint_choices, sha256_hex,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,7 +42,8 @@ pub struct BrowserConfig {
     /// Directory holding `database/`, `symbols/` and `footprints/`.
     pub catalog_root: PathBuf,
     /// The app's cache folder, kept apart from WebView2's data; previews go
-    /// under `previews/`.
+    /// under `previews/`, and kicad-cli keeps its own settings under
+    /// `kicad-cli-settings/`.
     pub cache_dir: PathBuf,
     /// JSON file holding user settings such as the kicad-cli override.
     pub settings_file: PathBuf,
@@ -1229,6 +1230,8 @@ fn discovery_options(config: &BrowserConfig, settings: &Settings) -> DiscoveryOp
     DiscoveryOptions {
         user_override: settings.kicad_cli_override.clone(),
         locations: config.kicad_locations.clone(),
+        // Never the person's KiCad settings, which kicad-cli can overwrite.
+        settings: CliSettingsFolder::new(config.cache_dir.join("kicad-cli-settings")),
     }
 }
 

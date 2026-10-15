@@ -1,7 +1,9 @@
 //! Version handling in kicad-integration's discovery, driven by the fake
 //! kicad-cli this package builds.
 
-use kicad_integration::{Discovery, DiscoveryOptions, SearchLocations, discover};
+use kicad_integration::{
+    CliSettingsFolder, Discovery, DiscoveryOptions, SearchLocations, discover,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +14,7 @@ fn an_older_kicad_is_reported_as_unsupported() {
     let options = DiscoveryOptions {
         user_override: Some(fake.clone()),
         locations: SearchLocations::Standard,
+        settings: CliSettingsFolder::new(dir.path().join("settings")),
     };
     match discover(&options) {
         Discovery::Unsupported { cli, version, .. } => {
@@ -45,6 +48,7 @@ fn a_kicad_cli_that_cannot_report_its_version_is_broken() {
     let options = DiscoveryOptions {
         user_override: Some(dir.path().to_path_buf()),
         locations: SearchLocations::Only(Vec::new()),
+        settings: CliSettingsFolder::new(dir.path().join("settings")),
     };
     match discover(&options) {
         Discovery::Broken { cli, message, .. } => {
@@ -62,6 +66,7 @@ fn a_kicad_nightly_is_reported_as_unsupported() {
     let options = DiscoveryOptions {
         user_override: Some(dir.path().to_path_buf()),
         locations: SearchLocations::Only(Vec::new()),
+        settings: CliSettingsFolder::new(dir.path().join("settings")),
     };
     assert!(matches!(discover(&options), Discovery::Unsupported { .. }));
 }
