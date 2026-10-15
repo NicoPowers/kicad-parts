@@ -72,6 +72,13 @@ pub enum KicadStatus {
         cli_path: String,
         message: String,
     },
+    /// kicad-cli was not started because the app could not use the folder
+    /// it keeps kicad-cli's settings in. KiCad itself may be fine.
+    SettingsFolder {
+        cli_path: String,
+        /// Names the folder and what went wrong.
+        message: String,
+    },
 }
 
 impl KicadStatus {

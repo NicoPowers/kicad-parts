@@ -515,6 +515,14 @@ fn KicadProblem(
                 "Reinstall or repair KiCad 10, or enter the path of a working kicad-cli.".into(),
                 vec![format!("{cli_path}: {message}")],
             ),
+            // KiCad may be fine: the app's own folder for kicad-cli failed.
+            KicadStatus::SettingsFolder { cli_path, message } => (
+                "kicad-cli could not be started".into(),
+                "This app keeps kicad-cli's settings in a folder of its own, and could not \
+                 use it. Check that you can write to that folder, then choose Search again."
+                    .into(),
+                vec![message.clone(), format!("Found {cli_path}")],
+            ),
         };
         view! {
             <section class="kicad-problem" role="alert" aria-labelledby="kicad-problem-title">

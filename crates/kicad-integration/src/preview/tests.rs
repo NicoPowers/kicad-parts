@@ -1,6 +1,6 @@
 use super::*;
 use crate::discovery::InstallSource;
-use crate::process::CliSettingsFolder;
+use crate::process::{CliSettingsFolder, RunError};
 use crate::resolver::LibraryOrigin;
 use std::sync::Condvar;
 use std::thread;
@@ -132,7 +132,7 @@ fn fixture(gate_open: bool) -> Fixture {
     let fake = FakeCli::new(gate_open);
     let runner: Runner = {
         let fake = fake.clone();
-        Arc::new(move |_, args, _| fake.run(args))
+        Arc::new(move |_, args, _| fake.run(args).map_err(RunError::Start))
     };
     Fixture {
         cache: Arc::new(PreviewCache::with_runner(dir.path().join("cache"), runner)),

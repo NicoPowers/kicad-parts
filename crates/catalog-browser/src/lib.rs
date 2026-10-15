@@ -1258,6 +1258,10 @@ fn kicad_status(discovery: &Discovery) -> KicadStatus {
             cli_path: display(cli),
             message: message.clone(),
         },
+        Discovery::SettingsFolder { cli, message } => KicadStatus::SettingsFolder {
+            cli_path: display(cli),
+            message: message.clone(),
+        },
     }
 }
 
@@ -1400,7 +1404,9 @@ fn rejection(discovery: &Discovery) -> Option<String> {
             "{} is KiCad {version}; this app needs KiCad {SUPPORTED_MAJOR}.",
             cli.display()
         )),
-        Discovery::Broken { message, .. } => Some(capitalize(message)),
+        Discovery::Broken { message, .. } | Discovery::SettingsFolder { message, .. } => {
+            Some(capitalize(message))
+        }
         Discovery::Missing { .. } => Some("No kicad-cli was found there.".into()),
     }
 }

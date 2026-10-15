@@ -62,11 +62,13 @@ fn kicad_cli_runs_get_our_settings_folder_and_never_the_persons() {
         }
     }
 
-    // A settings folder inside the person's KiCad folder is refused before
-    // kicad-cli starts.
-    match discover(&options(&cli, &theirs[0].join("ours"))) {
-        Discovery::Broken { message, .. } => assert!(message.contains("must not use"), "{message}"),
-        other => panic!("expected Broken, got {other:?}"),
+    // A settings folder inside the person's KiCad settings is refused before
+    // kicad-cli starts, with a message about the folder, not about KiCad.
+    match discover(&options(&cli, &theirs[0].join("10.0").join("ours"))) {
+        Discovery::SettingsFolder { message, .. } => {
+            assert!(message.contains("overlaps your KiCad folder"), "{message}")
+        }
+        other => panic!("expected SettingsFolder, got {other:?}"),
     }
     assert_eq!(runs(&bin).len(), 2, "the refused run must not start");
 }

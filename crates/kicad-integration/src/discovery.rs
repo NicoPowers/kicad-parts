@@ -1,6 +1,6 @@
 //! Finds the installed kicad-cli and records its version.
 
-use crate::process::{CliSettingsFolder, run_kicad_cli};
+use crate::process::{CliSettingsFolder, RunError, run_kicad_cli};
 use std::cmp::Reverse;
 use std::env;
 use std::fmt;
@@ -104,6 +104,13 @@ pub enum Discovery {
         source: InstallSource,
         message: String,
     },
+    /// kicad-cli was not started because its own settings folder was
+    /// refused or could not be made. KiCad itself may be fine.
+    SettingsFolder {
+        cli: PathBuf,
+        /// Names the folder and what went wrong.
+        message: String,
+    },
 }
 
 /// Where to look for kicad-cli.
@@ -202,7 +209,10 @@ pub fn installed_share_dir(locations: &SearchLocations) -> Option<PathBuf> {
 fn probe(cli: PathBuf, source: InstallSource, settings: &CliSettingsFolder) -> Discovery {
     let output = match run_kicad_cli(&cli, settings, ["version"], VERSION_TIMEOUT) {
         Ok(output) => output,
-        Err(error) => {
+        Err(RunError::SettingsFolder(message)) => {
+            return Discovery::SettingsFolder { cli, message };
+        }
+        Err(RunError::Start(error)) => {
             return Discovery::Broken {
                 cli,
                 source,

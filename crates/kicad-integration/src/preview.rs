@@ -30,7 +30,7 @@ pub use queue::{MAX_RUNNING, Selection};
 
 use crate::discovery::{KicadInstall, KicadVersion};
 use crate::library_file::SymbolLibrary;
-use crate::process::{CliOutput, run_kicad_cli};
+use crate::process::{CliOutput, RunError, run_kicad_cli};
 use crate::resolver::{LibRef, ResolvedFootprint, ResolvedSymbol};
 use queue::{Exporter, Joined, Queue};
 use sha2::{Digest, Sha256};
@@ -133,7 +133,7 @@ pub struct StoredItem {
 
 /// Runs the install's kicad-cli. Tests replace it to control timing.
 type Runner =
-    Arc<dyn Fn(&KicadInstall, &[OsString], Duration) -> io::Result<CliOutput> + Send + Sync>;
+    Arc<dyn Fn(&KicadInstall, &[OsString], Duration) -> Result<CliOutput, RunError> + Send + Sync>;
 
 /// A cheap stand-in for library content: names, sizes and modification
 /// times. The content hash is recomputed only when this changes.
@@ -534,7 +534,7 @@ impl PreviewCache {
         let output = (self.runner)(kicad, args, EXPORT_TIMEOUT).map_err(|error| {
             PreviewError::ExportFailed {
                 command: command.clone(),
-                cli_message: format!("could not start {}: {error}", kicad.cli.display()),
+                cli_message: error.message(&kicad.cli),
             }
         })?;
         // `fp export` exits 0 even when it fails, so success means an SVG
