@@ -26,8 +26,8 @@ pub(crate) struct Searched {
     pub(crate) response: SearchResponse,
     /// The part that was selected when the search was asked for.
     pub(crate) selected: Option<String>,
-    /// The team catalog's position then; loaded sections are kept only
-    /// while it and the search stay the same.
+    /// The team catalog's position then. After a change in the same
+    /// search, open sections keep their parts and load again.
     pub(crate) version: Option<u64>,
 }
 
