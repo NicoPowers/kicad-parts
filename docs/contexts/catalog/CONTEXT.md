@@ -72,6 +72,10 @@ _Avoid_: Approved Manufacturer Part, substitute, alternate, AVL entry
 A symbol, footprint or 3D model that parts use. It keeps its identity when its content changes.
 _Avoid_: Catalog Asset, asset, file, library item
 
+**Installed library**:
+A KiCad library that someone added to KiCad on their own computer, listed in their KiCad library tables. Teammates may not have it. The app only reads it.
+_Avoid_: user library, personal library, third-party library
+
 **Source**:
 Where a revision's data came from, such as a CSV file and row, the file someone chose in the app, the files someone downloaded for a new part and the site they came from, or the file in our libraries and the commit it was read from. The app records that commit; the team server checks the bytes it stores, not the commit.
 _Avoid_: Provenance, origin
