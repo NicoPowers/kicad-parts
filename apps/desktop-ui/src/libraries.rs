@@ -408,7 +408,15 @@ pub(crate) fn LibrariesDialog(
         >
             <header class="libraries-header">
                 <h2 id="libraries-title">"Libraries"</h2>
-                <p class="libraries-progress" role="status">
+                <p
+                    class="libraries-progress"
+                    role="status"
+                    data-state=move || view.with(|view| match view {
+                        None => "loading",
+                        Some(view) if view.is_ready() => "ready",
+                        Some(_) => "reading",
+                    })
+                >
                     {move || view.with(|view| view.as_ref().and_then(progress_text))}
                 </p>
                 <button type="button" id="libraries-close" on:click=move |_| close()>"Close"</button>

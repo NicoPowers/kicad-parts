@@ -69,7 +69,7 @@ async function waitUntilRead(browser) {
       browser.execute(() => {
         const view = document.querySelector('.library-groups');
         return (
-          document.querySelector('.libraries-progress')?.textContent === '' &&
+          document.querySelector('.libraries-progress')?.dataset.state === 'ready' &&
           view !== null &&
           !view.textContent.includes('…')
         );
