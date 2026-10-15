@@ -231,6 +231,32 @@ fn DrawingView(
         highlight.set(None);
         candidate.set(None);
     });
+    let layer_index = {
+        let layers = all_layers.clone();
+        move |layer: &str| layers.iter().position(|name| name == layer)
+    };
+    let active_index = Memo::new(move |_| active.with(|layer| layer_index(layer)));
+    // On another active layer, each set point moves to the same kind of
+    // point on the same pad there, when there is one.
+    {
+        let drawing = drawing.clone();
+        Effect::new(move |_| {
+            let Some(layer) = active_index.get() else {
+                return;
+            };
+            let Some(drawing) = &drawing else { return };
+            let follow = |mark: Option<Mark>| mark.map(|mark| mark.on_layer(drawing, layer));
+            let (from, to) = (start.get_untracked(), end.get_untracked());
+            if follow(from) != from {
+                start.set(follow(from));
+            }
+            if follow(to) != to {
+                end.set(follow(to));
+            }
+        });
+    }
+    // Bumped when the drawing area changes size, so marks keep their size.
+    let resized = RwSignal::new(0u32);
 
     let size = move || {
         area.get_untracked()
@@ -257,7 +283,8 @@ fn DrawingView(
         let (size, (left, top)) = size()?;
         let current = view.get_untracked();
         let at = to_drawing(current, size, (x - left, y - top));
-        Some(snaps.with_untracked(|points| mark_at(points, at, scale(current, size), free)))
+        let layer = active_index.get_untracked();
+        Some(snaps.with_untracked(|points| mark_at(points, at, scale(current, size), free, layer)))
     };
     // A click or Enter sets the start, then the end, then starts again.
     let place = move |mark: Mark| {
@@ -291,7 +318,19 @@ fn DrawingView(
             Some(at) => (at + 1) % count,
         };
         highlight.set(Some(next));
-        candidate.set(snaps.with_untracked(|points| points.get(next).copied().map(Mark::snapped)));
+        let layer = active_index.get_untracked();
+        let mark = snaps
+            .with_untracked(|points| points.get(next).map(|point| Mark::snapped(*point, layer)));
+        candidate.set(mark);
+        // Keep the highlighted point in view.
+        if let (Some(mark), Some((size, _))) = (mark, size()) {
+            let (x, y) = to_pixel(view.get_untracked(), size, mark.at);
+            let margin = 24.0_f64.min(size.0 / 4.0).min(size.1 / 4.0);
+            let outside = x < margin || y < margin || x > size.0 - margin || y > size.1 - margin;
+            if outside {
+                pan_by(size.0 / 2.0 - x, size.1 / 2.0 - y);
+            }
+        }
     };
 
     // The wheel zooms at the pointer. Leptos handles most events with one
@@ -350,6 +389,44 @@ fn DrawingView(
         });
     });
 
+    // A ResizeObserver says when the drawing area changes size.
+    let observer = StoredValue::new_local(
+        None::<(
+            wasm_bindgen::JsValue,
+            wasm_bindgen::closure::Closure<dyn FnMut()>,
+        )>,
+    );
+    Effect::new(move |_| {
+        use wasm_bindgen::JsCast;
+        let Some(element) = area.get() else { return };
+        if !measurable || observer.with_value(Option::is_some) {
+            return;
+        }
+        let Ok(constructor) = js_sys::Reflect::get(&js_sys::global(), &"ResizeObserver".into())
+        else {
+            return;
+        };
+        let Some(constructor) = constructor.dyn_ref::<js_sys::Function>() else {
+            return;
+        };
+        let callback = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
+            resized.update(|count| *count = count.wrapping_add(1));
+        });
+        let args = js_sys::Array::of1(callback.as_ref());
+        let Ok(instance) = js_sys::Reflect::construct(constructor, &args) else {
+            return;
+        };
+        call(&instance, "observe", &[element.into()]);
+        observer.set_value(Some((instance, callback)));
+    });
+    on_cleanup(move || {
+        observer.try_with_value(|observer| {
+            if let Some((instance, _)) = observer {
+                call(instance, "disconnect", &[]);
+            }
+        });
+    });
+
     let on_pointer_down = move |event: leptos::ev::PointerEvent| {
         // The left button and the middle button move the drawing. While
         // measuring, the left button places a point instead.
@@ -357,6 +434,8 @@ fn DrawingView(
             return;
         }
         if event.button() == 0 && measuring.get_untracked() {
+            // No text selection from a click that places a point.
+            event.prevent_default();
             let (x, y) = (f64::from(event.client_x()), f64::from(event.client_y()));
             if let Some(mark) = mark_at_pixel(x, y, event.shift_key()) {
                 highlight.set(None);
@@ -451,31 +530,38 @@ fn DrawingView(
     let help_id = format!("{id}-help");
     let has_drawing = drawing.is_some();
     let footprint = picture.footprint;
-    let overlay = {
+    // The end follows the pointer until it is set.
+    let live_end = Memo::new(move |_| {
+        end.get().or_else(|| {
+            start
+                .with(Option::is_some)
+                .then(|| candidate.get())
+                .flatten()
+        })
+    });
+    // The gap between the two ends' pads on the active layer, worked out
+    // only when an end or the layer changes.
+    let gap = {
         let drawing = drawing.clone();
+        Memo::new(move |_| {
+            let drawing = drawing.as_ref()?;
+            let (from, to) = (start.get()?, live_end.get()?);
+            active.with(|layer| pads_gap(drawing, &from, &to, layer))
+        })
+    };
+    let overlay = {
         Signal::derive(move || {
-            let Some(drawing) = &drawing else {
-                return String::new();
-            };
             if !measuring.get() {
                 return String::new();
             }
+            resized.track();
             let current = view.get();
             let scale = size().map_or(0.0, |(size, _)| scale(current, size));
-            let from = start.get();
-            // The end follows the pointer until it is set.
-            let to = end.get().or_else(|| from.and(candidate.get()));
-            let gap = match (from, to) {
-                (Some(from), Some(to)) => active
-                    .with(|layer| pads_gap(drawing, &from, &to, layer))
-                    .map(|(_, _, gap)| gap),
-                _ => None,
-            };
             Overlay {
-                start: from,
-                end: to,
+                start: start.get(),
+                end: live_end.get(),
                 candidate: candidate.get(),
-                gap,
+                gap: gap.with(|gap| gap.as_ref().map(|(_, _, gap)| *gap)),
                 scale,
                 mils: mils.get(),
             }
@@ -529,14 +615,21 @@ fn DrawingView(
             if !measuring.get() {
                 return None;
             }
+            let end = end.get();
             let lines = active.with(|layer| {
                 Readout {
                     drawing,
                     layer,
+                    layer_index: active_index.get(),
                     layer_hidden: active_hidden(),
                     start: start.get(),
-                    end: end.get(),
-                    highlighted: highlight.get().and(candidate.get()),
+                    end,
+                    // The live gap is the set gap once the end is set.
+                    gap: end.and_then(|_| gap.get()),
+                    highlighted: highlight
+                        .with(Option::is_some)
+                        .then(|| candidate.get())
+                        .flatten(),
                     mils: mils.get(),
                 }
                 .lines()
@@ -564,12 +657,21 @@ fn DrawingView(
         <div
             class="viewer"
             class:viewer-footprint=footprint
+            class:measuring=move || measuring.get()
             data-active-layer=move || has_drawing.then(|| active.get())
             data-ready=move || if ready.get() { "true" } else { "false" }
             on:keydown=move |event: leptos::ev::KeyboardEvent| {
                 // Escape clears a measurement first; only then does it
-                // close the close-up.
-                if event.key() == "Escape" && start.get_untracked().is_some() {
+                // close the close-up. A held Escape repeats: only a new
+                // press does either, so holding it never closes the
+                // close-up after clearing.
+                if event.key() != "Escape" || !measurable {
+                    return;
+                }
+                if event.repeat() {
+                    event.prevent_default();
+                    event.stop_propagation();
+                } else if start.get_untracked().is_some() {
                     event.prevent_default();
                     event.stop_propagation();
                     clear_measurement();
@@ -633,7 +735,7 @@ fn DrawingView(
                         }
                     }
                     on:mousedown=move |event: leptos::ev::MouseEvent| {
-                        if event.button() == 1 {
+                        if event.button() == 1 || (event.button() == 0 && measuring.get_untracked()) {
                             event.prevent_default();
                         }
                     }
@@ -642,7 +744,7 @@ fn DrawingView(
                     {svg}
                 </div>
                 {measurable.then(|| view! {
-                    <div class="viewer-readout" role="status" aria-live="polite">{readout}</div>
+                    <div class="viewer-readout" class:measuring=move || measuring.get() role="status" aria-live="polite">{readout}</div>
                 })}
                 <p id=help_id class="visually-hidden">{instructions}</p>
                 {problem.map(|problem| view! { <p class="viewer-note viewer-problem">{problem}</p> })}
@@ -880,6 +982,8 @@ mod tests {
         let pixel = (100.0, 150.0);
         let at = to_drawing(view, size, pixel);
         assert!(close(at.x, 2.5) && close(at.y, 1.25), "{at:?}");
+        let back = to_pixel(view, size, at);
+        assert!(close(back.0, pixel.0) && close(back.1, pixel.1), "{back:?}");
         let zoomed_in = zoomed(view, size, 2.0, at, (1.0, 1000.0));
         assert!(close(scale(zoomed_in, size), 80.0));
         let again = to_drawing(zoomed_in, size, pixel);

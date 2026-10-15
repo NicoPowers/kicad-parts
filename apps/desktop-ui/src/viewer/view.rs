@@ -30,6 +30,15 @@ pub(super) fn to_drawing(view: ViewBox, size: (f64, f64), pixel: (f64, f64)) -> 
     )
 }
 
+/// The pixel where drawing point `at` is shown, from the element's top
+/// left: the reverse of [`to_drawing`].
+pub(super) fn to_pixel(view: ViewBox, size: (f64, f64), at: Point) -> (f64, f64) {
+    let s = scale(view, size);
+    let left = (size.0 - view[2] * s) / 2.0;
+    let top = (size.1 - view[3] * s) / 2.0;
+    (left + (at.x - view[0]) * s, top + (at.y - view[1]) * s)
+}
+
 /// `view` zoomed by `factor` around the drawing point `at`, which stays
 /// where it is on screen. The zoom stays within `limits` (pixels per unit).
 pub(super) fn zoomed(
