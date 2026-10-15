@@ -10,11 +10,12 @@
 //! review them field by field.
 
 use crate::backend;
+use crate::edit_cad::CadFields;
 use desktop_contract::{
-    CsvChangeRow, CsvChanges, DetailChange, Field, FileKind, FilePreviewRequest, HistoryEntry,
-    LiveUpdates, ManufacturerPart, OlderUse, PreviewOutcome, PublishResult, SignInRequest,
+    CsvChangeRow, CsvChanges, DetailChange, Field, FileKind, HistoryEntry, LiveUpdates,
+    ManufacturerPart, OlderUse, PreviewKind, PreviewOutcome, PublishResult, SignInRequest,
     TeamArchiveRequest, TeamCategory, TeamConflict, TeamCsvReviewRequest, TeamEditRequest,
-    TeamFile, TeamFileRequest, TeamPart, TeamSession, TeamStatus,
+    TeamFile, TeamPart, TeamSession, TeamStatus,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -235,6 +236,8 @@ pub struct Draft {
     pub reason: String,
     /// Files chosen for the Symbol, the Footprint and its 3D models.
     pub files: Vec<TeamFile>,
+    /// Said when saving while a chosen file has no library chosen yet.
+    pub unchosen_library: Option<String>,
 }
 
 /// The state of the team column for the selected part. Reset when another
@@ -247,8 +250,11 @@ pub struct TeamUi {
     pub draft: StoredValue<Draft>,
     /// Bumped when manufacturer parts are added or removed.
     pub parts_version: RwSignal<u32>,
-    /// Bumped when a chosen file changes the Symbol or Footprint field.
-    pub files_version: RwSignal<u32>,
+    /// How many symbols, footprints or files Edit part is reading.
+    pub reading_files: RwSignal<u32>,
+    /// Why choosing a symbol or footprint did not work: its role, its row
+    /// and the plain words.
+    pub cad_problem: RwSignal<Option<(PreviewKind, u32, String)>>,
     /// Bumped when another category is chosen, which changes the fields.
     pub category_version: RwSignal<u32>,
     pub conflict: RwSignal<Option<TeamConflict>>,
@@ -340,7 +346,8 @@ impl TeamUi {
             editing: RwSignal::new(None),
             draft: StoredValue::new(Draft::default()),
             parts_version: RwSignal::new(0),
-            files_version: RwSignal::new(0),
+            reading_files: RwSignal::new(0),
+            cad_problem: RwSignal::new(None),
             category_version: RwSignal::new(0),
             conflict: RwSignal::new(None),
             notice: RwSignal::new(None),
@@ -422,6 +429,7 @@ pub(crate) fn draft_of(part: &TeamPart) -> Draft {
         cad_fields: part.revision.cad_fields.clone(),
         reason: String::new(),
         files: Vec::new(),
+        unchosen_library: None,
     }
 }
 
@@ -443,6 +451,7 @@ fn draft_from_request(request: &TeamEditRequest, part: &TeamPart) -> Draft {
         cad_fields: request.cad_fields.clone(),
         reason: request.reason.clone(),
         files: request.files.clone(),
+        unchosen_library: None,
     }
 }
 
@@ -609,6 +618,10 @@ fn new_correlation_id() -> String {
 }
 
 fn save_edit(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamEditRequest) {
+    if let Some(message) = ui.draft.with_value(|draft| draft.unchosen_library.clone()) {
+        ui.notice.set(Some(Notice::Problem(message)));
+        return;
+    }
     if request.reason.trim().is_empty() {
         ui.notice.set(Some(Notice::Problem(
             "Say why you are changing the part before you save.".into(),
@@ -1122,39 +1135,19 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
         }
     });
     let ipn = draft.ipn.clone();
-    let cad_fields = draft
-        .cad_fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| {
-            let kind = match field.name.as_str() {
-                "Symbol" => Some(FileKind::Symbol),
-                "Footprint" => Some(FileKind::Footprint),
-                _ => None,
-            };
-            let id = format!("edit-cad-{index}");
-            let name = field.name.clone();
-            view! {
-                <div class="edit-row">
-                    <label for=id.clone()>{name}</label>
-                    <input
-                        id=id
-                        type="text"
-                        spellcheck="false"
-                        prop:value=move || {
-                            ui.files_version.track();
-                            ui.draft.with_value(|draft| draft.cad_fields[index].value.clone())
-                        }
-                        on:input:target=move |event| {
-                            let value = event.target().value();
-                            ui.draft.update_value(|draft| draft.cad_fields[index].value = value);
-                        }
-                    />
-                </div>
-                {kind.map(|kind| view! { <FileArea ui=ui index=index kind=kind ipn=ipn.clone() /> })}
-            }
-        })
-        .collect_view();
+    // The part's Symbol and Footprint as they are now, which Undo puts back.
+    let before: Vec<(String, String)> = part.with_untracked(|part| {
+        part.as_ref()
+            .map(|part| {
+                part.revision
+                    .cad_fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    let cad_fields = view! { <CadFields ui=ui ipn=ipn.clone() before=before /> };
     let has_cad = !draft.cad_fields.is_empty();
     let save = move || save_edit(ui, part, request_of(ui.draft.get_value()));
     view! {
@@ -1261,6 +1254,7 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
                         {format!("Changing these adds a new revision of this part. Designs that use revision {base_revision} keep it.")}
                     </p>
                     {cad_fields}
+                    {move || (ui.reading_files.get() > 0).then(|| view! { <p class="hint" aria-busy="true">"Reading…"</p> })}
                 </fieldset>
             })}
             <label for="edit-reason" class="reason-label">"Why are you changing it?"</label>
@@ -1295,23 +1289,8 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
 /// that is not text grows by a third on the way.
 pub(crate) const MAX_FILE_BYTES: f64 = 24.0 * 1024.0 * 1024.0;
 
-/// What a chosen symbol library or footprint file holds, once read.
-#[derive(Clone, Debug, PartialEq)]
-struct ChosenFile {
-    file_name: String,
-    /// The symbols in the file, or the footprint's name.
-    names: Vec<String>,
-    chosen: String,
-    /// The library suggested; blank when the person types it.
-    library: String,
-    /// Catalog 3D models the footprint names that the Catalog lacks.
-    missing_models: Vec<String>,
-    /// The field's value before the file was chosen.
-    before: String,
-}
-
 /// The extensions a file for `kind` may have, and what to say otherwise.
-fn accepted(kind: FileKind) -> (&'static [&'static str], &'static str) {
+pub(crate) fn accepted(kind: FileKind) -> (&'static [&'static str], &'static str) {
     match kind {
         FileKind::Symbol => (
             &[".kicad_sym"],
@@ -1331,7 +1310,7 @@ fn accepted(kind: FileKind) -> (&'static [&'static str], &'static str) {
 /// The file chosen in a file input, read: its name and bytes, or `None`
 /// when none is chosen. Refuses, plainly, a file of the wrong kind or one
 /// too big to send.
-async fn read_chosen(
+pub(crate) async fn read_chosen(
     input: leptos::web_sys::HtmlInputElement,
     kind: FileKind,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
@@ -1399,288 +1378,15 @@ pub(crate) fn base64(bytes: &[u8]) -> String {
     text
 }
 
-/// The reference a field names for a file: the Symbol field's value, or
-/// the Footprint field's first choice.
-fn file_reference(value: &str) -> String {
-    value
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_owned()
-}
-
-/// `value` with its first footprint choice (or its whole value, for a
-/// symbol) replaced by `reference`.
-fn with_reference(value: &str, reference: &str, kind: FileKind) -> String {
-    match (kind, value.split_once(';')) {
-        (FileKind::Footprint, Some((_, rest))) => format!("{reference};{rest}"),
-        _ => reference.to_owned(),
-    }
-}
-
-/// `LIB:NAME`, or just the name when no library is known yet.
-fn joined(library: &str, name: &str) -> String {
-    if library.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{library}:{name}")
-    }
-}
-
-/// "Use a file…" under the Symbol or Footprint field: reads the chosen
-/// file, fills the field with the reference it suggests, lets the person
-/// pick a symbol when the library holds several, draws the file with
-/// kicad-cli, and asks for the Catalog 3D models a footprint names that the
-/// Catalog lacks (leaving one out saves it as a missing 3D model).
-#[component]
-fn FileArea(ui: TeamUi, index: usize, kind: FileKind, ipn: String) -> impl IntoView {
-    let chosen = RwSignal::new(None::<ChosenFile>);
-    let reading = RwSignal::new(false);
-    let problem = RwSignal::new(None::<String>);
-    let preview = RwSignal::new(None::<Result<PreviewOutcome, String>>);
-    let previewing = RwSignal::new(false);
-    // Each drawing asked for gets the next number; only the newest one's
-    // answer is shown, so a slow older answer never replaces it.
-    let draws = StoredValue::new(0u64);
-    let what = if kind == FileKind::Symbol {
-        "symbol"
-    } else {
-        "footprint"
-    };
-    let field_value = move || {
-        ui.draft
-            .with_value(|draft| draft.cad_fields[index].value.clone())
-    };
-    let set_field = move |value: String| {
-        ui.draft
-            .update_value(|draft| draft.cad_fields[index].value = value);
-        ui.files_version.update(|version| *version += 1);
-    };
-    // The file this field sends, from the draft.
-    let sent = move || {
-        ui.draft
-            .with_value(|draft| draft.files.iter().find(|file| file.kind == kind).cloned())
-    };
-    let draw = move || {
-        let Some(file) = sent() else {
-            preview.set(None);
-            return;
-        };
-        let reference = file_reference(&field_value());
-        draws.update_value(|number| *number += 1);
-        let asked = draws.get_value();
-        previewing.set(true);
-        spawn_local(async move {
-            let result = backend::team_preview_file(FilePreviewRequest {
-                file,
-                reference,
-                selection: None,
-            })
-            .await;
-            if draws.get_value() != asked {
-                return;
-            }
-            previewing.set(false);
-            preview.set(Some(result));
-        });
-    };
-    // Reads a file and, unless `keep_field`, fills the field from it.
-    let use_file =
-        move |file_name: String, encoded: String, symbol: Option<String>, keep_field: bool| {
-            problem.set(None);
-            reading.set(true);
-            let request = TeamFileRequest {
-                ipn: ipn.clone(),
-                kind,
-                file_name: file_name.clone(),
-                base64: encoded.clone(),
-                current_reference: file_reference(&field_value()),
-            };
-            spawn_local(async move {
-                let result = backend::team_read_file(request).await;
-                reading.set(false);
-                let found = match result {
-                    Ok(found) => found,
-                    Err(message) => {
-                        problem.set(Some(message));
-                        return;
-                    }
-                };
-                let name = symbol
-                    .filter(|name| found.names.contains(name))
-                    .unwrap_or(found.chosen.clone());
-                // What the field said before any file was chosen: from this
-                // form, or carried in the draft when the form was opened
-                // again (after a conflict).
-                let before = chosen
-                    .get_untracked()
-                    .map(|earlier| earlier.before)
-                    .or_else(|| sent().and_then(|file| file.replaces))
-                    .unwrap_or_else(field_value);
-                let still_missing = found.missing_models.clone();
-                if !keep_field {
-                    let value =
-                        with_reference(&field_value(), &joined(&found.library, &name), kind);
-                    set_field(value);
-                }
-                ui.draft.update_value(|draft| {
-                    // A 3D model file chosen for a model the footprint still
-                    // names stays chosen.
-                    draft.files.retain(|file| {
-                        file.kind != kind
-                            && (kind != FileKind::Footprint
-                                || file.kind != FileKind::Model3d
-                                || file
-                                    .model_key
-                                    .as_ref()
-                                    .is_some_and(|key| still_missing.contains(key)))
-                    });
-                    draft.files.push(TeamFile {
-                        kind,
-                        file_name: file_name.clone(),
-                        base64: encoded,
-                        symbol: (kind == FileKind::Symbol).then(|| name.clone()),
-                        model_key: None,
-                        replaces: Some(before.clone()),
-                        label: None,
-                    });
-                });
-                chosen.set(Some(ChosenFile {
-                    file_name,
-                    names: found.names,
-                    chosen: name,
-                    library: found.library,
-                    missing_models: found.missing_models,
-                    before,
-                }));
-                draw();
-            });
-        };
-    // A file chosen before (shown again after a conflict) is read again.
-    if let Some(file) = sent() {
-        use_file(file.file_name, file.base64, file.symbol, true);
-    }
-    let input_id = format!("edit-cad-file-{index}");
-    let field_name = if kind == FileKind::Symbol {
-        "Symbol"
-    } else {
-        "Footprint"
-    };
-    let (extensions, _) = accepted(kind);
-    let accept = extensions.join(",");
-    let on_choose =
-        move |event: leptos::ev::Targeted<leptos::ev::Event, leptos::web_sys::HtmlInputElement>| {
-            let input = event.target();
-            let use_file = use_file.clone();
-            spawn_local(async move {
-                match read_chosen(input, kind).await {
-                    Ok(Some((name, bytes))) => use_file(name, base64(&bytes), None, false),
-                    Ok(None) => {}
-                    Err(message) => problem.set(Some(message)),
-                }
-            });
-        };
-    let remove = move |_| {
-        if let Some(earlier) = chosen.get_untracked() {
-            set_field(earlier.before);
-        }
-        ui.draft.update_value(|draft| {
-            draft.files.retain(|file| {
-                file.kind != kind && (kind != FileKind::Footprint || file.kind != FileKind::Model3d)
-            });
-        });
-        chosen.set(None);
-        preview.set(None);
-        problem.set(None);
-    };
-    let pick_symbol = move |name: String| {
-        let library = field_value()
-            .split_once(':')
-            .map(|(library, _)| library.trim().to_owned())
-            .or_else(|| chosen.get_untracked().map(|file| file.library))
-            .unwrap_or_default();
-        set_field(joined(&library, &name));
-        ui.draft.update_value(|draft| {
-            if let Some(file) = draft.files.iter_mut().find(|file| file.kind == kind) {
-                file.symbol = Some(name.clone());
-            }
-        });
-        chosen.update(|file| {
-            if let Some(file) = file {
-                file.chosen = name;
-            }
-        });
-        draw();
-    };
-    view! {
-        <div class="edit-file">
-            <input
-                type="file"
-                id=input_id.clone()
-                class="file-input visually-hidden"
-                accept=accept
-                on:change:target=on_choose
-            />
-            <label for=input_id class="file-choice">
-                {move || if chosen.with(Option::is_some) { "Use another file…" } else { "Use a file…" }}
-                <span class="visually-hidden">{format!(" for the {field_name}")}</span>
-            </label>
-            {move || reading.get().then(|| view! { <p class="hint" aria-busy="true">"Reading the file…"</p> })}
-            {move || problem.get().map(|message| view! { <p class="problem file-problem" role="alert">{message}</p> })}
-            {move || chosen.get().map(|file| {
-                let symbol_id = format!("edit-cad-symbol-{index}");
-                let several = file.names.len() > 1;
-                let choices = file.names.clone();
-                let current = file.chosen.clone();
-                let no_library = file.library.is_empty() && !field_value().contains(':');
-                let missing = file.missing_models.clone();
-                view! {
-                    <div class="file-chosen">
-                        <p class="file-name">
-                            {format!("From {}", file.file_name)}
-                            " "
-                            <button type="button" class="file-remove" on:click=remove>"Don't use the file"</button>
-                        </p>
-                        {several.then(|| view! {
-                            <div class="file-symbol">
-                                <label for=symbol_id.clone()>"Symbol in the file"</label>
-                                <select
-                                    id=symbol_id
-                                    on:change:target=move |event| pick_symbol(event.target().value())
-                                >
-                                    {choices
-                                        .iter()
-                                        .map(|name| {
-                                            let selected = *name == current;
-                                            view! { <option value=name.clone() selected=selected>{name.clone()}</option> }
-                                        })
-                                        .collect_view()}
-                                </select>
-                            </div>
-                        })}
-                        {no_library.then(|| view! {
-                            <p class="hint">{format!("Type the {what}'s library before its name, such as g-res:NAME.")}</p>
-                        })}
-                        <FilePreview kind=kind preview=preview previewing=previewing />
-                        {missing
-                            .into_iter()
-                            .enumerate()
-                            .map(|(number, key)| view! { <ModelFile ui=ui index=index number=number key=key /> })
-                            .collect_view()}
-                    </div>
-                }
-            })}
-        </div>
-    }
-}
-
 /// The drawing of a chosen symbol or footprint file.
 #[component]
 pub(crate) fn FilePreview(
     kind: FileKind,
     preview: RwSignal<Option<Result<PreviewOutcome, String>>>,
     previewing: RwSignal<bool>,
+    /// Drawn from a library item chosen in the browser, not from a file.
+    #[prop(optional)]
+    chosen: bool,
 ) -> impl IntoView {
     let (what, canvas) = if kind == FileKind::Symbol {
         ("symbol", "canvas canvas-symbol file-canvas")
@@ -1696,7 +1402,11 @@ pub(crate) fn FilePreview(
         }
         match preview.get() {
             Some(Ok(PreviewOutcome::Ready(set))) => {
-                let alt = format!("Preview of the {what} {} from the file", set.reference);
+                let alt = if chosen {
+                    format!("Preview of the {what} {}", set.reference)
+                } else {
+                    format!("Preview of the {what} {} from the file", set.reference)
+                };
                 view! {
                     <div class="file-preview">
                         {set
@@ -1719,78 +1429,6 @@ pub(crate) fn FilePreview(
             }
             None => ().into_any(),
         }
-    }
-}
-
-/// A Catalog 3D model a chosen footprint names that the Catalog lacks: a
-/// file input for it, or leave it out.
-#[component]
-fn ModelFile(ui: TeamUi, index: usize, number: usize, key: String) -> impl IntoView {
-    // A file chosen before (shown again after a conflict) is still chosen.
-    let chosen = RwSignal::new(ui.draft.with_value(|draft| {
-        draft
-            .files
-            .iter()
-            .find(|file| file.model_key.as_deref() == Some(key.as_str()))
-            .map(|file| file.file_name.clone())
-    }));
-    let problem = RwSignal::new(None::<String>);
-    let input_id = format!("edit-model-file-{index}-{number}");
-    let (extensions, _) = accepted(FileKind::Model3d);
-    let model_key = key.clone();
-    let on_choose =
-        move |event: leptos::ev::Targeted<leptos::ev::Event, leptos::web_sys::HtmlInputElement>| {
-            let input = event.target();
-            let key = model_key.clone();
-            spawn_local(async move {
-                match read_chosen(input, FileKind::Model3d).await {
-                    Ok(Some((name, bytes))) => {
-                        problem.set(None);
-                        ui.draft.update_value(|draft| {
-                            draft
-                                .files
-                                .retain(|file| file.model_key.as_deref() != Some(key.as_str()));
-                            draft.files.push(TeamFile {
-                                kind: FileKind::Model3d,
-                                file_name: name.clone(),
-                                base64: base64(&bytes),
-                                symbol: None,
-                                model_key: Some(key.clone()),
-                                replaces: None,
-                                label: None,
-                            });
-                        });
-                        chosen.set(Some(name));
-                    }
-                    Ok(None) => {}
-                    Err(message) => problem.set(Some(message)),
-                }
-            });
-        };
-    let shown = key.rsplit('/').next().unwrap_or(&key).to_owned();
-    view! {
-        <div class="model-file">
-            <p>{format!("The footprint names the 3D model {key}, which the Catalog does not have.")}</p>
-            <input
-                type="file"
-                id=input_id.clone()
-                class="file-input visually-hidden"
-                accept=extensions.join(",")
-                on:change:target=on_choose
-            />
-            <label for=input_id class="file-choice">
-                "Use a 3D model file…"
-                <span class="visually-hidden">{format!(" for {shown}")}</span>
-            </label>
-            {move || match chosen.get() {
-                Some(name) => view! { <p class="file-name">{format!("From {name}")}</p> }.into_any(),
-                None => view! {
-                    <p class="hint">"Or leave it out: the footprint is saved with a missing 3D model."</p>
-                }
-                .into_any(),
-            }}
-            {move || problem.get().map(|message| view! { <p class="problem file-problem" role="alert">{message}</p> })}
-        </div>
     }
 }
 

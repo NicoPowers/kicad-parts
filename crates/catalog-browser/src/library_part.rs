@@ -268,6 +268,30 @@ impl Plan {
         (self.problems.clone(), self.findings.clone())
     }
 
+    /// What happens to the chosen footprint's 3D model in our library.
+    pub(crate) fn model_notes(&self) -> Vec<String> {
+        match (&self.footprint, &self.model) {
+            (Some(_), Some(model)) if self.in_catalog.contains(&model.path) => vec![format!(
+                "The footprint's 3D model is {}, which the Catalog already has.",
+                model.path
+            )],
+            (Some(_), Some(model)) => vec![format!(
+                "The footprint's 3D model {} from our library is saved with it.",
+                model.path
+            )],
+            _ => Vec::new(),
+        }
+    }
+
+    /// The commit holding the files to send, when they are all committed
+    /// as they are.
+    pub(crate) fn commit(&self) -> Option<&str> {
+        self.commit
+            .as_deref()
+            .ok()
+            .filter(|commit| !commit.is_empty())
+    }
+
     /// The chosen symbol and footprint references.
     fn references(&self) -> Vec<String> {
         self.symbol
@@ -471,17 +495,7 @@ impl Plan {
                 category.footprint_library = library.to_owned();
             }
         }
-        match (&self.footprint, &self.model) {
-            (Some(_), Some(model)) if self.in_catalog.contains(&model.path) => notes.push(format!(
-                "The footprint's 3D model is {}, which the Catalog already has.",
-                model.path
-            )),
-            (Some(_), Some(model)) => notes.push(format!(
-                "The footprint's 3D model {} from our library is saved with it.",
-                model.path
-            )),
-            _ => {}
-        }
+        notes.extend(self.model_notes());
         for item in self.references() {
             if self.in_catalog.contains(&item) {
                 notes.push(format!(

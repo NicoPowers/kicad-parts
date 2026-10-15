@@ -38,6 +38,9 @@ use std::path::{Path, PathBuf};
 /// a file that is not text.
 const MAX_MODEL_BYTES: u64 = 24 * 1024 * 1024;
 
+/// How long a choice waits for its library to be read.
+const READ_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Where a part made from KiCad's own symbols and footprints came from, as
 /// its history says it.
 pub(crate) const FROM_KICAD: &str = "KiCad's libraries";
@@ -115,8 +118,10 @@ impl CatalogBrowser {
         crate::libraries::sources::our_library_names(&self.config.catalog_root)
     }
 
-    /// The library `key` of `kind`, as the browser lists it.
+    /// The library `key` of `kind`, as the browser lists it, once read.
     fn listed(&self, kind: PreviewKind, key: &LibraryKey) -> Result<Source, String> {
+        self.libraries
+            .wait_for(|| self.library_places(), kind, key, READ_WAIT);
         self.libraries
             .snapshot(kind)
             .into_iter()
@@ -268,6 +273,14 @@ impl CatalogBrowser {
                         "From our libraries. The Catalog does not have it yet, so it is added when you save, as committed."
                             .into(),
                     );
+                    if let Some(commit) = plan.commit() {
+                        pick.notes.push(format!(
+                            "{} is read from commit {}.",
+                            item.reference,
+                            &commit[..12.min(commit.len())]
+                        ));
+                    }
+                    pick.notes.extend(plan.model_notes());
                     pick.notes.extend(findings);
                 }
             }
@@ -437,7 +450,6 @@ impl CatalogBrowser {
             .find(|(name, _)| name == "Footprint")
             .map(|(_, value)| value.trim().to_owned())?;
         let (nickname, name) = named.split_once(':')?;
-        let libraries = self.libraries.snapshot(PreviewKind::Footprint);
         [
             LibraryGroup::Ours,
             LibraryGroup::Installed,
@@ -448,7 +460,16 @@ impl CatalogBrowser {
             group,
             nickname: nickname.to_owned(),
         })
-        .find(|key| query::find_item(&libraries, key, name).is_some())
+        .find(|key| {
+            self.libraries.wait_for(
+                || self.library_places(),
+                PreviewKind::Footprint,
+                key,
+                READ_WAIT,
+            );
+            let libraries = self.libraries.snapshot(PreviewKind::Footprint);
+            query::find_item(&libraries, key, name).is_some()
+        })
         .map(|key| TeamPickRequest {
             kind: PreviewKind::Footprint,
             library: key,

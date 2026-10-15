@@ -680,6 +680,8 @@ mod tests {
             command::LIBRARY_ITEMS,
             command::LIBRARY_ITEM,
             command::LIBRARY_PREVIEW,
+            command::TEAM_PICK,
+            command::OUR_LIBRARIES,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

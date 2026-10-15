@@ -5,6 +5,8 @@
 
 mod add_part;
 mod backend;
+mod cad_choice;
+mod edit_cad;
 mod libraries;
 mod library_check;
 mod part_list;
@@ -80,6 +82,16 @@ fn App() -> impl IntoView {
     let checking = RwSignal::new(false);
     // The Libraries browser, while it is open, and what it is open for.
     let libraries_open = RwSignal::new(None::<BrowseFor>);
+    // Edit part and Add part open it to choose a symbol or footprint, and
+    // offer our libraries for a file (kicad-parts-bc6f).
+    provide_context(cad_choice::LibrariesOpener(libraries_open));
+    let our_libraries = RwSignal::new(None);
+    provide_context(cad_choice::OurLibrariesList(our_libraries));
+    spawn_local(async move {
+        if let Ok(found) = backend::our_libraries().await {
+            our_libraries.set(Some(found));
+        }
+    });
     // The browser's Add part from it, for the part panel to start.
     let library_add = RwSignal::new(None::<desktop_contract::TeamLibraryChoice>);
     Effect::new(move |_| {
@@ -910,7 +922,7 @@ fn PartPanel(
             }
         >
             {move || adding.get().then(|| view! {
-                <AddPartView form=add_form close=close_adding done=added open_part=open_part library_check=library_check />
+                <AddPartView form=add_form close=close_adding done=added open_part=open_part />
             })}
             {move || (checking.get() && !adding.get()).then(|| view! {
                 <LibraryCheckPanel check=library_check close=close_checking add_from=add_from />

@@ -31,6 +31,8 @@ pub mod command {
     pub const LIBRARY_ITEMS: &str = "library_items";
     pub const LIBRARY_ITEM: &str = "library_item";
     pub const LIBRARY_PREVIEW: &str = "library_preview";
+    pub const TEAM_PICK: &str = "team_pick";
+    pub const OUR_LIBRARIES: &str = "our_libraries";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -823,3 +823,68 @@ export async function archiveAsSomeoneElse(url, token, ipn, revision, archived, 
   record({ event: 'archive-by-someone-else', ipn, revision, archived, seq: answer.seq });
   return answer.seq;
 }
+
+const LIBRARIES = 'dialog.libraries-dialog';
+
+/** Waits until the Libraries browser is open (or closed, with `open: false`). */
+export async function waitForLibraries(browser, { open = true, timeout = 10_000 } = {}) {
+  await browser.waitUntil(
+    async () => (await browser.execute((s) => document.querySelector(s)?.open === true, LIBRARIES)) === open,
+    { timeout, timeoutMsg: open ? 'the Libraries browser did not open' : 'the Libraries browser did not close' },
+  );
+}
+
+/** Waits until the browser's list shows the answer to what was last asked. */
+async function librariesSettled(browser) {
+  await browser.waitUntil(
+    async () => browser.execute(() => document.getElementById('library-items')?.getAttribute('aria-busy') === 'false'),
+    { timeout: 20_000, interval: 25, timeoutMsg: 'the list never showed its answer' },
+  );
+}
+
+/**
+ * In the open Libraries browser (kicad-parts-bc6f), chooses the item `name`
+ * of the library `library` in `group` (`ours`, `kicad` or `installed`):
+ * picks the library, searches for the name, selects its row, and chooses
+ * it with Choose, or with Enter in the list when `enter` is set. Waits until
+ * the browser closes.
+ */
+export async function chooseInLibraries(browser, { group, library, name, enter = false }) {
+  await waitForLibraries(browser);
+  await browser.waitUntil(
+    async () =>
+      browser.execute(
+        (g, nick) => {
+          const list = document.querySelector(`ul[aria-labelledby="library-group-${g}"]`);
+          const button = list && [...list.querySelectorAll('.library-button')].find((b) => b.querySelector('.library-name')?.textContent === nick);
+          button?.click();
+          return Boolean(button);
+        },
+        group,
+        library,
+      ),
+    { timeout: 60_000, interval: 250, timeoutMsg: `no library ${library} in ${group}` },
+  );
+  await librariesSettled(browser);
+  await (await browser.$('#library-search')).setValue(name);
+  await browser.waitUntil(
+    async () =>
+      browser.execute((wanted) => {
+        const row = [...document.querySelectorAll('#library-items [role="option"]')].find(
+          (r) => r.querySelector('.library-item-name').textContent === wanted,
+        );
+        row?.click();
+        return Boolean(row);
+      }, name),
+    { timeout: 120_000, interval: 250, timeoutMsg: `no row named ${name} in ${library}` },
+  );
+  await waitForText(browser, '#library-detail-title', `${library}:${name}`);
+  if (enter) {
+    await browser.execute(() => document.getElementById('library-items').focus());
+    await browser.keys('Enter');
+  } else {
+    await (await browser.$('#library-choose')).click();
+  }
+  await waitForLibraries(browser, { open: false });
+  record({ event: 'chosen-in-libraries', group, library, name });
+}

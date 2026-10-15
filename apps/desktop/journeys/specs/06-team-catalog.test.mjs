@@ -12,6 +12,7 @@ import {
   FOOTPRINT,
   SYMBOL,
   assertAccessible,
+  chooseInLibraries,
   editAsSomeoneElse,
   launchApp,
   record,
@@ -24,6 +25,7 @@ import {
   waitForLiveUpdates,
   waitForPreview,
   waitForPreviewImages,
+  waitForLibraries,
   waitForText,
 } from '../harness.mjs';
 
@@ -372,7 +374,23 @@ describe('team catalog: history, edits and conflicts', () => {
     await waitForText(browser, '#edit-heading', 'Edit part');
     // KiCad's own resistor symbol draws the same two-pin resistor, so the
     // part can still replace the old one: a new revision, not a new IPN.
-    await (await fieldInput('Symbol')).setValue('Device:R');
+    // No CAD name is typed (kicad-parts-bc6f): the Symbol is read only, and
+    // Choose... opens the Libraries browser on the current symbol.
+    assert.equal(await browser.execute(() => document.getElementById('edit-cad-0').readOnly), true);
+    await browser.execute(() => document.getElementById('edit-cad-0-choose').scrollIntoView({ block: 'center' }));
+    await (await browser.$('#edit-cad-0-choose')).click();
+    await waitForLibraries(browser);
+    await waitForText(browser, '#library-detail-title', 'g-res:R_US');
+    await chooseInLibraries(browser, { group: 'kicad', library: 'Device', name: 'R' });
+    await browser.waitUntil(async () => (await browser.execute(() => document.getElementById('edit-cad-0').value)) === 'Device:R', {
+      timeout: 20_000,
+      timeoutMsg: `the Symbol did not become Device:R: ${await textOf(browser, '.edit-form')}`,
+    });
+    await waitForText(browser, '.edit-form .file-chosen .file-name', /^KiCad's own: the part refers to it, as imported parts do\./);
+    await browser.waitUntil(async () => (await browser.execute(() => document.activeElement?.id)) === 'edit-cad-0-choose', {
+      timeout: 5_000,
+      timeoutMsg: 'focus did not come back to Choose…',
+    });
     await (await browser.$('#edit-reason')).setValue("Use KiCad's resistor symbol");
     await clickButton('.edit-form', 'Save');
     await waitForText(browser, NOTICE, 'Saved as revision 2.');

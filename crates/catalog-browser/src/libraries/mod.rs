@@ -155,6 +155,32 @@ impl LibraryIndex {
         }
     }
 
+    /// Waits, at most `timeout`, until the library `key` of `kind` is read
+    /// or found unreadable, reading it next. Finds the libraries first when
+    /// none were found yet, such as when Add part starts from a library
+    /// before the browser was ever opened.
+    pub fn wait_for(
+        &self,
+        places: impl FnOnce() -> Places,
+        kind: PreviewKind,
+        key: &LibraryKey,
+        timeout: Duration,
+    ) {
+        if self.lock().libraries.is_empty() {
+            self.refresh(&places());
+        }
+        self.want(kind, key);
+        let state = self.lock();
+        let _ = self
+            .shared
+            .progress
+            .wait_timeout_while(state, timeout, |state| {
+                state.libraries.iter().any(|library| {
+                    library.pending && library.source.kind == kind && library.source.key == *key
+                })
+            });
+    }
+
     /// The libraries and how far the reading is.
     pub fn view(&self) -> LibrariesView {
         let state = self.lock();

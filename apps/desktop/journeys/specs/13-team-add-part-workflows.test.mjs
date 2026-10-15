@@ -20,6 +20,7 @@ import {
   teamSignIn,
   tempDir,
   textOf,
+  waitForLibraries,
   waitForLiveUpdates,
   waitForText,
 } from '../harness.mjs';
@@ -235,12 +236,41 @@ describe('team catalog: Add part in real workflows', () => {
   it("is completed with the keyboard alone, using the Catalog's own symbol", async () => {
     assert.equal(await valueOf('#add-ipn'), IPN);
     await browser.execute(() => document.getElementById('add-files').focus());
-    const toSymbol = await tabUntil((id) => id === 'add-symbol');
+    // No CAD name is typed (kicad-parts-bc6f): Choose... opens the Libraries
+    // browser for symbols, where the keyboard alone finds and chooses the
+    // Catalog's capacitor symbol.
+    const toSymbol = await tabUntil((id) => id === 'add-symbol-choose');
     record({ event: 'tab-stops-to-symbol', stops: toSymbol });
-    await browser.keys(['Control', 'a']);
-    await browser.keys(['Control']);
-    await browser.keys('g-cap:C'.split(''));
-    assert.equal(await valueOf('#add-symbol'), 'g-cap:C');
+    await browser.keys(['Enter']);
+    await waitForLibraries(browser);
+    await browser.waitUntil(async () => (await browser.execute(() => document.activeElement?.id)) === 'library-search', {
+      timeout: 5_000,
+      timeoutMsg: 'the search box did not take the focus',
+    });
+    await browser.keys('Unpolarized capacitor'.split(''));
+    // To the list, then down to g-cap's C, and Enter chooses it.
+    await tabUntil((id) => id === 'library-items');
+    let stops = 0;
+    while (
+      (await browser.execute(() => {
+        const row = document.getElementById(document.getElementById('library-items').getAttribute('aria-activedescendant') ?? '');
+        return row ? `${row.querySelector('.library-item-library')?.textContent}:${row.querySelector('.library-item-name').textContent}` : null;
+      })) !== 'g-cap:C'
+    ) {
+      assert.ok(stops++ < 60, 'g-cap:C is not in the list');
+      await browser.keys(['ArrowDown']);
+    }
+    await browser.keys(['Enter']);
+    await waitForLibraries(browser, { open: false });
+    await browser.waitUntil(async () => (await valueOf('#add-symbol')) === 'g-cap:C', {
+      timeout: 20_000,
+      timeoutMsg: `the symbol did not become g-cap:C: ${await valueOf('#add-symbol')}`,
+    });
+    // Focus is back on Choose..., ready for the next field.
+    await browser.waitUntil(async () => (await browser.execute(() => document.activeElement?.id)) === 'add-symbol-choose', {
+      timeout: 10_000,
+      timeoutMsg: 'focus did not come back to Choose…',
+    });
     // The vendor's footprint name says no package group; the Catalog's
     // footprint with the same pads gives one.
     assert.equal(await valueOf('#add-footprint'), 'g-Capacitor_SMD:CAP_GRM18_MUR_0603_Long_Vendor_Name');
@@ -282,7 +312,13 @@ describe('team catalog: Add part in real workflows', () => {
       timeout: 5_000,
       timeoutMsg: `the footprint group did not follow the category: ${await valueOf('#add-footprint')}`,
     });
-    await (await browser.$('#add-footprint')).setValue('g-Package_SO:CAP_ODD_PADS');
+    // The footprint's library is chosen from our libraries, never typed.
+    assert.equal(await browser.execute(() => document.getElementById('add-footprint').readOnly), true);
+    await (await browser.$('#add-footprint-library')).selectByAttribute('value', 'g-Package_SO');
+    await browser.waitUntil(async () => (await valueOf('#add-footprint')) === 'g-Package_SO:CAP_ODD_PADS', {
+      timeout: 5_000,
+      timeoutMsg: `the library chosen did not show: ${await valueOf('#add-footprint')}`,
+    });
     await (await browser.$('#add-category')).selectByAttribute('value', 'cap');
     await waitForText(browser, '#add-ipn-hint', 'The next free IPN in this category. An IPN is never reused.');
     assert.equal(await valueOf('#add-footprint'), 'g-Package_SO:CAP_ODD_PADS');

@@ -1,4 +1,4 @@
-// Add part from our libraries (kicad-parts-37a7): the app reads a copy of
+// Add part from our libraries (kicad-parts-37a7, kicad-parts-bc6f): the app reads a copy of
 // the CSV catalog, committed in a git repository of its own, in which an
 // engineer drew a capacitor symbol and its footprint with a 3D model by
 // hand in KiCad. The Library check lists them as not in the Catalog yet;
@@ -23,6 +23,7 @@ import {
   startTeamServer,
   tempDir,
   textOf,
+  waitForLibraries,
   waitForLiveUpdates,
   waitForText,
 } from '../harness.mjs';
@@ -208,12 +209,7 @@ describe('team catalog: add a part from our libraries', () => {
     );
     await add.click();
     await waitForText(browser, '#add-heading', 'Add part');
-    await waitForText(
-      browser,
-      '#add-download',
-      `From our libraries: ${HAND_SYMBOL} and ${HAND_FOOTPRINT}, read from commit ${head.slice(0, 12)}.`,
-    );
-    assert.equal(await browser.$('#add-from-library').getAttribute('aria-expanded'), 'true');
+    await waitForText(browser, '#add-download', `From the libraries: ${HAND_SYMBOL} and ${HAND_FOOTPRINT}.`);
     await waitForText(browser, '#add-guess', /^Best guess: Capacitors, because /);
     assert.equal(await valueOf('#add-category'), 'cap');
     assert.match(await valueOf('#add-ipn'), /^CAP-\d{4}-0001$/);
@@ -226,32 +222,41 @@ describe('team catalog: add a part from our libraries', () => {
     record({ event: 'library-checks', text: checks });
     assert.match(checks, new RegExp(`The footprint's 3D model ${MODEL} from our library is saved with it\\.`));
     assert.match(checks, /The footprint is the one the symbol names, g-Capacitor_SMD:C_0603_Hand\./);
+    assert.match(checks, new RegExp(`${HAND_SYMBOL} is read from commit ${head.slice(0, 12)}\\.`));
     assert.match(checks, /The symbol's 2 pins match the footprint's numbered pads\./);
     assert.equal(await browser.execute(() => document.querySelectorAll('.check-error').length), 0);
-    // The search over our libraries shows both, the symbol chosen.
-    await (await browser.$('#add-library-search')).setValue('hand');
-    await browser.waitUntil(
-      async () =>
-        (await browser.execute(() => [...document.querySelectorAll('.library-result')].map((b) => b.textContent))).length === 2,
-      { timeout: 5_000, timeoutMsg: 'the search did not narrow the list' },
+    // Both say how they are used: added from our libraries when saved.
+    const uses = await browser.execute(() =>
+      [...document.querySelectorAll('.add-form .cad-actions .file-name')].map((p) => p.textContent.trim()),
     );
-    const results = await browser.execute(() =>
-      [...document.querySelectorAll('.library-result')].map((b) => [
-        b.querySelector('.library-kind').textContent.trim(),
-        b.querySelector('code').textContent.trim(),
-        b.getAttribute('aria-pressed'),
-      ]),
-    );
-    // Screen readers hear how many match.
-    assert.equal(
-      await textOf(browser, '.library-picker [role="status"]'),
-      '2 symbols and footprints match.',
-    );
-    assert.deepEqual(results, [
-      ['Symbol', HAND_SYMBOL, 'true'],
-      // Brought by the symbol, so chosen too.
-      ['Footprint', HAND_FOOTPRINT, 'true'],
+    assert.deepEqual(uses, [
+      'From our libraries: added to the Catalog when you save, as committed.',
+      'From our libraries: added to the Catalog when you save, as committed.',
     ]);
+    // Choose... opens the Libraries browser for symbols only, on the chosen
+    // symbol, with the list focused so Enter would choose it again; Escape
+    // closes it, chooses nothing, and focus comes back.
+    await browser.execute(() => document.getElementById('add-symbol-choose').scrollIntoView({ block: 'center' }));
+    await (await browser.$('#add-symbol-choose')).click();
+    await waitForLibraries(browser);
+    await waitForText(browser, '#library-detail-title', HAND_SYMBOL);
+    await browser.waitUntil(async () => (await browser.execute(() => document.activeElement?.id)) === 'library-items', {
+      timeout: 5_000,
+      timeoutMsg: 'the list did not take the focus',
+    });
+    assert.deepEqual(
+      await browser.execute(() =>
+        [...document.querySelectorAll('.libraries-dialog [role="tab"]')].filter((tab) => !tab.hidden).map((tab) => tab.textContent.trim()),
+      ),
+      ['Symbols'],
+    );
+    await browser.keys(['Escape']);
+    await waitForLibraries(browser, { open: false });
+    await browser.waitUntil(async () => (await browser.execute(() => document.activeElement?.id)) === 'add-symbol-choose', {
+      timeout: 5_000,
+      timeoutMsg: 'focus did not come back to Choose…',
+    });
+    assert.equal(await valueOf('#add-symbol'), HAND_SYMBOL, 'closing chooses nothing');
     await waitForDrawings(`${SYMBOL} .file-preview img`);
     await waitForDrawings(`${FOOTPRINT} .file-preview img`);
     await browser.execute(() => {

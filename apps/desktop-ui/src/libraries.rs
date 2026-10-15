@@ -15,7 +15,7 @@ use crate::{Load, PreviewSection, backend, cad_reference, counted, grouped, into
 use desktop_contract::{
     LibrariesView, LibraryCheckView, LibraryEntry, LibraryFilters, LibraryGroup, LibraryItemDetail,
     LibraryItemRequest, LibraryItemRow, LibraryItems, LibraryItemsRequest, LibraryKey, MountFilter,
-    PreviewKind, PreviewOutcome, PreviewProblemReason, TeamLibraryChoice,
+    PreviewKind, PreviewOutcome, PreviewProblemReason, TeamLibraryChoice, TeamPickRequest,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -41,7 +41,10 @@ pub(crate) struct BrowseFor {
     /// Footprints for this symbol, with KiCad's two filters on.
     pub for_symbol: Option<String>,
     /// Called with the chosen item; the browser then closes.
-    pub choose: Option<Callback<(PreviewKind, String)>>,
+    pub choose: Option<Callback<TeamPickRequest>>,
+    /// The element that gets keyboard focus back when the browser closes,
+    /// by its id, such as the Choose... button that opened it.
+    pub return_focus: Option<String>,
 }
 
 /// What the browser can do outside itself.
@@ -151,7 +154,15 @@ pub(crate) fn LibrariesDialog(
     let preview = RwSignal::new(Load::<PreviewOutcome>::Loading);
     let alive = Arc::new(AtomicBool::new(true));
     let choose = browse.choose;
+    let return_focus = browse.return_focus.clone();
     let pending_current = StoredValue::new(browse.current.clone());
+    // Opened on a current item, the list has the focus with that item
+    // selected, so Enter chooses it; otherwise the search box has it.
+    let first_focus = if browse.current.is_some() {
+        "library-items"
+    } else {
+        "library-search"
+    };
     {
         let alive = alive.clone();
         on_cleanup(move || alive.store(false, Ordering::SeqCst));
@@ -162,7 +173,7 @@ pub(crate) fn LibrariesDialog(
     Effect::new(move |_| {
         if let Some(dialog) = dialog.get() {
             crate::show_modal(&dialog);
-            focus_later("library-search");
+            focus_later(first_focus);
         }
     });
     {
@@ -397,7 +408,12 @@ pub(crate) fn LibrariesDialog(
             node_ref=dialog
             class="libraries-dialog"
             aria-labelledby="libraries-title"
-            on:close=move |_| open.set(None)
+            on:close=move |_| {
+                open.set(None);
+                if let Some(id) = &return_focus {
+                    focus_later(id);
+                }
+            }
             on:pointerdown=move |event| pressed_outside.set_value(outside(&event))
             on:click=move |event| {
                 if pressed_outside.get_value() && outside(&event) {
@@ -778,7 +794,7 @@ fn ItemList(
     findings: Memo<BTreeMap<String, Vec<String>>>,
     library: RwSignal<Option<LibraryKey>>,
     view: RwSignal<Option<LibrariesView>>,
-    choose: Option<Callback<(PreviewKind, String)>>,
+    choose: Option<Callback<TeamPickRequest>>,
     done_with: Callback<Box<dyn FnOnce() + Send + Sync>>,
 ) -> impl IntoView {
     let list = NodeRef::<leptos::html::Ul>::new();
@@ -818,8 +834,12 @@ fn ItemList(
         let (Some(choose), Some(row)) = (choose, selected.get_untracked()) else {
             return false;
         };
-        let kind = tab.get_untracked();
-        done_with.run(Box::new(move || choose.run((kind, row.reference()))));
+        let pick = TeamPickRequest {
+            kind: tab.get_untracked(),
+            library: row.library,
+            name: row.name,
+        };
+        done_with.run(Box::new(move || choose.run(pick)));
         true
     };
     let on_key = move |event: leptos::ev::KeyboardEvent| {
@@ -956,7 +976,7 @@ fn Detail(
     preview: RwSignal<Load<PreviewOutcome>>,
     findings: Memo<BTreeMap<String, Vec<String>>>,
     actions: BrowserActions,
-    choose: Option<Callback<(PreviewKind, String)>>,
+    choose: Option<Callback<TeamPickRequest>>,
     done_with: Callback<Box<dyn FnOnce() + Send + Sync>>,
     matching_footprints: Callback<String>,
 ) -> impl IntoView {
@@ -1086,21 +1106,26 @@ fn Actions(
     row: LibraryItemRow,
     detail: LibraryItemDetail,
     actions: BrowserActions,
-    choose: Option<Callback<(PreviewKind, String)>>,
+    choose: Option<Callback<TeamPickRequest>>,
     done_with: Callback<Box<dyn FnOnce() + Send + Sync>>,
     matching_footprints: Callback<String>,
 ) -> impl IntoView {
     let reference = detail.reference.clone();
     let used = !detail.used_by.is_empty();
     let choose_button = choose.map(|choose| {
-        let reference = reference.clone();
+        let pick = TeamPickRequest {
+            kind,
+            library: row.library.clone(),
+            name: row.name.clone(),
+        };
         view! {
             <button
                 type="button"
                 class="primary"
+                id="library-choose"
                 on:click=move |_| {
-                    let reference = reference.clone();
-                    done_with.run(Box::new(move || choose.run((kind, reference))));
+                    let pick = pick.clone();
+                    done_with.run(Box::new(move || choose.run(pick)));
                 }
             >
                 "Choose"

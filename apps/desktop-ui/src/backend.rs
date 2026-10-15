@@ -2,11 +2,11 @@
 
 use desktop_contract::{
     AppStatus, FilePreviewRequest, LibrariesView, LibraryCheckView, LibraryItemDetail,
-    LibraryItemRequest, LibraryItems, LibraryItemsRequest, PartDetail, PreviewOutcome,
-    PreviewRequest, PublishResult, SearchRequest, SearchResponse, SignInRequest,
+    LibraryItemRequest, LibraryItems, LibraryItemsRequest, OurLibraries, PartDetail,
+    PreviewOutcome, PreviewRequest, PublishResult, SearchRequest, SearchResponse, SignInRequest,
     TeamArchiveRequest, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest,
     TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest,
-    TeamNewPartRequest, TeamPart, TeamSameMpn, TeamStatus, command,
+    TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSameMpn, TeamStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -260,4 +260,19 @@ pub async fn library_item(
 /// One library item's drawing.
 pub async fn library_preview(request: LibraryItemRequest) -> Result<PreviewOutcome, String> {
     call(command::LIBRARY_PREVIEW, &LibraryItemArgs { request }).await
+}
+
+#[derive(Serialize)]
+struct PickArgs {
+    request: TeamPickRequest,
+}
+
+/// What choosing an item in the Libraries browser does for a part.
+pub async fn team_pick(request: TeamPickRequest) -> Result<TeamPick, String> {
+    call(command::TEAM_PICK, &PickArgs { request }).await
+}
+
+/// Our libraries' nicknames, by role.
+pub async fn our_libraries() -> Result<OurLibraries, String> {
+    call(command::OUR_LIBRARIES, &NoArgs {}).await
 }
