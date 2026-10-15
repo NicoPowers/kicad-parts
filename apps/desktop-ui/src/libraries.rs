@@ -186,29 +186,64 @@ pub(crate) fn LibrariesDialog(
         });
     }
 
-    // Opened with a current item: select it once its library is listed.
+    // Opened with a current item: open its library once it is listed, and
+    // select the item once the library is read and has it. A reference only
+    // an unsaved file has (or one gone from its library) opens the library
+    // with nothing selected.
+    let awaiting = StoredValue::new(None::<(LibraryKey, String)>);
     Effect::new(move |_| {
-        let Some(reference) = pending_current.get_value() else {
+        if let Some(reference) = pending_current.get_value() {
+            let found = view.with(|view| {
+                let view = view.as_ref()?;
+                let entries = match tab.get_untracked() {
+                    PreviewKind::Symbol => &view.symbols,
+                    PreviewKind::Footprint => &view.footprints,
+                };
+                library_of(entries, &reference)
+            });
+            if let Some((key, name)) = found {
+                pending_current.set_value(None);
+                library.set(Some(key.clone()));
+                awaiting.set_value(Some((key, name)));
+            }
+        }
+        let Some((key, name)) = awaiting.get_value() else {
             return;
         };
-        let found = view.with(|view| {
-            let view = view.as_ref()?;
-            let entries = match tab.get_untracked() {
-                PreviewKind::Symbol => &view.symbols,
-                PreviewKind::Footprint => &view.footprints,
-            };
-            library_of(entries, &reference)
+        // Whether the library is read yet; asked again as each one is.
+        let read = view.with(|view| {
+            view.as_ref().is_some_and(|view| {
+                let entries = match tab.get_untracked() {
+                    PreviewKind::Symbol => &view.symbols,
+                    PreviewKind::Footprint => &view.footprints,
+                };
+                entries.iter().any(|entry| {
+                    entry.key == key && (entry.items.is_some() || entry.problem.is_some())
+                })
+            })
         });
-        if let Some((key, name)) = found {
-            pending_current.set_value(None);
-            library.set(Some(key.clone()));
-            selected.set(Some(LibraryItemRow {
-                library: key,
-                name,
-                description: String::new(),
-                in_catalog: false,
-            }));
+        if !read {
+            return;
         }
+        awaiting.set_value(None);
+        let request = LibraryItemRequest {
+            kind: tab.get_untracked(),
+            library: key.clone(),
+            name: name.clone(),
+            selection: None,
+        };
+        spawn_local(async move {
+            if let Ok(Some(_)) = backend::library_item(request).await {
+                if selected.try_get_untracked().flatten().is_none() {
+                    selected.set(Some(LibraryItemRow {
+                        library: key,
+                        name,
+                        description: String::new(),
+                        in_catalog: false,
+                    }));
+                }
+            }
+        });
     });
 
     // The list: asked again when what it shows changes, and while

@@ -23,6 +23,7 @@ import {
   teamSignIn,
   tempDir,
   textOf,
+  waitForLibraries,
   waitForLiveUpdates,
   waitForPreview,
   waitForText,
@@ -235,6 +236,22 @@ describe('team catalog: edit a part with files', () => {
     await waitForText(browser, '.model-file p', /names the 3D model 3d-models\/g-Resistor_SMD\.3dshapes\/R_Journey\.step/);
     await (await browser.$('#edit-model-file-1-0')).addValue(model);
     await waitForText(browser, '.model-file .file-name', 'From R_Journey.step');
+    // Choose... on a reference only the unsaved file has opens its library
+    // with nothing selected, never "not in its library any more".
+    await browser.execute(() => document.getElementById('edit-cad-1-choose').scrollIntoView({ block: 'center' }));
+    await (await browser.$('#edit-cad-1-choose')).click();
+    await waitForLibraries(browser);
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() =>
+          [...document.querySelectorAll('.library-button[aria-current="true"] .library-name')].some((n) => n.textContent === 'g-Resistor_SMD'),
+        ),
+      { timeout: 30_000, timeoutMsg: 'the browser did not open on g-Resistor_SMD' },
+    );
+    await waitForText(browser, '.libraries-detail h3', 'Nothing selected');
+    assert.doesNotMatch(await textOf(browser, '.libraries-detail'), /not in its library any more/);
+    await browser.keys(['Escape']);
+    await waitForLibraries(browser, { open: false });
     // Someone else changes the symbol first, so saving shows a conflict.
     const token = await teamSignIn(server.url, server.accounts[1]);
     await editAsSomeoneElse(server.url, token, IPN, { Symbol: 'g-res:R_US' }, 'Back to the usual symbol');

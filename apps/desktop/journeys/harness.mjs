@@ -879,6 +879,17 @@ export async function chooseInLibraries(browser, { group, library, name, enter =
     { timeout: 120_000, interval: 250, timeoutMsg: `no row named ${name} in ${library}` },
   );
   await waitForText(browser, '#library-detail-title', `${library}:${name}`);
+  // Its drawing first, so what is drawn next comes from the same cache
+  // every run and the screenshots after it never change by timing.
+  await browser.waitUntil(
+    async () =>
+      browser.execute(() => {
+        const detail = document.querySelector('.libraries-detail');
+        const images = [...(detail?.querySelectorAll('.preview img') ?? [])];
+        return (images.length > 0 && images.every((img) => img.complete && img.naturalWidth > 0)) || detail?.querySelector('.problem') !== null;
+      }),
+    { timeout: 60_000, interval: 100, timeoutMsg: `${library}:${name} was never drawn in the browser` },
+  );
   if (enter) {
     await browser.execute(() => document.getElementById('library-items').focus());
     await browser.keys('Enter');

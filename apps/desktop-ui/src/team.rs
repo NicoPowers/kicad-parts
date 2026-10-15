@@ -252,6 +252,9 @@ pub struct TeamUi {
     pub parts_version: RwSignal<u32>,
     /// How many symbols, footprints or files Edit part is reading.
     pub reading_files: RwSignal<u32>,
+    /// Something said under Symbol or Footprint stops the save, so Save is
+    /// off.
+    pub cad_blocked: RwSignal<bool>,
     /// Why choosing a symbol or footprint did not work: its role, its row
     /// and the plain words.
     pub cad_problem: RwSignal<Option<(PreviewKind, u32, String)>>,
@@ -348,6 +351,7 @@ impl TeamUi {
             parts_version: RwSignal::new(0),
             reading_files: RwSignal::new(0),
             cad_problem: RwSignal::new(None),
+            cad_blocked: RwSignal::new(false),
             category_version: RwSignal::new(0),
             conflict: RwSignal::new(None),
             notice: RwSignal::new(None),
@@ -407,6 +411,7 @@ impl TeamUi {
     pub(crate) fn start_editing(&self, draft: Draft) {
         self.edit_attempt.open();
         self.cad_problem.set(None);
+        self.cad_blocked.set(false);
         self.draft.set_value(draft);
         self.close_review();
         self.conflict.set(None);
@@ -1268,8 +1273,13 @@ fn EditForm(part: RwSignal<Option<TeamPart>>, ui: TeamUi) -> impl IntoView {
                     ui.draft.update_value(|draft| draft.reason = value);
                 }
             ></textarea>
+            {move || ui.cad_blocked.get().then(|| view! {
+                <p class="problem cad-blocked" id="edit-blocked">
+                    "Save is off until what is said under Symbol or Footprint is fixed."
+                </p>
+            })}
             <div class="form-actions">
-                <button type="submit" class="primary" disabled=move || ui.busy.get()>
+                <button type="submit" class="primary" disabled=move || ui.busy.get() || ui.cad_blocked.get()>
                     {move || if ui.busy.get() { "Saving…" } else { "Save" }}
                 </button>
                 <button

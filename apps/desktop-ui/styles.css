@@ -1338,6 +1338,19 @@ a {
   font-size: inherit;
 }
 
+/* The 3D model files a copy brings, each named by its link. */
+.cad-model-list {
+  margin: 0.2rem 0 0.4rem;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* Why Save is off: something said under Symbol or Footprint. */
+.cad-blocked {
+  margin: 0.4rem 0;
+}
+
 .cad-buttons .file-remove {
   margin-left: 0;
 }

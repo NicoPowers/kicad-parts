@@ -132,6 +132,57 @@ impl CatalogBrowser {
         uses
     }
 
+    /// Draws one of our library items as the Catalog has it (its newest
+    /// revision), for a choice bound to the Catalog; an item the Catalog
+    /// does not have, or cannot give, is drawn from its library.
+    pub fn catalog_item_preview(
+        &self,
+        request: &LibraryItemRequest,
+        team: &crate::team::TeamCatalog,
+    ) -> PreviewOutcome {
+        let kind = request.kind;
+        let reference = format!("{}:{}", request.library.nickname, request.name);
+        let stored = match team.current_cad(kind, &reference) {
+            Ok(Some(stored)) if request.library.group == LibraryGroup::Ours => stored,
+            _ => return self.library_preview(request),
+        };
+        let install = {
+            let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
+            match &kicad.discovery {
+                Discovery::Ready(install) => install.clone(),
+                _ => return self.library_preview(request),
+            }
+        };
+        let load = || team.stored_bytes(&stored);
+        let exported = match kind {
+            PreviewKind::Symbol => {
+                self.previews
+                    .stored_symbol(&install, &stored.item, load, request.selection)
+            }
+            PreviewKind::Footprint => {
+                self.previews
+                    .stored_footprint(&install, &stored.item, load, request.selection)
+            }
+        };
+        match exported {
+            Ok(preview) => ready(
+                kind,
+                &reference,
+                &[],
+                Drawn {
+                    library_path: String::new(),
+                    from_kicad_bundle: false,
+                    installed_library: false,
+                    cad_item_revision: Some(stored.number),
+                    note: None,
+                },
+                &install,
+                preview,
+            ),
+            Err(_) => self.library_preview(request),
+        }
+    }
+
     /// Draws one library item with kicad-cli, through the preview cache.
     pub fn library_preview(&self, request: &LibraryItemRequest) -> PreviewOutcome {
         let kind = request.kind;

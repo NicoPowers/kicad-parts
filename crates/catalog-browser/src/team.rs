@@ -1129,6 +1129,48 @@ impl TeamCatalog {
         }))
     }
 
+    /// The Catalog's newest revision of the symbol or footprint
+    /// `reference`, to draw it as the Catalog has it; `None` when the
+    /// Catalog does not have it.
+    pub fn current_cad(
+        &self,
+        kind: PreviewKind,
+        reference: &str,
+    ) -> Result<Option<StoredCad>, TeamCadError> {
+        let client = self.client().map_err(|_| TeamCadError::SignedOut)?;
+        let item_kind = match kind {
+            PreviewKind::Symbol => CadItemKind::Symbol,
+            PreviewKind::Footprint => CadItemKind::Footprint,
+        };
+        let id = CadItemId::new(item_kind, reference);
+        let filter = format!("cad_item = {}", serde_json::Value::from(id.as_str()));
+        let Some(revision) = client
+            .list_records::<StoredCadItemRevision>("catalog_cad_item_revisions", &filter, "-number")
+            .map_err(unreachable)?
+            .into_iter()
+            .max_by_key(|revision| revision.number)
+        else {
+            return Ok(None);
+        };
+        let snapshot: CadItemDetails =
+            serde_json::from_str(&revision.snapshot).map_err(|_| TeamCadError::Mismatch {
+                reference: reference.to_owned(),
+                why: "its record cannot be read".into(),
+            })?;
+        let lib_ref =
+            LibRef::parse(reference).map_err(|error| TeamCadError::NotFound(error.to_string()))?;
+        Ok(Some(StoredCad {
+            item: StoredItem {
+                lib_ref,
+                blob_sha256: snapshot.blob_sha256,
+                format_version: snapshot.format_version,
+            },
+            alternates: Vec::new(),
+            number: revision.number,
+            blob: revision.blob,
+        }))
+    }
+
     /// Downloads a CAD item revision's stored bytes. The preview cache
     /// checks them against their SHA-256.
     pub fn stored_bytes(&self, cad: &StoredCad) -> Result<Vec<u8>, String> {

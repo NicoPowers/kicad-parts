@@ -621,6 +621,7 @@ pub fn AddPartView(
                     library: pick.library.clone(),
                     name: pick.name.clone(),
                 },
+                pick.use_as == PickUse::Catalog,
                 symbol_drawing,
                 symbol_busy,
                 symbol_draws,
@@ -661,6 +662,7 @@ pub fn AddPartView(
                     library: pick.library.clone(),
                     name: pick.name.clone(),
                 },
+                pick.use_as == PickUse::Catalog,
                 footprint_drawing,
                 footprint_busy,
                 footprint_draws,
@@ -883,6 +885,8 @@ pub fn AddPartView(
             if copied_footprint {
                 let no_models = form.no_models.get_untracked();
                 file.no_models = no_models;
+                // It is the first footprint choice.
+                file.choice = Some(0);
                 files.push(file);
                 if !no_models {
                     files.extend(found.model_files.iter().cloned());
@@ -900,9 +904,16 @@ pub fn AddPartView(
             known.as_deref(),
         )];
         for extra in &extras {
+            // Each copy names the choice it is for, counted as the field
+            // lists them (a blank first choice is left out).
+            let choice = footprints
+                .iter()
+                .filter(|reference| !reference.is_empty())
+                .count();
             footprints.push(extra.reference());
             if let (PickUse::Copy, Some(mut file)) = (extra.pick.use_as, extra.pick.file.clone()) {
                 file.no_models = extra.no_models;
+                file.choice = Some(choice);
                 files.push(file);
                 if !extra.no_models {
                     files.extend(extra.pick.models.iter().cloned());
@@ -993,6 +1004,27 @@ pub fn AddPartView(
             }
         });
     };
+
+    // What is said about a chosen item and stops the save turns Save off:
+    // its problems, and a copied footprint's unreadable 3D models unless No
+    // 3D model is chosen.
+    let blocked = Memo::new(move |_| {
+        let no_models = form.no_models.get();
+        let chosen = form.reading.with(|reading| {
+            reading.as_ref().is_some_and(|reading| {
+                reading.picks.iter().any(|pick| {
+                    !pick_problems(pick, pick.kind == PreviewKind::Footprint && no_models)
+                        .is_empty()
+                })
+            })
+        });
+        chosen
+            || form.extras.with(|extras| {
+                extras
+                    .iter()
+                    .any(|extra| !pick_problems(&extra.pick, extra.no_models).is_empty())
+            })
+    });
 
     // Each new start from a library is read once.
     Effect::new(move |_| {
@@ -1091,11 +1123,16 @@ pub fn AddPartView(
                                 </p>
                             }
                         })}
+                        {move || blocked.get().then(|| view! {
+                            <p class="problem cad-blocked" id="add-blocked">
+                                "Save is off until what is said in Before you save or under Footprint is fixed."
+                            </p>
+                        })}
                         <div class="form-actions">
                             <button
                                 type="submit"
                                 class="primary"
-                                disabled=move || saving.get() || form.reading.with(Option::is_none)
+                                disabled=move || saving.get() || form.reading.with(Option::is_none) || blocked.get()
                             >
                                 {move || if saving.get() { "Saving…" } else { "Save" }}
                             </button>
@@ -1645,6 +1682,31 @@ fn DownloadForm(
             }
         })
     };
+    // Removing the first footprint makes the next choice the first: it is
+    // chosen for the footprint and the files are read again.
+    let remove_first = Callback::new(move |_: ()| {
+        let Some(next) = form.extras.with_untracked(|extras| extras.first().cloned()) else {
+            return;
+        };
+        form.extras.update(|extras| {
+            extras.remove(0);
+        });
+        let symbol = form
+            .reading
+            .with_untracked(|reading| reading.as_ref().and_then(|reading| reading.symbol));
+        if next.pick.use_as == PickUse::Copy {
+            form.footprint_library.set(next.library.clone());
+            form.offered_footprint_library
+                .set_value(next.library.clone());
+        }
+        form.choose(TeamPickRequest {
+            kind: PreviewKind::Footprint,
+            library: next.pick.library.clone(),
+            name: next.pick.name.clone(),
+        });
+        form.no_models.set(next.no_models);
+        read.run((symbol, None));
+    });
     let add_extra = Callback::new(move |pick: TeamPickRequest| {
         spawn_local(async move {
             match backend::team_pick(pick).await {
@@ -1757,6 +1819,12 @@ fn DownloadForm(
                         for_symbol=for_symbol
                         chose=choose(PreviewKind::Footprint)
                     />
+                    {move || form.extras.with(|extras| !extras.is_empty()).then(|| view! {
+                        <button type="button" class="file-remove" id="add-footprint-remove" on:click=move |_| remove_first.run(())>
+                            "Remove"
+                            <span class="visually-hidden">" the footprint"</span>
+                        </button>
+                    })}
                 </div>
                 {footprint_words}
                 {footprint_library}

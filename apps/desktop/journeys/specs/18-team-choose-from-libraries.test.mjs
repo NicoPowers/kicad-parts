@@ -170,6 +170,27 @@ describe('team catalog: choose symbols and footprints from the libraries', () =>
     await browser.execute(() => document.querySelector('.add-form fieldset:last-of-type').scrollIntoView({ block: 'start' }));
     await assertAccessible(browser, '70-team-add-part-from-kicad');
     await screenshot(browser, '70-team-add-part-from-kicad');
+    // A second footprint choice, then Remove on the first: the second
+    // becomes the first.
+    await click('#add-footprint-add');
+    await chooseInLibraries(browser, { group: 'kicad', library: 'Capacitor_SMD', name: 'C_0805_2012Metric' });
+    await browser.waitUntil(async () => (await valueOf('#add-footprint-2')) === 'Capacitor_SMD:C_0805_2012Metric', {
+      timeout: 30_000,
+      timeoutMsg: 'the second footprint choice was not added',
+    });
+    await click('#add-footprint-remove');
+    await browser.waitUntil(async () => (await valueOf('#add-footprint')) === 'Capacitor_SMD:C_0805_2012Metric', {
+      timeout: 30_000,
+      timeoutMsg: `the second choice did not become the first: ${await valueOf('#add-footprint')}`,
+    });
+    assert.equal(await browser.$('#add-footprint-2').isExisting(), false);
+    // And back to the 0603 footprint.
+    await click('#add-footprint-choose');
+    await chooseInLibraries(browser, { group: 'kicad', library: 'Capacitor_SMD', name: 'C_0603_1608Metric' });
+    await browser.waitUntil(async () => (await valueOf('#add-footprint')) === KICAD_FOOTPRINT, {
+      timeout: 30_000,
+      timeoutMsg: 'the footprint did not go back to the 0603',
+    });
     const value = await browser.execute(() => {
       const label = [...document.querySelectorAll('.add-form .edit-row label')].find((l) => l.textContent.trim() === 'Value');
       return label?.htmlFor ?? null;
@@ -207,6 +228,8 @@ describe('team catalog: choose symbols and footprints from the libraries', () =>
     // The library is one of ours, from a list, with the suggested one chosen.
     assert.equal(await valueOf('#edit-cad-library-1-1'), 'g-Capacitor_SMD');
     assert.equal(await textOf(browser, '#edit-cad-models-1-1 option:checked'), 'Copy its 3D model (C_0603_Mine.step)');
+    // Every file copied is listed with the link it comes from.
+    assert.equal(await textOf(browser, '#edit-cad-models-1-1-list'), 'Copies C_0603_Mine.step, from ${MY_LIBS}/models/C_0603_Mine.step');
     await browser.waitUntil(
       async () => browser.execute(() => [...document.querySelectorAll('.edit-form .file-preview img')].some((img) => img.complete && img.naturalWidth > 0)),
       { timeout: 60_000, interval: 100, timeoutMsg: 'the copied footprint was never drawn' },

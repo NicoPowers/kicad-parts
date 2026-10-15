@@ -33,6 +33,7 @@ pub mod command {
     pub const LIBRARY_PREVIEW: &str = "library_preview";
     pub const TEAM_PICK: &str = "team_pick";
     pub const OUR_LIBRARIES: &str = "our_libraries";
+    pub const TEAM_ITEM_PREVIEW: &str = "team_item_preview";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

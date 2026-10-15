@@ -49,10 +49,12 @@ pub(crate) fn noun(kind: PreviewKind) -> &'static str {
 /// A drawing being made or made, as [`crate::team::FilePreview`] shows it.
 pub(crate) type Drawing = RwSignal<Option<Result<PreviewOutcome, String>>>;
 
-/// Draws the library item `pick` into `drawing`; only the newest drawing
-/// asked for through `draws` is shown.
+/// Draws the library item `pick` into `drawing`, as the Catalog has it
+/// when `catalog`; only the newest drawing asked for through `draws` is
+/// shown.
 pub(crate) fn draw_item(
     pick: &TeamPickRequest,
+    catalog: bool,
     drawing: Drawing,
     busy: RwSignal<bool>,
     draws: StoredValue<u64>,
@@ -67,7 +69,11 @@ pub(crate) fn draw_item(
         selection: None,
     };
     spawn_local(async move {
-        let result = backend::library_preview(request).await;
+        let result = if catalog {
+            backend::team_item_preview(request).await
+        } else {
+            backend::library_preview(request).await
+        };
         if draws.try_get_value() == Some(asked) {
             busy.set(false);
             drawing.set(Some(result));
@@ -198,17 +204,49 @@ pub(crate) fn CopyModels(
             "Copy its 3D models".to_owned()
         };
         let label_for = id.clone();
+        let list_id = format!("{id}-list");
+        let described = list_id.clone();
+        // Every file that would be copied, named by its link as written, so
+        // the person sees exactly what goes to the team server.
+        let files: Vec<(String, String)> = pick
+            .models
+            .iter()
+            .map(|model| {
+                let link = model
+                    .installed
+                    .as_ref()
+                    .and_then(|installed| installed.link.clone())
+                    .unwrap_or_default();
+                (model.file_name.clone(), link)
+            })
+            .collect();
         view! {
             <div class="file-symbol cad-models">
                 <label for=label_for>"3D model"</label>
                 <select
                     id=id
+                    aria-describedby=described
                     on:change:target=move |event| changed.run(event.target().value() == "none")
                 >
                     <option value="copy" selected=move || !no_models.get()>{copy}</option>
                     <option value="none" selected=move || no_models.get()>"No 3D model"</option>
                 </select>
             </div>
+            <ul class="cad-model-list" id=list_id>
+                {move || if no_models.get() {
+                    view! { <li>"No 3D model is copied."</li> }.into_any()
+                } else if files.is_empty() {
+                    view! { <li>"No 3D model can be copied."</li> }.into_any()
+                } else {
+                    files
+                        .iter()
+                        .map(|(name, link)| view! {
+                            <li>{format!("Copies {name}, from {link}")}</li>
+                        })
+                        .collect_view()
+                        .into_any()
+                }}
+            </ul>
         }
     })
 }

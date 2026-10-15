@@ -272,6 +272,11 @@ pub async fn team_pick(request: TeamPickRequest) -> Result<TeamPick, String> {
     call(command::TEAM_PICK, &PickArgs { request }).await
 }
 
+/// One of our items drawn as the Catalog has it.
+pub async fn team_item_preview(request: LibraryItemRequest) -> Result<PreviewOutcome, String> {
+    call(command::TEAM_ITEM_PREVIEW, &LibraryItemArgs { request }).await
+}
+
 /// Our libraries' nicknames, by role.
 pub async fn our_libraries() -> Result<OurLibraries, String> {
     call(command::OUR_LIBRARIES, &NoArgs {}).await

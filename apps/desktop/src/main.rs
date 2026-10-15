@@ -342,6 +342,16 @@ async fn team_pick(
 }
 
 #[tauri::command]
+async fn team_item_preview(
+    browser: State<'_, Browser>,
+    team: State<'_, Team>,
+    request: LibraryItemRequest,
+) -> Result<PreviewOutcome, String> {
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    blocking(move || browser.catalog_item_preview(&request, &team)).await
+}
+
+#[tauri::command]
 async fn our_libraries(browser: State<'_, Browser>) -> Result<OurLibraries, String> {
     let browser = browser.inner().clone();
     blocking(move || browser.our_libraries()).await
@@ -551,6 +561,7 @@ fn main() {
             team_edit,
             team_pick,
             our_libraries,
+            team_item_preview,
             team_archive,
             team_csv_review,
             team_read_file,
@@ -682,6 +693,7 @@ mod tests {
             command::LIBRARY_PREVIEW,
             command::TEAM_PICK,
             command::OUR_LIBRARIES,
+            command::TEAM_ITEM_PREVIEW,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

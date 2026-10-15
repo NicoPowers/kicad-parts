@@ -124,7 +124,14 @@ fn sync(ui: TeamUi, symbol: Option<Rows>, footprints: Option<Rows>) {
     let mut files = Vec::new();
     let mut unchosen = None;
     let mut collect = |rows: &[Row], kind: PreviewKind| {
+        // A copy names the footprint choice it is for, counted as the field
+        // lists them (blank choices are left out).
+        let mut at = 0;
         for row in rows {
+            let position = at;
+            if !row.reference.trim().is_empty() {
+                at += 1;
+            }
             if let Change::File(choice) = &row.change {
                 if choice.library.is_empty() && unchosen.is_none() {
                     unchosen = Some(format!(
@@ -136,6 +143,8 @@ fn sync(ui: TeamUi, symbol: Option<Rows>, footprints: Option<Rows>) {
                 let mut file = choice.file.clone();
                 file.replaces = Some(row.before.clone());
                 file.no_models = choice.copy.is_some() && choice.no_models;
+                file.choice =
+                    (kind == PreviewKind::Footprint && choice.copy.is_some()).then_some(position);
                 files.push(file);
                 if let Some(copy) = choice.copy.as_ref().filter(|_| !choice.no_models) {
                     files.extend(copy.models.iter().cloned());
@@ -172,6 +181,22 @@ fn sync(ui: TeamUi, symbol: Option<Rows>, footprints: Option<Rows>) {
         draft.files = files;
         draft.unchosen_library = unchosen;
     });
+    // What is said under a choice and stops the save turns Save off.
+    let stops = |rows: Option<Rows>| {
+        rows.is_some_and(|rows| {
+            rows.rows.with_untracked(|list| {
+                list.iter().any(|row| match &row.change {
+                    Change::None => false,
+                    Change::Pick(pick) => !pick.problems.is_empty(),
+                    Change::File(choice) => choice
+                        .copy
+                        .as_ref()
+                        .is_some_and(|copy| !pick_problems(copy, choice.no_models).is_empty()),
+                })
+            })
+        })
+    };
+    ui.cad_blocked.set(stops(symbol) || stops(footprints));
 }
 
 /// The Symbol and Footprint of Edit part, from the draft. `before` holds
@@ -261,77 +286,80 @@ pub(crate) fn CadFields(ui: TeamUi, ipn: String, before: Vec<(String, String)>) 
         let Some(rows) = rows else { return };
         let kind = file_kind(rows.kind);
         for file in draft.files.iter().filter(|file| file.kind == kind) {
-            let name = file.symbol.clone();
-            // A symbol file goes with the symbol; a downloaded footprint file
-            // with the first choice; a copied footprint with the choice named
-            // like its file, as KiCad names a footprint's file.
-            let wanted = match kind {
-                FileKind::Footprint if file.installed.is_none() => None,
-                FileKind::Footprint => file.file_name.strip_suffix(".kicad_mod").map(str::to_owned),
-                _ => name.clone(),
-            };
+            // A symbol file goes with the symbol; a copied footprint with
+            // the choice it was chosen for; a downloaded footprint file with
+            // the first choice.
             let row = rows.rows.with_untracked(|list| {
-                list.iter()
-                    .find(|row| {
-                        wanted
-                            .as_deref()
-                            .is_some_and(|wanted| row.reference.rsplit(':').next() == Some(wanted))
-                    })
-                    .map(|row| row.key)
+                let named: Vec<&Row> = list
+                    .iter()
+                    .filter(|row| !row.reference.trim().is_empty())
+                    .collect();
+                file.choice
+                    .filter(|_| kind == FileKind::Footprint)
+                    .and_then(|at| named.get(at).map(|row| row.key))
+                    .or_else(|| list.first().map(|row| row.key))
             });
-            let Some(key) = row.or_else(|| {
-                rows.rows
-                    .with_untracked(|list| list.first().map(|row| row.key))
-            }) else {
+            let Some(key) = row else {
                 continue;
             };
-            let copy = file.installed.as_ref().map(|_| TeamPick {
-                kind: rows.kind,
-                library: desktop_contract::LibraryKey {
-                    group: desktop_contract::LibraryGroup::Installed,
-                    nickname: file
-                        .installed
-                        .as_ref()
-                        .map(|installed| installed.library.clone())
-                        .unwrap_or_default(),
-                },
-                name: String::new(),
-                reference: String::new(),
-                use_as: PickUse::Copy,
-                file: Some(file.clone()),
-                models: draft
-                    .files
-                    .iter()
-                    .filter(|model| {
-                        model.kind == FileKind::Model3d
-                            && model
-                                .installed
-                                .as_ref()
-                                .is_some_and(|installed| installed.link.is_some())
-                    })
-                    .cloned()
-                    .collect(),
-                model_problems: Vec::new(),
-                problems: Vec::new(),
-                notes: Vec::new(),
-            });
             let model_files: Vec<TeamFile> = draft
                 .files
                 .iter()
                 .filter(|model| model.model_key.is_some())
                 .cloned()
                 .collect();
-            read_file(
-                ui,
-                ipn.clone(),
-                rows,
-                key,
-                file.clone(),
-                copy,
-                true,
-                model_files,
-                changed,
-            );
+            let Some(installed) = file.installed.clone() else {
+                read_file(
+                    ui,
+                    ipn.clone(),
+                    rows,
+                    key,
+                    file.clone(),
+                    None,
+                    true,
+                    model_files,
+                    false,
+                    changed,
+                );
+                continue;
+            };
+            // A copy is chosen again, so its 3D models and problems are
+            // known again; the file sent before is kept, with No 3D model
+            // if it was chosen.
+            let name = match kind {
+                FileKind::Symbol => file.symbol.clone().unwrap_or_default(),
+                _ => file
+                    .file_name
+                    .strip_suffix(".kicad_mod")
+                    .unwrap_or(&file.file_name)
+                    .to_owned(),
+            };
+            let request = TeamPickRequest {
+                kind: rows.kind,
+                library: desktop_contract::LibraryKey {
+                    group: desktop_contract::LibraryGroup::Installed,
+                    nickname: installed.library,
+                },
+                name,
+            };
+            let file = file.clone();
+            let ipn = ipn.clone();
+            spawn_local(async move {
+                let fresh = backend::team_pick(request).await.ok();
+                let (copy, no_models) = restored_copy(&file, fresh, rows.kind);
+                read_file(
+                    ui,
+                    ipn,
+                    rows,
+                    key,
+                    file,
+                    Some(copy),
+                    true,
+                    model_files,
+                    no_models,
+                    changed,
+                );
+            });
         }
     };
     restore(symbol);
@@ -347,6 +375,48 @@ pub(crate) fn CadFields(ui: TeamUi, ipn: String, before: Vec<(String, String)>) 
     }
 }
 
+/// The copy a file restored after a conflict stands for, and whether No 3D
+/// model was chosen for it. `fresh` is the item chosen again, whose 3D
+/// models and problems are current; without it (the library is gone, say)
+/// its 3D models cannot be known, which stops the save unless No 3D model
+/// is chosen.
+pub(crate) fn restored_copy(
+    file: &TeamFile,
+    fresh: Option<TeamPick>,
+    kind: PreviewKind,
+) -> (TeamPick, bool) {
+    let library = file
+        .installed
+        .as_ref()
+        .map(|installed| installed.library.clone())
+        .unwrap_or_default();
+    let mut copy = fresh
+        .filter(|pick| pick.use_as == PickUse::Copy)
+        .unwrap_or_else(|| TeamPick {
+            kind,
+            library: desktop_contract::LibraryKey {
+                group: desktop_contract::LibraryGroup::Installed,
+                nickname: library.clone(),
+            },
+            name: String::new(),
+            reference: String::new(),
+            use_as: PickUse::Copy,
+            file: None,
+            models: Vec::new(),
+            model_problems: if kind == PreviewKind::Footprint {
+                vec![format!(
+                    "Its 3D models could not be read again from the installed library {library}. Choose it again, or choose No 3D model."
+                )]
+            } else {
+                Vec::new()
+            },
+            problems: Vec::new(),
+            notes: Vec::new(),
+        });
+    copy.file = Some(file.clone());
+    (copy, file.no_models)
+}
+
 /// Reads `file` for the row `key` of `rows` and makes it the row's change;
 /// `keep_library` keeps the library the row's reference names (a file
 /// chosen before), otherwise the one suggested.
@@ -360,6 +430,7 @@ fn read_file(
     copy: Option<TeamPick>,
     keep_library: bool,
     model_files: Vec<TeamFile>,
+    no_models: bool,
     changed: Callback<()>,
 ) {
     let Some(row) = rows.row(key) else { return };
@@ -411,7 +482,7 @@ fn read_file(
                 })
                 .collect(),
             copy,
-            no_models: false,
+            no_models,
         };
         rows.set(key, |row| {
             row.reference = choice.reference();
@@ -509,6 +580,7 @@ fn choose(
                     Some(pick),
                     false,
                     Vec::new(),
+                    false,
                     changed,
                 );
             }
@@ -581,6 +653,7 @@ fn RowView(
                     library: pick.library.clone(),
                     name: pick.name.clone(),
                 },
+                pick.use_as == PickUse::Catalog,
                 drawing,
                 drawing_busy,
                 draws,
@@ -654,7 +727,18 @@ fn RowView(
                             no_models: false,
                             choice: None,
                         };
-                        read_file(ui, ipn, rows, key, file, None, false, Vec::new(), changed);
+                        read_file(
+                            ui,
+                            ipn,
+                            rows,
+                            key,
+                            file,
+                            None,
+                            false,
+                            Vec::new(),
+                            false,
+                            changed,
+                        );
                     }
                     Ok(None) => {}
                     Err(message) => ui.cad_problem.set(Some((kind, key, message))),
@@ -915,6 +999,62 @@ fn ModelFileInput(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn copied_file(no_models: bool) -> TeamFile {
+        TeamFile {
+            kind: FileKind::Footprint,
+            file_name: "C_0603_Lost.kicad_mod".into(),
+            base64: String::new(),
+            symbol: None,
+            model_key: None,
+            replaces: None,
+            label: None,
+            installed: Some(desktop_contract::InstalledFile {
+                library: "MyFootprints".into(),
+                path: "C_0603_Lost.kicad_mod".into(),
+                link: None,
+            }),
+            no_models,
+            choice: Some(1),
+        }
+    }
+
+    #[test]
+    fn a_copy_restored_after_a_conflict_keeps_no_3d_model_and_its_problems() {
+        // Saved with No 3D model: still so, and its unreadable model is
+        // known again, so the choice to copy it can be made again.
+        let fresh = TeamPick {
+            kind: PreviewKind::Footprint,
+            library: desktop_contract::LibraryKey {
+                group: desktop_contract::LibraryGroup::Installed,
+                nickname: "MyFootprints".into(),
+            },
+            name: "C_0603_Lost".into(),
+            reference: "MyFootprints:C_0603_Lost".into(),
+            use_as: PickUse::Copy,
+            file: None,
+            models: Vec::new(),
+            model_problems: vec!["Its 3D model ${MY_LIBS}/gone.step could not be read".into()],
+            problems: Vec::new(),
+            notes: Vec::new(),
+        };
+        let (copy, no_models) =
+            restored_copy(&copied_file(true), Some(fresh), PreviewKind::Footprint);
+        assert!(no_models);
+        assert_eq!(copy.file, Some(copied_file(true)), "the file sent is kept");
+        assert_eq!(copy.model_problems.len(), 1);
+        assert!(
+            pick_problems(&copy, no_models).is_empty(),
+            "it can be saved again"
+        );
+        assert_eq!(pick_problems(&copy, false).len(), 1);
+        // The library is gone: its 3D models are not known, which stops
+        // the save until No 3D model is chosen.
+        let (copy, no_models) = restored_copy(&copied_file(false), None, PreviewKind::Footprint);
+        assert!(!no_models);
+        assert_eq!(pick_problems(&copy, false).len(), 1, "{copy:?}");
+        assert!(pick_problems(&copy, true).is_empty());
+    }
 
     #[test]
     fn a_files_reference_is_its_own_name_in_the_library_chosen() {
