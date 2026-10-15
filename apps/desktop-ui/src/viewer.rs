@@ -128,25 +128,38 @@ pub(crate) fn Viewer(
     #[prop(optional)] enlarge: Option<Callback<()>>,
 ) -> impl IntoView {
     // None while the drawing is on its way.
-    let loaded = RwSignal::new(None::<Option<Arc<FootprintDrawing>>>);
+    // With the drawing, why there is none when one was asked for.
+    let loaded = RwSignal::new(None::<(Option<Arc<FootprintDrawing>>, Option<String>)>);
     match picture.drawing_key.clone() {
         Some(key) => spawn_local(async move {
-            let drawing = backend::footprint_drawing(&key).await.ok().flatten();
-            loaded.try_set(Some(drawing.map(Arc::new)));
+            let got = match backend::footprint_drawing(&key).await {
+                Ok(Some(drawing)) => (Some(Arc::new(drawing)), None),
+                Ok(None) => (
+                    None,
+                    Some("The layers could not be loaded: the footprint file is no longer in the app's cache, or cannot be read. This is kicad-cli's drawing.".to_owned()),
+                ),
+                Err(why) => (
+                    None,
+                    Some(format!("The layers could not be loaded: {why}. This is kicad-cli's drawing.")),
+                ),
+            };
+            loaded.try_set(Some(got));
         }),
-        None => loaded.set(Some(None)),
+        None => loaded.set(Some((None, None))),
     }
-    move || match loaded.get() {
+    move || {
+        match loaded.get() {
         None => view! {
             <div class="viewer" data-ready="false">
                 <p class="loading" aria-busy="true">"Drawing the layers…"</p>
             </div>
         }
         .into_any(),
-        Some(drawing) => view! {
-            <DrawingView picture=picture.clone() drawing=drawing layers=layers enlarge=enlarge />
+        Some((drawing, problem)) => view! {
+            <DrawingView picture=picture.clone() drawing=drawing problem=problem layers=layers enlarge=enlarge />
         }
         .into_any(),
+    }
     }
 }
 
@@ -156,6 +169,8 @@ pub(crate) fn Viewer(
 fn DrawingView(
     picture: Picture,
     drawing: Option<Arc<FootprintDrawing>>,
+    /// Why the footprint's own drawing is missing, when it is.
+    problem: Option<String>,
     layers: bool,
     enlarge: Option<Callback<()>>,
 ) -> impl IntoView {
@@ -420,6 +435,7 @@ fn DrawingView(
                     {svg}
                 </div>
                 <p id=help_id class="visually-hidden">{instructions}</p>
+                {problem.map(|problem| view! { <p class="viewer-note viewer-problem">{problem}</p> })}
             </div>
             {layer_list}
         </div>

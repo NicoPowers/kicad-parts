@@ -5,6 +5,8 @@
 // A symbol keeps kicad-cli's drawing and stays sharp when zoomed.
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import {
   FOOTPRINT,
@@ -91,9 +93,10 @@ function near(a, b, tolerance, message) {
 
 describe('drawing close-up', () => {
   let browser;
+  let dataDir;
 
   before(async () => {
-    ({ browser } = await launchApp());
+    ({ browser, dataDir } = await launchApp());
   });
 
   after(async () => {
@@ -291,5 +294,26 @@ describe('drawing close-up', () => {
     await screenshot(browser, '76-symbol-zoomed');
     await (await browser.$(`${dialog} .zoom-header button`)).click();
     await browser.waitUntil(async () => !(await isOpen(browser, dialog)), { timeout: 5_000, timeoutMsg: 'Close did not close the close-up' });
+  });
+
+  it("says when the layers cannot be loaded, and shows kicad-cli's drawing", async () => {
+    // The footprint file the drawing is read from is gone from the cache.
+    fs.rmSync(path.join(dataDir, 'cache', 'previews', 'v2'), { recursive: true, force: true });
+    await (await browser.$(`${FOOTPRINT} figure button`)).click();
+    await browser.waitUntil(async () => isOpen(browser, CLOSE_UP), { timeout: 5_000, timeoutMsg: 'the close-up did not open' });
+    await waitForDrawing(browser, CLOSE_UP);
+    const shown = await browser.execute((s) => {
+      const viewer = document.querySelector(`${s} .viewer`);
+      return {
+        problem: viewer.querySelector('.viewer-problem')?.textContent ?? null,
+        image: viewer.querySelector('svg image') !== null,
+        layers: viewer.querySelectorAll('.viewer-layers').length,
+      };
+    }, CLOSE_UP);
+    assert.match(shown.problem ?? '', /^The layers could not be loaded: /);
+    assert.equal(shown.image, true);
+    assert.equal(shown.layers, 0);
+    await browser.keys('Escape');
+    await browser.waitUntil(async () => !(await isOpen(browser, CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
   });
 });
