@@ -508,6 +508,39 @@ function uploadLibrary(upload, which, role, reference, bytes, sha256) {
   return { path: expected, byteSha256: library.byteSha256, commit: library.commit, byteRange: byteRange };
 }
 
+// The `source` of CAD item revisions copied from another of the person's
+// installed KiCad libraries (kicad-parts-bc6f): not ours and not KiCad's
+// own, so teammates may not have it. Like a download, it is CAD made in the
+// app, so a later CSV import never counts it as imported. Its Source names
+// the library's nickname and the file it was read from.
+const INSTALLED_SOURCE = "installed";
+
+// Where an upload says it was copied from in an installed library:
+// { library, path }, or null when it says nothing. Only the words are
+// checked (the server cannot see the person's computer); the bytes it
+// stores are checked as for any upload.
+function uploadInstalled(upload, which, role, reference) {
+  const installed = upload.installed;
+  if (installed === undefined || installed === null) {
+    return null;
+  }
+  if (typeof installed !== "object" || Array.isArray(installed)) {
+    fail(`${which} must say where it was copied from as an object`);
+  }
+  if (upload.library !== undefined && upload.library !== null) {
+    fail(`the ${role} ${reference} cannot come both from our libraries and from an installed library`);
+  }
+  const plain = (text, longest) =>
+    typeof text === "string" && trimSpace(text).length > 0 && text.length <= longest && !CONTROL_CHARACTER.test(text);
+  if (!plain(installed.library, 255)) {
+    fail(`the ${role} ${reference} needs the nickname of the installed library it was copied from, of at most 255 characters`);
+  }
+  if (!plain(installed.path, 1000)) {
+    fail(`the ${role} ${reference} needs the file it was copied from, of at most 1000 characters`);
+  }
+  return { library: installed.library, path: installed.path };
+}
+
 // What the Source of a revision read from our libraries holds, for
 // filters: CSV imports treat such revisions as imported, not made in the app.
 const LIBRARY_SOURCE_MARK = '"source":"library"';
@@ -526,6 +559,9 @@ function hashedUpload(upload) {
   const hashed = [upload.role, upload.reference, upload.fileName, upload.formatVersion, upload.sha256];
   if (upload.library) {
     hashed.push([upload.library.path, upload.library.byteSha256, upload.library.commit, upload.library.byteRange]);
+  }
+  if (upload.installed) {
+    hashed.push(["installed", upload.installed.library, upload.installed.path]);
   }
   return hashed;
 }
@@ -606,6 +642,7 @@ function editUploads(list) {
       bytes: bytes,
       sha256: sha256,
       library: uploadLibrary(upload, which, role, reference, bytes, sha256),
+      installed: uploadInstalled(upload, which, role, reference),
     };
   });
   const seen = {};
@@ -2025,6 +2062,7 @@ function saveNewCadItemRevisions(txApp, entries, changeId, source) {
     made.set("snapshot", entry.snapshot);
     made.set("license", UNKNOWN_LICENSE);
     const library = entry.upload.library;
+    const installed = entry.upload.installed;
     made.set(
       "source",
       JSON.stringify(
@@ -2038,7 +2076,15 @@ function saveNewCadItemRevisions(txApp, entries, changeId, source) {
               byte_range: library.byteRange,
               file_name: entry.upload.fileName,
             }
-          : { schema: SOURCE_SCHEMA, source: source, file_name: entry.upload.fileName },
+          : installed
+            ? {
+                schema: SOURCE_SCHEMA,
+                source: INSTALLED_SOURCE,
+                library: installed.library,
+                path: installed.path,
+                file_name: entry.upload.fileName,
+              }
+            : { schema: SOURCE_SCHEMA, source: source, file_name: entry.upload.fileName },
       ),
     );
     txApp.save(made);

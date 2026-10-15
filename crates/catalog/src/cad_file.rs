@@ -112,6 +112,7 @@ pub fn symbol_upload(
         format_version: Some(version),
         bytes: bytes[entry.span.clone()].to_vec(),
         library: None,
+        installed: None,
     })
 }
 
@@ -153,6 +154,7 @@ pub fn footprint_upload(
         format_version: None,
         bytes: bytes.to_vec(),
         library: None,
+        installed: None,
     })
 }
 
@@ -174,6 +176,7 @@ pub fn model_upload(bytes: &[u8], key: &str, file_name: &str) -> Result<CadUploa
         format_version: None,
         bytes: bytes.to_vec(),
         library: None,
+        installed: None,
     })
 }
 

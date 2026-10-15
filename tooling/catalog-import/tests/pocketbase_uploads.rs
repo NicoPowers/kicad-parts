@@ -455,6 +455,174 @@ fn a_footprint_names_its_3d_model_which_is_sent_or_the_edit_is_refused() {
     assert_eq!(last.blob(&stored_model.blob).unwrap().bytes, model);
 }
 
+/// A footprint and its 3D model copied from another installed KiCad library
+/// (kicad-parts-bc6f) are saved like a download, and each Source names the
+/// installed library and the file, never "library" (our repository), so a
+/// later import does not count them as imported. Wrong words about where
+/// a file came from are refused plainly, and nothing is written.
+#[test]
+fn files_copied_from_an_installed_library_record_where_they_came_from() {
+    let team = Team::start();
+    let editor = team.member("Ada Editor", true);
+    let before = team.read();
+    let footprint = String::from_utf8(team.file(FOOTPRINT_FILE))
+        .unwrap()
+        .replacen(
+            "(footprint \"R_0603_1608Metric\"",
+            "(footprint \"R_Copied\"",
+            1,
+        )
+        .replace(
+            "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+            "${GITPLM_PARTS}/3d-models/g-Resistor_SMD.3dshapes/R_Copied.step",
+        );
+    let key = "3d-models/g-Resistor_SMD.3dshapes/R_Copied.step";
+    let reference = "g-Resistor_SMD:R_Copied";
+    let footprint_path = r"D:\KiCad\Mine.pretty\R_Copied.kicad_mod";
+    let model_path = r"D:\KiCad\models\R_Copied.step";
+    let installed = |path: &str| {
+        Some(catalog::pocketbase::InstalledSource {
+            library: "My Footprints".into(),
+            path: path.into(),
+        })
+    };
+    let mut upload =
+        footprint_upload(footprint.as_bytes(), reference, "R_Copied.kicad_mod").unwrap();
+    upload.installed = installed(footprint_path);
+    let mut model =
+        model_upload(b"ISO-10303-21;\nEND-ISO-10303-21;\n", key, "R_Copied.step").unwrap();
+    model.installed = installed(model_path);
+
+    // Wrong words about where a file came from.
+    let (number, revision) = current_revision(&before, IPN);
+    let fields: Vec<Value> = revision
+        .cad_fields
+        .iter()
+        .map(|field| {
+            let value = if field.name == "Footprint" {
+                reference
+            } else {
+                field.value.as_str()
+            };
+            json!({ "name": field.name, "value": value })
+        })
+        .collect();
+    let send = |installed: Value, library: Option<Value>| {
+        let mut upload = json!({
+            "role": "footprint",
+            "reference": reference,
+            "fileName": "R_Copied.kicad_mod",
+            "text": footprint,
+            "installed": installed,
+        });
+        if let Some(library) = library {
+            upload["library"] = library;
+        }
+        let body = json!({
+            "correlationId": format!("installed-{}", catalog::sha256_hex(upload.to_string())),
+            "reason": "Copy my footprint",
+            "ipn": IPN,
+            "cad": { "expectedRevision": number, "fields": fields, "uploads": [upload] },
+        });
+        editor
+            .post_json(EDIT_ROUTE, &body)
+            .and_then(|reply| -> Result<(), CollabError> {
+                reply.success()?;
+                panic!("expected a refusal, got {}", reply.body)
+            })
+    };
+    let ours = json!({
+        "path": "footprints/g-Resistor_SMD.pretty/R_Copied.kicad_mod",
+        "byteSha256": catalog::sha256_hex(footprint.as_bytes()),
+        "commit": "a".repeat(40),
+    });
+    let cases = [
+        (
+            json!("My Footprints"),
+            None,
+            "must say where it was copied from as an object",
+        ),
+        (
+            json!({ "library": "", "path": "x" }),
+            None,
+            "needs the nickname of the installed library",
+        ),
+        (
+            json!({ "library": "Mine\u{7}", "path": "x" }),
+            None,
+            "needs the nickname of the installed library",
+        ),
+        (
+            json!({ "library": "Mine", "path": "a\nb" }),
+            None,
+            "needs the file it was copied from",
+        ),
+        (
+            json!({ "library": "Mine", "path": "x".repeat(1001) }),
+            None,
+            "needs the file it was copied from",
+        ),
+        (
+            json!({ "library": "Mine", "path": "x" }),
+            Some(ours),
+            "both from our libraries and from an installed library",
+        ),
+    ];
+    for (installed, library, says) in cases {
+        match send(installed, library) {
+            Err(CollabError::Http {
+                status: 400,
+                message,
+            }) => assert!(message.contains(says), "{says}: {message}"),
+            other => panic!("expected 400 saying {says:?}, got {other:?}"),
+        }
+    }
+    assert!(team.read() == before, "nothing was written");
+
+    let reply = submit_edit(
+        &editor,
+        &cad_edit(
+            &before,
+            IPN,
+            &[("Footprint", reference)],
+            vec![upload, model],
+        ),
+    )
+    .unwrap();
+    applied(&reply);
+    let stored = team.read();
+    for (kind, key, path, file_name) in [
+        (
+            catalog::CadItemKind::Footprint,
+            reference,
+            footprint_path,
+            "R_Copied.kicad_mod",
+        ),
+        (
+            catalog::CadItemKind::Model3d,
+            key,
+            model_path,
+            "R_Copied.step",
+        ),
+    ] {
+        let item = catalog::CadItemId::new(kind, key);
+        let first = stored
+            .cad_item_revision(catalog::CadItemRevisionId::new(&item, 1).as_str())
+            .unwrap();
+        let source: Value = serde_json::from_str(&first.source).unwrap();
+        assert_eq!(
+            source,
+            json!({
+                "schema": "kicad-parts/source/1",
+                "source": "installed",
+                "library": "My Footprints",
+                "path": path,
+                "file_name": file_name,
+            })
+        );
+    }
+}
+
 /// The team server applies the library check's rule for 3D model links to
 /// every footprint file an edit sends, so an older app or a direct request
 /// cannot store a link that only works on one computer: KiCad's own and
@@ -759,6 +927,7 @@ fn wrong_or_unused_files_are_refused_plainly_and_nothing_is_written() {
         format_version: None,
         bytes: vec![b'x'; catalog::pocketbase::EDIT_BODY_LIMIT],
         library: None,
+        installed: None,
     };
     let error = submit_edit(&editor, &cad_edit(&before, IPN, &[], vec![big])).unwrap_err();
     assert!(error.to_string().contains("nothing was sent"), "{error}");

@@ -908,6 +908,22 @@ pub struct CadUpload {
     /// already there (Add part from our libraries, kicad-parts-37a7);
     /// `None` for a file chosen in the app.
     pub library: Option<LibrarySource>,
+    /// Where the file was copied from, for a symbol, footprint or 3D model
+    /// of another installed KiCad library (kicad-parts-bc6f); `None`
+    /// otherwise.
+    pub installed: Option<InstalledSource>,
+}
+
+/// Where an upload was copied from in one of the person's other installed
+/// KiCad libraries (not ours, not KiCad's own): the library's nickname and
+/// the file. Its Source says so, so a later CSV import never counts it as
+/// imported.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstalledSource {
+    /// The library's nickname in the person's KiCad library tables.
+    pub library: String,
+    /// The file it was read from, such as `D:\KiCad\Mine.pretty\X.kicad_mod`.
+    pub path: String,
 }
 
 /// Where an upload was read from in the CSV catalog's own libraries: the
@@ -936,6 +952,7 @@ impl std::fmt::Debug for CadUpload {
             .field("format_version", &self.format_version)
             .field("size", &self.bytes.len())
             .field("library", &self.library)
+            .field("installed", &self.installed)
             .finish()
     }
 }
@@ -958,6 +975,12 @@ impl CadUpload {
                 "byteSha256": library.byte_sha256,
                 "commit": library.commit,
                 "byteRange": library.byte_range,
+            });
+        }
+        if let Some(installed) = &self.installed {
+            body["installed"] = json!({
+                "library": installed.library,
+                "path": installed.path,
             });
         }
         match std::str::from_utf8(&self.bytes) {
