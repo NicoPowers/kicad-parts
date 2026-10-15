@@ -11,12 +11,16 @@
 //! The view is the SVG's `viewBox`, in drawing millimetres, shown with
 //! `xMidYMid meet`. So a view needs no size to be drawn; only zooming and
 //! moving read the element's size.
+//!
+//! A footprint's close-up also has a Measure tool (kicad-parts-e95e): two
+//! clicks measure between points, which snap to the active layer.
 
 use crate::{backend, bounds, show_modal};
 use desktop_contract::PreviewImage;
 use desktop_contract::drawing::{
     DrawnText, Edge, FootprintDrawing, PadKind, Point, Shape, TextAlign, circle_center,
 };
+use desktop_contract::measure::snap_points;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::collections::BTreeSet;
@@ -25,9 +29,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod markup;
+mod measure;
 mod view;
 
 use markup::*;
+use measure::*;
 use view::*;
 
 /// The closest zoom, in screen pixels per millimetre: enough to inspect a
@@ -196,6 +202,35 @@ fn DrawingView(
     let dim = RwSignal::new(false);
     // An SVG <image> loads in the background; the journeys wait for it.
     let ready = RwSignal::new(drawing.is_some());
+    // The Measure tool, in a footprint's close-up only.
+    let measurable = layers && drawing.is_some();
+    let measuring = RwSignal::new(false);
+    let mils = RwSignal::new(mils_chosen());
+    let start = RwSignal::new(None::<Mark>);
+    let end = RwSignal::new(None::<Mark>);
+    // The point under the pointer, or the one N picked.
+    let candidate = RwSignal::new(None::<Mark>);
+    // The index of the snap point N picked.
+    let highlight = RwSignal::new(None::<usize>);
+    let active_hidden = move || hidden.with(|hidden| active.with(|active| hidden.contains(active)));
+    let snaps = {
+        let drawing = drawing.clone();
+        Memo::new(move |_| {
+            let points = match &drawing {
+                Some(drawing) if measuring.get() && !active_hidden() => {
+                    active.with(|layer| snap_points(drawing, layer))
+                }
+                _ => Vec::new(),
+            };
+            Arc::new(points)
+        })
+    };
+    // A new layer has new snap points.
+    Effect::new(move |_| {
+        let _ = snaps.get();
+        highlight.set(None);
+        candidate.set(None);
+    });
 
     let size = move || {
         area.get_untracked()
@@ -216,6 +251,47 @@ fn DrawingView(
         if let Some((size, _)) = size() {
             view.update(|current| *current = panned(*current, size, dx, dy));
         }
+    };
+    // The mark at a screen position: a snap point near it, or a free one.
+    let mark_at_pixel = move |x: f64, y: f64, free: bool| {
+        let (size, (left, top)) = size()?;
+        let current = view.get_untracked();
+        let at = to_drawing(current, size, (x - left, y - top));
+        Some(snaps.with_untracked(|points| mark_at(points, at, scale(current, size), free)))
+    };
+    // A click or Enter sets the start, then the end, then starts again.
+    let place = move |mark: Mark| {
+        if start.get_untracked().is_none() || end.get_untracked().is_some() {
+            start.set(Some(mark));
+            end.set(None);
+        } else {
+            end.set(Some(mark));
+        }
+    };
+    let clear_measurement = move || {
+        start.set(None);
+        end.set(None);
+        highlight.set(None);
+        candidate.set(None);
+    };
+    let toggle_measuring = move || {
+        clear_measurement();
+        measuring.update(|on| *on = !*on);
+    };
+    // N and Shift+N step through the snap points in reading order.
+    let step_highlight = move |back: bool| {
+        let count = snaps.with_untracked(|points| points.len());
+        if count == 0 {
+            return;
+        }
+        let next = match highlight.get_untracked() {
+            None if back => count - 1,
+            None => 0,
+            Some(at) if back => (at + count - 1) % count,
+            Some(at) => (at + 1) % count,
+        };
+        highlight.set(Some(next));
+        candidate.set(snaps.with_untracked(|points| points.get(next).copied().map(Mark::snapped)));
     };
 
     // The wheel zooms at the pointer. Leptos handles most events with one
@@ -275,8 +351,21 @@ fn DrawingView(
     });
 
     let on_pointer_down = move |event: leptos::ev::PointerEvent| {
-        // The left button and the middle button move the drawing.
+        // The left button and the middle button move the drawing. While
+        // measuring, the left button places a point instead.
         if event.button() != 0 && event.button() != 1 {
+            return;
+        }
+        if event.button() == 0 && measuring.get_untracked() {
+            let (x, y) = (f64::from(event.client_x()), f64::from(event.client_y()));
+            if let Some(mark) = mark_at_pixel(x, y, event.shift_key()) {
+                highlight.set(None);
+                candidate.set(Some(mark));
+                place(mark);
+            }
+            if let Some(element) = area.get_untracked() {
+                call(&element, "focus", &[]);
+            }
             return;
         }
         if event.button() == 1 {
@@ -319,6 +408,10 @@ fn DrawingView(
                 (x - left, y - top),
             )));
         }
+        if measuring.get_untracked() && drag.get_value().is_none() {
+            highlight.set(None);
+            candidate.set(mark_at_pixel(x, y, event.shift_key()));
+        }
     };
     let end_drag = move |event: leptos::ev::PointerEvent| {
         if drag
@@ -336,6 +429,13 @@ fn DrawingView(
         }
         let step = size().map_or(40.0, |(size, _)| size.0.min(size.1) * PAN_STEP);
         match event.key().as_str() {
+            "m" | "M" if measurable => toggle_measuring(),
+            "n" | "N" if measuring.get_untracked() => step_highlight(event.shift_key()),
+            "Enter" if measuring.get_untracked() && highlight.get_untracked().is_some() => {
+                if let Some(mark) = candidate.get_untracked() {
+                    place(mark);
+                }
+            }
             "+" | "=" => zoom_by(ZOOM_STEP, None),
             "-" | "_" => zoom_by(1.0 / ZOOM_STEP, None),
             "0" => view.set(fit),
@@ -351,8 +451,39 @@ fn DrawingView(
     let help_id = format!("{id}-help");
     let has_drawing = drawing.is_some();
     let footprint = picture.footprint;
+    let overlay = {
+        let drawing = drawing.clone();
+        Signal::derive(move || {
+            let Some(drawing) = &drawing else {
+                return String::new();
+            };
+            if !measuring.get() {
+                return String::new();
+            }
+            let current = view.get();
+            let scale = size().map_or(0.0, |(size, _)| scale(current, size));
+            let from = start.get();
+            // The end follows the pointer until it is set.
+            let to = end.get().or_else(|| from.and(candidate.get()));
+            let gap = match (from, to) {
+                (Some(from), Some(to)) => active
+                    .with(|layer| pads_gap(drawing, &from, &to, layer))
+                    .map(|(_, _, gap)| gap),
+                _ => None,
+            };
+            Overlay {
+                start: from,
+                end: to,
+                candidate: candidate.get(),
+                gap,
+                scale,
+                mils: mils.get(),
+            }
+            .markup()
+        })
+    };
     let svg = match drawing.clone() {
-        Some(drawing) => footprint_svg(drawing, view, active, hidden, dim).into_any(),
+        Some(drawing) => footprint_svg(drawing, view, active, hidden, dim, overlay).into_any(),
         None => {
             let [x, y, w, h] = picture.view_box.unwrap_or([0.0, 0.0, 100.0, 100.0]);
             view! {
@@ -377,12 +508,50 @@ fn DrawingView(
             .into_any()
         }
     };
-    let position = move || {
-        pointer
-            .get()
-            .map(|point| format!("X {} mm, Y {} mm", format_mm(point.x), format_mm(point.y)))
+    let position = {
+        let drawing = drawing.clone();
+        move || {
+            let mils = mils.get();
+            let mut text = format_position(pointer.get()?, mils);
+            // While measuring, also the point a click would snap to.
+            if let (Some(drawing), Some(mark)) = (&drawing, candidate.get()) {
+                if mark.snap.is_some() {
+                    let _ = write!(text, " \u{b7} {}", mark.name(drawing, mils));
+                }
+            }
+            Some(text)
+        }
     };
-    let instructions = if footprint {
+    let readout = {
+        let drawing = drawing.clone();
+        move || {
+            let drawing = drawing.as_ref()?;
+            if !measuring.get() {
+                return None;
+            }
+            let lines = active.with(|layer| {
+                Readout {
+                    drawing,
+                    layer,
+                    layer_hidden: active_hidden(),
+                    start: start.get(),
+                    end: end.get(),
+                    highlighted: highlight.get().and(candidate.get()),
+                    mils: mils.get(),
+                }
+                .lines()
+            });
+            Some(
+                lines
+                    .into_iter()
+                    .map(|line| view! { <p>{line}</p> })
+                    .collect_view(),
+            )
+        }
+    };
+    let instructions = if measurable {
+        "Scroll or press plus and minus to zoom. Drag, or use the arrow keys, to move the drawing. Press 0 to fit it. Press M to measure: click two points, or press N to step through the snap points and Enter to pick one. Escape clears the measurement."
+    } else if footprint {
         "Scroll or press plus and minus to zoom. Drag, or use the arrow keys, to move the drawing. Press 0 to fit it. The pointer's position is shown in millimetres."
     } else {
         "Scroll or press plus and minus to zoom. Drag, or use the arrow keys, to move the drawing. Press 0 to fit it."
@@ -397,6 +566,15 @@ fn DrawingView(
             class:viewer-footprint=footprint
             data-active-layer=move || has_drawing.then(|| active.get())
             data-ready=move || if ready.get() { "true" } else { "false" }
+            on:keydown=move |event: leptos::ev::KeyboardEvent| {
+                // Escape clears a measurement first; only then does it
+                // close the close-up.
+                if event.key() == "Escape" && start.get_untracked().is_some() {
+                    event.prevent_default();
+                    event.stop_propagation();
+                    clear_measurement();
+                }
+            }
         >
             <div class="viewer-main">
                 <div class="viewer-toolbar">
@@ -406,6 +584,29 @@ fn DrawingView(
                     {enlarge.map(|enlarge| view! {
                         <button type="button" class="viewer-enlarge" on:click=move |_| enlarge.run(())>"Enlarge"</button>
                     })}
+                    {measurable.then(|| view! {
+                        <button
+                            type="button"
+                            class="viewer-measure"
+                            aria-pressed=move || if measuring.get() { "true" } else { "false" }
+                            title="Measure between two points (M)"
+                            on:click=move |_| toggle_measuring()
+                        >
+                            "Measure"
+                        </button>
+                        <button
+                            type="button"
+                            class="viewer-units"
+                            title="Show lengths in millimetres or mils"
+                            on:click=move |_| {
+                                let next = !mils.get_untracked();
+                                choose_mils(next);
+                                mils.set(next);
+                            }
+                        >
+                            {move || if mils.get() { "Units: mils" } else { "Units: mm" }}
+                        </button>
+                    })}
                     {footprint.then(|| view! {
                         <span class="viewer-position" aria-hidden="true">{position}</span>
                     })}
@@ -414,6 +615,7 @@ fn DrawingView(
                     node_ref=area
                     class="viewer-area"
                     class:panning=move || dragging.get()
+                    class:measuring=move || measuring.get()
                     tabindex="0"
                     role="application"
                     aria-roledescription="drawing"
@@ -424,7 +626,12 @@ fn DrawingView(
                     on:pointerup=end_drag
                     on:pointercancel=end_drag
                     on:lostpointercapture=end_drag
-                    on:pointerleave=move |_| pointer.set(None)
+                    on:pointerleave=move |_| {
+                        pointer.set(None);
+                        if highlight.get_untracked().is_none() {
+                            candidate.set(None);
+                        }
+                    }
                     on:mousedown=move |event: leptos::ev::MouseEvent| {
                         if event.button() == 1 {
                             event.prevent_default();
@@ -434,6 +641,9 @@ fn DrawingView(
                 >
                     {svg}
                 </div>
+                {measurable.then(|| view! {
+                    <div class="viewer-readout" role="status" aria-live="polite">{readout}</div>
+                })}
                 <p id=help_id class="visually-hidden">{instructions}</p>
                 {problem.map(|problem| view! { <p class="viewer-note viewer-problem">{problem}</p> })}
             </div>
@@ -450,6 +660,7 @@ fn footprint_svg(
     active: RwSignal<String>,
     hidden: RwSignal<BTreeSet<String>>,
     dim: RwSignal<bool>,
+    overlay: Signal<String>,
 ) -> impl IntoView {
     let layers = drawing.layers.clone();
     let holes = holes_markup(&drawing);
@@ -487,6 +698,7 @@ fn footprint_svg(
                 }
             />
             <g class="holes" inner_html=holes></g>
+            <g class="measure" inner_html=move || overlay.get()></g>
         </svg>
     }
 }
@@ -528,7 +740,13 @@ fn LayerList(
                                         id=radio.clone()
                                         name=group.clone()
                                         prop:checked=move || active.get() == is_active
-                                        on:change=move |_| active.set(choose.clone())
+                                        on:change=move |_| {
+                                            // The active layer is always shown.
+                                            hidden.update(|hidden| {
+                                                hidden.remove(&choose);
+                                            });
+                                            active.set(choose.clone());
+                                        }
                                     />
                                     <span class="layer-swatch" style:background=color></span>
                                     <label for=radio>

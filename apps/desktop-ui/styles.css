@@ -750,6 +750,40 @@ a {
   border-color: #001023;
 }
 
+/* The Measure tool (kicad-parts-e95e): a crosshair while it is on, and
+   its readout under the drawing. */
+.viewer-area.measuring {
+  cursor: crosshair;
+}
+
+.viewer-area.measuring.panning {
+  cursor: grabbing;
+}
+
+.viewer-toolbar button[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* Room for four lines, so the drawing does not jump as the readout
+   changes. */
+.viewer-readout {
+  min-height: calc(4 * 1.45em);
+  margin-top: 0.4rem;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
+
+.viewer-readout:empty {
+  display: none;
+}
+
+.viewer-readout p {
+  margin: 0;
+}
+
 /* The drawing area takes the pointer, so thousands of shapes never need
    hit testing, and shapes zoomed past the area never cover the page. */
 .viewer-svg {
