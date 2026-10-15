@@ -206,18 +206,27 @@ pub fn pad_gap(drawing: &FootprintDrawing, a: usize, b: usize, layer: &str) -> O
             .filter_map(|shape| Region::of(&shape.shape))
             .collect()
     };
-    let first = regions(drawing.pads.get(a)?);
-    let second = regions(drawing.pads.get(b)?);
+    let (pad_a, pad_b) = (drawing.pads.get(a)?, drawing.pads.get(b)?);
+    let (first, second) = (regions(pad_a), regions(pad_b));
+    // Of equally short gaps, the one nearest halfway between the pads.
+    let near = middle(pad_a.center, pad_b.center);
     let mut best: Option<Gap> = None;
     for one in &first {
         for other in &second {
-            let gap = one.gap(other);
-            if best.is_none_or(|best| gap.distance < best.distance) {
+            let gap = one.gap(other, near);
+            if best.is_none_or(|best| shorter(gap, best, near)) {
                 best = Some(gap);
             }
         }
     }
     best
+}
+
+/// Whether gap `a` is shorter than `b`, or as short and nearer `near`.
+fn shorter(a: Gap, b: Gap, near: Point) -> bool {
+    const SAME: f64 = 1e-9;
+    let off = |gap: Gap| distance(middle(gap.from, gap.to), near);
+    a.distance < b.distance - SAME || (a.distance <= b.distance + SAME && off(a) < off(b) - SAME)
 }
 
 // ---- Snap points ---------------------------------------------------------
@@ -469,17 +478,32 @@ impl Region {
         (0..count).map(move |i| (self.path[i], self.path[(i + 1) % n]))
     }
 
-    fn gap(&self, other: &Region) -> Gap {
-        let mut best = (f64::MAX, Point::default(), Point::default());
+    /// The gap between two regions; of equally short ones, the one
+    /// nearest `near`.
+    fn gap(&self, other: &Region, near: Point) -> Gap {
+        let mut best: Option<Gap> = None;
         for (a0, a1) in self.pieces() {
             for (b0, b1) in other.pieces() {
                 let (d, p, q) = segment_distance(a0, a1, b0, b1);
-                if d < best.0 {
-                    best = (d, p, q);
+                let gap = Gap {
+                    distance: d,
+                    from: p,
+                    to: q,
+                };
+                if best.is_none_or(|best| shorter(gap, best, near)) {
+                    best = Some(gap);
                 }
             }
         }
-        let (d, p, q) = best;
+        let Gap {
+            distance: d,
+            from: p,
+            to: q,
+        } = best.unwrap_or(Gap {
+            distance: f64::MAX,
+            from: Point::default(),
+            to: Point::default(),
+        });
         let distance = d - self.grow - other.grow;
         // From each line out to its grown edge, towards the other.
         let toward = unit(sub(q, p));
@@ -610,6 +634,20 @@ fn contains(path: &[Point], p: Point) -> bool {
 fn segment_distance(a0: Point, a1: Point, b0: Point, b1: Point) -> (f64, Point, Point) {
     if let Some(p) = crossing(a0, a1, b0, b1) {
         return (0.0, p, p);
+    }
+    // Side by side, such as two pads' facing edges: the middle of the
+    // stretch where they face each other.
+    let (r, s) = (sub(a1, a0), sub(b1, b0));
+    let (rr, ss) = (dot(r, r), dot(s, s));
+    if rr > 0.0 && ss > 0.0 && cross(r, s).abs() <= 1e-12 * (rr * ss).sqrt() {
+        let (t0, t1) = (dot(sub(b0, a0), r) / rr, dot(sub(b1, a0), r) / rr);
+        let (low, high) = (t0.min(t1).max(0.0), t0.max(t1).min(1.0));
+        if low <= high {
+            let t = (low + high) / 2.0;
+            let p = Point::new(a0.x + t * r.x, a0.y + t * r.y);
+            let q = nearest_on(b0, b1, p);
+            return (distance(p, q), p, q);
+        }
     }
     let mut best = (f64::MAX, a0, b0);
     for (p, a, b, flip) in [

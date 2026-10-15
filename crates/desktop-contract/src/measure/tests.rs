@@ -421,6 +421,8 @@ fn gaps_between_rectangles_rounded_rectangles_circles_and_ovals() {
     let g = pad_gap(&d, 0, 1, "F.Cu").unwrap();
     assert!(close(g.distance, 0.85), "{g:?}");
     assert!(close(g.from.x, -0.425) && close(g.to.x, 0.425), "{g:?}");
+    // Facing edges: the gap line runs across their middle.
+    assert!(close(g.from.y, 0.0) && close(g.to.y, 0.0), "{g:?}");
     // Corner to corner, diagonally: the rounding counts.
     let d = pair(rect(0.0, 0.0, 1.0, 1.0), rect(2.0, 2.0, 1.0, 1.0));
     assert!(close(gap(&d, "F.Cu"), 2f64.sqrt()));
