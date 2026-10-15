@@ -163,6 +163,8 @@ pub struct Form {
     /// copied footprint, whether its 3D models are copied (`None` is No 3D
     /// model).
     model: RwSignal<Option<usize>>,
+    /// For a footprint copied from an installed library: No 3D model.
+    no_models: RwSignal<bool>,
     from: RwSignal<String>,
     reason: RwSignal<String>,
     /// The symbol and footprint chosen in the Libraries browser.
@@ -224,6 +226,7 @@ impl Form {
             offered_footprint_library: StoredValue::new(String::new()),
             known_footprint: RwSignal::new(None),
             model: RwSignal::new(None),
+            no_models: RwSignal::new(false),
             from: RwSignal::new(String::new()),
             reason: RwSignal::new(String::new()),
             picks: RwSignal::new(Vec::new()),
@@ -305,6 +308,7 @@ impl Form {
         self.offered_fields.set_value(Vec::new());
         self.known_footprint.set(None);
         self.model.set(None);
+        self.no_models.set(false);
         self.picks.set(Vec::new());
         self.extras.set(Vec::new());
         self.focus_after.set_value(None);
@@ -474,6 +478,7 @@ impl Form {
         });
         if kind == PreviewKind::Footprint {
             self.known_footprint.set(None);
+            self.no_models.set(false);
         }
         self.focus_after.set_value(Some(match kind {
             PreviewKind::Symbol => "add-symbol-choose".to_owned(),
@@ -877,9 +882,10 @@ pub fn AddPartView(
         if let Some(mut file) = footprint_file {
             let model = form.model.get_untracked();
             if copied_footprint {
-                file.no_models = model.is_none();
+                let no_models = form.no_models.get_untracked();
+                file.no_models = no_models;
                 files.push(file);
-                if model.is_some() {
+                if !no_models {
                     files.extend(found.model_files.iter().cloned());
                 }
             } else {
@@ -1226,7 +1232,24 @@ fn DownloadForm(
             </div>
         }
     });
-    let model_choice = (!found.models.is_empty() && found.footprint_file.is_some()).then(|| {
+    // A copied footprint's 3D models are all copied, or none (No 3D model).
+    let copy_models = footprint_pick
+        .clone()
+        .filter(|pick| pick.use_as == PickUse::Copy)
+        .map(|pick| {
+            view! {
+                <CopyModels
+                    id="add-copy-models".to_owned()
+                    pick=pick
+                    no_models=Signal::derive(move || form.no_models.get())
+                    changed=Callback::new(move |none: bool| form.no_models.set(none))
+                />
+            }
+        });
+    let model_choice = (!found.models.is_empty()
+        && found.footprint_file.is_some()
+        && copy_models.is_none())
+    .then(|| {
         let models = found.models.clone();
         view! {
             <div class="edit-row">
@@ -1353,7 +1376,7 @@ fn DownloadForm(
     let chosen_problems = {
         let picks = found.picks.clone();
         move || {
-            let no_models = form.model.get().is_none();
+            let no_models = form.no_models.get();
             picks
                 .iter()
                 .flat_map(|pick| {
@@ -1739,6 +1762,7 @@ fn DownloadForm(
                 </div>
                 {footprint_words}
                 {footprint_library}
+                {copy_models}
             </div>
             {model_choice}
             <ExtraFootprints form=form />
