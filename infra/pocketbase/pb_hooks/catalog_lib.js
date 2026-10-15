@@ -596,6 +596,11 @@ function editUploads(list) {
     if (typeof fileName !== "string" || trimSpace(fileName).length === 0 || fileName.length > 255) {
       fail(`${which} needs the name of the file it came from, of at most 255 characters`);
     }
+    // Only KiCad's 3D model files (crates/catalog cad_file
+    // MODEL_EXTENSIONS), so no other file, such as a key, is ever stored.
+    if (role === "3d-model" && !/\.(step|stp|stpz|wrl|wrz)$/i.test(reference)) {
+      fail(`the 3D model ${reference} must be a .step, .stp, .stpz, .wrl or .wrz file`);
+    }
     let formatVersion = null;
     if (role === "symbol") {
       formatVersion = upload.formatVersion;

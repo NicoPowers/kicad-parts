@@ -413,6 +413,7 @@ pub(crate) fn read_files(
             label: Some(shortened(&symbol.file.label)),
             installed: None,
             no_models: false,
+            choice: None,
         }),
         footprint_file: footprint.map(|file| team_file(file, FileKind::Footprint)),
         // The 3D models never change with the symbol or footprint chosen, so
@@ -462,6 +463,7 @@ fn team_file(file: &DownloadFile, kind: FileKind) -> TeamFile {
         label: Some(shortened(&file.label)),
         installed: None,
         no_models: false,
+        choice: None,
     }
 }
 
@@ -848,12 +850,16 @@ pub(crate) fn copied_footprints(
     {
         let bytes = crate::team::decoded(&file.base64, &file.file_name)?;
         let name = read_footprint_file(&bytes)?.name;
-        let reference = choices
-            .iter()
-            .find(|choice| choice.split_once(':').is_some_and(|(_, item)| item == name))
-            .ok_or_else(|| {
-                format!("The copied footprint {name} is not one of the part's footprints.")
-            })?;
+        let named = |choice: &&String| choice.split_once(':').is_some_and(|(_, item)| item == name);
+        // The choice it was chosen for; an older app sends none, and then
+        // the first choice named like it.
+        let reference = match file.choice {
+            Some(at) => choices.get(at).filter(named),
+            None => choices.iter().find(named),
+        }
+        .ok_or_else(|| {
+            format!("The copied footprint {name} is not one of the part's footprints.")
+        })?;
         for upload in copied_footprint_uploads(file, &models, reference)? {
             let sent = uploads
                 .iter()
@@ -887,6 +893,8 @@ fn copied_footprint_uploads(
     let outside = |link: &str| judge_model_link(library, name, link) == ModelLink::Outside;
     let mut text = original.clone();
     let mut uploads: Vec<CadUpload> = Vec::new();
+    // Each link copied, and the place its model goes.
+    let mut placed: Vec<(String, String)> = Vec::new();
     if file.no_models {
         text = remove_model_links(&text, outside);
     } else {
@@ -921,6 +929,16 @@ fn copied_footprint_uploads(
                         .to_owned(),
                 );
             }
+            // Two models with one file name would share one place.
+            if let Some((other, _)) = placed
+                .iter()
+                .find(|(other, placed_key)| *placed_key == key && *other != link)
+            {
+                return Err(format!(
+                    "The footprint's 3D models {other} and {link} have the same file name, {file_name}, so they cannot both be copied. Rename one in its library, or choose No 3D model."
+                ));
+            }
+            placed.push((link.clone(), key.clone()));
             text = download::relink_model(&text, &link, &format!("${{GITPLM_PARTS}}/{key}"));
             if !uploads.iter().any(|upload| upload.reference == key) {
                 let bytes = crate::team::decoded(&model.base64, &model.file_name)?;
@@ -955,6 +973,128 @@ mod tests {
         assert_eq!(symbol_pins(library, "Base"), Ok(3));
         assert_eq!(symbol_pins(library, "Child"), Ok(3));
         assert_eq!(symbol_pins(library, "Orphan"), Err("Missing".to_owned()));
+    }
+
+    fn copied(name: &str, links: &[&str], choice: Option<usize>, library: &str) -> TeamFile {
+        let models: String = links
+            .iter()
+            .map(|link| {
+                format!(
+                    "	(model \"{link}\")
+"
+                )
+            })
+            .collect();
+        let text = format!(
+            "(footprint \"{name}\"
+	(version 20240108)
+	(attr smd)
+	(pad \"1\" smd rect (at 0 0) (size 1 1) (layers \"F.Cu\"))
+{models})
+"
+        );
+        TeamFile {
+            kind: FileKind::Footprint,
+            file_name: format!("{name}.kicad_mod"),
+            base64: encoded(text.as_bytes()),
+            symbol: None,
+            model_key: None,
+            replaces: None,
+            label: None,
+            installed: Some(desktop_contract::InstalledFile {
+                library: library.into(),
+                path: format!("{name}.kicad_mod"),
+                link: None,
+            }),
+            no_models: false,
+            choice,
+        }
+    }
+
+    fn model(link: &str, file_name: &str) -> TeamFile {
+        TeamFile {
+            kind: FileKind::Model3d,
+            file_name: file_name.into(),
+            base64: encoded(b"ISO-10303-21;"),
+            symbol: None,
+            model_key: None,
+            replaces: None,
+            label: None,
+            installed: Some(desktop_contract::InstalledFile {
+                library: "Mine".into(),
+                path: link.into(),
+                link: Some(link.into()),
+            }),
+            no_models: false,
+            choice: None,
+        }
+    }
+
+    fn references(uploads: &[CadUpload]) -> Vec<String> {
+        uploads
+            .iter()
+            .map(|upload| upload.reference.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_copied_footprint_goes_to_the_choice_it_was_chosen_for() {
+        // KiCad's footprint first, the person's own of the same name second.
+        let choices = vec![
+            "Capacitor_SMD:C_0603_1608Metric".to_owned(),
+            "g-Inductor_SMD:C_0603_1608Metric".to_owned(),
+        ];
+        let files = [copied("C_0603_1608Metric", &[], Some(1), "Mine")];
+        assert_eq!(
+            references(&copied_footprints(&files, &choices).unwrap()),
+            ["g-Inductor_SMD:C_0603_1608Metric"]
+        );
+        // Two copies of the same name from two installed libraries.
+        let choices = vec![
+            "g-Capacitor_SMD:C_Twin".to_owned(),
+            "g-Inductor_SMD:C_Twin".to_owned(),
+        ];
+        let files = [
+            copied("C_Twin", &[], Some(1), "Other"),
+            copied("C_Twin", &[], Some(0), "Mine"),
+        ];
+        let uploads = copied_footprints(&files, &choices).unwrap();
+        assert_eq!(
+            references(&uploads),
+            ["g-Inductor_SMD:C_Twin", "g-Capacitor_SMD:C_Twin"]
+        );
+        assert_eq!(uploads[0].installed.as_ref().unwrap().library, "Other");
+        // A choice that names another footprint is refused plainly.
+        let files = [copied("C_Other", &[], Some(0), "Mine")];
+        let refused = copied_footprints(&files, &choices).unwrap_err();
+        assert!(refused.contains("C_Other"), "{refused}");
+    }
+
+    #[test]
+    fn two_3d_models_with_one_file_name_are_refused_plainly() {
+        let choices = vec!["g-Capacitor_SMD:C_Two".to_owned()];
+        let files = [
+            copied("C_Two", &["${A}/x.step", "${B}/x.step"], Some(0), "Mine"),
+            model("${A}/x.step", "x.step"),
+            model("${B}/x.step", "x.step"),
+        ];
+        let refused = copied_footprints(&files, &choices).unwrap_err();
+        assert!(
+            refused.contains("${A}/x.step") && refused.contains("${B}/x.step"),
+            "{refused}"
+        );
+        // The same link twice is one model.
+        let files = [
+            copied("C_Two", &["${A}/x.step", "${A}/x.step"], Some(0), "Mine"),
+            model("${A}/x.step", "x.step"),
+        ];
+        assert_eq!(
+            references(&copied_footprints(&files, &choices).unwrap()),
+            [
+                "3d-models/g-Capacitor_SMD.3dshapes/x.step",
+                "g-Capacitor_SMD:C_Two"
+            ]
+        );
     }
 
     #[test]

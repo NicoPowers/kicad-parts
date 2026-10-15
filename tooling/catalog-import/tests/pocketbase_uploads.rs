@@ -891,6 +891,18 @@ fn wrong_or_unused_files_are_refused_plainly_and_nothing_is_written() {
             "is not a Catalog 3D model path",
         ));
     }
+    // Only KiCad's 3D model files: a key or other file is never stored.
+    for key in [
+        "3d-models/g-a.3dshapes/id_ed25519",
+        "3d-models/g-a.3dshapes/secrets.env",
+        "3d-models/g-a.3dshapes/x.step.txt",
+    ] {
+        cases.push((
+            json!([{ "role": "3d-model", "reference": key, "fileName": "x", "base64": "AAEC" }]),
+            fields.clone(),
+            "must be a .step, .stp, .stpz, .wrl or .wrz file",
+        ));
+    }
     for (uploads, fields, says) in cases {
         match send(&editor, uploads, &fields) {
             Err(CollabError::Http {

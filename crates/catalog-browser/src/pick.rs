@@ -24,7 +24,7 @@ use crate::libraries::read::{
 use crate::libraries::sources::{Format, Source, path_variables};
 use crate::team::TeamCatalog;
 use catalog::CadItemKind;
-use catalog::cad_file::{is_plain_name, read_footprint_file, symbol_upload};
+use catalog::cad_file::{is_model_file_name, is_plain_name, read_footprint_file, symbol_upload};
 use catalog::download::model_links;
 use catalog::library_check::{ModelLink, judge_model_link};
 use desktop_contract::{
@@ -32,7 +32,7 @@ use desktop_contract::{
     TeamFile, TeamLibraryChoice, TeamPick, TeamPickRequest,
 };
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup, symbol_properties};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The largest 3D model copied with a footprint: what one save can send of
 /// a file that is not text.
@@ -59,8 +59,8 @@ pub(crate) struct Item {
     pub bytes: Vec<u8>,
     /// The file it was read from.
     pub path: PathBuf,
-    /// The symbol it is drawn from, if any.
-    pub extends: Option<String>,
+    /// The same file inside its library, such as `C_0603.kicad_mod`.
+    pub inside: String,
 }
 
 impl Item {
@@ -187,7 +187,11 @@ impl CatalogBrowser {
                 }
                 Ok(Item {
                     bytes: symbol_library_file(&entries, parsed.version.as_deref()),
-                    extends: entry.extends.clone(),
+                    inside: source
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
                     reference,
                     name,
                     path: source.path.clone(),
@@ -201,18 +205,11 @@ impl CatalogBrowser {
                     };
                 let (bytes, version) =
                     symdir_bytes(&source, symbol.file.as_deref(), &name, &file_of)?;
-                // Each entry is one symbol; the last is the chosen one.
-                let parsed = SymbolLibrary::parse(&symbol_library_file(&[&bytes], None))
-                    .map_err(|error| format!("{reference} could not be read: {error}."))?;
-                let extends = parsed
-                    .entries
-                    .iter()
-                    .find(|entry| entry.name == name)
-                    .and_then(|entry| entry.extends.clone());
+                let inside = symbol.file.clone().unwrap_or_default();
                 Ok(Item {
                     bytes: symbol_library_file(&[&bytes], version.as_deref()),
-                    extends,
-                    path: source.path.join(symbol.file.clone().unwrap_or_default()),
+                    inside: inside.clone(),
+                    path: source.path.join(inside),
                     reference,
                     name,
                 })
@@ -222,7 +219,7 @@ impl CatalogBrowser {
                 let bytes = read_limited(&path, MAX_FOOTPRINT_FILE_BYTES, inside_links)?;
                 Ok(Item {
                     bytes,
-                    extends: None,
+                    inside: format!("{name}.kicad_mod"),
                     path,
                     reference,
                     name,
@@ -306,10 +303,10 @@ impl CatalogBrowser {
     /// footprint the 3D models its links name.
     fn copy(&self, item: &Item, request: &TeamPickRequest, pick: &mut TeamPick) {
         let nickname = &request.library.nickname;
-        // The path as the computer writes it, with one kind of separator.
-        let installed = |path: &Path, link: Option<String>| InstalledFile {
+        // Where it is in its library, never the person's own folders.
+        let installed = |path: &str, link: Option<String>| InstalledFile {
             library: nickname.clone(),
-            path: path.components().collect::<PathBuf>().display().to_string(),
+            path: path.to_owned(),
             link,
         };
         let label = |file_name: &str| {
@@ -334,11 +331,6 @@ impl CatalogBrowser {
                     &file_name,
                 ) {
                     pick.problems.push(why);
-                } else if let Some(parent) = &item.extends {
-                    pick.problems.push(format!(
-                        "The symbol {} is drawn from another symbol ({parent}), so it cannot be copied on its own. Choose another symbol.",
-                        item.name
-                    ));
                 }
                 pick.file = Some(TeamFile {
                     kind: FileKind::Symbol,
@@ -348,8 +340,9 @@ impl CatalogBrowser {
                     model_key: None,
                     replaces: None,
                     label: Some(label(&file_name)),
-                    installed: Some(installed(&item.path, None)),
+                    installed: Some(installed(&item.inside, None)),
                     no_models: false,
+                    choice: None,
                 });
             }
             PreviewKind::Footprint => {
@@ -364,8 +357,9 @@ impl CatalogBrowser {
                     model_key: None,
                     replaces: None,
                     label: Some(label(&file_name)),
-                    installed: Some(installed(&item.path, None)),
+                    installed: Some(installed(&item.inside, None)),
                     no_models: false,
+                    choice: None,
                 });
                 let text = String::from_utf8_lossy(&item.bytes).into_owned();
                 for link in model_links(&text) {
@@ -374,7 +368,7 @@ impl CatalogBrowser {
                     if judge_model_link("g-copy", &item.name, &link) != ModelLink::Outside {
                         continue;
                     }
-                    match self.model_file(&link, &item.path) {
+                    match self.model_file(&link) {
                         Ok((path, bytes)) => {
                             let model_name = path
                                 .file_name()
@@ -388,8 +382,10 @@ impl CatalogBrowser {
                                 model_key: None,
                                 replaces: None,
                                 label: Some(label(&model_name)),
-                                installed: Some(installed(&path, Some(link.clone()))),
+                                // A model is named by the link as written.
+                                installed: Some(installed(&link, Some(link.clone()))),
                                 no_models: false,
+                                choice: None,
                             });
                         }
                         Err(why) => pick.model_problems.push(format!(
@@ -409,9 +405,10 @@ impl CatalogBrowser {
     }
 
     /// The 3D model file `link` names, through the person's KiCad path
-    /// variables; a link with no variable and no drive is taken from the
-    /// folder that holds the footprint's library.
-    fn model_file(&self, link: &str, footprint: &Path) -> Result<(PathBuf, Vec<u8>), String> {
+    /// variables. Only KiCad's 3D model files are read, and only a link
+    /// that says where the file is: one with no folder and no variable is
+    /// not guessed at.
+    fn model_file(&self, link: &str) -> Result<(PathBuf, Vec<u8>), String> {
         let places = self.library_places();
         let expanded = match &places.kicad_config {
             Some(config) => path_variables(&places, config).0.expand(link),
@@ -419,13 +416,16 @@ impl CatalogBrowser {
                 .expand(link),
         }
         .map_err(|missing| format!("{missing}."))?;
-        let mut path = PathBuf::from(&expanded);
+        let path = PathBuf::from(&expanded);
+        if !is_model_file_name(&expanded) {
+            return Err(
+                "it is not a 3D model file: KiCad's are .step, .stp, .stpz, .wrl or .wrz.".into(),
+            );
+        }
         if path.is_relative() {
-            let library_folder = footprint
-                .parent()
-                .and_then(Path::parent)
-                .unwrap_or_else(|| Path::new("."));
-            path = library_folder.join(path);
+            return Err(
+                "it names no folder and no path variable, so where it is is not known.".into(),
+            );
         }
         let bytes = read_limited(&path, MAX_MODEL_BYTES, Links::Follow).map_err(|why| {
             if why.contains("larger than") {

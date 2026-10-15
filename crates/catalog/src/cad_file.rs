@@ -166,6 +166,11 @@ pub fn model_upload(bytes: &[u8], key: &str, file_name: &str) -> Result<CadUploa
             "{key} is not where the Catalog keeps 3D models, such as 3d-models/g-Resistor_SMD.3dshapes/R_0603_1608Metric.step."
         ));
     }
+    if !is_model_file_name(key) {
+        return Err(format!(
+            "{key} is not a 3D model file: KiCad's are .step, .stp, .stpz, .wrl or .wrz."
+        ));
+    }
     if bytes.is_empty() {
         return Err(format!("The 3D model file {file_name} is empty."));
     }
@@ -178,6 +183,18 @@ pub fn model_upload(bytes: &[u8], key: &str, file_name: &str) -> Result<CadUploa
         library: None,
         installed: None,
     })
+}
+
+/// The file types KiCad reads as 3D models, in lower case.
+pub const MODEL_EXTENSIONS: [&str; 5] = ["step", "stp", "stpz", "wrl", "wrz"];
+
+/// Whether the file `name` (or path) is one of KiCad's 3D model types, by
+/// its extension, without regard to case.
+pub fn is_model_file_name(name: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| MODEL_EXTENSIONS.contains(&extension.to_lowercase().as_str()))
 }
 
 /// Whether `name` can be a library or item name: what [`LibRef::parse`]
@@ -306,6 +323,29 @@ mod tests {
     use super::*;
 
     const TWO: &str = "(kicad_symbol_lib\n\t(version 20241209)\n\t(symbol \"A\"\n\t\t(in_bom yes)\n\t)\n\t(symbol \"B\"\n\t\t(symbol \"B_0_1\")\n\t)\n\t(symbol \"C\"\n\t\t(extends \"A\")\n\t)\n)\n";
+
+    #[test]
+    fn only_kicads_3d_model_files_are_uploaded() {
+        for key in [
+            "3d-models/g-a.3dshapes/x.step",
+            "3d-models/g-a.3dshapes/x.STP",
+            "3d-models/g-a.3dshapes/x.stpz",
+            "3d-models/g-a.3dshapes/x.WRL",
+            "3d-models/g-a.3dshapes/x.wrz",
+        ] {
+            assert!(model_upload(b"x", key, "x").is_ok(), "{key}");
+        }
+        for key in [
+            "3d-models/g-a.3dshapes/id_ed25519",
+            "3d-models/g-a.3dshapes/secrets.env",
+            "3d-models/g-a.3dshapes/x.step.txt",
+        ] {
+            let refused = model_upload(b"x", key, "x").unwrap_err();
+            assert!(refused.contains("is not a 3D model file"), "{refused}");
+        }
+        assert!(is_model_file_name("C 0603.Step"));
+        assert!(!is_model_file_name("step"));
+    }
 
     #[test]
     fn a_symbol_upload_is_one_entry_with_its_library_version() {

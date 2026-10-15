@@ -1906,6 +1906,7 @@ mod tests {
             label: None,
             installed: None,
             no_models: false,
+            choice: None,
         }
     }
 

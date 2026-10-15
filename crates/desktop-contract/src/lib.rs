@@ -662,6 +662,11 @@ pub struct TeamFile {
     /// (No 3D model).
     #[serde(default)]
     pub no_models: bool,
+    /// For a footprint copied from an installed library: the footprint
+    /// choice it is for, counted from 0, so a copy never goes to another
+    /// choice of the same name.
+    #[serde(default)]
+    pub choice: Option<usize>,
 }
 
 /// Where a file copied from one of the person's other installed KiCad
@@ -670,7 +675,9 @@ pub struct TeamFile {
 pub struct InstalledFile {
     /// The library's nickname in the person's KiCad library tables.
     pub library: String,
-    /// The file it was read from.
+    /// The file it was read from, inside its library (such as
+    /// `C_0603.kicad_mod`); for a 3D model, the link as the footprint
+    /// writes it (such as `${MY_LIBS}/models/C_0603.step`).
     pub path: String,
     /// For a 3D model: the footprint's link to it, as the footprint writes
     /// it, which saving points at the copy.

@@ -225,6 +225,7 @@ fn team_file(kind: FileKind, name: &str, bytes: &[u8], symbol: Option<&str>) -> 
         label: None,
         installed: None,
         no_models: false,
+        choice: None,
     }
 }
 

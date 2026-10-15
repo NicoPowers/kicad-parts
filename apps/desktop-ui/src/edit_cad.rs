@@ -652,6 +652,7 @@ fn RowView(
                             label: None,
                             installed: None,
                             no_models: false,
+                            choice: None,
                         };
                         read_file(ui, ipn, rows, key, file, None, false, Vec::new(), changed);
                     }
@@ -872,6 +873,7 @@ fn ModelFileInput(
                             label: None,
                             installed: None,
                             no_models: false,
+                            choice: None,
                         });
                     }
                     Ok(None) => {}
@@ -927,6 +929,7 @@ mod tests {
                 label: None,
                 installed: None,
                 no_models: false,
+                choice: None,
             },
             names: vec!["R_Box".into(), "R_Round".into()],
             library: String::new(),

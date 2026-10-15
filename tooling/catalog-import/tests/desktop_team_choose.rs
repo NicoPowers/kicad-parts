@@ -179,6 +179,44 @@ fn kicad(root: &Path, catalog: &Path) -> Kicad {
         &mine.join("Mine.pretty").join("C_0603_Lost.kicad_mod"),
         footprint_like(catalog, "C_0603_Lost", "${MY_LIBS}/models/gone.step"),
     );
+    // A link to a file that is no 3D model, and one with no folder.
+    write(
+        &mine.join("secret.env"),
+        "TOKEN=not for the team server
+",
+    );
+    write(
+        &mine.join("Mine.pretty").join("C_0603_Key.kicad_mod"),
+        footprint_like(catalog, "C_0603_Key", "${MY_LIBS}/secret.env"),
+    );
+    write(
+        &mine.join("Mine.pretty").join("C_0603_Bare.kicad_mod"),
+        footprint_like(catalog, "C_0603_Bare", "models/C 0603 Mine.step"),
+    );
+    // Footprints named like KiCad's, and like another installed library's.
+    let kicad_model = "${KICAD10_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0603_1608Metric.step";
+    write(
+        &mine.join("Mine.pretty").join("C_0603_1608Metric.kicad_mod"),
+        footprint_like(catalog, "C_0603_1608Metric", kicad_model).replacen(
+            "(attr",
+            "(descr \"mine\")
+	(attr",
+            1,
+        ),
+    );
+    for (folder, words) in [("Mine.pretty", "mine"), ("Other.pretty", "other")] {
+        write(
+            &mine.join(folder).join("C_0603_Twin.kicad_mod"),
+            footprint_like(catalog, "C_0603_Twin", kicad_model).replacen(
+                "(attr",
+                &format!(
+                    "(descr \"{words}\")
+	(attr"
+                ),
+                1,
+            ),
+        );
+    }
     let config = root.join("kicad-config");
     write(
         &config.join("kicad_common.json"),
@@ -193,7 +231,7 @@ fn kicad(root: &Path, catalog: &Path) -> Kicad {
     );
     write(
         &config.join("fp-lib-table"),
-        "(fp_lib_table (version 7) (lib (name \"MyFootprints\")(type \"KiCad\")(uri \"${MY_LIBS}/Mine.pretty\")(options \"\")(descr \"\")))",
+        "(fp_lib_table (version 7) (lib (name \"MyFootprints\")(type \"KiCad\")(uri \"${MY_LIBS}/Mine.pretty\")(options \"\")(descr \"\")) (lib (name \"OtherFootprints\")(type \"KiCad\")(uri \"${MY_LIBS}/Other.pretty\")(options \"\")(descr \"\")))",
     );
     Kicad {
         install,
@@ -478,12 +516,9 @@ fn edit_part_uses_a_choice_by_where_it_lives() {
     let file = pick.file.clone().unwrap();
     let installed = file.installed.clone().unwrap();
     assert_eq!(installed.library, "MyFootprints");
-    let footprint_path = team
-        .kicad
-        .mine
-        .join("Mine.pretty")
-        .join("C_0603_Mine.kicad_mod");
-    assert_eq!(installed.path, footprint_path.display().to_string());
+    // The file inside its library, never the person's home folder.
+    let footprint_path = "C_0603_Mine.kicad_mod";
+    assert_eq!(installed.path, footprint_path);
     assert_eq!(pick.models.len(), 1, "{pick:?}");
     let mut files = vec![file];
     files.extend(pick.models.clone());
@@ -493,7 +528,7 @@ fn edit_part_uses_a_choice_by_where_it_lives() {
     let source = team.source(catalog::CadItemKind::Footprint, copied);
     assert_eq!(source["source"], "installed", "{source}");
     assert_eq!(source["library"], "MyFootprints");
-    assert_eq!(source["path"], footprint_path.display().to_string());
+    assert_eq!(source["path"], footprint_path);
     let stored = String::from_utf8(team.stored(catalog::CadItemKind::Footprint, copied)).unwrap();
     assert!(
         stored.contains(&format!("\"${{GITPLM_PARTS}}/{model_key}\"")),
@@ -502,15 +537,8 @@ fn edit_part_uses_a_choice_by_where_it_lives() {
     assert!(!stored.contains("MY_LIBS"), "{stored}");
     let source = team.source(catalog::CadItemKind::Model3d, model_key);
     assert_eq!(source["source"], "installed", "{source}");
-    assert_eq!(
-        source["path"],
-        team.kicad
-            .mine
-            .join("models")
-            .join("C 0603 Mine.step")
-            .display()
-            .to_string()
-    );
+    // The link as the footprint wrote it.
+    assert_eq!(source["path"], "${MY_LIBS}/models/C 0603 Mine.step");
     assert_eq!(team.stored(catalog::CadItemKind::Model3d, model_key), MODEL);
 
     // A 3D model that cannot be read stops the save plainly, unless No 3D
@@ -586,6 +614,76 @@ fn edit_part_uses_a_choice_by_where_it_lives() {
     );
     let message = refused(team.edit(IPN, "Footprint", "g-Capacitor_SMD:C_0603_Late", Vec::new()));
     assert!(message.contains("is not committed"), "{message}");
+
+    // Only KiCad's 3D model files are copied, and a link must say where.
+    for (name, says) in [
+        ("C_0603_Key", "is not a 3D model file"),
+        ("C_0603_Bare", "names no folder"),
+    ] {
+        let pick = team.pick(
+            PreviewKind::Footprint,
+            LibraryGroup::Installed,
+            "MyFootprints",
+            name,
+        );
+        assert!(pick.models.is_empty(), "{pick:?}");
+        assert!(
+            pick.model_problems.len() == 1 && pick.model_problems[0].contains(says),
+            "{says}: {pick:?}"
+        );
+    }
+
+    // A copy named like KiCad's first footprint goes to the second choice,
+    // the one it was chosen for.
+    let pick = team.pick(
+        PreviewKind::Footprint,
+        LibraryGroup::Installed,
+        "MyFootprints",
+        "C_0603_1608Metric",
+    );
+    let mut file = pick.file.clone().unwrap();
+    file.choice = Some(1);
+    let both = "Capacitor_SMD:C_0603_1608Metric;g-Inductor_SMD:C_0603_1608Metric";
+    let part = saved(team.edit(IPN, "Footprint", both, vec![file]));
+    assert_eq!(part.revision.field("Footprint"), Some(both));
+    let source = team.source(
+        catalog::CadItemKind::Footprint,
+        "g-Inductor_SMD:C_0603_1608Metric",
+    );
+    assert_eq!(source["source"], "installed", "{source}");
+
+    // Two copies of one name from two installed libraries each go to their
+    // own choice.
+    let twin = |library: &str, choice: usize| {
+        let pick = team.pick(
+            PreviewKind::Footprint,
+            LibraryGroup::Installed,
+            library,
+            "C_0603_Twin",
+        );
+        let mut file = pick.file.unwrap();
+        file.choice = Some(choice);
+        file
+    };
+    let twins = "g-Capacitor_SMD:C_0603_Twin;g-Inductor_SMD:C_0603_Twin";
+    saved(team.edit(
+        IPN,
+        "Footprint",
+        twins,
+        vec![twin("OtherFootprints", 1), twin("MyFootprints", 0)],
+    ));
+    for (key, library, words) in [
+        ("g-Capacitor_SMD:C_0603_Twin", "MyFootprints", "mine"),
+        ("g-Inductor_SMD:C_0603_Twin", "OtherFootprints", "other"),
+    ] {
+        let source = team.source(catalog::CadItemKind::Footprint, key);
+        assert_eq!(source["library"], library, "{source}");
+        let stored = String::from_utf8(team.stored(catalog::CadItemKind::Footprint, key)).unwrap();
+        assert!(
+            stored.contains(&format!("(descr \"{words}\")")),
+            "{key}: {stored}"
+        );
+    }
 }
 
 /// Add part From a library: KiCad's generic capacitor becomes a new part
