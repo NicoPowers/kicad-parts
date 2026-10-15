@@ -459,3 +459,26 @@ fn pads_without_copper_get_no_margins() {
     assert_size(size_on(&drawing.pads[2], "F.Paste"), (0.9, 0.9));
     assert_size(size_on(&drawing.pads[2], "F.Mask"), (1.14, 1.14));
 }
+
+#[test]
+fn polygons_without_a_fill_and_shapes_without_a_width_are_filled() {
+    let drawing = draw(
+        "(module \"Old\" (layer F.Cu)
+          (fp_poly (pts (xy 0 0) (xy 1 0) (xy 1 1)) (layer F.SilkS) (width 0.1))
+          (fp_rect (start 0 0) (end 1 1) (layer F.Fab) (width 0) (fill none))
+          (fp_circle (center 0 0) (end 1 0) (layer F.Fab) (width 0))
+          (fp_circle (center 0 0) (end 1 0) (layer F.Fab) (width 0.1))
+          (fp_poly (pts (xy 0 0) (xy 1 0) (xy 1 1)) (layer F.Fab) (stroke (width 0.1)) (fill no))
+          (fp_rect (start 0 0) (end 1 1) (layer F.Fab) (stroke (width 0.1)) (fill hatch)))",
+    );
+    let filled: Vec<bool> = drawing
+        .graphics
+        .iter()
+        .map(|graphic| match graphic.shape {
+            Shape::Polygon { filled, .. } | Shape::Circle { filled, .. } => filled,
+            _ => panic!("{graphic:?}"),
+        })
+        .collect();
+    assert_eq!(filled, [true, true, true, false, false, true]);
+    assert_eq!(drawing.left_out, ["Hatched fills are drawn solid."]);
+}

@@ -47,6 +47,9 @@ pub fn footprint_drawing(bytes: &[u8]) -> Option<FootprintDrawing> {
             Some(
                 head @ ("fp_line" | "fp_rect" | "fp_circle" | "fp_arc" | "fp_poly" | "fp_curve"),
             ) => {
+                if hatched(item) {
+                    drawer.note("Hatched fills are drawn solid.");
+                }
                 if let (Some(layer), Some(shape)) = (layer_of(item), graphic(head, item, false)) {
                     drawer.graphic(layer, shape);
                 }

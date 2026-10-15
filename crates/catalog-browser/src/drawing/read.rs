@@ -51,9 +51,21 @@ pub(super) fn stroke_width(node: &Sexp) -> f64 {
 pub(super) fn filled(node: &Sexp, default: bool) -> bool {
     match child(node, "fill").and_then(|fill| fill.word_at(1)) {
         Some("yes" | "solid") => true,
-        Some(_) => false,
+        Some(word) => hatch(word),
         None => default,
     }
+}
+
+/// Whether a shape has one of KiCad 10's hatched fills, which the close-up
+/// draws solid.
+pub(super) fn hatched(node: &Sexp) -> bool {
+    child(node, "fill")
+        .and_then(|fill| fill.word_at(1))
+        .is_some_and(hatch)
+}
+
+fn hatch(word: &str) -> bool {
+    word.ends_with("hatch")
 }
 
 pub(super) fn layer_of(node: &Sexp) -> Option<String> {

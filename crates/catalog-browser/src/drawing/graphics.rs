@@ -4,7 +4,10 @@ use super::*;
 
 /// A footprint graphic (`fp_line` and the like) or a custom pad's
 /// primitive (`gr_line` and the like), by its kind without the prefix.
-/// Primitives are filled unless they say otherwise.
+///
+/// As in KiCad: a polygon with no `fill` is filled (KiCad 5 wrote none),
+/// a primitive is filled unless it says otherwise, and a polygon,
+/// rectangle or circle with no width is filled, or it would not show.
 pub(super) fn graphic(head: &str, node: &Sexp, primitive: bool) -> Option<Shape> {
     let kind = head
         .strip_prefix("fp_")
@@ -21,7 +24,7 @@ pub(super) fn graphic(head: &str, node: &Sexp, primitive: bool) -> Option<Shape>
             polygon(
                 &[a, Point::new(b.x, a.y), b, Point::new(a.x, b.y)],
                 width,
-                filled(node, primitive),
+                width == 0.0 || filled(node, primitive),
             )
         }
         "circle" => {
@@ -30,7 +33,7 @@ pub(super) fn graphic(head: &str, node: &Sexp, primitive: bool) -> Option<Shape>
                 center,
                 radius: distance(center, point(node, "end")?),
                 width,
-                filled: filled(node, primitive),
+                filled: width == 0.0 || filled(node, primitive),
             }
         }
         "arc" => {
@@ -51,7 +54,7 @@ pub(super) fn graphic(head: &str, node: &Sexp, primitive: bool) -> Option<Shape>
             Shape::Polygon {
                 edges,
                 width,
-                filled: filled(node, primitive),
+                filled: width == 0.0 || filled(node, true),
             }
         }
         "curve" | "bezier" => {
