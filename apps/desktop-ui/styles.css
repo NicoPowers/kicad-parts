@@ -1601,12 +1601,17 @@ a {
 
 /* The Libraries browser: a large dialog over the whole window, with the
    libraries, the list of items and the chosen item side by side. */
+/* As tall as the badges beside it (an inset outline, no border), so the
+   header keeps its height. */
 .libraries-open {
   padding: 0.2rem 0.75rem;
   font-size: 0.9rem;
+  font-weight: 600;
   background: transparent;
   color: var(--brand-ink);
-  border-color: #8fa3bd;
+  border: 0;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px #c9d4e2;
 }
 
 .libraries-dialog {
