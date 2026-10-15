@@ -9,6 +9,10 @@
 //! keeps, and refuses a file nested deeper than [`MAX_DEPTH`].
 
 use crate::library_file::{LibraryFileError, MAX_DEPTH};
+
+/// Bumped whenever what these readers return changes, so caches built from
+/// an older reader are read again.
+pub const SUMMARY_VERSION: u32 = 2;
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 
@@ -319,10 +323,31 @@ pub fn read_footprint_file(bytes: &[u8]) -> Result<FootprintSummary, LibraryFile
                         "thru_hole" => hole_pads = true,
                         _ => {}
                     }
-                    if kind != "np_thru_hole" && !number.trim().is_empty() {
+                    // KiCad's pin count leaves out pads with no copper
+                    // layer, such as paste-only shapes (GetUniquePadCount).
+                    // A pad that lists no layers at all is counted.
+                    let mut copper = true;
+                    loop {
+                        match lexer.next()? {
+                            None => return Err(LibraryFileError("unbalanced `(`".into())),
+                            Some(Token::Close(_)) => break,
+                            Some(Token::Open(_)) => {
+                                let depth = lexer.depth;
+                                if lexer.word()?.as_deref() == Some("layers") {
+                                    copper = false;
+                                    while let Some(layer) = lexer.word_or_close()? {
+                                        copper |= layer.ends_with(".Cu");
+                                    }
+                                } else {
+                                    lexer.skip_rest(depth)?;
+                                }
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                    if kind != "np_thru_hole" && copper && !number.trim().is_empty() {
                         numbers.insert(number.into_bytes());
                     }
-                    lexer.skip_rest(2)?;
                 }
                 Some(Token::Atom(b"model")) => {
                     let path = lexer.word()?;
@@ -615,6 +640,19 @@ mod tests {
         assert_eq!(summary.mount, Mount::Other);
         assert_eq!(summary.pad_count, 0);
         assert_eq!(summary.model, None);
+    }
+
+    #[test]
+    fn pads_without_copper_are_not_counted_like_kicad() {
+        // A paste-only pad shapes solder paste; KiCad's pin count leaves it out.
+        let footprint = r#"(footprint "QFN" (attr smd)
+	(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask"))
+	(pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask"))
+	(pad "3" smd rect (at 2 0) (size 1 1) (layers "F.Paste"))
+	(pad "4" thru_hole circle (at 3 0) (size 1 1) (drill 0.5) (layers "*.Cu" "*.Mask"))
+	(pad "5" smd rect (at 4 0) (size 1 1) (layers "In1.Cu")))"#;
+        let summary = read_footprint_file(footprint.as_bytes()).unwrap();
+        assert_eq!(summary.pad_count, 4);
     }
 
     #[test]

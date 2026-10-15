@@ -399,6 +399,31 @@ fn stored_bytes_that_do_not_match_or_cannot_be_drawn_are_refused() {
         cache.stored_symbol(&fixture.kicad, &stored("R_Child", child.as_bytes()), || Ok(child.as_bytes().to_vec()), None),
         Err(PreviewError::Unexportable(message)) if message.contains("based on the symbol R_US")
     ));
+    // Extra entries may only be the parents the symbol extends: an
+    // unrelated symbol beside a derived symbol and its parent is refused,
+    // and so is a symbol with an extra one beside it.
+    let unrelated = format!(
+        "(symbol \"Other\")
+{ENTRY}
+{child}"
+    );
+    assert!(matches!(
+        cache.stored_symbol(&fixture.kicad, &stored("R_Child", unrelated.as_bytes()), || Ok(unrelated.as_bytes().to_vec()), None),
+        Err(PreviewError::Unexportable(message)) if message.contains("not exactly one symbol named R_Child")
+    ));
+    let beside = format!(
+        "{ENTRY}
+(symbol \"Other\")"
+    );
+    assert!(matches!(
+        cache.stored_symbol(
+            &fixture.kicad,
+            &stored("R_US", beside.as_bytes()),
+            || Ok(beside.as_bytes().to_vec()),
+            None
+        ),
+        Err(PreviewError::Unexportable(_))
+    ));
     // The name must match exactly, case included.
     assert!(matches!(
         cache.stored_symbol(

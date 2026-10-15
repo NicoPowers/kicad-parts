@@ -623,8 +623,9 @@ fn checked_bytes(
     Ok(bytes)
 }
 
-/// Writes `entry` (one top-level `(symbol ...)`) as the only symbol of a
-/// library of `version`, and checks that kicad-cli can draw it from there.
+/// Writes `entry` (one top-level `(symbol ...)`, or a derived symbol with
+/// exactly the parents it extends) as a library of `version`, and checks
+/// that kicad-cli can draw it from there.
 fn write_symbol_library(
     staging: &Path,
     item: &StoredItem,
@@ -642,34 +643,39 @@ fn write_symbol_library(
             item.lib_ref
         ))
     })?;
-    // One symbol named as asked, or a derived symbol after the parents it
-    // extends (a symbol of a .kicad_symdir library and its parent).
+    // One symbol named as asked, plus exactly the parents it extends, one
+    // after another (a symbol of a .kicad_symdir library and its parent).
+    let not_one = || {
+        PreviewError::Unexportable(format!(
+            "The stored revision of {} is not exactly one symbol named {}.",
+            item.lib_ref, item.lib_ref.item
+        ))
+    };
     let named: Vec<_> = parsed
         .entries
         .iter()
         .filter(|entry| entry.name == item.lib_ref.item)
         .collect();
     let [only] = named.as_slice() else {
-        return Err(PreviewError::Unexportable(format!(
-            "The stored revision of {} is not exactly one symbol named {}.",
-            item.lib_ref, item.lib_ref.item
-        )));
+        return Err(not_one());
     };
-    if parsed.entries.len() > 1 && only.extends.is_none() {
-        return Err(PreviewError::Unexportable(format!(
-            "The stored revision of {} is not exactly one symbol named {}.",
-            item.lib_ref, item.lib_ref.item
-        )));
-    }
-    for entry in &parsed.entries {
-        if let Some(parent) = &entry.extends {
-            if !parsed.entries.iter().any(|other| other.name == *parent) {
-                return Err(PreviewError::Unexportable(format!(
-                    "The stored revision of {} is based on the symbol {parent}, which it does not include, so kicad-cli cannot draw it.",
-                    item.lib_ref
-                )));
-            }
+    let mut chain = vec![only.name.as_str()];
+    let mut parent = only.extends.as_deref();
+    while let Some(name) = parent {
+        let Some(found) = parsed.entries.iter().find(|entry| entry.name == name) else {
+            return Err(PreviewError::Unexportable(format!(
+                "The stored revision of {} is based on the symbol {name}, which it does not include, so kicad-cli cannot draw it.",
+                item.lib_ref
+            )));
+        };
+        if chain.contains(&found.name.as_str()) {
+            return Err(not_one());
         }
+        chain.push(found.name.as_str());
+        parent = found.extends.as_deref();
+    }
+    if chain.len() != parsed.entries.len() {
+        return Err(not_one());
     }
     let path = symbol_library(staging, &item.lib_ref);
     let folder = staging.join("in");

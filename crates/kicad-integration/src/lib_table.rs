@@ -324,14 +324,14 @@ pub fn read_tables(config_dir: &Path, kind: TableKind, vars: &PathVariables) -> 
     let top = config_dir.join(kind.file_name());
     reading.found = top.is_file();
     if reading.found {
-        let mut seen_tables = BTreeSet::new();
+        let mut chain = Vec::new();
         let mut nicknames = BTreeSet::new();
         read_table_file(
             &top,
             kind,
             vars,
             0,
-            &mut seen_tables,
+            &mut chain,
             &mut nicknames,
             &mut reading,
         );
@@ -344,18 +344,34 @@ fn read_table_file(
     kind: TableKind,
     vars: &PathVariables,
     depth: usize,
-    seen_tables: &mut BTreeSet<PathBuf>,
+    chain: &mut Vec<PathBuf>,
     nicknames: &mut BTreeSet<String>,
     reading: &mut TableReading,
 ) {
+    // Only a table already on the way here is a loop; one reached again
+    // through another branch is read again (its nicknames are kept once).
     let key = normalized(file);
-    if !seen_tables.insert(key) {
+    if chain.contains(&key) {
         reading.problems.push(format!(
             "{} names itself through its nested tables, so it was read once.",
             file.display()
         ));
         return;
     }
+    chain.push(key);
+    read_table_rows(file, kind, vars, depth, chain, nicknames, reading);
+    chain.pop();
+}
+
+fn read_table_rows(
+    file: &Path,
+    kind: TableKind,
+    vars: &PathVariables,
+    depth: usize,
+    chain: &mut Vec<PathBuf>,
+    nicknames: &mut BTreeSet<String>,
+    reading: &mut TableReading,
+) {
     let bytes = match read_limited(file) {
         Ok(bytes) => bytes,
         Err(ReadError::Missing) => {
@@ -398,15 +414,9 @@ fn read_table_file(
             .map_err(|missing| format!("{missing}"));
         if row.is_table() {
             match path {
-                Ok(nested) if depth + 1 < MAX_TABLE_NESTING => read_table_file(
-                    &nested,
-                    kind,
-                    vars,
-                    depth + 1,
-                    seen_tables,
-                    nicknames,
-                    reading,
-                ),
+                Ok(nested) if depth + 1 < MAX_TABLE_NESTING => {
+                    read_table_file(&nested, kind, vars, depth + 1, chain, nicknames, reading)
+                }
                 Ok(nested) => reading.problems.push(format!(
                     "{} is nested more than {MAX_TABLE_NESTING} tables deep, so it was not read.",
                     nested.display()
@@ -652,6 +662,39 @@ mod tests {
         // No table at all is no problem.
         let empty = read_tables(&root.path().join("none"), TableKind::Symbol, &vars);
         assert_eq!(empty, TableReading::default());
+    }
+
+    #[test]
+    fn a_table_reached_twice_is_not_a_loop() {
+        // Two branches include the same shared table; neither names itself.
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        let row = |name: &str, kind: &str, uri: &str| {
+            format!(
+                "(lib (name \"{name}\")(type \"{kind}\")(uri \"{uri}\")(options \"\")(descr \"\"))"
+            )
+        };
+        let table = |rows: &[String]| format!("(sym_lib_table (version 7) {})", rows.join(" "));
+        let shared = root.path().join("shared-table");
+        // Quoted strings treat a backslash as an escape, as KiCad does.
+        let uri = |path: &Path| path.to_string_lossy().replace(char::from(92), "/");
+        write(
+            &config.join("sym-lib-table"),
+            &table(&[
+                row("A", "Table", &uri(&root.path().join("a-table"))),
+                row("B", "Table", &uri(&root.path().join("b-table"))),
+            ]),
+        );
+        for branch in ["a-table", "b-table"] {
+            write(
+                &root.path().join(branch),
+                &table(&[row("Shared", "Table", &uri(&shared))]),
+            );
+        }
+        write(&shared, &table(&[row("Lib", "KiCad", "lib.kicad_sym")]));
+        let reading = read_tables(&config, TableKind::Symbol, &PathVariables::default());
+        assert!(reading.problems.is_empty(), "{:?}", reading.problems);
+        assert_eq!(reading.libraries.len(), 1);
     }
 
     #[test]
