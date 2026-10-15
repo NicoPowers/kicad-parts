@@ -110,7 +110,8 @@ impl PadGeometry {
     ///   arcs at its corners. Otherwise it is resized by twice each margin,
     ///   keeping its rounding and chamfer ratios; so is a rounded pad with
     ///   different margins.
-    /// - A trapezoid moves its whole outline by the X margin.
+    /// - A trapezoid moves its whole outline by the X margin, and is gone
+    ///   when a margin shrinks the pad to nothing.
     /// - A custom pad is its anchor resized by both margins, together with
     ///   the whole pad moved by the X margin. Each primitive moves on its
     ///   own: a growing margin widens its stroke, a shrinking one uses up
@@ -130,14 +131,7 @@ impl PadGeometry {
         };
         let shapes = match &self.form {
             // A custom pad's primitives can outlast its anchor.
-            _ if resized_away
-                && !matches!(
-                    self.form,
-                    PadForm::Trapezoid { .. } | PadForm::Custom { .. }
-                ) =>
-            {
-                Vec::new()
-            }
+            _ if resized_away && !matches!(self.form, PadForm::Custom { .. }) => Vec::new(),
             PadForm::Circle => vec![Shape::Circle {
                 center: Point::default(),
                 radius: w2 / 2.0,

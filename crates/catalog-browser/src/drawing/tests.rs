@@ -886,3 +886,13 @@ fn a_shrinking_margin_shrinks_a_custom_pads_primitives() {
     );
     assert_eq!(boxes[1], [0.0, 0.0, 2.0, 2.0]);
 }
+
+#[test]
+fn a_trapezoid_shrunk_to_nothing_is_gone() {
+    // The ratio is clamped so the paste is exactly as narrow as nothing.
+    let drawing = draw(
+        "(footprint \"T\" (pad \"1\" smd trapezoid (at 0 0) (size 2 1) (rect_delta 0.4 0) (layers \"F.Cu\" \"F.Paste\") (solder_paste_margin_ratio -0.6)))",
+    );
+    assert!(size_on(&drawing.pads[0], "F.Paste").is_none());
+    assert!(size_on(&drawing.pads[0], "F.Cu").is_some());
+}
