@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { assertAccessible, launchApp, screenshot, tempDir, textOf, waitForPreviewImages, waitForText } from '../harness.mjs';
+import { assertAccessible, launchApp, record, screenshot, tempDir, textOf, waitForPreviewImages, waitForText } from '../harness.mjs';
 
 const DIALOG = 'dialog.libraries-dialog';
 const PREVIEW = '.libraries-detail .preview';
@@ -327,6 +327,42 @@ describe('Libraries browser', () => {
       timeoutMsg: 'Escape did not close the close-up',
     });
     assert.equal(await browser.execute((s) => document.querySelector(s)?.open === true, DIALOG), true, 'the browser stays open');
+  });
+
+  it('draws a BGA with nearly 2,000 pads and zooms it without delay', async () => {
+    await chooseLibrary(browser, 'Package_BGA');
+    await typeSearch(browser, 'Xilinx_FFG1926');
+    await selectRow(browser, 'Xilinx_FFG1926_FFG1927_FFG1928_FFG1930');
+    await waitForPreviewImages(browser, PREVIEW);
+    const pane = `${PREVIEW} .preview-figure`;
+    const started = Date.now();
+    await (await browser.$(`${pane} .viewer-enlarge`)).click();
+    const closeUp = `${PREVIEW} dialog.zoom-dialog`;
+    await browser.waitUntil(async () => browser.execute((s) => document.querySelector(s)?.querySelectorAll('g.layer').length > 0, closeUp), {
+      timeout: 10_000,
+      timeoutMsg: 'the close-up never drew the BGA',
+    });
+    const opened = Date.now() - started;
+    // One wheel step, timed until the next frame is drawn.
+    const timing = await browser.executeAsync((s, done) => {
+      const area = document.querySelector(`${s} .viewer-area`);
+      const rect = area.getBoundingClientRect();
+      const pads = area.querySelector('g.layer[data-layer="F.Cu"] g').children.length;
+      const before = performance.now();
+      area.dispatchEvent(
+        new WheelEvent('wheel', { deltaY: -300, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, bubbles: true, cancelable: true }),
+      );
+      requestAnimationFrame(() => requestAnimationFrame(() => done({ pads, zoomMs: performance.now() - before })));
+    }, closeUp);
+    record({ event: 'bga-close-up', openedMs: opened, ...timing });
+    assert.ok(timing.pads > 1900, `${timing.pads} pads drawn`);
+    assert.ok(opened < 5_000, `the close-up took ${opened} ms to open`);
+    assert.ok(timing.zoomMs < 500, `one zoom step took ${timing.zoomMs} ms`);
+    await browser.keys('Escape');
+    await browser.waitUntil(async () => browser.execute((s) => document.querySelector(s)?.open === false, closeUp), {
+      timeout: 5_000,
+      timeoutMsg: 'Escape did not close the close-up',
+    });
   });
 
   it("draws a symbol from the person's own folder library", async () => {
