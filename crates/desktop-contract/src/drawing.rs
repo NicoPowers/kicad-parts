@@ -167,3 +167,39 @@ pub enum TextAlign {
     Center,
     End,
 }
+
+/// The centre of the circle through three points, such as an arc's start,
+/// middle and end; `None` when they lie on a line.
+pub fn circle_center(a: Point, b: Point, c: Point) -> Option<Point> {
+    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if d.abs() < 1e-12 {
+        return None;
+    }
+    let sq = |p: Point| p.x * p.x + p.y * p.y;
+    let x = (sq(a) * (b.y - c.y) + sq(b) * (c.y - a.y) + sq(c) * (a.y - b.y)) / d;
+    let y = (sq(a) * (c.x - b.x) + sq(b) * (a.x - c.x) + sq(c) * (b.x - a.x)) / d;
+    (x.is_finite() && y.is_finite()).then_some(Point::new(x, y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_centre_of_three_points_on_a_circle() {
+        let center = circle_center(
+            Point::new(-1.0, 2.0),
+            Point::new(0.0, 1.0),
+            Point::new(1.0, 2.0),
+        );
+        assert_eq!(center, Some(Point::new(0.0, 2.0)));
+        assert_eq!(
+            circle_center(
+                Point::new(0.0, 0.0),
+                Point::new(1.0, 1.0),
+                Point::new(2.0, 2.0)
+            ),
+            None
+        );
+    }
+}

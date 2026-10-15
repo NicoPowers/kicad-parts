@@ -15,7 +15,7 @@
 use crate::{bounds, show_modal};
 use desktop_contract::PreviewImage;
 use desktop_contract::drawing::{
-    DrawnText, Edge, FootprintDrawing, PadKind, Point, Shape, TextAlign,
+    DrawnText, Edge, FootprintDrawing, PadKind, Point, Shape, TextAlign, circle_center,
 };
 use leptos::prelude::*;
 use std::collections::BTreeSet;
@@ -260,18 +260,6 @@ fn escape(text: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
-}
-
-/// The centre of the circle through three points; `None` on a line.
-fn circle_center(a: Point, b: Point, c: Point) -> Option<Point> {
-    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
-    if d.abs() < 1e-12 {
-        return None;
-    }
-    let sq = |p: Point| p.x * p.x + p.y * p.y;
-    let x = (sq(a) * (b.y - c.y) + sq(b) * (c.y - a.y) + sq(c) * (a.y - b.y)) / d;
-    let y = (sq(a) * (c.x - b.x) + sq(b) * (a.x - c.x) + sq(c) * (b.x - a.x)) / d;
-    (x.is_finite() && y.is_finite()).then_some(Point::new(x, y))
 }
 
 /// SVG path commands for the arc from `start` (already reached) through
