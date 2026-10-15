@@ -1,6 +1,28 @@
 # GitPLM Parts Project
 This repository has been forked from [git-plm/parts](https://github.com/git-plm/parts).  Check it out for excellent info on IPN numbering schemes.  All that info has been stripped out in this fork to focus on the KiCad parts database and its day-to-day usage.
 
+## Try the new desktop app
+The new app (Rust and Tauri, in `apps/`, `crates/` and `tooling/`) is a prototype. It reads the CSV catalog into a team server that runs only on your computer, so you can try it without changing anything in the repository. You need Rust, [trunk](https://trunkrs.dev/) and KiCad 10.
+
+Build it once, and again after each update:
+
+```bash
+cd apps/desktop-ui
+trunk build
+cd ../..
+cargo build --locked -p kicad-parts-desktop --features custom-protocol
+```
+
+Start a team server with every CSV file imported and open the app:
+
+```bash
+cargo run --locked -p catalog-import -- local-team-server --desktop
+```
+
+The console prints three accounts and their passwords, which are new each time. Sign in at the top right of the app. Add `--csv g-res,g-cap` to import only some CSV files, which is faster. Close the app to stop the server and delete its data.
+
+See [Try the team catalog by hand](docs/operations/TRY_THE_TEAM_CATALOG.md) for what to try.
+
 ## API credentials (optional)
 Some scripts use DigiKey and Mouser APIs. To use them, copy the example secrets file and add your keys:
 
@@ -10,8 +32,8 @@ cp secrets.env.example secrets.env
 
 Then edit `secrets.env` and replace the placeholders with your DigiKey client ID/secret and Mouser API key. Do not commit `secrets.env`; it is gitignored.
 
-## KiCad Parts Manager GUI
-The repository now includes a cross-platform desktop GUI for editing part CSVs, managing alternates, and generating the SQLite database.
+## KiCad Parts Manager GUI (older Python app)
+The repository also includes the older Python desktop GUI for editing part CSVs, managing alternates, and generating the SQLite database.
 
 ### Features
 - Category browser for all `database/g-*.csv` files
