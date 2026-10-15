@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod drawing;
+pub mod measure;
 pub use drawing::FootprintDrawing;
 
 /// Tauri command names.

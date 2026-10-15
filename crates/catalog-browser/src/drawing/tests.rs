@@ -942,3 +942,59 @@ fn a_polygon_with_a_point_in_a_side_still_shrinks_and_grows() {
         matches!(offset_convex(&flat, -0.1), Shape::Polygon { ref edges, .. } if edges.is_empty())
     );
 }
+
+/// The Measure tool on a real footprint (kicad-parts-e95e): our 0603
+/// resistor's pads are 1.65 mm apart, with 0.85 mm between their copper.
+#[test]
+fn measures_between_the_pads_of_our_0603_resistor() {
+    use desktop_contract::measure::{SnapKind, nearest_snap, pad_gap, snap_points};
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod");
+    let drawing = footprint_drawing(&std::fs::read(path).unwrap()).unwrap();
+    let points = snap_points(&drawing, "F.Cu");
+    let centre = |x: f64| {
+        let index = nearest_snap(&points, Point::new(x, 0.0), 0.05).unwrap();
+        assert_eq!(points[index].kind, SnapKind::Centre);
+        points[index]
+    };
+    let (one, two) = (centre(-0.8), centre(0.8));
+    assert_eq!(one.name(&drawing), "Pad 1 centre");
+    assert_eq!(two.name(&drawing), "Pad 2 centre");
+    assert!(close(two.at.x - one.at.x, 1.65));
+    let (a, b) = (one.pad.unwrap(), two.pad.unwrap());
+    let copper = pad_gap(&drawing, a, b, "F.Cu").unwrap();
+    assert!((copper.distance - 0.85).abs() < 1e-6, "{copper:?}");
+    // The file sets no paste margin, so paste matches copper here.
+    let paste = pad_gap(&drawing, a, b, "F.Paste").unwrap();
+    assert!((paste.distance - 0.85).abs() < 1e-6, "{paste:?}");
+}
+
+/// KiCad's LFPAK56 shrinks its paste by 0.05 mm, so pads 1 and 2, 1.27 mm
+/// apart and 0.7 mm tall, have 0.57 mm between their copper and 0.67 mm
+/// between their paste. Read only from KiCad's install, when there is one.
+#[test]
+fn a_paste_margin_widens_the_gap_between_paste_openings() {
+    use desktop_contract::measure::pad_gap;
+    let Some(share) = kicad_integration::installed_share_dir(&Default::default()) else {
+        eprintln!("KiCad is not installed; skipped");
+        return;
+    };
+    let path = share.join("footprints/Package_TO_SOT_SMD.pretty/LFPAK56.kicad_mod");
+    let Ok(bytes) = std::fs::read(&path) else {
+        eprintln!("{} is missing; skipped", path.display());
+        return;
+    };
+    let drawing = footprint_drawing(&bytes).unwrap();
+    let find = |number: &str| {
+        drawing
+            .pads
+            .iter()
+            .position(|pad| pad.number == number)
+            .unwrap()
+    };
+    let (one, two) = (find("1"), find("2"));
+    let copper = pad_gap(&drawing, one, two, "F.Cu").unwrap().distance;
+    let paste = pad_gap(&drawing, one, two, "F.Paste").unwrap().distance;
+    assert!((copper - 0.57).abs() < 1e-6, "copper {copper}");
+    assert!((paste - 0.67).abs() < 1e-6, "paste {paste}");
+}
