@@ -95,6 +95,7 @@ describe("team part 3D view: the Catalog's stored 3D model", () => {
           found: link.querySelector('.model-found')?.textContent ?? null,
           problem: link.querySelector('.model-problem')?.textContent ?? null,
           path: link.querySelector('.model-path-text')?.textContent ?? null,
+          key: link.querySelector('.model-key')?.textContent ?? null,
         })),
       };
     }, CLOSE_UP);
@@ -104,6 +105,8 @@ describe("team part 3D view: the Catalog's stored 3D model", () => {
     assert.equal(shown.links[0].link, '${GITPLM_PARTS}/3d-models/g-Package_TO_SOT_SMD.3dshapes/SOT-23-5.step');
     assert.equal(shown.links[0].found, "From the Catalog's stored model for this revision.");
     assert.equal(shown.links[0].problem, null);
+    // Named by where the Catalog keeps it.
+    assert.equal(shown.links[0].key, '3d-models/g-Package_TO_SOT_SMD.3dshapes/SOT-23-5.step');
     // The checked copy in the app's own cache, with the stored bytes.
     const copy = shown.links[0].path;
     assert.ok(copy.startsWith(dataDir), `${copy} is in the app's cache`);

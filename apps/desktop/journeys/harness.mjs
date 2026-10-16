@@ -331,11 +331,15 @@ function smallPng(png) {
  * then the page is put back. Text under a see-through cover stays
  * incomplete. The journey fails on any contrast
  * violation and on any contrast check that is still incomplete.
+ *
+ * `disabledRules` turns off axe rules that cannot work on this page, by
+ * their ids; the caller must say why. Every other rule still runs.
+ * @param {{ disabledRules?: string[] }} options
  */
-export async function assertAccessible(browser, name) {
+export async function assertAccessible(browser, name, { disabledRules = [] } = {}) {
   fs.mkdirSync(a11yDir, { recursive: true });
   await browser.execute(axe.source);
-  const results = await browser.executeAsync(async (done) => {
+  const results = await browser.executeAsync(async (disabled, done) => {
     try {
       // eslint-disable-next-line no-undef
       const axe = window.axe;
@@ -344,7 +348,13 @@ export async function assertAccessible(browser, name) {
       // A drawing in a viewer (kicad-parts-34df) is a picture, hidden from
       // assistive technology; its text, such as a footprint's reference, is
       // part of the picture, as it is in kicad-cli's images.
-      const first = await axe.run({ exclude: [['.viewer-svg']] }, { resultTypes: ['violations', 'incomplete'] });
+      const first = await axe.run(
+        { exclude: [['.viewer-svg']] },
+        {
+          resultTypes: ['violations', 'incomplete'],
+          rules: Object.fromEntries(disabled.map((id) => [id, { enabled: false }])),
+        },
+      );
       // axe places an element in its grid by its box clipped to overflow:
       // hidden parents, then tests the unclipped box, so a drawing zoomed
       // past its viewer seems to cover text near the viewer. A drawing can
@@ -480,11 +490,12 @@ export async function assertAccessible(browser, name) {
         })),
         contrastRechecks,
         passes: first.passes.length,
+        disabledRules: disabled,
       });
     } catch (error) {
       done({ error: String(error) });
     }
-  });
+  }, disabledRules);
   fs.writeFileSync(path.join(a11yDir, `${name}.json`), JSON.stringify(results, null, 2));
   const stillIncomplete = (results.contrastRechecks ?? []).filter((r) => r.outcome === 'incomplete');
   record({

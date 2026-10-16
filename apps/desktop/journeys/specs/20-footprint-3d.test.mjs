@@ -359,9 +359,33 @@ describe('footprint 3D view', () => {
     assert.equal(await shown(browser, CLOSE_UP, '.viewer-measure'), true, 'Measure is back');
     assert.equal(await browser.execute(() => document.querySelectorAll('canvas').length), 0, 'the 3D canvas is gone');
 
+    // A measurement stays while the 3D view is shown.
+    await (await browser.$(`${CLOSE_UP} .viewer-measure`)).click();
+    const pads = await browser.execute((s) =>
+      [...document.querySelectorAll(`${s} g.layer[data-layer="F.Cu"] path`)].slice(0, 2).map((pad) => {
+        const rect = pad.getBoundingClientRect();
+        return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+      }), CLOSE_UP);
+    for (const pad of pads) {
+      await browser.action('pointer', { parameters: { pointerType: 'mouse' } }).move(pad).down({ button: 0 }).up({ button: 0 }).perform();
+    }
+    const readout = () => browser.execute((s) => [...document.querySelectorAll(`${s} .viewer-readout p`)].map((line) => line.textContent), CLOSE_UP);
+    const measured = await readout();
+    assert.equal(measured[0], 'Distance 1.650 mm, \u0394X 1.650 mm, \u0394Y 0.000 mm.');
+
     const again = await turn3dOn(browser, CLOSE_UP);
     record({ event: '3d-again', statuses: again });
     assert.ok((await info(browser, CLOSE_UP)).meshNames.includes('R_0603_1608Metric'));
+    // If the browser takes WebGL away, the view says so.
+    await browser.execute((s) => {
+      const canvas = document.querySelector(`${s} .view3d-canvas`);
+      (canvas.getContext('webgl2') ?? canvas.getContext('webgl')).getExtension('WEBGL_lose_context').loseContext();
+    }, CLOSE_UP);
+    await waitForText(browser, `${CLOSE_UP} .view3d-status`, 'The 3D view stopped. Turn 3D off and on again.');
+    await toggle.click();
+    assert.deepEqual(await readout(), measured, 'the measurement is still there');
+    assert.equal(await (await browser.$(`${CLOSE_UP} .viewer-measure`)).getAttribute('aria-pressed'), 'true');
+    await turn3dOn(browser, CLOSE_UP);
     // Escape closes the close-up, and the 3D view with it.
     await browser.keys('Escape');
     await browser.waitUntil(async () => !(await isOpen(browser, CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
@@ -421,6 +445,11 @@ describe('footprint 3D view', () => {
       said.links.map(({ link, found, problem }) => ({ link, found, problem })),
       [{ link: '${GITPLM_3DMODELS}/ABS07L-32.768KHZ-T.step', found: null, problem: 'The file is missing.' }],
     );
+    // Outside a footprint library's folder, saving would not keep it.
+    assert.match(
+      await browser.execute((s) => document.querySelector(`${s} .model-link-note`)?.textContent ?? '', CLOSE_UP),
+      /^Edit part would save this link as missing/,
+    );
     assert.match(said.links[0].path, /[\\/]3d-models[\\/]ABS07L-32\.768KHZ-T\.step$/);
     assert.deepEqual(said.notes, ['No 3D model can be shown, so only the board with its pads, silkscreen and mask is shown.']);
     await assertAccessible(browser, '85-footprint-3d-missing-model');
@@ -473,9 +502,11 @@ describe('footprint 3D view', () => {
     assert.deepEqual(said.notes, ['No 3D model can be shown, so only the board with its pads, silkscreen and mask is shown.']);
     const drawn = await info(browser, LIBRARY_CLOSE_UP);
     assert.ok(drawn.meshNames.every((name) => name.startsWith('board_')), `meshes: ${drawn.meshNames}`);
-    // No axe check here: axe cannot tell the colours of text in a close-up
-    // over the Libraries browser, another modal dialog (mx-d2fb83). The
-    // same panel is checked over the part details above.
+    // axe cannot tell the colours of a note whose lines lie over the
+    // Libraries browser, another modal dialog under this close-up
+    // (mx-d2fb83). Only that rule is off; the same panel's contrast is
+    // checked over the part details above.
+    await assertAccessible(browser, '87-footprint-3d-models-not-found', { disabledRules: ['color-contrast'] });
     await screenshotHiding3d(browser, '87-footprint-3d-models-not-found');
     await browser.keys('Escape');
     await browser.waitUntil(async () => !(await isOpen(browser, LIBRARY_CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
