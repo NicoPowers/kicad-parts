@@ -1,0 +1,41 @@
+three.js 0.186.1, copied into the app for the footprint 3D view
+(kicad-parts-c9c1). The app never loads it from the network.
+
+Where it came from
+  npm package three@0.186.1, downloaded once on 2026-10-16 with
+  `npm pack three@0.186.1`:
+  https://registry.npmjs.org/three/-/three-0.186.1.tgz
+  npm integrity, checked against the file:
+  sha512-blFeqb49wRCSGUGj7gtpfnSGHy2lwDk94RhUmS1c/hTby70kvChbWpkJ4Pm1390LqzzvTmzgXKHPEafJwCb8jA==
+
+Licence
+  MIT, in LICENSE, copied from the package.
+
+Files, and where each is in the package
+  three.module.js      build/three.module.js            unchanged
+  three.core.js        build/three.core.js              unchanged
+  addons/loaders/GLTFLoader.js
+                       examples/jsm/loaders/GLTFLoader.js
+  addons/utils/BufferGeometryUtils.js
+                       examples/jsm/utils/BufferGeometryUtils.js
+  addons/utils/SkeletonUtils.js
+                       examples/jsm/utils/SkeletonUtils.js
+
+  The three addons import from 'three', a name only a bundler or an
+  import map knows. Each has that one line changed to
+  `} from '../../three.module.js';`. Nothing else is changed.
+
+SHA-256 of each file as copied here
+  three.module.js                      9052042d676cb0fdc1ddfefe193053f34b7ac0513a616fdac4535d49987812ea
+  three.core.js                        9edde002b066a9a05676a6127f67735b62baf399bdea529f2f7e31657da769e6
+  addons/loaders/GLTFLoader.js         03952cb129d558f92b8e6c757fbf7c1f718b3126c4d34f264d574b40ea36054f
+  addons/utils/BufferGeometryUtils.js  259085a7dac89e0840393a9347c77123fbc4206ec2146bf0c29ffc72e14a2800
+  addons/utils/SkeletonUtils.js        28017bf37d0ecb0c4be6048db759ff14df729a562464830b064d4cc239c5af17
+  LICENSE                              8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc
+
+Trunk copies this folder to dist/three (see index.html). The app's own
+3D view, apps/desktop-ui/js/view3d.js, loads it when a person first turns
+3D on. It has its own small orbit control, so OrbitControls is not used.
+
+To update: download the new release the same way, check its integrity,
+copy the same files, change the same import lines, and update this note.

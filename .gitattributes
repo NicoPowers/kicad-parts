@@ -17,3 +17,6 @@
 
 # Screenshots, including the reviewed journey baselines, are images.
 *.png binary
+
+# Third-party code copied into the app; keep its bytes exactly.
+/apps/desktop-ui/vendor/** -text
