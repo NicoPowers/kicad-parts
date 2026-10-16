@@ -26,7 +26,7 @@ use crate::libraries::sources::{is_link, path_variables};
 use crate::pick::starts_as_model;
 use crate::team::TeamCatalog;
 use base64::Engine;
-use catalog::cad_file::{is_catalog_model_key, is_model_file_name};
+use catalog::cad_file::{is_model_file_name, is_plain_name};
 use desktop_contract::{
     Footprint3dRequest, Footprint3dView, GlbReady, ModelLinkView, ModelSource, TeamFile,
 };
@@ -234,21 +234,26 @@ pub(crate) fn resolve(
         Err(missing) => return not_shown(NotShown::VariableNotSet(missing.0)),
     };
     let path = PathBuf::from(expanded);
-    if path.is_relative() {
+    // `/models/x.step` names a folder on the current drive, as KiCad reads it.
+    if path.is_relative() && !path.has_root() {
         return not_shown(NotShown::NoFolder);
     }
     found(ModelSource::Installed, &checked_model(&path))
 }
 
-/// The Catalog place a link into our library names, such as
-/// `3d-models/g-Package_SO.3dshapes/SOIC-8.step`.
+/// The place below the catalog folder a link into our library names, such
+/// as `3d-models/g-Package_SO.3dshapes/SOIC-8.step`. Each part must be a
+/// plain name, so it can never leave `3d-models/`.
 fn our_key(link: &str) -> Option<String> {
     let rest = ["${GITPLM_PARTS}/3d-models", "${GITPLM_3DMODELS}"]
         .iter()
         .find_map(|prefix| link.strip_prefix(prefix))?
         .strip_prefix(['/', '\\'])?;
-    let key = format!("3d-models/{}", rest.replace('\\', "/"));
-    is_catalog_model_key(&key).then_some(key)
+    let parts: Vec<&str> = rest.split(['/', '\\']).collect();
+    parts
+        .iter()
+        .all(|part| is_plain_name(part))
+        .then(|| format!("3d-models/{}", parts.join("/")))
 }
 
 /// The path below KiCad's 3D models folder of a `${KICAD<n>_3DMODEL_DIR}`

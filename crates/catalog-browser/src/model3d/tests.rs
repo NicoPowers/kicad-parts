@@ -119,6 +119,11 @@ fn every_reason_a_model_is_not_shown() {
         places.resolve("x.step"),
         Resolved::NotShown(NotShown::NoFolder)
     );
+    // A path from another computer, with a folder but no drive.
+    assert!(matches!(
+        places.resolve("/home/someone/3d-models/x.step"),
+        Resolved::NotShown(NotShown::Missing(_))
+    ));
     assert_eq!(
         places.resolve("${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/Gone.step"),
         missing("kicad/3dmodels/Resistor_SMD.3dshapes/Gone.step")
@@ -309,9 +314,16 @@ fn only_3d_model_file_names_and_safe_paths_are_read() {
         "${GITPLM_PARTS}/3d-models/../secrets.env",
         "${GITPLM_PARTS}/3d-models/g-X.3dshapes/../../y.step",
         "${GITPLM_PARTS}/other/x.step",
+        "${GITPLM_3DMODELS}/a//b.step",
+        "${GITPLM_3DMODELS}/C:x.step",
     ] {
         assert_eq!(our_key(unsafe_link), None, "{unsafe_link}");
     }
+    // A model our library keeps outside a footprint library's folder.
+    assert_eq!(
+        our_key("${GITPLM_3DMODELS}/ABS07L-32.768KHZ-T.step"),
+        Some("3d-models/ABS07L-32.768KHZ-T.step".into())
+    );
     assert_eq!(
         kicad_model("${KICAD8_3DMODEL_DIR}/A.3dshapes/b.wrl"),
         Some("A.3dshapes/b.wrl")
