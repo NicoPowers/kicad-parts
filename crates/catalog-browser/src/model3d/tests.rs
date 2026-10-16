@@ -365,15 +365,17 @@ fn only_3d_model_file_names_and_safe_paths_are_read() {
 
 #[test]
 fn network_paths_are_opened_only_through_the_persons_path_variables() {
+    // The links name host.invalid, which never resolves, so a broken rule
+    // can't make a test run look for a real computer.
     let mut places = places();
     for link in [
-        r"\\host\share\x.step",
-        "//host/share/x.step",
-        r"\\?\UNC\host\share\x.step",
+        r"\\host.invalid\share\x.step",
+        "//host.invalid/share/x.step",
+        r"\\?\UNC\host.invalid\share\x.step",
         r"\\.\pipe\x.step",
-        r"/\host\share\x.step",
-        r"\??\UNC\host\share\x.step",
-        "/??/UNC/host/share/x.step",
+        r"/\host.invalid\share\x.step",
+        r"\??\UNC\host.invalid\share\x.step",
+        "/??/UNC/host.invalid/share/x.step",
         r"\??\C:\x.step",
         "/?/x.step",
     ] {
@@ -395,10 +397,10 @@ fn network_paths_are_opened_only_through_the_persons_path_variables() {
     // Variables whose values are ordinary, or empty, never make a network
     // path ordinary.
     for link in [
-        "/${SLASH}host/share/x.step",
-        "${SLASH}/host/share/x.step",
-        r"${EMPTY}\\host\share\x.step",
-        "${EMPTY}//host/share/x.step",
+        "/${SLASH}host.invalid/share/x.step",
+        "${SLASH}/host.invalid/share/x.step",
+        r"${EMPTY}\\host.invalid\share\x.step",
+        "${EMPTY}//host.invalid/share/x.step",
     ] {
         assert_eq!(
             places.resolve(link),
@@ -443,7 +445,7 @@ fn a_downloads_footprint_draws_only_its_own_model() {
     for link in [
         here.to_string_lossy().into_owned(),
         "${MY_LIB_3D}/models/Part.wrl".to_owned(),
-        r"\\host\share\x.step".to_owned(),
+        r"\\host.invalid\share\x.step".to_owned(),
         "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603.step".to_owned(),
     ] {
         assert_eq!(
