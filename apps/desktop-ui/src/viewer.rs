@@ -74,6 +74,9 @@ pub(crate) struct Picture {
     pub model_files: Vec<TeamFile>,
     /// Add part: the download's 3D model, used as saving links it.
     pub download_model: Option<TeamFile>,
+    /// Add part: the footprint is from a download, so its 3D view draws
+    /// only the download's own model.
+    pub from_download: bool,
 }
 
 impl Picture {
@@ -87,13 +90,21 @@ impl Picture {
             stored: image.stored_footprint.clone(),
             model_files: Vec::new(),
             download_model: None,
+            from_download: false,
         }
     }
 
-    /// The same picture, whose 3D view uses these 3D model files.
-    pub(crate) fn with_models(mut self, files: Vec<TeamFile>, download: Option<TeamFile>) -> Self {
+    /// The same picture, whose 3D view uses these 3D model files. With
+    /// `from_download`, it uses no other.
+    pub(crate) fn with_models(
+        mut self,
+        files: Vec<TeamFile>,
+        download: Option<TeamFile>,
+        from_download: bool,
+    ) -> Self {
         self.model_files = files;
         self.download_model = download;
+        self.from_download = from_download;
         self
     }
 
@@ -347,10 +358,7 @@ fn DrawingView(
             no_webgl.set(true);
             return;
         }
-        // Measuring is for the 2D drawing.
-        if measuring.get_untracked() {
-            toggle_measuring();
-        }
+        // A measurement stays, for when the drawing comes back.
         no_webgl.set(false);
         three_d.set(true);
     };
@@ -717,7 +725,9 @@ fn DrawingView(
                 // close the close-up. A held Escape repeats: only a new
                 // press does either, so holding it never closes the
                 // close-up after clearing.
-                if event.key() != "Escape" || !measurable {
+                // In 3D, Escape closes the close-up; the measurement is
+                // kept for the drawing.
+                if event.key() != "Escape" || !measurable || three_d.get_untracked() {
                     return;
                 }
                 if event.repeat() {

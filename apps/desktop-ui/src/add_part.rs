@@ -1063,6 +1063,13 @@ pub fn AddPartView(
                 .and_then(|at| found.model_files.get(at).cloned())
         })
     });
+    let from_download = Signal::derive(move || {
+        form.reading.with(|found| {
+            found
+                .as_ref()
+                .is_some_and(|found| picked(found, PreviewKind::Footprint).is_none())
+        })
+    });
     let previews = move || {
         let chosen = form.reading.with(Option::is_some);
         view! {
@@ -1074,7 +1081,7 @@ pub fn AddPartView(
             <section class="preview" aria-labelledby="footprint-heading">
                 <h3 id="footprint-heading">"Footprint"</h3>
                 {(!chosen).then(|| view! { <p class="hint">"Upload a download or choose from a library to see its footprint here."</p> })}
-                <FilePreview kind=FileKind::Footprint preview=footprint_drawing previewing=footprint_busy models=copied_models download_model=download_model />
+                <FilePreview kind=FileKind::Footprint preview=footprint_drawing previewing=footprint_busy models=copied_models download_model=download_model from_download=from_download />
             </section>
         }
     };

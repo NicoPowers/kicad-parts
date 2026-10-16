@@ -51,14 +51,15 @@ export function webglAvailable() {
 
 /**
  * Reads the GLB in `bytes` (an ArrayBuffer) and draws it in `container`,
- * on `background`. Resolves to the view.
+ * on `background`. Resolves to the view. `onLost` runs if the browser
+ * takes the view's WebGL away, such as after a graphics driver reset.
  */
-export async function createView(container, bytes, background) {
+export async function createView(container, bytes, background, onLost) {
   const { THREE, GLTFLoader } = await loadThree();
   const gltf = await new Promise((resolve, reject) => {
     new GLTFLoader().parse(bytes, '', resolve, (error) => reject(new Error(String(error?.message ?? error))));
   });
-  return new View3d(THREE, container, gltf, background);
+  return new View3d(THREE, container, gltf, background, onLost);
 }
 
 const DEGREE = Math.PI / 180;
@@ -78,7 +79,7 @@ const ZOOM_STEP = 1.5;
 const FIELD_OF_VIEW = 30;
 
 class View3d {
-  constructor(THREE, container, gltf, background) {
+  constructor(THREE, container, gltf, background, onLost) {
     const model = gltf.scene;
     this.THREE = THREE;
     this.container = container;
@@ -93,6 +94,11 @@ class View3d {
     this.canvas = this.renderer.domElement;
     this.canvas.className = 'view3d-canvas';
     this.canvas.setAttribute('aria-hidden', 'true');
+    this.lost = (event) => {
+      event.preventDefault();
+      onLost?.();
+    };
+    this.canvas.addEventListener('webglcontextlost', this.lost);
     container.appendChild(this.canvas);
 
     this.scene = new THREE.Scene();
@@ -373,6 +379,8 @@ class View3d {
       }
     });
     this.scene.clear();
+    // Freeing the context below is no loss to report.
+    this.canvas.removeEventListener('webglcontextlost', this.lost);
     this.renderer.dispose();
     this.renderer.forceContextLoss();
     this.canvas.remove();

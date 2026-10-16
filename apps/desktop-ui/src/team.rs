@@ -1406,6 +1406,10 @@ pub(crate) fn FilePreview(
     /// Add part: the download's 3D model, used as saving links it.
     #[prop(optional, into)]
     download_model: Option<Signal<Option<TeamFile>>>,
+    /// Add part: the footprint is from a download, so its 3D view draws
+    /// only the download's own model.
+    #[prop(optional, into)]
+    from_download: Option<Signal<bool>>,
 ) -> impl IntoView {
     let (what, canvas) = if kind == FileKind::Symbol {
         ("symbol", "canvas canvas-symbol file-canvas")
@@ -1445,7 +1449,8 @@ pub(crate) fn FilePreview(
                                             // The 3D models chosen by now.
                                             let files = models.map(|models| models.get_untracked()).unwrap_or_default();
                                             let download = download_model.and_then(|model| model.get_untracked());
-                                            close_up.open(picture.clone().with_models(files, download));
+                                            let downloaded = from_download.is_some_and(|from| from.get_untracked());
+                                            close_up.open(picture.clone().with_models(files, download, downloaded));
                                         }
                                     >
                                         <img src=image.data_uri alt=alt.clone() />

@@ -32,6 +32,11 @@ pub struct Footprint3dRequest {
     /// for the model link it was chosen for.
     #[serde(default)]
     pub files: Vec<TeamFile>,
+    /// Add part: the footprint is from a download, so only the download's
+    /// own 3D model is drawn. Its other links point at the maker's
+    /// computer, so the app never looks for them.
+    #[serde(default)]
+    pub from_download: bool,
     /// Add part: the download's 3D model, used as saving links it.
     #[serde(default)]
     pub download_model: Option<TeamFile>,
@@ -46,7 +51,7 @@ pub struct Footprint3dRequest {
 pub enum ModelSource {
     /// The Catalog's stored model for this footprint revision.
     Catalog,
-    /// Our library, `3d-models/g-*.3dshapes` in the catalog folder.
+    /// Our library: `3d-models/` in the catalog folder.
     Ours,
     /// KiCad's own 3D models.
     Kicad,
@@ -65,10 +70,18 @@ pub struct ModelLinkView {
     pub link: String,
     /// Where its file was found, when it is drawn.
     pub source: Option<ModelSource>,
-    /// The full path of the file drawn, or of the file looked for.
+    /// The full path of the file drawn, or of the file looked for. For a
+    /// Catalog model, its copy in the app's cache.
     pub path: Option<String>,
+    /// For a Catalog model: where the Catalog keeps it, such as
+    /// `3d-models/g-Package_SO.3dshapes/SOIC-8.step`.
+    #[serde(default)]
+    pub catalog_key: Option<String>,
     /// Why it is not drawn, in plain words.
     pub problem: Option<String>,
+    /// Something else to know about it, in plain words.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// The GLB of a 3D view, ready to read.

@@ -16,11 +16,13 @@ extern "C" {
     pub(super) fn webgl_available() -> bool;
 
     /// Reads a GLB and draws it in an element; resolves to the view.
+    /// `on_lost` runs if the browser takes the view's WebGL away.
     #[wasm_bindgen(js_name = createView, catch)]
     async fn create_view(
         container: JsValue,
         bytes: JsValue,
         background: &str,
+        on_lost: &js_sys::Function,
     ) -> Result<JsValue, JsValue>;
 
     /// A drawn 3D view.
@@ -38,6 +40,8 @@ extern "C" {
 
 /// What the person sees when WebGL is off.
 pub(super) const NO_WEBGL: &str = "This computer can't show 3D views (WebGL is off).";
+/// What the person sees when the browser takes the view's WebGL away.
+const LOST: &str = "The 3D view stopped. Turn 3D off and on again.";
 
 /// Where a 3D view is.
 #[derive(Clone, Debug, PartialEq)]
@@ -71,9 +75,17 @@ pub(super) fn ThreeDArea(
         stored: picture.stored.clone(),
         files: picture.model_files.clone(),
         download_model: picture.download_model.clone(),
-        // The newest request: waiting exports for older ones are dropped.
-        selection: Some(js_sys::Date::now() as u64),
+        from_download: picture.from_download,
+        // Never replaced: the person turned 3D on and waits for it.
+        selection: None,
     };
+    // Kept while the area is open, then dropped with it; the view stops
+    // listening before that.
+    let lost = StoredValue::new_local(wasm_bindgen::closure::Closure::<dyn FnMut()>::new(
+        move || {
+            making.try_set(Making::Problem(LOST.into()));
+        },
+    ));
     {
         let closed = closed.clone();
         spawn_local(async move {
@@ -103,7 +115,9 @@ pub(super) fn ThreeDArea(
                     .try_get_untracked()
                     .flatten()
                     .ok_or_else(|| "the close-up closed".to_owned())?;
-                create_view(element.into(), bytes, BOARD)
+                let on_lost: js_sys::Function =
+                    lost.with_value(|lost| lost.as_ref().clone().unchecked_into());
+                create_view(element.into(), bytes, BOARD, &on_lost)
                     .await
                     .map_err(|error| {
                         js_sys::Reflect::get(&error, &"message".into())
@@ -208,17 +222,31 @@ pub(super) fn ModelPanel(
                     {view.models.into_iter().map(|model| {
                         let found = model.source.map(source_words);
                         let looked = model.problem.is_some();
+                        // A Catalog model is named by where the Catalog
+                        // keeps it; the app's copy is a detail.
+                        let (key, path, copy) = match model.catalog_key {
+                            Some(key) => (Some(key), None, model.path),
+                            None => (None, model.path, None),
+                        };
                         view! {
                             <li class="model-link" class:model-missing=looked>
                                 <code class="model-link-text">{model.link}</code>
                                 {found.map(|words| view! { <p class="model-found">{words}</p> })}
+                                {key.map(|key| view! { <p class="model-key"><code>{key}</code></p> })}
                                 {model.problem.map(|problem| view! { <p class="model-problem">{problem}</p> })}
-                                {model.path.map(|path| view! {
+                                {path.map(|path| view! {
                                     <p class="model-path">
                                         {if looked { "Looked for:" } else { "File:" }}
                                         <span class="model-path-text">{path}</span>
                                     </p>
                                 })}
+                                {copy.map(|path| view! {
+                                    <details class="model-copy">
+                                        <summary>"The app's copy"</summary>
+                                        <p class="model-path"><span class="model-path-text">{path}</span></p>
+                                    </details>
+                                })}
+                                {model.note.map(|note| view! { <p class="model-link-note">{note}</p> })}
                             </li>
                         }
                     }).collect_view()}

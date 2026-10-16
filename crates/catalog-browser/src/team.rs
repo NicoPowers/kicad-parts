@@ -213,8 +213,18 @@ impl StoredCad {
 }
 
 /// A footprint's 3D model link as the footprint writes it, and the stored
-/// model the Catalog binds it to, or why that model failed its checks.
-pub type FootprintModel = (String, Result<StoredModel, String>);
+/// model the Catalog binds it to, or why it cannot be used.
+pub type FootprintModel = (String, Result<StoredModel, StoredModelError>);
+
+/// Why a footprint revision's stored 3D model cannot be used. Each reason
+/// finishes the sentence "... because ...".
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StoredModelError {
+    /// Its record failed the checks previews use.
+    Check(String),
+    /// The team server could not give it now, such as when signed out.
+    Unavailable(String),
+}
 
 /// One 3D model revision a footprint revision uses, as the Catalog stores
 /// it, after its record is checked.
@@ -1258,17 +1268,21 @@ impl TeamCatalog {
                         number: *number,
                         snapshot_sha256,
                     };
-                    checked_record(&record, &named, CadItemKind::Model3d, "3d-model").map(
-                        |details| StoredModel {
+                    checked_record(&record, &named, CadItemKind::Model3d, "3d-model")
+                        .map(|details| StoredModel {
                             key: details.key,
                             blob_sha256: details.blob_sha256,
                             blob: record.blob,
-                        },
-                    )
+                        })
+                        .map_err(StoredModelError::Check)
                 }
-                Err(TeamCadError::Unreachable(why) | TeamCadError::NotFound(why)) => Err(why),
-                Err(TeamCadError::SignedOut) => Err("you are signed out".into()),
-                Err(TeamCadError::Mismatch { why, .. }) => Err(why),
+                Err(TeamCadError::Unreachable(why) | TeamCadError::NotFound(why)) => {
+                    Err(StoredModelError::Unavailable(why))
+                }
+                Err(TeamCadError::SignedOut) => {
+                    Err(StoredModelError::Unavailable("you are signed out".into()))
+                }
+                Err(TeamCadError::Mismatch { why, .. }) => Err(StoredModelError::Check(why)),
             };
             models.push((model.reference, checked));
         }

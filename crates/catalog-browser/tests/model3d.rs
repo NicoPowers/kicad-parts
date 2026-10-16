@@ -48,6 +48,31 @@ fn drawing_key(browser: &CatalogBrowser, reference: &str) -> String {
     }
 }
 
+/// The drawing key of a footprint file chosen in Edit part.
+fn file_key(browser: &CatalogBrowser, name: &str, footprint: &str) -> String {
+    use base64::Engine;
+    let request = FilePreviewRequest {
+        file: TeamFile {
+            kind: FileKind::Footprint,
+            file_name: format!("{name}.kicad_mod"),
+            base64: base64::engine::general_purpose::STANDARD.encode(footprint),
+            symbol: None,
+            model_key: None,
+            replaces: None,
+            label: None,
+            installed: None,
+            no_models: false,
+            choice: None,
+        },
+        reference: format!("g-Test:{name}"),
+        selection: None,
+    };
+    match browser.preview_file(&request) {
+        PreviewOutcome::Ready(set) => set.images[0].drawing_key.clone().unwrap(),
+        PreviewOutcome::Problem(problem) => panic!("{problem:?}"),
+    }
+}
+
 /// The JSON chunk of a GLB, once the GLB is shown to be whole.
 fn glb_json(bytes: &[u8]) -> serde_json::Value {
     let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
@@ -161,27 +186,7 @@ fn a_footprint_whose_models_cannot_be_shown_still_shows_its_board() {
   (model \"${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step\" (hide yes))
 )
 ";
-    use base64::Engine;
-    let request = FilePreviewRequest {
-        file: TeamFile {
-            kind: FileKind::Footprint,
-            file_name: "No_Models.kicad_mod".into(),
-            base64: base64::engine::general_purpose::STANDARD.encode(footprint),
-            symbol: None,
-            model_key: None,
-            replaces: None,
-            label: None,
-            installed: None,
-            no_models: false,
-            choice: None,
-        },
-        reference: "g-Test:No_Models".into(),
-        selection: None,
-    };
-    let key = match browser.preview_file(&request) {
-        PreviewOutcome::Ready(set) => set.images[0].drawing_key.clone().unwrap(),
-        PreviewOutcome::Problem(problem) => panic!("{problem:?}"),
-    };
+    let key = file_key(&browser, "No_Models", footprint);
     let (view, _) = made(&browser, &team, &key);
     assert_eq!(view.problem, None, "{view:?}");
     let problems: Vec<&str> = view
@@ -216,4 +221,64 @@ fn a_footprint_whose_models_cannot_be_shown_still_shows_its_board() {
         "{names:?}"
     );
     assert!(names.iter().any(|name| name == "board_pad"), "{names:?}");
+}
+
+/// kicad-cli 10 ends with code 2 when it cannot read a STEP file, but still
+/// writes the board. The view is made, the model is marked as not drawn,
+/// and the result is cached like any other.
+#[test]
+fn a_model_kicad_cli_cannot_read_is_marked_and_the_board_still_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some((browser, team)) = open(dir.path()) else {
+        return;
+    };
+    let truncated = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/Truncated.step");
+    let link = truncated.to_string_lossy().replace('\\', "/");
+    let footprint = format!(
+        "(footprint \"Truncated_Model\" (version 20241229) (layer \"F.Cu\") (attr smd)
+  (fp_rect (start -1.5 -1) (end 1.5 1) (stroke (width 0.05) (type solid)) (fill no) (layer \"F.CrtYd\"))
+  (pad \"1\" smd rect (at -0.8 0) (size 0.8 1) (layers \"F.Cu\" \"F.Paste\" \"F.Mask\"))
+  (pad \"2\" smd rect (at 0.8 0) (size 0.8 1) (layers \"F.Cu\" \"F.Paste\" \"F.Mask\"))
+  (model \"{link}\")
+)
+"
+    );
+    let key = file_key(&browser, "Truncated_Model", &footprint);
+    for time in ["first", "from the cache"] {
+        let (view, _) = made(&browser, &team, &key);
+        assert_eq!(view.problem, None, "{time}: {view:?}");
+        let [model] = view.models.as_slice() else {
+            panic!("{time}: one model: {view:?}");
+        };
+        assert_eq!(model.source, None, "{time}");
+        assert_eq!(
+            model.problem.as_deref(),
+            Some("kicad-cli could not read this file."),
+            "{time}"
+        );
+        assert!(
+            model
+                .path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("Truncated.step"))
+        );
+        assert_eq!(
+            view.notes[0],
+            "No 3D model can be shown, so only the board with its pads, silkscreen and mask is shown.",
+            "{time}"
+        );
+        assert!(
+            view.notes[1].contains("readSTEP() failed"),
+            "{time}: {:?}",
+            view.notes
+        );
+        let glb = view.glb.expect("the board is still shown");
+        assert_eq!(glb.from_cache, time != "first");
+        let bytes = browser.footprint_glb(&glb.key).unwrap();
+        assert!(
+            mesh_names(&glb_json(&bytes))
+                .iter()
+                .all(|name| name.starts_with("board_"))
+        );
+    }
 }

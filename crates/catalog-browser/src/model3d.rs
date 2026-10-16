@@ -10,23 +10,30 @@
 //! 1. the Catalog's stored model, for a Catalog footprint revision, after
 //!    the same checks previews use;
 //! 2. a 3D model file chosen with the footprint, in Edit part or Add part;
-//! 3. our library, `3d-models/g-*.3dshapes/` in the catalog folder;
+//! 3. our library: `${GITPLM_PARTS}/3d-models/...` or
+//!    `${GITPLM_3DMODELS}/...`, in the catalog folder's `3d-models/`;
 //! 4. KiCad's own models: the person's `KICAD10_3DMODEL_DIR`, or the
 //!    `3dmodels` folder KiCad installed;
 //! 5. any other link, through the person's KiCad path variables: an
 //!    installed library.
 //!
+//! A footprint from a download in Add part draws only the download's own
+//! 3D model: its other links point at the maker's computer.
+//!
 //! Only `.step .stp .stpz .wrl .wrz` files are read, and only once their
 //! real path and first bytes show a 3D model, as copies from installed
-//! libraries are checked (mx-4b6662). kicad-cli is never left to find a
-//! model itself, so the file the panel names is the file drawn.
+//! libraries are checked (mx-4b6662). A network path (`\\host\share`) is
+//! opened only when it comes from a path variable the person set, because
+//! opening one can send their Windows sign-in to that host. kicad-cli is
+//! never left to find a model itself, so the file the panel names is the
+//! file drawn.
 
 use crate::CatalogBrowser;
 use crate::libraries::sources::{is_link, path_variables};
 use crate::pick::starts_as_model;
-use crate::team::TeamCatalog;
+use crate::team::{StoredModelError, TeamCatalog};
 use base64::Engine;
-use catalog::cad_file::{is_model_file_name, is_plain_name};
+use catalog::cad_file::{is_catalog_model_key, is_model_file_name, is_plain_name};
 use desktop_contract::{
     Footprint3dRequest, Footprint3dView, GlbReady, ModelLinkView, ModelSource, TeamFile,
 };
@@ -43,6 +50,13 @@ use std::path::{Path, PathBuf};
 pub const MAX_GLB_BYTES: u64 = 150 * 1024 * 1024;
 /// How much of a file is read to see that it holds a 3D model.
 const HEADER_BYTES: u64 = 4096;
+/// What kicad-cli prints about a 3D model it could not load.
+const CLI_COMPLAINTS: [&str; 4] = [
+    "readSTEP() failed",
+    "No model for filename",
+    "Could not add 3D model",
+    "File not found",
+];
 
 /// Where 3D model files are looked for.
 #[derive(Clone, Debug)]
@@ -59,9 +73,22 @@ pub(crate) struct ModelPlaces {
 /// chosen with the footprint, each checked and copied into the cache.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Supplies {
-    /// The Catalog's stored models, by link as the footprint writes it.
-    pub stored: Vec<(String, Result<PathBuf, NotShown>)>,
+    /// The Catalog's stored models.
+    pub stored: Vec<Stored>,
     pub chosen: Vec<Chosen>,
+    /// A download's footprint: draw only the chosen files.
+    pub only_chosen: bool,
+}
+
+/// A 3D model the Catalog stores for the footprint revision.
+#[derive(Clone, Debug)]
+pub(crate) struct Stored {
+    /// The link as the footprint writes it.
+    pub link: String,
+    /// Where the Catalog keeps it, when its record could be read.
+    pub key: Option<String>,
+    /// Its checked copy in the cache.
+    pub copy: Result<PathBuf, NotShown>,
 }
 
 /// A 3D model file chosen with the footprint.
@@ -98,6 +125,12 @@ pub(crate) enum NotShown {
     NoFolder,
     /// A path variable the link uses is not set.
     VariableNotSet(String),
+    /// The link uses `${KIPRJMOD}`, a KiCad project's folder.
+    ProjectFolder,
+    /// A network path that no path variable of the person's gave.
+    NetworkPath,
+    /// A download's link to something other than its own 3D model.
+    OutsideDownload,
     Missing(PathBuf),
     /// In our library, the path goes through a link.
     Linked(PathBuf),
@@ -112,9 +145,11 @@ pub(crate) enum NotShown {
         path: PathBuf,
         why: String,
     },
+    /// kicad-cli could not load the file.
+    CliUnreadable(PathBuf),
     /// The Catalog's stored model failed its checks, because of `0`.
     HashFailed(String),
-    /// The Catalog's stored model could not be fetched, because of `0`.
+    /// The Catalog's copy cannot be had now, because of `0`.
     Unavailable(String),
 }
 
@@ -130,10 +165,21 @@ impl NotShown {
                 "It is not a 3D model file: KiCad's are .step, .stp, .stpz, .wrl or .wrz.".into()
             }
             Self::NoFolder => {
-                "It names no folder and no path variable, so where the file is is not known.".into()
+                "The link has no folder or path variable, so the app can't tell where the file is."
+                    .into()
             }
             Self::VariableNotSet(name) => {
                 format!("The path variable ${{{name}}} is not set in KiCad's path settings.")
+            }
+            Self::ProjectFolder => {
+                "${KIPRJMOD} means a KiCad project's folder, which a library footprint doesn't have."
+                    .into()
+            }
+            Self::NetworkPath => {
+                "It names a network folder, which the app opens only through a path variable you set in KiCad's path settings.".into()
+            }
+            Self::OutsideDownload => {
+                "It points outside the download, so the app doesn't look for the file.".into()
             }
             Self::Missing(_) => "The file is missing.".into(),
             Self::Linked(_) => {
@@ -144,11 +190,12 @@ impl NotShown {
             }
             Self::NotModel(_) => "The file does not hold a 3D model of its kind.".into(),
             Self::Unreadable { why, .. } => format!("The file could not be read: {why}."),
+            Self::CliUnreadable(_) => "kicad-cli could not read this file.".into(),
             Self::HashFailed(why) => {
                 format!("The Catalog's stored model failed its hash check because {why}.")
             }
             Self::Unavailable(why) => {
-                format!("The Catalog's stored model could not be fetched because {why}.")
+                format!("The Catalog's copy isn't available right now, because {why}.")
             }
         }
     }
@@ -159,6 +206,7 @@ impl NotShown {
             Self::Missing(path)
             | Self::Linked(path)
             | Self::NotModel(path)
+            | Self::CliUnreadable(path)
             | Self::LeadsElsewhere { path, .. }
             | Self::Unreadable { path, .. } => Some(path),
             _ => None,
@@ -197,11 +245,14 @@ pub(crate) fn resolve(
         Ok(path) => Resolved::Found(source, path.clone()),
         Err(why) => Resolved::NotShown(why.clone()),
     };
-    if let Some((_, stored)) = supplies.stored.iter().find(|(known, _)| known == link) {
-        return found(ModelSource::Catalog, stored);
+    if let Some(stored) = supplies.stored.iter().find(|stored| stored.link == link) {
+        return found(ModelSource::Catalog, &stored.copy);
     }
     if let Some(chosen) = supplies.chosen.iter().find(|chosen| chosen.matches(link)) {
         return found(ModelSource::Chosen, &chosen.copy);
+    }
+    if supplies.only_chosen {
+        return not_shown(NotShown::OutsideDownload);
     }
     if !is_model_file_name(link) {
         return not_shown(NotShown::NotModelFile);
@@ -219,26 +270,53 @@ pub(crate) fn resolve(
         }
         return found(ModelSource::Ours, &checked_model(&path));
     }
-    if let Some(rest) = kicad_model(link) {
+    // KiCad 5 called KiCad's own folder KISYS3DMOD; KiCad still reads it so,
+    // unless the person set it to something else.
+    let old_name = places.variables.get("KISYS3DMOD").is_none();
+    if let Some(rest) = kicad_model(link, old_name) {
         let Some(folder) = &places.kicad_models else {
             return not_shown(NotShown::VariableNotSet(format!(
                 "KICAD{SUPPORTED_MAJOR}_3DMODEL_DIR"
             )));
         };
         let mut path = folder.clone();
-        path.extend(rest.split(['/', '\\']).filter(|part| !part.is_empty()));
+        path.extend(rest.split(['/', '\\']));
         return found(ModelSource::Kicad, &checked_model(&path));
+    }
+    let project = ["${KIPRJMOD}", "$(KIPRJMOD)"];
+    if project.iter().any(|name| link.contains(name)) && places.variables.get("KIPRJMOD").is_none()
+    {
+        return not_shown(NotShown::ProjectFolder);
+    }
+    if is_network_path(link) {
+        return not_shown(NotShown::NetworkPath);
     }
     let expanded = match places.variables.expand(link) {
         Ok(expanded) => expanded,
         Err(missing) => return not_shown(NotShown::VariableNotSet(missing.0)),
     };
+    // A network path only from a path variable at the link's start, which
+    // the person set.
+    if is_network_path(&expanded) && !link.starts_with('$') {
+        return not_shown(NotShown::NetworkPath);
+    }
     let path = PathBuf::from(expanded);
     // `/models/x.step` names a folder on the current drive, as KiCad reads it.
     if path.is_relative() && !path.has_root() {
         return not_shown(NotShown::NoFolder);
     }
     found(ModelSource::Installed, &checked_model(&path))
+}
+
+/// Whether `text` starts as a network or device path, such as
+/// `\\host\share`, `//host/share`, `\\?\UNC\host` or `\\.\device`:
+/// two slashes of either kind.
+fn is_network_path(text: &str) -> bool {
+    let mut start = text.chars();
+    matches!(
+        (start.next(), start.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    )
 }
 
 /// The place below the catalog folder a link into our library names, such
@@ -257,15 +335,23 @@ fn our_key(link: &str) -> Option<String> {
 }
 
 /// The path below KiCad's 3D models folder of a `${KICAD<n>_3DMODEL_DIR}`
-/// link, with no `..` that would climb out of it. KiCad reads an older
-/// version's variable as its own.
-fn kicad_model(link: &str) -> Option<&str> {
-    let rest = link.strip_prefix("${KICAD")?;
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    let rest = rest[digits..]
-        .strip_prefix("_3DMODEL_DIR}")?
-        .strip_prefix(['/', '\\'])?;
-    (digits > 0 && !rest.split(['/', '\\']).any(|part| part == "..")).then_some(rest)
+/// link, or, with `old_name`, a `${KISYS3DMOD}` one. KiCad reads an older
+/// version's variable as its own. Each part must be a plain name, so the
+/// path never leaves the folder.
+fn kicad_model(link: &str, old_name: bool) -> Option<&str> {
+    let rest = match link.strip_prefix("${KISYS3DMOD}") {
+        Some(rest) if old_name => rest,
+        _ => {
+            let rest = link.strip_prefix("${KICAD")?;
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 {
+                return None;
+            }
+            rest[digits..].strip_prefix("_3DMODEL_DIR}")?
+        }
+    };
+    let rest = rest.strip_prefix(['/', '\\'])?;
+    rest.split(['/', '\\']).all(is_plain_name).then_some(rest)
 }
 
 fn last_part(link: &str) -> &str {
@@ -322,6 +408,19 @@ fn plain_path(path: PathBuf) -> PathBuf {
     }
 }
 
+/// Whether kicad-cli's `messages` say it could not load the file at
+/// `path`. kicad-cli names the file as the board does.
+fn cli_could_not_read(messages: &str, path: &Path) -> bool {
+    let normal = |text: &str| text.replace('/', "\\").to_lowercase();
+    let wanted = normal(&path.to_string_lossy());
+    messages.lines().any(|line| {
+        CLI_COMPLAINTS
+            .iter()
+            .any(|complaint| line.contains(complaint))
+            && normal(line).contains(&wanted)
+    })
+}
+
 impl CatalogBrowser {
     /// The footprint's 3D view: its 3D model links, where each file was
     /// found or why it is not drawn, and the GLB kicad-cli made.
@@ -357,7 +456,10 @@ impl CatalogBrowser {
         let name = catalog::cad_file::read_footprint_file(&bytes)
             .map(|footprint| footprint.name)
             .unwrap_or_else(|_| "footprint".into());
-        let mut supplies = Supplies::default();
+        let mut supplies = Supplies {
+            only_chosen: request.from_download,
+            ..Supplies::default()
+        };
         let mut blocks = match model_blocks(&bytes) {
             Ok(blocks) => blocks,
             Err(error) => {
@@ -400,27 +502,9 @@ impl CatalogBrowser {
             match team.footprint_models(stored) {
                 Ok(models) => {
                     for (link, model) in models {
-                        let copy = match model {
-                            Ok(model) => {
-                                let extension = Path::new(&model.key)
-                                    .extension()
-                                    .map(|extension| extension.to_string_lossy().into_owned())
-                                    .unwrap_or_default();
-                                self.previews
-                                    .model_copy(&install, &model.blob_sha256, &extension, || {
-                                        team.stored_model_bytes(&model)
-                                    })
-                                    .map_err(|error| match error {
-                                        PreviewError::StoredBytes(why) if why.contains("match") => {
-                                            NotShown::HashFailed(why)
-                                        }
-                                        other => NotShown::Unavailable(other.to_string()),
-                                    })
-                                    .and_then(|path| checked_model(&path))
-                            }
-                            Err(why) => Err(NotShown::HashFailed(why)),
-                        };
-                        supplies.stored.push((link, copy));
+                        supplies
+                            .stored
+                            .push(self.stored_copy(&install, team, link, model));
                     }
                 }
                 Err(error) => view.notes.push(format!(
@@ -435,24 +519,12 @@ impl CatalogBrowser {
         let mut files = Vec::new();
         for block in &blocks {
             let resolved = resolve(&block.link, block.hidden, &places, &supplies);
-            let (model, shown) = link_view(block, &resolved);
+            let (model, shown) = link_view(block, &resolved, &supplies);
             view.models.push(shown);
             if let ModelUse::File(path) = &model {
                 files.push(path.clone());
             }
             uses.push((block.clone(), model));
-        }
-        let drawn = uses.iter().any(|(_, model)| *model != ModelUse::Leave);
-        if blocks.is_empty() {
-            view.notes.push(
-                "The footprint has no 3D model, so only the board with its pads, silkscreen and mask is shown."
-                    .into(),
-            );
-        } else if !drawn {
-            view.notes.push(
-                "No 3D model can be shown, so only the board with its pads, silkscreen and mask is shown."
-                    .into(),
-            );
         }
         let board = match one_footprint_board(&bytes, &uses, crate::drawing::board_box(&drawing)) {
             Ok(board) => board,
@@ -471,13 +543,24 @@ impl CatalogBrowser {
             .board_glb(&install, &export, request.selection)
         {
             Ok(glb) => {
+                // A model kicad-cli could not load is not drawn.
+                for ((_, model), shown) in uses.iter_mut().zip(&mut view.models) {
+                    let ModelUse::File(path) = model else {
+                        continue;
+                    };
+                    if cli_could_not_read(&glb.messages, path) {
+                        let why = NotShown::CliUnreadable(path.clone());
+                        shown.source = None;
+                        shown.catalog_key = None;
+                        shown.problem = Some(why.words());
+                        *model = ModelUse::Leave;
+                    }
+                }
                 let unadded: Vec<&str> = glb
                     .messages
                     .lines()
-                    .filter(|line| {
-                        line.contains("Could not add 3D model")
-                            || line.starts_with("File not found")
-                    })
+                    .map(str::trim)
+                    .filter(|line| CLI_COMPLAINTS.iter().any(|known| line.contains(known)))
                     .collect();
                 if !unadded.is_empty() {
                     view.notes.push(format!(
@@ -512,6 +595,20 @@ impl CatalogBrowser {
                 view.problem = Some(format!("The 3D view could not be made: {error}"));
             }
         }
+        let drawn = uses.iter().any(|(_, model)| *model != ModelUse::Leave);
+        if blocks.is_empty() {
+            view.notes.insert(
+                0,
+                "The footprint has no 3D model, so only the board with its pads, silkscreen and mask is shown."
+                    .into(),
+            );
+        } else if !drawn {
+            view.notes.insert(
+                0,
+                "No 3D model can be shown, so only the board with its pads, silkscreen and mask is shown."
+                    .into(),
+            );
+        }
         view
     }
 
@@ -521,6 +618,57 @@ impl CatalogBrowser {
         self.previews
             .glb_bytes(key)
             .filter(|bytes| bytes.len() as u64 <= MAX_GLB_BYTES)
+    }
+
+    /// A stored model's checked copy in the cache, or why there is none.
+    fn stored_copy(
+        &self,
+        install: &KicadInstall,
+        team: &TeamCatalog,
+        link: String,
+        model: Result<crate::team::StoredModel, StoredModelError>,
+    ) -> Stored {
+        let model = match model {
+            Ok(model) => model,
+            Err(StoredModelError::Check(why)) => {
+                return Stored {
+                    link,
+                    key: None,
+                    copy: Err(NotShown::HashFailed(why)),
+                };
+            }
+            Err(StoredModelError::Unavailable(why)) => {
+                return Stored {
+                    link,
+                    key: None,
+                    copy: Err(NotShown::Unavailable(why)),
+                };
+            }
+        };
+        let key = Some(model.key.clone());
+        // Its type first, so no other file is ever fetched or written.
+        if !is_model_file_name(&model.key) {
+            return Stored {
+                link,
+                key,
+                copy: Err(NotShown::NotModelFile),
+            };
+        }
+        let mut fetch_failed = None;
+        let copied =
+            self.previews
+                .model_copy(install, &model.blob_sha256, last_part(&model.key), || {
+                    team.stored_model_bytes(&model).inspect_err(|why| {
+                        fetch_failed = Some(why.clone());
+                    })
+                });
+        let copy = match (copied, fetch_failed) {
+            (Ok(path), _) => checked_model(&path),
+            (Err(_), Some(why)) => Err(NotShown::Unavailable(why)),
+            (Err(PreviewError::StoredBytes(why)), None) => Err(NotShown::HashFailed(why)),
+            (Err(other), None) => Err(NotShown::Unavailable(other.to_string())),
+        };
+        Stored { link, key, copy }
     }
 
     /// A 3D model file chosen with the footprint, checked and copied into
@@ -540,12 +688,13 @@ impl CatalogBrowser {
             if !starts_as_model(&file.file_name, &bytes) {
                 return Err(NotShown::NotModel(path.clone()));
             }
-            let extension = path
-                .extension()
-                .map(|extension| extension.to_string_lossy().into_owned())
-                .unwrap_or_default();
             self.previews
-                .model_copy(install, &sha256_hex(&bytes), &extension, || Ok(bytes))
+                .model_copy(
+                    install,
+                    &sha256_hex(&bytes),
+                    last_part(&file.file_name),
+                    || Ok(bytes),
+                )
                 .map_err(|error| NotShown::Unreadable {
                     path: path.clone(),
                     why: error.to_string(),
@@ -591,24 +740,63 @@ impl CatalogBrowser {
 }
 
 /// What the board does with a link, and what the panel says about it.
-fn link_view(block: &ModelBlock, resolved: &Resolved) -> (ModelUse, ModelLinkView) {
-    let shown = |source, path: Option<&Path>, problem: Option<String>| ModelLinkView {
+fn link_view(
+    block: &ModelBlock,
+    resolved: &Resolved,
+    supplies: &Supplies,
+) -> (ModelUse, ModelLinkView) {
+    let mut shown = ModelLinkView {
         link: block.link.clone(),
-        source,
-        path: path.map(|path| path.display().to_string()),
-        problem,
+        source: None,
+        path: None,
+        catalog_key: None,
+        problem: None,
+        note: None,
     };
-    match resolved {
-        Resolved::Found(source, path) => (
-            ModelUse::File(path.clone()),
-            shown(Some(*source), Some(path), None),
-        ),
-        Resolved::Embedded => (
-            ModelUse::Keep,
-            shown(Some(ModelSource::Embedded), None, None),
-        ),
-        Resolved::NotShown(why) => (ModelUse::Leave, shown(None, why.path(), Some(why.words()))),
+    let model = match resolved {
+        Resolved::Found(source, path) => {
+            shown.source = Some(*source);
+            shown.path = Some(path.display().to_string());
+            if *source == ModelSource::Catalog {
+                shown.catalog_key = supplies
+                    .stored
+                    .iter()
+                    .find(|stored| stored.link == block.link)
+                    .and_then(|stored| stored.key.clone());
+            }
+            ModelUse::File(path.clone())
+        }
+        Resolved::Embedded => {
+            shown.source = Some(ModelSource::Embedded);
+            ModelUse::Keep
+        }
+        Resolved::NotShown(why) => {
+            shown.path = why.path().map(|path| path.display().to_string());
+            shown.problem = Some(why.words());
+            ModelUse::Leave
+        }
+    };
+    let from_library = !matches!(
+        shown.source,
+        Some(ModelSource::Catalog | ModelSource::Chosen)
+    ) && !supplies.only_chosen;
+    if from_library {
+        if let Some(key) = our_key(&block.link).filter(|key| !is_catalog_model_key(key)) {
+            // mx-292514: the Catalog keeps 3D models only in a footprint
+            // library's own folder.
+            shown.note = Some(format!(
+                "Edit part would save this link as missing: the Catalog keeps a 3D model only in its footprint library's folder, such as 3d-models/g-Package_SO.3dshapes, not at {key}."
+            ));
+        } else if block.link.starts_with("${KISYS3DMOD}")
+            && shown.source == Some(ModelSource::Kicad)
+        {
+            shown.note = Some(
+                "${KISYS3DMOD} is KiCad 5's name for KiCad's own 3D models folder, so the app looks there."
+                    .into(),
+            );
+        }
     }
+    (model, shown)
 }
 
 fn team_words(error: &crate::team::TeamCadError) -> String {

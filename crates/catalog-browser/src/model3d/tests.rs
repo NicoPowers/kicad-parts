@@ -167,6 +167,10 @@ fn every_reason_has_plain_words_and_says_where_it_looked() {
         },
         NotShown::HashFailed("the 3D model's bytes do not match their SHA-256".into()),
         NotShown::Unavailable("the team server could not be reached".into()),
+        NotShown::ProjectFolder,
+        NotShown::NetworkPath,
+        NotShown::OutsideDownload,
+        NotShown::CliUnreadable(path.clone()),
     ];
     for reason in &reasons {
         let words = reason.words();
@@ -200,11 +204,16 @@ fn the_catalogs_stored_models_and_chosen_files_come_first() {
     let failed = NotShown::HashFailed("its record does not match its SHA-256".into());
     let supplies = Supplies {
         stored: vec![
-            (link.to_owned(), Ok(stored_copy.clone())),
-            (
-                "${MY_LIB_3D}/models/Part.wrl".to_owned(),
-                Err(failed.clone()),
-            ),
+            Stored {
+                link: link.to_owned(),
+                key: Some("3d-models/g-Resistor_SMD.3dshapes/R_0603.step".into()),
+                copy: Ok(stored_copy.clone()),
+            },
+            Stored {
+                link: "${MY_LIB_3D}/models/Part.wrl".to_owned(),
+                key: None,
+                copy: Err(failed.clone()),
+            },
         ],
         chosen: vec![
             Chosen {
@@ -226,6 +235,7 @@ fn the_catalogs_stored_models_and_chosen_files_come_first() {
                 copy: Err(NotShown::NotModel(PathBuf::from("LM317.STEP"))),
             },
         ],
+        only_chosen: false,
     };
     let resolve = |link: &str| resolve(link, false, &places.places, &supplies);
     // The Catalog's stored model, not KiCad's file with the same link.
@@ -325,11 +335,24 @@ fn only_3d_model_file_names_and_safe_paths_are_read() {
         Some("3d-models/ABS07L-32.768KHZ-T.step".into())
     );
     assert_eq!(
-        kicad_model("${KICAD8_3DMODEL_DIR}/A.3dshapes/b.wrl"),
+        kicad_model("${KICAD8_3DMODEL_DIR}/A.3dshapes/b.wrl", true),
         Some("A.3dshapes/b.wrl")
     );
-    assert_eq!(kicad_model("${KICAD_3DMODEL_DIR}/A.3dshapes/b.wrl"), None);
-    assert_eq!(kicad_model("${KICAD10_3DMODEL_DIR}/../b.wrl"), None);
+    for unsafe_link in [
+        "${KICAD_3DMODEL_DIR}/A.3dshapes/b.wrl",
+        "${KICAD10_3DMODEL_DIR}/../b.wrl",
+        // A drive would replace KiCad's folder.
+        "${KICAD10_3DMODEL_DIR}/C:/Users/x.step",
+        "${KICAD10_3DMODEL_DIR}/A//b.wrl",
+    ] {
+        assert_eq!(kicad_model(unsafe_link, true), None, "{unsafe_link}");
+    }
+    // KiCad 5's name, unless the person set it to something else.
+    assert_eq!(
+        kicad_model("${KISYS3DMOD}/A.3dshapes/b.wrl", true),
+        Some("A.3dshapes/b.wrl")
+    );
+    assert_eq!(kicad_model("${KISYS3DMOD}/A.3dshapes/b.wrl", false), None);
     assert_eq!(
         plain_path(PathBuf::from(r"\\?\C:\a\b.step")),
         PathBuf::from(r"C:\a\b.step")
@@ -338,4 +361,108 @@ fn only_3d_model_file_names_and_safe_paths_are_read() {
         plain_path(PathBuf::from(r"\\?\UNC\server\share\b.step")),
         PathBuf::from(r"\\server\share\b.step")
     );
+}
+
+#[test]
+fn network_paths_are_opened_only_through_the_persons_path_variables() {
+    let mut places = places();
+    for link in [
+        r"\\host\share\x.step",
+        "//host/share/x.step",
+        r"\\?\UNC\host\share\x.step",
+        r"\\.\pipe\x.step",
+        r"/\host\share\x.step",
+    ] {
+        assert_eq!(
+            places.resolve(link),
+            Resolved::NotShown(NotShown::NetworkPath),
+            "{link}"
+        );
+    }
+    // A variable whose value hides a network path in the link's middle.
+    let mut variables = std::collections::BTreeMap::new();
+    variables.insert("SLASH".to_owned(), "/".to_owned());
+    // A verbatim local folder: it starts like a network path, but opens no
+    // connection.
+    let local = format!(r"\\?\{}", places.path("mine").display());
+    variables.insert("SHARE".to_owned(), local);
+    places.places.variables = PathVariables::new(variables);
+    assert_eq!(
+        places.resolve("/${SLASH}host/share/x.step"),
+        Resolved::NotShown(NotShown::NetworkPath)
+    );
+    // A folder the person set as a path variable is looked in, even one
+    // written like a network path.
+    assert!(matches!(
+        places.resolve(r"${SHARE}\models\Part.wrl"),
+        Resolved::Found(ModelSource::Installed, _)
+    ));
+}
+
+#[test]
+fn a_downloads_footprint_draws_only_its_own_model() {
+    let places = places();
+    let supplies = Supplies {
+        stored: Vec::new(),
+        chosen: vec![Chosen {
+            link: Some("C:/Users/maker/LM317.step".into()),
+            key: None,
+            file_name: "LM317.step".into(),
+            copy: Ok(PathBuf::from("/cache/lm317.step")),
+        }],
+        only_chosen: true,
+    };
+    let resolve = |link: &str| resolve(link, false, &places.places, &supplies);
+    assert_eq!(
+        resolve("C:/Users/maker/LM317.step"),
+        Resolved::Found(ModelSource::Chosen, PathBuf::from("/cache/lm317.step"))
+    );
+    // The maker's other links, even to a file on this computer, are not
+    // looked for.
+    let here = places.path("mine/models/Part.wrl");
+    for link in [
+        here.to_string_lossy().into_owned(),
+        "${MY_LIB_3D}/models/Part.wrl".to_owned(),
+        r"\\host\share\x.step".to_owned(),
+        "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603.step".to_owned(),
+    ] {
+        assert_eq!(
+            resolve(&link),
+            Resolved::NotShown(NotShown::OutsideDownload),
+            "{link}"
+        );
+    }
+    assert_eq!(resolve("kicad-embed://inside.step"), Resolved::Embedded);
+}
+
+#[test]
+fn project_and_kicad_5_links_say_what_they_mean() {
+    let places = places();
+    assert_eq!(
+        places.resolve("${KIPRJMOD}/models/x.step"),
+        Resolved::NotShown(NotShown::ProjectFolder)
+    );
+    assert_eq!(
+        places.resolve("${KISYS3DMOD}/Resistor_SMD.3dshapes/R_0603.step"),
+        Resolved::Found(
+            ModelSource::Kicad,
+            places.real("kicad/3dmodels/Resistor_SMD.3dshapes/R_0603.step")
+        )
+    );
+    let words = NotShown::NoFolder.words();
+    assert_eq!(
+        words,
+        "The link has no folder or path variable, so the app can't tell where the file is."
+    );
+}
+
+#[test]
+fn kicad_cli_complaints_name_the_file_they_are_about() {
+    let messages = "**** ERR StepFile : Undefined Parsing ****\nreadSTEP() failed on filename 'C:\\m\\Bad.step'.\nNo model for filename 'C:\\m\\Bad.step'.\nBinary GLTF file 'b.glb' created.";
+    assert!(cli_could_not_read(messages, Path::new("C:/m/bad.step")));
+    assert!(!cli_could_not_read(messages, Path::new("C:/m/good.step")));
+    assert!(!cli_could_not_read(
+        "Binary GLTF file 'C:/m/bad.step'",
+        Path::new("C:/m/bad.step")
+    ));
 }

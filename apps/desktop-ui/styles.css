@@ -970,6 +970,19 @@ a {
   margin-top: 0.5rem;
 }
 
+.model-key {
+  margin: 0.2rem 0 0;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.model-copy summary,
+.model-link-note {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .model-cli pre {
   max-height: 10rem;
   overflow: auto;
