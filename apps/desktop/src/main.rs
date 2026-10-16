@@ -7,13 +7,13 @@
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
-    AppStatus, FilePreviewRequest, FootprintDrawing, LibrariesView, LibraryCheckView,
-    LibraryItemDetail, LibraryItemRequest, LibraryItems, LibraryItemsRequest, OurLibraries,
-    PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest, SearchResponse,
-    SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest,
-    TeamEditRequest, TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest,
-    TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSameMpn,
-    TeamStatus,
+    AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, FootprintDrawing,
+    LibrariesView, LibraryCheckView, LibraryItemDetail, LibraryItemRequest, LibraryItems,
+    LibraryItemsRequest, OurLibraries, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
+    SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
+    TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest,
+    TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick,
+    TeamPickRequest, TeamSameMpn, TeamStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -309,6 +309,31 @@ async fn footprint_drawing(
 }
 
 #[tauri::command]
+async fn footprint_3d(
+    browser: State<'_, Browser>,
+    team: State<'_, Team>,
+    request: Footprint3dRequest,
+) -> Result<Footprint3dView, String> {
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    // Made only when the person turns 3D on, because it takes seconds.
+    blocking(move || browser.footprint_3d(&request, &team)).await
+}
+
+/// The GLB of a 3D view, sent as raw bytes rather than JSON, so a large
+/// model is not copied into text first.
+#[tauri::command]
+async fn footprint_glb(
+    browser: State<'_, Browser>,
+    key: String,
+) -> Result<tauri::ipc::Response, String> {
+    let browser = browser.inner().clone();
+    blocking(move || browser.footprint_glb(&key))
+        .await?
+        .map(tauri::ipc::Response::new)
+        .ok_or_else(|| "The 3D view is no longer in the app's cache. Turn 3D on again.".to_owned())
+}
+
+#[tauri::command]
 async fn team_status(team: State<'_, Team>) -> Result<TeamStatus, String> {
     let team = team.inner().clone();
     blocking(move || team.status()).await
@@ -566,6 +591,8 @@ fn main() {
             part_detail,
             part_preview,
             footprint_drawing,
+            footprint_3d,
+            footprint_glb,
             team_status,
             team_sign_in,
             team_sign_out,
@@ -686,6 +713,8 @@ mod tests {
             command::PART_DETAIL,
             command::PART_PREVIEW,
             command::FOOTPRINT_DRAWING,
+            command::FOOTPRINT_3D,
+            command::FOOTPRINT_GLB,
             command::TEAM_STATUS,
             command::TEAM_SIGN_IN,
             command::TEAM_SIGN_OUT,

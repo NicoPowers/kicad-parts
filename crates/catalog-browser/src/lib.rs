@@ -10,8 +10,11 @@ mod git;
 mod libraries;
 mod library;
 mod library_part;
+mod model3d;
 mod pick;
 pub mod team;
+
+pub use model3d::MAX_GLB_BYTES;
 
 use base64::Engine;
 use csv_catalog::{CatalogPart, CsvCatalog};
@@ -842,6 +845,7 @@ impl CatalogBrowser {
                     from_kicad_bundle: false,
                     installed_library: false,
                     cad_item_revision: None,
+                    stored_footprint: None,
                     note: None,
                 },
                 &install,
@@ -959,6 +963,7 @@ impl CatalogBrowser {
                     from_kicad_bundle: false,
                     installed_library: false,
                     cad_item_revision: Some(stored.number),
+                    stored_footprint: Some(stored.footprint()),
                     note: None,
                 },
                 install,
@@ -1091,6 +1096,7 @@ impl CatalogBrowser {
                     from_kicad_bundle: origin == LibraryOrigin::KicadBundled,
                     installed_library: false,
                     cad_item_revision: None,
+                    stored_footprint: None,
                     note,
                 },
                 install,
@@ -1124,6 +1130,8 @@ pub(crate) struct Drawn {
     from_kicad_bundle: bool,
     installed_library: bool,
     cad_item_revision: Option<u32>,
+    /// The Catalog revision a footprint was drawn from, for its 3D view.
+    stored_footprint: Option<desktop_contract::StoredFootprint>,
     note: Option<String>,
 }
 
@@ -1157,6 +1165,10 @@ pub(crate) fn ready(
                 view_box: svg_view_box(&image.svg),
                 drawing_key: match kind {
                     PreviewKind::Footprint => preview.footprint_key.clone(),
+                    PreviewKind::Symbol => None,
+                },
+                stored_footprint: match kind {
+                    PreviewKind::Footprint => drawn.stored_footprint.clone(),
                     PreviewKind::Symbol => None,
                 },
             })

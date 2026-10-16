@@ -279,6 +279,19 @@ impl Drawer {
 
 // ---- Layers and bounds -----------------------------------------------------
 
+/// The box a footprint's one-footprint board is drawn around, for its 3D
+/// view: its courtyard's, front and back, or, with no courtyard, the box
+/// around all its shapes.
+pub fn board_box(drawing: &FootprintDrawing) -> [f64; 4] {
+    let mut courtyard = Bounds::default();
+    for graphic in &drawing.graphics {
+        if matches!(graphic.layer.as_str(), "F.CrtYd" | "B.CrtYd") {
+            courtyard.shape(&graphic.shape);
+        }
+    }
+    courtyard.box_.unwrap_or(drawing.fit)
+}
+
 /// KiCad's order of the technical layers, as its layer list shows them
 /// after the copper layers.
 const LAYER_ORDER: [&str; 18] = [

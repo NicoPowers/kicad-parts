@@ -575,7 +575,7 @@ fn read_model(path: &std::path::Path) -> Result<Vec<u8>, String> {
 /// Whether `bytes` start as the 3D model their file `name` says: STEP with
 /// `ISO-10303-21;`, VRML with `#VRML` (each after an optional BOM and
 /// white space), and the gzipped .stpz and .wrz with gzip's mark.
-fn starts_as_model(name: &str, bytes: &[u8]) -> bool {
+pub(crate) fn starts_as_model(name: &str, bytes: &[u8]) -> bool {
     let extension = std::path::Path::new(name)
         .extension()
         .and_then(|extension| extension.to_str())

@@ -174,6 +174,7 @@ impl CatalogBrowser {
                     from_kicad_bundle: false,
                     installed_library: false,
                     cad_item_revision: Some(stored.number),
+                    stored_footprint: Some(stored.footprint()),
                     note: None,
                 },
                 &install,
@@ -241,6 +242,7 @@ impl CatalogBrowser {
             from_kicad_bundle: source.key.group == LibraryGroup::Kicad,
             installed_library: source.key.group == LibraryGroup::Installed,
             cad_item_revision: None,
+            stored_footprint: None,
             note: None,
         };
         let exported = match (item, source.format) {

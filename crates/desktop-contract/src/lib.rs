@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod drawing;
 pub mod measure;
+pub mod model3d;
 pub use drawing::FootprintDrawing;
+pub use model3d::{
+    Footprint3dRequest, Footprint3dView, GlbReady, ModelLinkView, ModelSource, StoredFootprint,
+};
 
 /// Tauri command names.
 pub mod command {
@@ -39,6 +43,8 @@ pub mod command {
     pub const OUR_LIBRARIES: &str = "our_libraries";
     pub const TEAM_ITEM_PREVIEW: &str = "team_item_preview";
     pub const FOOTPRINT_DRAWING: &str = "footprint_drawing";
+    pub const FOOTPRINT_3D: &str = "footprint_3d";
+    pub const FOOTPRINT_GLB: &str = "footprint_glb";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -268,6 +274,10 @@ pub struct PreviewImage {
     /// only when a close-up or the Libraries browser shows it.
     #[serde(default)]
     pub drawing_key: Option<String>,
+    /// For a footprint drawn from a Catalog revision: that revision, whose
+    /// stored 3D models its 3D view draws.
+    #[serde(default)]
+    pub stored_footprint: Option<StoredFootprint>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

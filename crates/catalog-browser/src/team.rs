@@ -33,15 +33,16 @@ use catalog::replica::CatalogReplica;
 use catalog::{
     CATEGORY_LABEL, CadItemDetails, CadItemId, CadItemKind, CadItemRevisionId, CadReference,
     CadReferenceRole, CadReferenceTarget, CategoryDetails, DetailField, DifferenceKind,
-    PartDetails, PartRevision, compare_details, compare_revisions,
+    ModelTarget, PartDetails, PartRevision, compare_details, compare_revisions,
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
     ArchiveNote, CadItemUse, ConflictRow, CsvChangeRow, CsvChanges, CurrentDetails,
     CurrentRevision, DetailChange, Field, FileKind, HistoryEntry, LiveUpdates, ManufacturerPart,
-    OlderUse, PreviewKind, PublishResult, RevisionStatus, SignInRequest, TeamArchiveRequest,
-    TeamCategory, TeamConflict, TeamCsvReviewRequest, TeamEditRequest, TeamFile, TeamFileReading,
-    TeamFileRequest, TeamIpnCheck, TeamNewPartRequest, TeamPart, TeamSession, TeamStatus,
+    OlderUse, PreviewKind, PublishResult, RevisionStatus, SignInRequest, StoredFootprint,
+    TeamArchiveRequest, TeamCategory, TeamConflict, TeamCsvReviewRequest, TeamEditRequest,
+    TeamFile, TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamNewPartRequest, TeamPart,
+    TeamSession, TeamStatus,
 };
 use kicad_integration::library_file::{
     footprint_says_excluded_from_bom, symbol_entries_say_not_in_bom,
@@ -192,6 +193,38 @@ pub struct StoredCad {
     pub alternates: Vec<String>,
     /// The CAD item revision number, as the part's details show it.
     pub number: u32,
+    /// The CAD item's ID.
+    pub cad_item: String,
+    /// The SHA-256 of the revision's record.
+    pub snapshot_sha256: String,
+    /// The ID of the blob record holding the bytes.
+    blob: String,
+}
+
+impl StoredCad {
+    /// The revision, as a footprint's 3D view asks for its stored models.
+    pub fn footprint(&self) -> StoredFootprint {
+        StoredFootprint {
+            cad_item: self.cad_item.clone(),
+            number: self.number,
+            snapshot_sha256: self.snapshot_sha256.clone(),
+        }
+    }
+}
+
+/// A footprint's 3D model link as the footprint writes it, and the stored
+/// model the Catalog binds it to, or why that model failed its checks.
+pub type FootprintModel = (String, Result<StoredModel, String>);
+
+/// One 3D model revision a footprint revision uses, as the Catalog stores
+/// it, after its record is checked.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredModel {
+    /// Where the Catalog keeps it, such as
+    /// `3d-models/g-Resistor_SMD.3dshapes/R_0603_1608Metric.step`.
+    pub key: String,
+    /// The SHA-256 of its bytes, which are checked against it.
+    pub blob_sha256: String,
     /// The ID of the blob record holding the bytes.
     blob: String,
 }
@@ -1125,6 +1158,8 @@ impl TeamCatalog {
             },
             alternates,
             number: revision.number,
+            cad_item: cad_item.clone(),
+            snapshot_sha256: snapshot_sha256.clone(),
             blob: revision.blob,
         }))
     }
@@ -1167,6 +1202,9 @@ impl TeamCatalog {
             },
             alternates: Vec::new(),
             number: revision.number,
+            // Worked out here, so the 3D view checks the record as read.
+            snapshot_sha256: catalog::sha256_hex(revision.snapshot.as_bytes()),
+            cad_item: revision.cad_item,
             blob: revision.blob,
         }))
     }
@@ -1174,13 +1212,74 @@ impl TeamCatalog {
     /// Downloads a CAD item revision's stored bytes. The preview cache
     /// checks them against their SHA-256.
     pub fn stored_bytes(&self, cad: &StoredCad) -> Result<Vec<u8>, String> {
+        self.blob_bytes(&cad.blob)
+    }
+
+    /// Downloads a 3D model revision's stored bytes. The preview cache
+    /// checks them against their SHA-256.
+    pub fn stored_model_bytes(&self, model: &StoredModel) -> Result<Vec<u8>, String> {
+        self.blob_bytes(&model.blob)
+    }
+
+    /// The 3D models the footprint revision uses, by their links as the
+    /// footprint writes them, once each record is checked. A link the
+    /// Catalog does not bind to a stored model is left out. A model whose
+    /// record fails its checks says why, finishing "... because ...".
+    pub fn footprint_models(
+        &self,
+        footprint: &StoredFootprint,
+    ) -> Result<Vec<FootprintModel>, TeamCadError> {
+        let client = self.client().map_err(|_| TeamCadError::SignedOut)?;
+        let record = self.cad_item_revision(&client, &footprint.cad_item, footprint.number)?;
+        let named = NamedRevision {
+            cad_item: &footprint.cad_item,
+            number: footprint.number,
+            snapshot_sha256: &footprint.snapshot_sha256,
+        };
+        let snapshot = checked_record(&record, &named, CadItemKind::Footprint, "kicad-footprint")
+            .map_err(|why| TeamCadError::Mismatch {
+            reference: footprint.cad_item.clone(),
+            why,
+        })?;
+        let mut models = Vec::new();
+        for model in snapshot.model_references {
+            let ModelTarget::CadItemRevision {
+                cad_item,
+                number,
+                snapshot_sha256,
+            } = &model.target
+            else {
+                continue;
+            };
+            let checked = match self.cad_item_revision(&client, cad_item, *number) {
+                Ok(record) => {
+                    let named = NamedRevision {
+                        cad_item,
+                        number: *number,
+                        snapshot_sha256,
+                    };
+                    checked_record(&record, &named, CadItemKind::Model3d, "3d-model").map(
+                        |details| StoredModel {
+                            key: details.key,
+                            blob_sha256: details.blob_sha256,
+                            blob: record.blob,
+                        },
+                    )
+                }
+                Err(TeamCadError::Unreachable(why) | TeamCadError::NotFound(why)) => Err(why),
+                Err(TeamCadError::SignedOut) => Err("you are signed out".into()),
+                Err(TeamCadError::Mismatch { why, .. }) => Err(why),
+            };
+            models.push((model.reference, checked));
+        }
+        Ok(models)
+    }
+
+    fn blob_bytes(&self, blob: &str) -> Result<Vec<u8>, String> {
         let client = self.client()?;
         let fail = |error: CollabError| plain_reason(&error);
         let blob: StoredBlob = client
-            .get(&format!(
-                "/api/collections/catalog_blobs/records/{}",
-                cad.blob
-            ))
+            .get(&format!("/api/collections/catalog_blobs/records/{blob}"))
             .and_then(|reply| reply.json())
             .map_err(fail)?;
         let token = client.file_token().map_err(fail)?;
@@ -1284,6 +1383,27 @@ fn checked_snapshot(
     reference: &str,
     kind: PreviewKind,
 ) -> Result<CadItemDetails, String> {
+    let (expected_kind, expected_format) = match kind {
+        PreviewKind::Symbol => (CadItemKind::Symbol, "kicad-symbol-entry"),
+        PreviewKind::Footprint => (CadItemKind::Footprint, "kicad-footprint"),
+    };
+    let snapshot = checked_record(revision, named, expected_kind, expected_format)?;
+    if snapshot.key != reference {
+        return Err("its record is for another reference".into());
+    }
+    Ok(snapshot)
+}
+
+/// The details of a CAD item revision record, once it is shown to be the
+/// named revision: its snapshot hashes to the named SHA-256, it is the
+/// named revision of the named CAD item, and it is a `kind` in `format`.
+/// Otherwise says why not, finishing the sentence "... because ...".
+fn checked_record(
+    revision: &StoredCadItemRevision,
+    named: &NamedRevision<'_>,
+    expected_kind: CadItemKind,
+    expected_format: &str,
+) -> Result<CadItemDetails, String> {
     if catalog::sha256_hex(revision.snapshot.as_bytes()) != named.snapshot_sha256 {
         return Err("its record does not match its SHA-256".into());
     }
@@ -1295,10 +1415,6 @@ fn checked_snapshot(
     }
     let snapshot: CadItemDetails = serde_json::from_str(&revision.snapshot)
         .map_err(|_| "its record cannot be read".to_owned())?;
-    let (expected_kind, expected_format) = match kind {
-        PreviewKind::Symbol => (CadItemKind::Symbol, "kicad-symbol-entry"),
-        PreviewKind::Footprint => (CadItemKind::Footprint, "kicad-footprint"),
-    };
     if snapshot.kind != expected_kind || snapshot.format != expected_format {
         return Err(format!(
             "its record is a {} in the {} format, not a {}",
@@ -1306,9 +1422,6 @@ fn checked_snapshot(
             snapshot.format,
             expected_kind.as_str()
         ));
-    }
-    if snapshot.key != reference {
-        return Err("its record is for another reference".into());
     }
     Ok(snapshot)
 }

@@ -998,3 +998,28 @@ fn a_paste_margin_widens_the_gap_between_paste_openings() {
     assert!((copper - 0.57).abs() < 1e-6, "copper {copper}");
     assert!((paste - 0.67).abs() < 1e-6, "paste {paste}");
 }
+
+/// The one-footprint board of a 3D view is drawn around the courtyard, or
+/// around every shape when there is none.
+#[test]
+fn the_board_box_is_the_courtyards_or_all_shapes() {
+    let pads = "(pad \"1\" smd rect (at -2 0) (size 1 1) (layers \"F.Cu\"))
+        (pad \"2\" smd rect (at 2 0) (size 1 1) (layers \"F.Cu\"))
+        (fp_text value \"A long value text far away\" (at 0 30) (layer \"F.Fab\"))";
+    let with_courtyard = draw(&format!(
+        "(footprint \"C\" (layer \"F.Cu\") {pads}
+           (fp_rect (start -3 -1.5) (end 3 1.5) (stroke (width 0.1) (type solid)) (layer \"F.CrtYd\"))
+           (fp_line (start -1 4) (end 1 4) (stroke (width 0.1) (type solid)) (layer \"B.CrtYd\")))"
+    ));
+    let [x0, y0, x1, y1] = board_box(&with_courtyard);
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    // Both courtyards, each widened by half its line.
+    assert!(
+        close(x0, -3.05) && close(y0, -1.55) && close(x1, 3.05) && close(y1, 4.05),
+        "{:?}",
+        [x0, y0, x1, y1]
+    );
+    let without = draw(&format!("(footprint \"N\" (layer \"F.Cu\") {pads})"));
+    // The pads' box; the far text is not a shape.
+    assert_eq!(board_box(&without), [-2.5, -0.5, 2.5, 0.5]);
+}
