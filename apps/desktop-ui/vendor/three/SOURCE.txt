@@ -20,8 +20,12 @@ Files, and where each is in the package
                        examples/jsm/utils/BufferGeometryUtils.js
   addons/utils/SkeletonUtils.js
                        examples/jsm/utils/SkeletonUtils.js
+  addons/environments/RoomEnvironment.js
+                       examples/jsm/environments/RoomEnvironment.js
+                       (copied from the same package on 2026-10-16, its
+                       integrity checked again)
 
-  The three addons import from 'three', a name only a bundler or an
+  The four addons import from 'three', a name only a bundler or an
   import map knows. Each has that one line changed to
   `} from '../../three.module.js';`. Nothing else is changed.
 
@@ -31,6 +35,8 @@ SHA-256 of each file as copied here
   addons/loaders/GLTFLoader.js         03952cb129d558f92b8e6c757fbf7c1f718b3126c4d34f264d574b40ea36054f
   addons/utils/BufferGeometryUtils.js  259085a7dac89e0840393a9347c77123fbc4206ec2146bf0c29ffc72e14a2800
   addons/utils/SkeletonUtils.js        28017bf37d0ecb0c4be6048db759ff14df729a562464830b064d4cc239c5af17
+  addons/environments/RoomEnvironment.js
+                                       dbc78a606724508ea6ddfb376b63689761cad07c49d879d0fa9c2ddc45c27dbc
   LICENSE                              8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc
 
 Trunk copies this folder to dist/three (see index.html). The app's own

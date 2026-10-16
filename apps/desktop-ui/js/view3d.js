@@ -27,7 +27,12 @@ function loadThree() {
   loading ??= Promise.all([
     import('/three/three.module.js'),
     import('/three/addons/loaders/GLTFLoader.js'),
-  ]).then(([THREE, loader]) => ({ THREE, GLTFLoader: loader.GLTFLoader }));
+    import('/three/addons/environments/RoomEnvironment.js'),
+  ]).then(([THREE, loader, room]) => ({
+    THREE,
+    GLTFLoader: loader.GLTFLoader,
+    RoomEnvironment: room.RoomEnvironment,
+  }));
   // A failed load may work next time.
   loading.catch(() => {
     loading = null;
@@ -55,11 +60,11 @@ export function webglAvailable() {
  * takes the view's WebGL away, such as after a graphics driver reset.
  */
 export async function createView(container, bytes, background, onLost) {
-  const { THREE, GLTFLoader } = await loadThree();
+  const { THREE, GLTFLoader, RoomEnvironment } = await loadThree();
   const gltf = await new Promise((resolve, reject) => {
     new GLTFLoader().parse(bytes, '', resolve, (error) => reject(new Error(String(error?.message ?? error))));
   });
-  return new View3d(THREE, container, gltf, background, onLost);
+  return new View3d(THREE, RoomEnvironment, container, gltf, background, onLost);
 }
 
 const DEGREE = Math.PI / 180;
@@ -79,7 +84,7 @@ const ZOOM_STEP = 1.5;
 const FIELD_OF_VIEW = 30;
 
 class View3d {
-  constructor(THREE, container, gltf, background, onLost) {
+  constructor(THREE, RoomEnvironment, container, gltf, background, onLost) {
     const model = gltf.scene;
     this.THREE = THREE;
     this.container = container;
@@ -87,6 +92,31 @@ class View3d {
     // The GLB's own mesh names: the model's, from its file, and the
     // board's, such as board_pad.
     this.meshNames = (gltf.parser?.json?.meshes ?? []).map((mesh) => mesh.name ?? '');
+    // Each drawn mesh's GLB mesh name, such as board_silkscreen.
+    const nameOf = (object) => this.meshNames[gltf.parser?.associations?.get(object)?.meshes] ?? '';
+    // kicad-cli's board body, solder mask and silkscreen are see-through
+    // layers (glTF BLEND), which three.js draws without depth, one over
+    // the other. It orders them by their centres, which says little for
+    // wide, flat layers, so the mask could cover the silkscreen. They are
+    // drawn by height instead: from above, the higher last; from below,
+    // the lower last (see place()).
+    this.layers = [];
+    this.silkscreen = [];
+    model.updateMatrixWorld(true);
+    model.traverse((object) => {
+      if (!object.isMesh) return;
+      if (nameOf(object).endsWith('_silkscreen')) this.silkscreen.push(object);
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      if (!materials.some((material) => material?.transparent)) return;
+      // The board body is barely see-through (98 % opaque), so its own
+      // faces hide each other, as they would on a real board.
+      for (const material of materials) {
+        if (material?.transparent && material.opacity >= 0.95) material.depthWrite = true;
+      }
+      const box = new THREE.Box3().setFromObject(object);
+      this.layers.push({ object, height: (box.min.y + box.max.y) / 2 });
+    });
+    this.layers.sort((a, b) => a.height - b.height);
     this.background = new THREE.Color(background);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -104,13 +134,23 @@ class View3d {
     this.scene = new THREE.Scene();
     this.scene.background = this.background;
     this.scene.add(model);
-    // Soft, even light with no shadows: light from the sky and the ground,
-    // and two lights that move with the camera, so every side is lit.
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8d8d8d, 1.6));
+    // Soft, even light with no shadows. kicad-cli's pads and silkscreen
+    // are metal in glTF's terms, and metal shows only what it reflects, so
+    // a soft room surrounds the model; without it they look black. Light
+    // from the sky and the ground, and two lights that move with the
+    // camera, light every side.
+    const environment = new THREE.PMREMGenerator(this.renderer);
+    const room = new RoomEnvironment();
+    this.environment = environment.fromScene(room, 0.04).texture;
+    room.dispose?.();
+    environment.dispose();
+    this.scene.environment = this.environment;
+    this.scene.environmentIntensity = 0.5;
+    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8d8d8d, 0.6));
     this.camera = new THREE.PerspectiveCamera(FIELD_OF_VIEW, 1, 1e-6, 10);
-    const key = new THREE.DirectionalLight(0xffffff, 1.4);
+    const key = new THREE.DirectionalLight(0xffffff, 1.0);
     key.position.set(-0.5, 1, 1);
-    const fill = new THREE.DirectionalLight(0xffffff, 0.6);
+    const fill = new THREE.DirectionalLight(0xffffff, 0.3);
     fill.position.set(0.7, -0.3, 1);
     this.camera.add(key, key.target, fill, fill.target);
     key.target.position.set(0, 0, -1);
@@ -176,6 +216,10 @@ class View3d {
     this.camera.position.copy(this.target).add(offset);
     this.camera.up.set(0, 1, 0);
     this.camera.lookAt(this.target);
+    const above = this.camera.position.y >= this.centre.y;
+    this.layers.forEach(({ object }, rank) => {
+      object.renderOrder = above ? rank : -rank;
+    });
     this.camera.near = this.distance / 200;
     this.camera.far = this.distance * 20 + this.radius * 4;
     this.camera.updateProjectionMatrix();
@@ -342,12 +386,34 @@ class View3d {
         Math.abs(pixels[at] - r) > 8 || Math.abs(pixels[at + 1] - g) > 8 || Math.abs(pixels[at + 2] - b) > 8;
       if (differs) drawn += 1;
     }
+    // The silkscreen's pixels: those that change when it is hidden.
+    for (const mesh of this.silkscreen) mesh.visible = false;
+    this.render();
+    const without = new Uint8Array(width * height * 4);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, without);
+    for (const mesh of this.silkscreen) mesh.visible = true;
+    this.render();
+    let silkscreen = 0;
+    let lightness = 0;
+    for (let at = 0; at < pixels.length; at += 4) {
+      const differs =
+        Math.abs(pixels[at] - without[at]) > 24 ||
+        Math.abs(pixels[at + 1] - without[at + 1]) > 24 ||
+        Math.abs(pixels[at + 2] - without[at + 2]) > 24;
+      if (differs) {
+        silkscreen += 1;
+        lightness += Math.min(pixels[at], pixels[at + 1], pixels[at + 2]);
+      }
+    }
     return {
       meshes,
       meshNames: this.meshNames,
       width,
       height,
       drawn,
+      silkscreen,
+      // How light the silkscreen is, 0 to 255: KiCad's is white.
+      silkscreenLightness: silkscreen ? Math.round(lightness / silkscreen) : 0,
       azimuth: this.azimuth / DEGREE,
       elevation: this.elevation / DEGREE,
       distance: this.distance,
@@ -379,6 +445,7 @@ class View3d {
       }
     });
     this.scene.clear();
+    this.environment.dispose();
     // Freeing the context below is no loss to report.
     this.canvas.removeEventListener('webglcontextlost', this.lost);
     this.renderer.dispose();
