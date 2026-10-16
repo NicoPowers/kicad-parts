@@ -154,22 +154,28 @@ function near(a, b, tolerance, message) {
 }
 
 /** Opens a footprint of the Journey3d library in its close-up. */
-async function openFixture(browser, name) {
+async function openFixture(browser, name, { group = 'installed', library = 'Journey3d' } = {}) {
   if (!(await isOpen(browser, LIBRARIES))) {
     await (await browser.$('#libraries-open')).click();
     await browser.waitUntil(async () => isOpen(browser, LIBRARIES), { timeout: 10_000, timeoutMsg: 'the Libraries browser did not open' });
     await (await browser.$('#library-tab-footprints')).click();
     await browser.waitUntil(
       async () =>
-        browser.execute(() => {
-          const list = document.querySelector('ul[aria-labelledby="library-group-installed"]');
-          const button = list && [...list.querySelectorAll('.library-button')].find((b) => b.querySelector('.library-name')?.textContent === 'Journey3d');
-          button?.click();
-          return Boolean(button);
-        }),
-      { timeout: 60_000, interval: 250, timeoutMsg: 'no installed library Journey3d' },
+        browser.execute(
+          (g, nick) => {
+            const list = document.querySelector(`ul[aria-labelledby="library-group-${g}"]`);
+            const button = list && [...list.querySelectorAll('.library-button')].find((b) => b.querySelector('.library-name')?.textContent === nick);
+            button?.click();
+            return Boolean(button);
+          },
+          group,
+          library,
+        ),
+      { timeout: 60_000, interval: 250, timeoutMsg: `no ${group} library ${library}` },
     );
   }
+  // A large library lists its items as you search.
+  await (await browser.$('#library-search')).setValue(name);
   await browser.waitUntil(
     async () =>
       browser.execute((wanted) => {
@@ -179,7 +185,7 @@ async function openFixture(browser, name) {
         row?.click();
         return Boolean(row);
       }, name),
-    { timeout: 20_000, interval: 250, timeoutMsg: `no row ${name}` },
+    { timeout: 60_000, interval: 250, timeoutMsg: `no row ${name}` },
   );
   await waitForText(browser, '#library-detail-title', new RegExp(`:${name}$`));
   const enlarge = await browser.$('.libraries-detail .preview .viewer-enlarge');
@@ -392,6 +398,42 @@ describe('footprint 3D view', () => {
     assert.equal(await browser.execute(() => document.querySelectorAll('canvas').length), 0, 'closing frees the 3D canvas');
   });
 
+  it('frees a 3D view whose drawing fails partway, and says so', async () => {
+    await (await browser.$(`${FOOTPRINT} figure button`)).click();
+    await browser.waitUntil(async () => isOpen(browser, CLOSE_UP), { timeout: 5_000, timeoutMsg: 'the close-up did not open' });
+    // The view's size watcher fails, after its canvas and WebGL context
+    // were made.
+    await browser.execute(() => {
+      window.journeyResizeObserver = window.ResizeObserver;
+      window.ResizeObserver = function failing() {
+        throw new Error('no size watcher');
+      };
+    });
+    try {
+      await (await browser.$(`${CLOSE_UP} .viewer-3d-toggle`)).click();
+      await browser.waitUntil(
+        async () => browser.execute((s) => document.querySelector(`${s} .viewer-3d`)?.dataset.state === 'problem', CLOSE_UP),
+        { timeout: 60_000, interval: 100, timeoutMsg: 'the 3D view never said it failed' },
+      );
+      const left = await browser.execute((s) => ({
+        status: document.querySelector(`${s} .view3d-status`)?.textContent,
+        canvases: document.querySelectorAll('canvas').length,
+        info: typeof document.querySelector(`${s} .viewer-3d`).view3dInfo,
+      }), CLOSE_UP);
+      assert.deepEqual(left, {
+        status: 'The 3D view could not be made: no size watcher.',
+        canvases: 0,
+        info: 'undefined',
+      });
+    } finally {
+      await browser.execute(() => {
+        window.ResizeObserver = window.journeyResizeObserver;
+      });
+    }
+    await browser.keys('Escape');
+    await browser.waitUntil(async () => !(await isOpen(browser, CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
+  });
+
   it('says when this computer cannot show 3D views, and keeps the 2D view', async () => {
     await (await browser.$(`${FOOTPRINT} figure button`)).click();
     await browser.waitUntil(async () => isOpen(browser, CLOSE_UP), { timeout: 5_000, timeoutMsg: 'the close-up did not open' });
@@ -528,6 +570,36 @@ describe('footprint 3D view', () => {
     // checked over the part details above.
     await assertAccessible(browser, '87-footprint-3d-models-not-found', { disabledRules: ['color-contrast'] });
     await screenshotHiding3d(browser, '87-footprint-3d-models-not-found');
+    await browser.keys('Escape');
+    await browser.waitUntil(async () => !(await isOpen(browser, LIBRARY_CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
+    await browser.keys('Escape');
+    await browser.waitUntil(async () => !(await isOpen(browser, LIBRARIES)), { timeout: 5_000, timeoutMsg: 'Escape did not close the Libraries browser' });
+  });
+
+  it("shows the silkscreen from low down, next to a tall part", async () => {
+    // KiCad's own 2-pin header: its pins reach far above the board, so the
+    // middle of the scene is too.
+    await openFixture(browser, 'PinHeader_1x02_P2.54mm_Vertical', {
+      group: 'kicad',
+      library: 'Connector_PinHeader_2.54mm',
+    });
+    await turn3dOn(browser, LIBRARY_CLOSE_UP);
+    // Lower the view until the camera is below the scene's middle, still
+    // above the board.
+    await browser.execute((s) => document.querySelector(`${s} .viewer-3d`).focus(), LIBRARY_CLOSE_UP);
+    // Four steps down to 5 degrees, then a 15 pixel drag up to about -2.5.
+    await browser.keys(['ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown']);
+    const centre = await centreOf(browser, `${LIBRARY_CLOSE_UP} .viewer-3d`);
+    await drag(browser, centre, { x: centre.x, y: centre.y - 15 }, 0);
+    const low = await info(browser, LIBRARY_CLOSE_UP);
+    record({ event: '3d-low-silkscreen', ...low, meshNames: undefined });
+    assert.ok(low.sceneMiddle - low.boardTop > 0.002, 'the pins lift the scene well above the board');
+    assert.ok(
+      low.cameraHeight < low.sceneMiddle && low.cameraHeight > low.boardTop,
+      `the camera at ${low.cameraHeight} is between the board top ${low.boardTop} and the scene middle ${low.sceneMiddle}`,
+    );
+    assert.ok(low.silkscreen > 100, `${low.silkscreen} silkscreen pixels from low down`);
+    await capture(browser, path.join(screenshotsDir, '88-footprint-3d-low-drawn.png'), PATHS);
     await browser.keys('Escape');
     await browser.waitUntil(async () => !(await isOpen(browser, LIBRARY_CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
     await browser.keys('Escape');
