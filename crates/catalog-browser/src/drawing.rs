@@ -280,16 +280,33 @@ impl Drawer {
 // ---- Layers and bounds -----------------------------------------------------
 
 /// The box a footprint's one-footprint board is drawn around, for its 3D
-/// view: its courtyard's, front and back, or, with no courtyard, the box
-/// around all its shapes.
+/// view: its courtyard, front and back, or, with no courtyard, all its
+/// shapes; and its silkscreen, texts too, so nothing printed hangs over
+/// the board's edge.
 pub fn board_box(drawing: &FootprintDrawing) -> [f64; 4] {
-    let mut courtyard = Bounds::default();
+    let silkscreen = |layer: &str| matches!(layer, "F.SilkS" | "B.SilkS");
+    let mut outline = Bounds::default();
     for graphic in &drawing.graphics {
         if matches!(graphic.layer.as_str(), "F.CrtYd" | "B.CrtYd") {
-            courtyard.shape(&graphic.shape);
+            outline.shape(&graphic.shape);
         }
     }
-    courtyard.box_.unwrap_or(drawing.fit)
+    if outline.box_.is_none() {
+        let [x0, y0, x1, y1] = drawing.fit;
+        outline.point(Point::new(x0, y0), 0.0);
+        outline.point(Point::new(x1, y1), 0.0);
+    }
+    for graphic in drawing
+        .graphics
+        .iter()
+        .filter(|graphic| silkscreen(&graphic.layer))
+    {
+        outline.shape(&graphic.shape);
+    }
+    for text in drawing.texts.iter().filter(|text| silkscreen(&text.layer)) {
+        outline.text(text);
+    }
+    outline.finish()
 }
 
 /// KiCad's order of the technical layers, as its layer list shows them

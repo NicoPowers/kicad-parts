@@ -1000,9 +1000,9 @@ fn a_paste_margin_widens_the_gap_between_paste_openings() {
 }
 
 /// The one-footprint board of a 3D view is drawn around the courtyard, or
-/// around every shape when there is none.
+/// around every shape when there is none, and around the silkscreen.
 #[test]
-fn the_board_box_is_the_courtyards_or_all_shapes() {
+fn the_board_box_is_the_courtyards_or_all_shapes_with_the_silkscreen() {
     let pads = "(pad \"1\" smd rect (at -2 0) (size 1 1) (layers \"F.Cu\"))
         (pad \"2\" smd rect (at 2 0) (size 1 1) (layers \"F.Cu\"))
         (fp_text value \"A long value text far away\" (at 0 30) (layer \"F.Fab\"))";
@@ -1020,6 +1020,19 @@ fn the_board_box_is_the_courtyards_or_all_shapes() {
         [x0, y0, x1, y1]
     );
     let without = draw(&format!("(footprint \"N\" (layer \"F.Cu\") {pads})"));
-    // The pads' box; the far text is not a shape.
+    // The pads' box; the far text is not on the silkscreen.
     assert_eq!(board_box(&without), [-2.5, -0.5, 2.5, 0.5]);
+    // A reference on the silkscreen above the courtyard is inside.
+    let silk = draw(&format!(
+        "(footprint \"S\" (layer \"F.Cu\") {pads}
+           (fp_rect (start -3 -1.5) (end 3 1.5) (stroke (width 0.1) (type solid)) (layer \"F.CrtYd\"))
+           (fp_text reference \"REF**\" (at 0 -3) (layer \"F.SilkS\") (effects (font (size 1 1) (thickness 0.15))))
+           (fp_line (start 3.5 0) (end 4 0) (stroke (width 0.12) (type solid)) (layer \"B.SilkS\")))"
+    ));
+    let [x0, y0, x1, y1] = board_box(&silk);
+    assert!(
+        y0 < -3.4 && x1 >= 4.06 && close(y1, 1.55) && x0 <= -3.05,
+        "{:?}",
+        [x0, y0, x1, y1]
+    );
 }

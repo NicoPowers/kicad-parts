@@ -118,32 +118,42 @@ pub fn one_footprint_board(
         - text
             .trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n'])
             .len();
-    let mut uses: Vec<&(ModelBlock, ModelUse)> = uses.iter().collect();
-    uses.sort_by_key(|(block, _)| block.span.start);
+    // Each change: the text to replace, and what replaces it.
+    let mut changes: Vec<(Range<usize>, String)> = Vec::new();
+    for (block, model) in uses {
+        match model {
+            ModelUse::Keep => {}
+            ModelUse::Leave => changes.push((block.span.clone(), String::new())),
+            ModelUse::File(file) => {
+                // A `(model)` with no link gets one, after the head.
+                let space = if block.path.is_empty() { " " } else { "" };
+                let link = format!("{space}{}", quoted(&file.to_string_lossy()));
+                changes.push((block.path.clone(), link));
+            }
+        }
+    }
+    // The footprint goes at the origin, unturned, where its outline is
+    // drawn, whatever placement its own file gives it.
+    let skipped = if bytes.starts_with(BOM) { BOM.len() } else { 0 };
+    let (_, children) = root_children(&bytes[skipped..])?;
+    for child in children.iter().filter(|child| child.head == "at") {
+        changes.push((
+            child.span.start + skipped..child.span.end + skipped,
+            String::new(),
+        ));
+    }
+    changes.sort_by_key(|(span, _)| span.start);
     let mut footprint = String::with_capacity(text.len());
     let mut at = start;
-    for (block, model) in uses {
-        if block.span.start < at || block.span.end > text.len() {
+    for (span, replacement) in changes {
+        if span.start < at || span.end > text.len() {
             return Err(LibraryFileError(
                 "the 3D models do not match the footprint".into(),
             ));
         }
-        match model {
-            ModelUse::Keep => continue,
-            ModelUse::Leave => {
-                footprint.push_str(&text[at..block.span.start]);
-                at = block.span.end;
-            }
-            ModelUse::File(file) => {
-                footprint.push_str(&text[at..block.path.start]);
-                // A `(model)` with no link gets one, after the head.
-                if block.path.is_empty() {
-                    footprint.push(' ');
-                }
-                footprint.push_str(&quoted(&file.to_string_lossy()));
-                at = block.path.end;
-            }
-        }
+        footprint.push_str(&text[at..span.start]);
+        footprint.push_str(&replacement);
+        at = span.end;
     }
     footprint.push_str(&text[at..]);
 
@@ -341,6 +351,18 @@ mod tests {
                 .iter()
                 .any(|layer| layer.word_at(1) == Some("User.9"))
         );
+    }
+
+    #[test]
+    fn the_footprint_goes_at_the_origin_whatever_its_own_placement() {
+        let bytes = b"(footprint \"P\" (layer \"F.Cu\") (at 10 5 90) (pad \"1\" smd rect (at 1 0) (size 1 1) (layers \"F.Cu\")))";
+        let board = one_footprint_board(bytes, &[], [-0.5, -0.5, 1.5, 0.5]).unwrap();
+        let tree = Sexp::parse(board.as_bytes()).unwrap();
+        let footprint = tree.children("footprint").next().unwrap();
+        assert_eq!(footprint.children("at").count(), 0, "{board}");
+        // The pad keeps its place in the footprint.
+        let pad = footprint.children("pad").next().unwrap();
+        assert_eq!(pad.children("at").next().unwrap().word_at(1), Some("1"));
     }
 
     #[test]
