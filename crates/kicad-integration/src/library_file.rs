@@ -260,15 +260,15 @@ fn tokens(bytes: &[u8]) -> Result<Vec<Token>, LibraryFileError> {
 
 /// A direct child list of the root list.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Child {
-    head: String,
+pub(crate) struct Child {
+    pub(crate) head: String,
     /// The first argument after the head, if it is an atom or a string.
-    first: Option<String>,
-    span: Range<usize>,
+    pub(crate) first: Option<String>,
+    pub(crate) span: Range<usize>,
 }
 
 /// The root list's head and its direct child lists.
-fn root_children(bytes: &[u8]) -> Result<(String, Vec<Child>), LibraryFileError> {
+pub(crate) fn root_children(bytes: &[u8]) -> Result<(String, Vec<Child>), LibraryFileError> {
     let invalid = |message: &str| LibraryFileError(message.to_owned());
     let tokens = tokens(bytes)?;
     let atom = |token: Option<&Token>| match token {

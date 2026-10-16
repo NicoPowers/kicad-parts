@@ -24,12 +24,16 @@
 //! waiting exports for a replaced selection are dropped ([`queue`]).
 //! [`PreviewCache::evict_unused`] removes entries nothing uses any more
 //! ([`eviction`]).
+//!
+//! The same cache keeps footprints' 3D views, exported as GLB ([`glb`]).
 
 mod eviction;
+mod glb;
 mod queue;
 mod staging;
 
 pub use eviction::{UNUSED_FOR, remove_old_cache};
+pub use glb::{BoardExport, Glb};
 pub use queue::{MAX_RUNNING, Selection};
 
 use crate::discovery::{KicadInstall, KicadVersion};
@@ -466,12 +470,17 @@ impl PreviewCache {
         })
     }
 
-    /// The key of a footprint entry that keeps its source: its folder
-    /// below the cache root, with `/` between the parts.
+    /// The key of a footprint entry that keeps its source.
     fn footprint_key(&self, entry: &Path) -> Option<String> {
         if !entry.join(SOURCE_FILE).is_file() {
             return None;
         }
+        self.entry_key(entry)
+    }
+
+    /// An entry's key: its folder below the cache root, with `/` between
+    /// the parts.
+    fn entry_key(&self, entry: &Path) -> Option<String> {
         let parts: Vec<String> = entry
             .strip_prefix(&self.root)
             .ok()?
@@ -481,12 +490,12 @@ impl PreviewCache {
         Some(parts.join("/"))
     }
 
-    /// The `.kicad_mod` a footprint preview was drawn from, by the key its
-    /// [`Preview`] gave. `None` for a key that is not exactly a footprint
-    /// entry of this cache, so a key can never name another file.
-    pub fn footprint_source(&self, key: &str) -> Option<Vec<u8>> {
+    /// The entry folder `key` names, only if it is exactly an entry of
+    /// this cache whose library folder starts with `kind`, such as `fp-`.
+    /// So a key can never name another file.
+    fn entry_by_key(&self, key: &str, kind: &str) -> Option<PathBuf> {
         let parts: Vec<&str> = key.split('/').collect();
-        let [layout, _kicad, _theme, kind, _item] = parts.as_slice() else {
+        let [layout, _kicad, _theme, library, _item] = parts.as_slice() else {
             return None;
         };
         let plain = parts.iter().all(|part| {
@@ -496,12 +505,19 @@ impl PreviewCache {
                 && !part.contains(['\\', ':'])
                 && !part.chars().any(char::is_control)
         });
-        if !plain || *layout != CACHE_LAYOUT || !kind.starts_with("fp-") {
+        if !plain || *layout != CACHE_LAYOUT || !library.starts_with(kind) {
             return None;
         }
         let mut path = self.root.clone();
         path.extend(&parts);
-        fs::read(path.join(SOURCE_FILE)).ok()
+        Some(path)
+    }
+
+    /// The `.kicad_mod` a footprint preview was drawn from, by the key its
+    /// [`Preview`] gave. `None` for a key that is not exactly a footprint
+    /// entry of this cache.
+    pub fn footprint_source(&self, key: &str) -> Option<Vec<u8>> {
+        fs::read(self.entry_by_key(key, "fp-")?.join(SOURCE_FILE)).ok()
     }
 
     /// Updates the library folder's last-used time, once per process, so

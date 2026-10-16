@@ -11,12 +11,15 @@
 //!   them by content hash and KiCad version.
 //! - [`library_file`] reads saved symbol libraries and footprints: one
 //!   symbol's exact bytes, file versions and 3D model references.
+//! - [`board`] puts one footprint on a board of its own, with its 3D
+//!   models pointed at exact files, for kicad-cli's 3D export.
 //! - [`lib_table`] reads the person's KiCad library tables
 //!   (`sym-lib-table`, `fp-lib-table`) and expands KiCad's path variables.
 //! - [`library_summary`] reads what a library browser lists about every
 //!   symbol and footprint in one quick pass, and [`footprint_filter`]
 //!   applies KiCad's footprint filters for a symbol.
 
+pub mod board;
 pub mod discovery;
 pub mod footprint_filter;
 pub mod lib_table;
@@ -31,8 +34,8 @@ pub use discovery::{
     SearchLocations, discover, installed_share_dir,
 };
 pub use preview::{
-    CacheOutcome, MAX_RUNNING, Preview, PreviewCache, PreviewError, PreviewImage, Selection,
-    StoredItem, remove_old_cache, sha256_hex,
+    BoardExport, CacheOutcome, Glb, MAX_RUNNING, Preview, PreviewCache, PreviewError, PreviewImage,
+    Selection, StoredItem, remove_old_cache, sha256_hex,
 };
 pub use process::CliSettingsFolder;
 pub use resolver::{
