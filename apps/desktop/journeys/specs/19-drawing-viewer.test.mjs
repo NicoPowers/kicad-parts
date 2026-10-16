@@ -345,9 +345,13 @@ describe('drawing close-up', () => {
         pressed: document.querySelector(`${s} .viewer-measure`).getAttribute('aria-pressed'),
         cursor: getComputedStyle(area).cursor,
         live: document.querySelector(`${s} .viewer-readout`).getAttribute('aria-live'),
+        // Clicks on the drawing never select text, but the readout can
+        // still be selected and copied.
+        areaSelect: getComputedStyle(area).userSelect,
+        readoutSelectable: getComputedStyle(document.querySelector(`${s} .viewer-readout`)).userSelect !== 'none',
       };
     }, CLOSE_UP);
-    assert.deepEqual(on, { pressed: 'true', cursor: 'crosshair', live: 'polite' });
+    assert.deepEqual(on, { pressed: 'true', cursor: 'crosshair', live: 'polite', areaSelect: 'none', readoutSelectable: true });
     assert.match((await readout(browser, CLOSE_UP))[0], /^Click a point to start\./);
 
     // The pads of our g-Resistor_SMD:R_0603_1608Metric are at x = -0.825

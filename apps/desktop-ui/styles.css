@@ -760,8 +760,9 @@ a {
   cursor: grabbing;
 }
 
-/* A click that places a point never selects text. */
-.viewer.measuring {
+/* A click that places a point never selects text. Only the drawing,
+   so the readout can still be selected and copied. */
+.viewer-area.measuring {
   user-select: none;
 }
 
