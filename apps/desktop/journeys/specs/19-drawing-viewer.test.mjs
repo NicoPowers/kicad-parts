@@ -268,9 +268,9 @@ describe('drawing close-up', () => {
 
   it('zooms, moves and fits with the keyboard, with visible focus', async () => {
     const fitted = await view(browser, CLOSE_UP);
-    // Tab from the zoom, Measure and Units buttons to the drawing.
+    // Tab from the zoom, 3D, Measure and Units buttons to the drawing.
     await browser.execute((s) => document.querySelector(`${s} .viewer-fit`).focus(), CLOSE_UP);
-    await browser.keys(['Tab', 'Tab', 'Tab', 'Tab', 'Tab']);
+    await browser.keys(['Tab', 'Tab', 'Tab', 'Tab', 'Tab', 'Tab']);
     const focus = await browser.execute((s) => {
       const area = document.querySelector(`${s} .viewer-area`);
       return {

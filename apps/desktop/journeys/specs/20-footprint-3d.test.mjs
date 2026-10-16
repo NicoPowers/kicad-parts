@@ -190,6 +190,11 @@ async function openFixture(browser, name) {
     async () => browser.execute((s) => document.querySelector(`${s} .viewer`)?.dataset.ready === 'true', LIBRARY_CLOSE_UP),
     { timeout: 10_000, timeoutMsg: 'the close-up never got its drawing' },
   );
+  // The browser behind says how far it has read; wait until it is done.
+  await browser.waitUntil(
+    async () => browser.execute(() => document.querySelector('.libraries-progress')?.dataset.state === 'ready'),
+    { timeout: 120_000, interval: 250, timeoutMsg: 'the Libraries browser never finished reading' },
+  );
 }
 
 describe('footprint 3D view', () => {
@@ -468,10 +473,6 @@ describe('footprint 3D view', () => {
     assert.deepEqual(said.notes, ['No 3D model can be shown, so only the board with its pads, silkscreen and mask is shown.']);
     const drawn = await info(browser, LIBRARY_CLOSE_UP);
     assert.ok(drawn.meshNames.every((name) => name.startsWith('board_')), `meshes: ${drawn.meshNames}`);
-    await browser.waitUntil(
-      async () => browser.execute(() => document.querySelector('.libraries-progress')?.dataset.state === 'ready'),
-      { timeout: 120_000, interval: 250, timeoutMsg: 'the Libraries browser never finished reading' },
-    );
     // No axe check here: axe cannot tell the colours of text in a close-up
     // over the Libraries browser, another modal dialog (mx-d2fb83). The
     // same panel is checked over the part details above.
