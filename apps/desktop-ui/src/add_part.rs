@@ -1036,6 +1036,33 @@ pub fn AddPartView(
         read(None, None, true);
     });
 
+    // The footprint's 3D view uses the 3D models saving would use: a
+    // copy's own models, or the download's chosen model.
+    let copied_models = Signal::derive(move || {
+        form.reading.with(|found| {
+            let Some(found) = found else {
+                return Vec::new();
+            };
+            let copied = picked(found, PreviewKind::Footprint)
+                .is_some_and(|pick| pick.use_as == PickUse::Copy);
+            if copied && !form.no_models.get() {
+                found.model_files.clone()
+            } else {
+                Vec::new()
+            }
+        })
+    });
+    let download_model = Signal::derive(move || {
+        form.reading.with(|found| {
+            let found = found.as_ref()?;
+            if picked(found, PreviewKind::Footprint).is_some() {
+                return None;
+            }
+            form.model
+                .get()
+                .and_then(|at| found.model_files.get(at).cloned())
+        })
+    });
     let previews = move || {
         let chosen = form.reading.with(Option::is_some);
         view! {
@@ -1047,7 +1074,7 @@ pub fn AddPartView(
             <section class="preview" aria-labelledby="footprint-heading">
                 <h3 id="footprint-heading">"Footprint"</h3>
                 {(!chosen).then(|| view! { <p class="hint">"Upload a download or choose from a library to see its footprint here."</p> })}
-                <FilePreview kind=FileKind::Footprint preview=footprint_drawing previewing=footprint_busy />
+                <FilePreview kind=FileKind::Footprint preview=footprint_drawing previewing=footprint_busy models=copied_models download_model=download_model />
             </section>
         }
     };

@@ -878,6 +878,105 @@ a {
   margin: 0.5rem 0 0.3rem;
 }
 
+/* The footprint's 3D view (kicad-parts-c9c1). It takes the drawing's
+   place, and the 3D model panel takes the layer list's. The 2D drawing
+   and layer list stay in the page, hidden, so they keep their state. */
+.viewer-area.off,
+.viewer-layers.off,
+.viewer-readout.off,
+.viewer-position.off {
+  display: none;
+}
+
+.viewer-3d {
+  position: relative;
+}
+
+.viewer-3d.dragging {
+  cursor: grabbing;
+}
+
+.view3d-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.view3d-status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 1rem;
+  color: #dbe2ec;
+  text-align: center;
+}
+
+.view3d-problem {
+  color: #ffd9d9;
+}
+
+.viewer-models h5 {
+  margin: 0 0 0.3rem;
+  font-size: 0.88rem;
+}
+
+.model-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Not laid out like the layer list's rows. */
+.viewer-layers .model-link {
+  display: block;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+}
+
+.model-link-text {
+  display: block;
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.model-found,
+.model-problem,
+.model-path {
+  margin: 0.2rem 0 0;
+  font-size: 0.8rem;
+}
+
+.model-problem {
+  color: var(--danger);
+}
+
+.model-path {
+  color: var(--muted);
+}
+
+/* A block of its own: a long path that wraps stays one box. */
+.model-path-text {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.model-note {
+  margin-top: 0.5rem;
+}
+
+.model-cli pre {
+  max-height: 10rem;
+  overflow: auto;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+}
+
 /* In the Libraries browser the drawing fills its pane. */
 .preview-figure .viewer {
   flex: 1;

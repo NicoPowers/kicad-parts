@@ -1,12 +1,13 @@
 //! Calls into the Tauri shell. Payload shapes come from `desktop-contract`.
 
 use desktop_contract::{
-    AppStatus, FilePreviewRequest, LibrariesView, LibraryCheckView, LibraryItemDetail,
-    LibraryItemRequest, LibraryItems, LibraryItemsRequest, OurLibraries, PartDetail,
-    PreviewOutcome, PreviewRequest, PublishResult, SearchRequest, SearchResponse, SignInRequest,
-    TeamArchiveRequest, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest,
-    TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest,
-    TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSameMpn, TeamStatus, command,
+    AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, LibrariesView,
+    LibraryCheckView, LibraryItemDetail, LibraryItemRequest, LibraryItems, LibraryItemsRequest,
+    OurLibraries, PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
+    SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest, TeamDownload,
+    TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest, TeamIpnCheck,
+    TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest,
+    TeamSameMpn, TeamStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -267,6 +268,33 @@ pub async fn footprint_drawing(
     key: &str,
 ) -> Result<Option<desktop_contract::FootprintDrawing>, String> {
     call(command::FOOTPRINT_DRAWING, &DrawingArgs { key }).await
+}
+
+#[derive(Serialize)]
+struct Footprint3dArgs {
+    request: Footprint3dRequest,
+}
+
+/// Makes a footprint's 3D view, or reads it from the cache.
+pub async fn footprint_3d(request: Footprint3dRequest) -> Result<Footprint3dView, String> {
+    call(command::FOOTPRINT_3D, &Footprint3dArgs { request }).await
+}
+
+/// A 3D view's GLB, as an `ArrayBuffer`: the command sends raw bytes, not
+/// JSON.
+pub async fn footprint_glb(key: &str) -> Result<JsValue, String> {
+    let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+    let args = DrawingArgs { key }
+        .serialize(&serializer)
+        .map_err(|error| error.to_string())?;
+    let bytes = tauri_invoke(command::FOOTPRINT_GLB, args)
+        .await
+        .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))?;
+    if bytes.is_instance_of::<js_sys::ArrayBuffer>() {
+        Ok(bytes)
+    } else {
+        Err("The 3D view did not arrive as bytes.".into())
+    }
 }
 
 /// One library item's drawing.

@@ -13,14 +13,15 @@
 //! moving read the element's size.
 //!
 //! A footprint's close-up also has a Measure tool (kicad-parts-e95e): two
-//! clicks measure between points, which snap to the active layer.
+//! clicks measure between points, which snap to the active layer. Its 3D
+//! button shows the footprint with its 3D model instead (kicad-parts-c9c1).
 
 use crate::{backend, bounds, show_modal};
-use desktop_contract::PreviewImage;
 use desktop_contract::drawing::{
     DrawnText, Edge, FootprintDrawing, PadKind, Point, Shape, TextAlign, arc_turn,
 };
 use desktop_contract::measure::snap_points;
+use desktop_contract::{PreviewImage, StoredFootprint, TeamFile};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::collections::BTreeSet;
@@ -30,10 +31,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod markup;
 mod measure;
+mod three_d;
 mod view;
 
 use markup::*;
 use measure::*;
+use three_d::*;
 use view::*;
 
 /// The closest zoom, in screen pixels per millimetre: enough to inspect a
@@ -64,6 +67,13 @@ pub(crate) struct Picture {
     pub drawing_key: Option<String>,
     /// Drawn on KiCad's dark board, not on white paper.
     pub footprint: bool,
+    /// For a footprint drawn from a Catalog revision: that revision, whose
+    /// stored 3D models the 3D view draws.
+    pub stored: Option<StoredFootprint>,
+    /// 3D model files chosen with the footprint, for its 3D view.
+    pub model_files: Vec<TeamFile>,
+    /// Add part: the download's 3D model, used as saving links it.
+    pub download_model: Option<TeamFile>,
 }
 
 impl Picture {
@@ -74,7 +84,17 @@ impl Picture {
             view_box: image.view_box,
             drawing_key: image.drawing_key.clone(),
             footprint,
+            stored: image.stored_footprint.clone(),
+            model_files: Vec::new(),
+            download_model: None,
         }
+    }
+
+    /// The same picture, whose 3D view uses these 3D model files.
+    pub(crate) fn with_models(mut self, files: Vec<TeamFile>, download: Option<TeamFile>) -> Self {
+        self.model_files = files;
+        self.download_model = download;
+        self
     }
 
     /// kicad-cli's drawing's box: `[min_x, min_y, max_x, max_y]`.
@@ -257,6 +277,19 @@ fn DrawingView(
     }
     // Bumped when the drawing area changes size, so marks keep their size.
     let resized = RwSignal::new(0u32);
+    // The 3D view, in a footprint's close-up only.
+    let can_3d = measurable && picture.drawing_key.is_some();
+    let three_d = RwSignal::new(false);
+    let no_webgl = RwSignal::new(false);
+    let view3d = StoredValue::new_local(None::<View3d>);
+    let found3d = RwSignal::new(None);
+    let with_view3d = move |act: fn(&View3d)| {
+        view3d.with_value(|view| {
+            if let Some(view) = view {
+                act(view);
+            }
+        });
+    };
 
     let size = move || {
         area.get_untracked()
@@ -304,6 +337,22 @@ fn DrawingView(
     let toggle_measuring = move || {
         clear_measurement();
         measuring.update(|on| *on = !*on);
+    };
+    let toggle_3d = move || {
+        if three_d.get_untracked() {
+            three_d.set(false);
+            return;
+        }
+        if !webgl_available() {
+            no_webgl.set(true);
+            return;
+        }
+        // Measuring is for the 2D drawing.
+        if measuring.get_untracked() {
+            toggle_measuring();
+        }
+        no_webgl.set(false);
+        three_d.set(true);
     };
     // N and Shift+N step through the snap points in reading order.
     let step_highlight = move |back: bool| {
@@ -528,6 +577,8 @@ fn DrawingView(
     };
 
     let help_id = format!("{id}-help");
+    let help_3d = format!("{id}-help-3d");
+    let models_id = id.clone();
     let has_drawing = drawing.is_some();
     let footprint = picture.footprint;
     // The end follows the pointer until it is set.
@@ -651,7 +702,8 @@ fn DrawingView(
     };
     let layer_list = (layers && drawing.is_some()).then(|| {
         let drawing = drawing.clone().expect("a drawing");
-        view! { <LayerList drawing=drawing active=active hidden=hidden dim=dim id=id.clone() /> }
+        let off = Signal::derive(move || three_d.get());
+        view! { <LayerList drawing=drawing active=active hidden=hidden dim=dim id=id.clone() off=off /> }
     });
     view! {
         <div
@@ -680,13 +732,32 @@ fn DrawingView(
         >
             <div class="viewer-main">
                 <div class="viewer-toolbar">
-                    <button type="button" class="viewer-fit" on:click=move |_| view.set(fit)>"Fit"</button>
-                    <button type="button" aria-label="Zoom in" title="Zoom in" on:click=move |_| zoom_by(ZOOM_STEP, None)>"+"</button>
-                    <button type="button" aria-label="Zoom out" title="Zoom out" on:click=move |_| zoom_by(1.0 / ZOOM_STEP, None)>"-"</button>
+                    <Show when=move || !three_d.get()>
+                        <button type="button" class="viewer-fit" on:click=move |_| view.set(fit)>"Fit"</button>
+                        <button type="button" aria-label="Zoom in" title="Zoom in" on:click=move |_| zoom_by(ZOOM_STEP, None)>"+"</button>
+                        <button type="button" aria-label="Zoom out" title="Zoom out" on:click=move |_| zoom_by(1.0 / ZOOM_STEP, None)>"-"</button>
+                    </Show>
                     {enlarge.map(|enlarge| view! {
                         <button type="button" class="viewer-enlarge" on:click=move |_| enlarge.run(())>"Enlarge"</button>
                     })}
+                    {can_3d.then(|| view! {
+                        <button
+                            type="button"
+                            class="viewer-3d-toggle"
+                            aria-pressed=move || if three_d.get() { "true" } else { "false" }
+                            title="Show the footprint with its 3D model"
+                            on:click=move |_| toggle_3d()
+                        >
+                            "3D"
+                        </button>
+                        <Show when=move || three_d.get()>
+                            <button type="button" class="viewer-3d-reset" on:click=move |_| with_view3d(View3d::reset)>"Reset view"</button>
+                            <button type="button" class="viewer-3d-top" on:click=move |_| with_view3d(View3d::top)>"Top"</button>
+                            <button type="button" class="viewer-3d-bottom" on:click=move |_| with_view3d(View3d::bottom)>"Bottom"</button>
+                        </Show>
+                    })}
                     {measurable.then(|| view! {
+                        <Show when=move || !three_d.get()>
                         <button
                             type="button"
                             class="viewer-measure"
@@ -708,14 +779,17 @@ fn DrawingView(
                         >
                             {move || if mils.get() { "Units: mils" } else { "Units: mm" }}
                         </button>
+                        </Show>
                     })}
                     {footprint.then(|| view! {
-                        <span class="viewer-position" aria-hidden="true">{position}</span>
+                        <span class="viewer-position" aria-hidden="true" class:off=move || three_d.get()>{position}</span>
                     })}
                 </div>
+                {move || no_webgl.get().then(|| view! { <p class="viewer-note viewer-problem" role="status">{NO_WEBGL}</p> })}
                 <div
                     node_ref=area
                     class="viewer-area"
+                    class:off=move || three_d.get()
                     class:panning=move || dragging.get()
                     class:measuring=move || measuring.get()
                     tabindex="0"
@@ -743,13 +817,30 @@ fn DrawingView(
                 >
                     {svg}
                 </div>
+                {
+                    let (picture, help) = (picture.clone(), help_3d.clone());
+                    move || three_d.get().then(|| view! {
+                        <ThreeDArea picture=picture.clone() help_id=help.clone() handle=view3d found=found3d />
+                    })
+                }
                 {measurable.then(|| view! {
-                    <div class="viewer-readout" class:measuring=move || measuring.get() role="status" aria-live="polite">{readout}</div>
+                    <div class="viewer-readout" class:measuring=move || measuring.get() class:off=move || three_d.get() role="status" aria-live="polite">{readout}</div>
                 })}
                 <p id=help_id class="visually-hidden">{instructions}</p>
+                {can_3d.then(|| view! {
+                    <p id=help_3d.clone() class="visually-hidden">
+                        "Drag to turn the model around its centre. Scroll, or press plus and minus, to zoom. Drag with the middle or right button, or press Shift and an arrow key, to move the view. The arrow keys turn it. Press 0 for the starting view."
+                    </p>
+                })}
                 {problem.map(|problem| view! { <p class="viewer-note viewer-problem">{problem}</p> })}
             </div>
             {layer_list}
+            {move || three_d.get().then(|| view! {
+                // It can scroll, so it takes focus for the keyboard.
+                <div class="viewer-layers viewer-side-3d" tabindex="0" role="region" aria-label="3D model files">
+                    <ModelPanel found=found3d id=models_id.clone() />
+                </div>
+            })}
         </div>
     }
 }
@@ -814,11 +905,13 @@ fn LayerList(
     hidden: RwSignal<BTreeSet<String>>,
     dim: RwSignal<bool>,
     id: String,
+    /// Hidden while the 3D view is shown, keeping its choices.
+    off: Signal<bool>,
 ) -> impl IntoView {
     let group = format!("{id}-active");
     let notes = drawing.left_out.clone();
     view! {
-        <div class="viewer-layers">
+        <div class="viewer-layers" class:off=move || off.get()>
             <fieldset aria-describedby=format!("{id}-layers-hint")>
                 <legend>"Layers"</legend>
                 <p class="viewer-layers-hint" id=format!("{id}-layers-hint")>
@@ -932,6 +1025,8 @@ pub(crate) fn CloseUpDialog(close_up: CloseUp) -> impl IntoView {
             class="zoom-dialog"
             aria-labelledby=labelled_by
             on:pointerdown=move |event| pressed_outside.set_value(outside(&event))
+            // Closing ends the viewer, which frees a 3D view's drawing.
+            on:close=move |_| close_up.shown.set(None)
             on:click=move |event| {
                 if pressed_outside.get_value() && outside(&event) {
                     if let Some(dialog) = dialog.get_untracked() {

@@ -862,6 +862,12 @@ fn RowView(
                     let undo_label = if choice.copy.is_some() { "Undo" } else { "Don't use the file" };
                     let missing = choice.missing_models.clone();
                     let chosen_models = choice.model_files.clone();
+                    // The 3D view uses the files chosen for its models, and
+                    // a copy's models unless No 3D model is chosen.
+                    let mut models_3d = choice.model_files.clone();
+                    if !choice.no_models {
+                        models_3d.extend(choice.copy.iter().flat_map(|copy| copy.models.iter().cloned()));
+                    }
                     let library = choice.library.clone();
                     view! {
                         <div class="file-chosen">
@@ -895,7 +901,7 @@ fn RowView(
                             />
                             {copy_models}
                             {problems.into_iter().map(|problem| view! { <p class="problem file-problem" role="alert">{problem}</p> }).collect_view()}
-                            <FilePreview kind=file_kind(kind) preview=drawing previewing=drawing_busy chosen=choice.copy.is_some() />
+                            <FilePreview kind=file_kind(kind) preview=drawing previewing=drawing_busy chosen=choice.copy.is_some() models=Signal::stored(models_3d) />
                             {missing.into_iter().enumerate().map(|(number, model_key)| {
                                 let chosen_name = chosen_models
                                     .iter()
