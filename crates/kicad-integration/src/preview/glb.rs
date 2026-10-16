@@ -109,31 +109,39 @@ impl PreviewCache {
         self.library_hash(file)
     }
 
-    /// A copy in the cache of the 3D model whose bytes have `sha256`, named
-    /// `model.<extension>`, for a board to point at. `load_bytes` runs only
-    /// when the cache has no copy yet, and its bytes must match `sha256`.
+    /// A copy in the cache of the 3D model file `name` whose bytes have
+    /// `sha256`, for a board to point at. The copy is named
+    /// `model.<extension>`, in a folder for the bytes and the name, so the
+    /// same bytes stored as `.stp` and `.step` both work. `load_bytes`
+    /// runs only when the cache has no copy yet, and its bytes must match
+    /// `sha256`.
     pub fn model_copy(
         &self,
         kicad: &KicadInstall,
         sha256: &str,
-        extension: &str,
+        name: &str,
         load_bytes: impl FnOnce() -> Result<Vec<u8>, String>,
     ) -> Result<PathBuf, PreviewError> {
-        let plain = |text: &str, length: usize| {
-            text.len() == length && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'z'))
-        };
-        let extension = extension.to_ascii_lowercase();
-        if !plain(sha256, 64) || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
             return Err(PreviewError::StoredBytes(
                 "the 3D model's SHA-256 is not 64 lowercase hex digits".into(),
             ));
         }
-        if !(1..=4).any(|length| plain(&extension, length)) {
+        let extension = Path::new(name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|extension| MODEL_EXTENSIONS.contains(&extension.as_str()));
+        let Some(extension) = extension else {
             return Err(PreviewError::Unexportable(format!(
-                "{extension:?} is not a 3D model file type."
+                "{name:?} is not a 3D model file: KiCad's are .step, .stp, .stpz, .wrl or .wrz."
             )));
-        }
-        let entry = self.entry_dir(kicad, "model", sha256, "model");
+        };
+        let entry = self.entry_dir(kicad, "model", sha256, name);
         let file_name = format!("model.{extension}");
         if entry.join(&file_name).is_file() {
             if let Some(library) = entry.parent() {
@@ -194,10 +202,13 @@ impl PreviewCache {
             }
         })?;
         // kicad-cli can end without an error and write nothing, so the
-        // export counts only when a GLB was written.
-        let written =
-            fs::read(&glb).is_ok_and(|bytes| bytes.len() > 12 && bytes.starts_with(b"glTF"));
-        if !output.success() || !written {
+        // export counts only when a GLB was written. It ends with code 2
+        // when it could not read a 3D model, yet still writes the board;
+        // the 3D view then says which model it could not read.
+        let written = starts_as_glb(&glb);
+        let model_trouble =
+            output.code == Some(2) && !output.timed_out && only_model_complaints(&output.message());
+        if !(output.success() || model_trouble) || !written {
             let mut cli_message = output.message();
             if cli_message.is_empty() {
                 cli_message = "kicad-cli wrote no 3D view and printed no message.".into();
@@ -213,6 +224,48 @@ impl PreviewCache {
         let messages = out.join(MESSAGES_FILE);
         fs::write(&messages, output.message()).map_err(|e| io_error("cannot write", &messages, e))
     }
+}
+
+/// The 3D model file types KiCad reads, in lower case.
+const MODEL_EXTENSIONS: [&str; 5] = ["step", "stp", "stpz", "wrl", "wrz"];
+
+/// What kicad-cli prints about a 3D model it could not load. It goes on
+/// without the model.
+const MODEL_COMPLAINTS: [&str; 4] = [
+    "readSTEP() failed",
+    "No model for filename",
+    "Could not add 3D model",
+    "File not found",
+];
+
+/// Whether `message` holds a complaint about loading a 3D model, and
+/// nothing else but kicad-cli's usual lines and the STEP reader's errors.
+pub(crate) fn only_model_complaints(message: &str) -> bool {
+    let lines: Vec<&str> = message
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let complaint = |line: &str| MODEL_COMPLAINTS.iter().any(|known| line.contains(known));
+    lines.iter().any(|line| complaint(line))
+        && lines.iter().all(|line| {
+            complaint(line)
+                || line.starts_with("****")
+                || line.starts_with("Binary GLTF file")
+                || line.starts_with("Export time")
+        })
+}
+
+/// Whether the file at `path` is longer than a GLB header and starts as
+/// one; only the first bytes are read.
+fn starts_as_glb(path: &Path) -> bool {
+    use std::io::Read;
+    let mut header = [0u8; 12];
+    fs::metadata(path).is_ok_and(|metadata| metadata.len() > 12)
+        && fs::File::open(path)
+            .and_then(|mut file| file.read_exact(&mut header))
+            .is_ok()
+        && header.starts_with(b"glTF")
 }
 
 /// Adds `bytes` to `hasher` after its length, so parts never run together.

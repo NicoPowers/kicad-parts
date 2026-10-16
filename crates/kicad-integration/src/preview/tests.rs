@@ -1,3 +1,4 @@
+use super::glb::only_model_complaints;
 use super::*;
 use crate::discovery::InstallSource;
 use crate::process::{CliSettingsFolder, RunError};
@@ -721,21 +722,28 @@ fn model_copies_are_checked_and_stored_once() {
     let sha = sha256_hex(&bytes);
     let path = fixture
         .cache
-        .model_copy(&fixture.kicad, &sha, "STEP", || Ok(bytes.clone()))
+        .model_copy(&fixture.kicad, &sha, "R.STEP", || Ok(bytes.clone()))
         .unwrap();
     assert_eq!(fs::read(&path).unwrap(), bytes);
     assert_eq!(path.file_name().unwrap(), "model.step");
     // Stored already: the bytes are not loaded again.
     let again = fixture
         .cache
-        .model_copy(&fixture.kicad, &sha, "step", || panic!("loaded again"))
+        .model_copy(&fixture.kicad, &sha, "R.STEP", || panic!("loaded again"))
         .unwrap();
     assert_eq!(again, path);
+    // The same bytes under another name and type get their own copy.
+    let stp = fixture
+        .cache
+        .model_copy(&fixture.kicad, &sha, "R.stp", || Ok(bytes.clone()))
+        .unwrap();
+    assert_eq!(stp.file_name().unwrap(), "model.stp");
+    assert_ne!(stp.parent(), path.parent());
     // Bytes that do not match their SHA-256 are refused.
     let other = sha256_hex(b"other");
     let refused = fixture
         .cache
-        .model_copy(&fixture.kicad, &other, "step", || Ok(bytes.clone()))
+        .model_copy(&fixture.kicad, &other, "R.step", || Ok(bytes.clone()))
         .unwrap_err();
     assert!(
         matches!(refused, PreviewError::StoredBytes(ref why) if why.contains("do not match")),
@@ -744,13 +752,61 @@ fn model_copies_are_checked_and_stored_once() {
     assert!(
         fixture
             .cache
-            .model_copy(&fixture.kicad, "ABC", "step", || Ok(bytes.clone()))
+            .model_copy(&fixture.kicad, "ABC", "R.step", || Ok(bytes.clone()))
             .is_err()
     );
+    for name in ["R.kicad_mod", "id_rsa", "R"] {
+        assert!(
+            fixture
+                .cache
+                .model_copy(&fixture.kicad, &sha, name, || panic!("{name} loaded"))
+                .is_err(),
+            "{name}"
+        );
+    }
+}
+
+/// kicad-cli 10.0.4 ends with code 2 when a STEP file cannot be read, but
+/// still writes the board without that model.
+#[test]
+fn a_3d_export_that_could_not_read_a_model_still_counts() {
+    let complaints = "**** ERR StepFile : Undefined Parsing: Line 4: Incorrect syntax ****\nreadSTEP() failed on filename 'C:\\m\\bad.step'.\nNo model for filename 'C:\\m\\bad.step'.\nBinary GLTF file 'b.glb' created.\n\nExport time 0.014 s";
+    assert!(only_model_complaints(complaints));
+    assert!(!only_model_complaints("Binary GLTF file 'b.glb' created."));
+    assert!(!only_model_complaints(
+        "No model for filename 'x'.\nFailed to load board"
+    ));
+    let run = |code: i32, stdout: &'static str| {
+        let dir = tempfile::tempdir().unwrap();
+        let runner: Runner = Arc::new(move |_, args, _| {
+            let at = args.iter().position(|arg| arg == "--output").unwrap();
+            fs::write(&args[at + 1], b"glTF\x02\0\0\0 a 3D view").unwrap();
+            Ok(CliOutput {
+                code: Some(code),
+                stdout: stdout.into(),
+                stderr: String::new(),
+                timed_out: false,
+            })
+        });
+        let cache = PreviewCache::with_runner(dir.path().join("cache"), runner);
+        let kicad = fixture(true).kicad;
+        let result = cache.board_glb(&kicad, &board_export("(kicad_pcb)", &[]), None);
+        (result, dir)
+    };
+    let (read, _dir) = run(2, complaints);
+    assert_eq!(
+        read.unwrap().messages,
+        complaints,
+        "the messages are kept for the 3D view"
+    );
+    let (other, _dir) = run(2, "Failed to load board");
     assert!(
-        fixture
-            .cache
-            .model_copy(&fixture.kicad, &sha, "st/p", || Ok(bytes.clone()))
-            .is_err()
+        matches!(other, Err(PreviewError::ExportFailed { .. })),
+        "{other:?}"
+    );
+    let (crash, _dir) = run(3, complaints);
+    assert!(
+        matches!(crash, Err(PreviewError::ExportFailed { .. })),
+        "{crash:?}"
     );
 }

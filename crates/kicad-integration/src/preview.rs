@@ -957,8 +957,10 @@ fn fingerprint(library: &Path) -> Result<Fingerprint, PreviewError> {
 fn hash_library(library: &Path) -> Result<String, PreviewError> {
     let mut hasher = Sha256::new();
     if library.is_file() {
-        let bytes = fs::read(library).map_err(|e| io_error("cannot read", library, e))?;
-        hasher.update(&bytes);
+        // A 3D model can be large, so it is read in pieces.
+        fs::File::open(library)
+            .and_then(|mut file| io::copy(&mut file, &mut hasher))
+            .map_err(|e| io_error("cannot read", library, e))?;
     } else {
         for path in library_files(library)? {
             let bytes = fs::read(&path).map_err(|e| io_error("cannot read", &path, e))?;
