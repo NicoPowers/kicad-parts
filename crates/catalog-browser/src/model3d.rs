@@ -127,7 +127,8 @@ pub(crate) enum NotShown {
     VariableNotSet(String),
     /// The link uses `${KIPRJMOD}`, a KiCad project's folder.
     ProjectFolder,
-    /// A network path that no path variable of the person's gave.
+    /// A network or system path that no path variable of the person's
+    /// gave.
     NetworkPath,
     /// A download's link to something other than its own 3D model.
     OutsideDownload,
@@ -176,7 +177,7 @@ impl NotShown {
                     .into()
             }
             Self::NetworkPath => {
-                "It names a network folder, which the app opens only through a path variable you set in KiCad's path settings.".into()
+                "It names a network or system path, which the app opens only through a path variable you set in KiCad's path settings.".into()
             }
             Self::OutsideDownload => {
                 "It points outside the download, so the app doesn't look for the file.".into()
@@ -288,35 +289,63 @@ pub(crate) fn resolve(
     {
         return not_shown(NotShown::ProjectFolder);
     }
-    if is_network_path(link) {
-        return not_shown(NotShown::NetworkPath);
-    }
     let expanded = match places.variables.expand(link) {
         Ok(expanded) => expanded,
         Err(missing) => return not_shown(NotShown::VariableNotSet(missing.0)),
     };
-    // A network path only from a path variable at the link's start, which
-    // the person set.
-    if is_network_path(&expanded) && !link.starts_with('$') {
-        return not_shown(NotShown::NetworkPath);
-    }
-    let path = PathBuf::from(expanded);
+    let path = PathBuf::from(&expanded);
     // `/models/x.step` names a folder on the current drive, as KiCad reads it.
     if path.is_relative() && !path.has_root() {
         return not_shown(NotShown::NoFolder);
     }
+    // Only an ordinary path on this computer, unless the person set the
+    // link's leading path variable to another kind, such as a network
+    // folder. Anything else could open a network share.
+    if !ordinary_path(&expanded) && !leading_value_is_unusual(link, &places.variables) {
+        return not_shown(NotShown::NetworkPath);
+    }
     found(ModelSource::Installed, &checked_model(&path))
 }
 
-/// Whether `text` starts as a network or device path, such as
-/// `\\host\share`, `//host/share`, `\\?\UNC\host` or `\\.\device`:
-/// two slashes of either kind.
-fn is_network_path(text: &str) -> bool {
-    let mut start = text.chars();
-    matches!(
-        (start.next(), start.next()),
-        (Some('/' | '\\'), Some('/' | '\\'))
-    )
+/// Whether `text` is an ordinary path on this computer: a drive path
+/// (`C:\` or `C:/`), or one slash and then a plain name, as `/home/...`.
+/// Network and device paths, such as `\\host\share`, `//host`,
+/// `\\?\UNC\host`, `\??\C:\` or `\\.\pipe`, are not.
+fn ordinary_path(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return matches!(bytes[2], b'/' | b'\\');
+    }
+    let Some(rest) = text.strip_prefix(['/', '\\']) else {
+        return false;
+    };
+    // A drive's root on its own, `/`, is ordinary too.
+    if rest.is_empty() {
+        return true;
+    }
+    let first = rest.split(['/', '\\']).next().unwrap_or_default();
+    is_plain_name(first) && !first.contains(['?', '*'])
+}
+
+/// Whether `link` starts with a path variable whose own value, which the
+/// person set, is something other than an ordinary path, such as a network
+/// folder. What the rest of the link adds is never trusted that way.
+fn leading_value_is_unusual(link: &str, variables: &PathVariables) -> bool {
+    let Some(rest) = link.strip_prefix('$') else {
+        return false;
+    };
+    let close = match rest.chars().next() {
+        Some('{') => '}',
+        Some('(') => ')',
+        _ => return false,
+    };
+    let Some(end) = rest.find(close) else {
+        return false;
+    };
+    let name = &rest[1..end];
+    variables
+        .expand(&format!("${{{name}}}"))
+        .is_ok_and(|value| !value.is_empty() && !ordinary_path(&value))
 }
 
 /// The place below the catalog folder a link into our library names, such

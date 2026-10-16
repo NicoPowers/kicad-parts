@@ -372,6 +372,10 @@ fn network_paths_are_opened_only_through_the_persons_path_variables() {
         r"\\?\UNC\host\share\x.step",
         r"\\.\pipe\x.step",
         r"/\host\share\x.step",
+        r"\??\UNC\host\share\x.step",
+        "/??/UNC/host/share/x.step",
+        r"\??\C:\x.step",
+        "/?/x.step",
     ] {
         assert_eq!(
             places.resolve(link),
@@ -382,15 +386,31 @@ fn network_paths_are_opened_only_through_the_persons_path_variables() {
     // A variable whose value hides a network path in the link's middle.
     let mut variables = std::collections::BTreeMap::new();
     variables.insert("SLASH".to_owned(), "/".to_owned());
+    variables.insert("EMPTY".to_owned(), String::new());
     // A verbatim local folder: it starts like a network path, but opens no
     // connection.
     let local = format!(r"\\?\{}", places.path("mine").display());
     variables.insert("SHARE".to_owned(), local);
     places.places.variables = PathVariables::new(variables);
-    assert_eq!(
-        places.resolve("/${SLASH}host/share/x.step"),
-        Resolved::NotShown(NotShown::NetworkPath)
+    // Variables whose values are ordinary, or empty, never make a network
+    // path ordinary.
+    for link in [
+        "/${SLASH}host/share/x.step",
+        "${SLASH}/host/share/x.step",
+        r"${EMPTY}\\host\share\x.step",
+        "${EMPTY}//host/share/x.step",
+    ] {
+        assert_eq!(
+            places.resolve(link),
+            Resolved::NotShown(NotShown::NetworkPath),
+            "{link}"
+        );
+    }
+    assert!(
+        ordinary_path(r"C:\x.step") && ordinary_path("c:/x.step") && ordinary_path("/home/x.step")
     );
+    assert!(!ordinary_path("C:x.step") && !ordinary_path(r"\??\C:\x.step"));
+    assert!(ordinary_path("/") && ordinary_path(r"\") && !ordinary_path("//"));
     // A folder the person set as a path variable is looked in, even one
     // written like a network path.
     assert!(matches!(
