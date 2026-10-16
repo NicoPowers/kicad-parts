@@ -2,7 +2,7 @@
 	(version 20241229)
 	(generator "journey")
 	(layer "F.Cu")
-	(descr "Two pads and no 3D model, for the 3D view journey")
+	(descr "Two pads, silkscreen front and back, and no 3D model, for the 3D view journey")
 	(tags "journey")
 	(property "Reference" "REF**"
 		(at 0 -1.5 0)
@@ -33,6 +33,16 @@
 			(type solid)
 		)
 		(layer "F.SilkS")
+	)
+	(fp_rect
+		(start -1.5 0.5)
+		(end 1.5 0.8)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(fill yes)
+		(layer "B.SilkS")
 	)
 	(fp_rect
 		(start -2 -1)

@@ -9,9 +9,11 @@ import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import {
   FOOTPRINT,
+  capture,
   launchApp,
   record,
   repoRoot,
+  screenshotsDir,
   searchFor,
   selectResult,
   startTeamServer,
@@ -115,6 +117,8 @@ describe("team part 3D view: the Catalog's stored 3D model", () => {
       shown.meshNames.some((name) => !name.startsWith('board_')),
       `the model's own mesh is drawn: ${shown.meshNames}`,
     );
+    // For people to look at: the model over its silkscreen; not compared.
+    await capture(browser, path.join(screenshotsDir, '21-team-footprint-3d-drawn.png'), ['.model-path-text']);
     await browser.keys('Escape');
     await browser.waitUntil(async () => !(await isOpen(browser, CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
   });

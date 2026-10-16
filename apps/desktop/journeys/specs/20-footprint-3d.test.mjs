@@ -470,6 +470,26 @@ describe('footprint 3D view', () => {
     const drawn = await info(browser, LIBRARY_CLOSE_UP);
     assert.ok(drawn.meshNames.length > 0 && drawn.meshNames.every((name) => name.startsWith('board_')), `meshes: ${drawn.meshNames}`);
     assert.ok(drawn.drawn > 2_000, `${drawn.drawn} pixels drawn`);
+    // The silkscreen (REF** and a line) shows in front of the mask, white
+    // as KiCad draws it, from the top and at the starting angle.
+    assert.ok(drawn.silkscreen > 300, `${drawn.silkscreen} silkscreen pixels at the start`);
+    assert.ok(drawn.silkscreenLightness > 185, `the silkscreen is white, not ${drawn.silkscreenLightness} of 255`);
+    await (await browser.$(`${LIBRARY_CLOSE_UP} .viewer-3d-top`)).click();
+    const top = await info(browser, LIBRARY_CLOSE_UP);
+    assert.ok(top.silkscreen > 300, `${top.silkscreen} silkscreen pixels from the top`);
+    // The back's silkscreen, a filled bar, through the back's mask.
+    await (await browser.$(`${LIBRARY_CLOSE_UP} .viewer-3d-bottom`)).click();
+    const bottom = await info(browser, LIBRARY_CLOSE_UP);
+    record({
+      event: '3d-silkscreen',
+      start: drawn.silkscreen,
+      top: top.silkscreen,
+      bottom: bottom.silkscreen,
+      lightness: [drawn.silkscreenLightness, top.silkscreenLightness, bottom.silkscreenLightness],
+    });
+    assert.ok(bottom.silkscreenLightness > 185, `the back's silkscreen is white, not ${bottom.silkscreenLightness} of 255`);
+    assert.ok(bottom.silkscreen > 300, `${bottom.silkscreen} silkscreen pixels from the bottom`);
+    await (await browser.$(`${LIBRARY_CLOSE_UP} .viewer-3d-reset`)).click();
     await assertAccessible(browser, '84-footprint-3d-no-model');
     await screenshotHiding3d(browser, '84-footprint-3d-no-model');
     await browser.keys('Escape');
