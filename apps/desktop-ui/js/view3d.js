@@ -5,6 +5,10 @@
 // from the network. The GLB comes from the app as bytes and is read with
 // GLTFLoader.parse, so nothing is fetched.
 //
+// The app's CSP needs nothing new for this: three.js runs no eval, and
+// kicad-cli's GLB holds no textures, which GLTFLoader would load from
+// blob: URLs. A texture in some model would be refused, not the model.
+//
 // Controls, on the focused view area:
 // - a left drag turns the model around its centre;
 // - the wheel zooms at the pointer;
