@@ -139,7 +139,7 @@ pub(super) fn ThreeDArea(
                 }
                 Err(why) => {
                     making.try_set(Making::Problem(format!(
-                        "The 3D view could not be drawn: {why}."
+                        "The 3D view could not be made: {why}."
                     )));
                 }
             }

@@ -102,10 +102,15 @@ class View3d {
     // the lower last (see place()).
     this.layers = [];
     this.silkscreen = [];
+    // The board's own box, without the model: whether the camera is above
+    // or below the board decides the order, not the whole scene's middle,
+    // which a tall part lifts far above the board.
+    const board = new THREE.Box3();
     model.updateMatrixWorld(true);
     model.traverse((object) => {
       if (!object.isMesh) return;
       if (nameOf(object).endsWith('_silkscreen')) this.silkscreen.push(object);
+      if (nameOf(object).endsWith('_PCB')) board.expandByObject(object);
       const materials = Array.isArray(object.material) ? object.material : [object.material];
       if (!materials.some((material) => material?.transparent)) return;
       // The board body is barely see-through (98 % opaque), so its own
@@ -117,6 +122,7 @@ class View3d {
       this.layers.push({ object, height: (box.min.y + box.max.y) / 2 });
     });
     this.layers.sort((a, b) => a.height - b.height);
+    this.board = board.isEmpty() ? null : board;
     this.background = new THREE.Color(background);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -130,7 +136,17 @@ class View3d {
     };
     this.canvas.addEventListener('webglcontextlost', this.lost);
     container.appendChild(this.canvas);
+    try {
+      this.build(THREE, RoomEnvironment, model);
+    } catch (error) {
+      // Nothing is left behind: no canvas, WebGL context or listener.
+      this.dispose();
+      throw error;
+    }
+  }
 
+  build(THREE, RoomEnvironment, model) {
+    const container = this.container;
     this.scene = new THREE.Scene();
     this.scene.background = this.background;
     this.scene.add(model);
@@ -160,6 +176,7 @@ class View3d {
     // Turn around the model's centre; fit its whole size.
     const box = new THREE.Box3().setFromObject(model);
     this.centre = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
+    this.boardMiddle = this.board ? (this.board.min.y + this.board.max.y) / 2 : this.centre.y;
     const size = box.isEmpty() ? 0.001 : box.getSize(new THREE.Vector3()).length() / 2;
     this.radius = Math.max(size, 1e-5);
     this.target = new THREE.Vector3();
@@ -216,7 +233,7 @@ class View3d {
     this.camera.position.copy(this.target).add(offset);
     this.camera.up.set(0, 1, 0);
     this.camera.lookAt(this.target);
-    const above = this.camera.position.y >= this.centre.y;
+    const above = this.camera.position.y >= this.boardMiddle;
     this.layers.forEach(({ object }, rank) => {
       object.renderOrder = above ? rank : -rank;
     });
@@ -418,22 +435,32 @@ class View3d {
       elevation: this.elevation / DEGREE,
       distance: this.distance,
       fitting: this.fittingDistance(),
+      // Heights, for checking the order the layers are drawn in.
+      cameraHeight: this.camera.position.y,
+      sceneMiddle: this.centre.y,
+      boardMiddle: this.boardMiddle,
+      boardTop: this.board?.max.y ?? null,
       target: this.target.toArray(),
     };
   }
 
-  /** Frees the GPU memory and removes every listener. */
+  /**
+   * Frees the GPU memory and removes every listener. It also cleans up a
+   * view whose building stopped halfway.
+   */
   dispose() {
     for (const [name, handler] of Object.entries(this.handlers ?? {})) {
       this.container.removeEventListener(name, handler);
     }
-    for (const name of ['pointercancel', 'lostpointercapture']) {
-      this.container.removeEventListener(name, this.handlers?.pointerup);
+    if (this.handlers) {
+      for (const name of ['pointercancel', 'lostpointercapture']) {
+        this.container.removeEventListener(name, this.handlers.pointerup);
+      }
     }
     this.container.classList.remove('dragging');
     delete this.container.view3dInfo;
     this.observer?.disconnect();
-    this.scene.traverse((object) => {
+    this.scene?.traverse((object) => {
       object.geometry?.dispose();
       const materials = Array.isArray(object.material) ? object.material : [object.material];
       for (const material of materials) {
@@ -444,8 +471,8 @@ class View3d {
         material.dispose();
       }
     });
-    this.scene.clear();
-    this.environment.dispose();
+    this.scene?.clear();
+    this.environment?.dispose();
     // Freeing the context below is no loss to report.
     this.canvas.removeEventListener('webglcontextlost', this.lost);
     this.renderer.dispose();
