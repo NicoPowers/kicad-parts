@@ -111,14 +111,18 @@ pub fn one_footprint_board(
     bytes: &[u8],
     uses: &[(ModelBlock, ModelUse)],
     content: [f64; 4],
-) -> Result<String, LibraryFileError> {
-    let text = String::from_utf8_lossy(bytes);
+) -> Result<Vec<u8>, LibraryFileError> {
+    // The footprint's own bytes are kept as they are, even ones that are
+    // not UTF-8, such as Latin-1 in an old vendor file: every place
+    // changed is a byte offset into them.
+    let skipped = if bytes.starts_with(BOM) { BOM.len() } else { 0 };
     // A byte order mark or blank lines would sit in the middle of the board.
-    let start = text.len()
-        - text
-            .trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n'])
-            .len();
-    // Each change: the text to replace, and what replaces it.
+    let start = skipped
+        + bytes[skipped..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_whitespace())
+            .count();
+    // Each change: the bytes to replace, and what replaces them.
     let mut changes: Vec<(Range<usize>, String)> = Vec::new();
     for (block, model) in uses {
         match model {
@@ -134,7 +138,6 @@ pub fn one_footprint_board(
     }
     // The footprint goes at the origin, unturned, where its outline is
     // drawn, whatever placement its own file gives it.
-    let skipped = if bytes.starts_with(BOM) { BOM.len() } else { 0 };
     let (_, children) = root_children(&bytes[skipped..])?;
     for child in children.iter().filter(|child| child.head == "at") {
         changes.push((
@@ -143,23 +146,26 @@ pub fn one_footprint_board(
         ));
     }
     changes.sort_by_key(|(span, _)| span.start);
-    let mut footprint = String::with_capacity(text.len());
+    let mut footprint = Vec::with_capacity(bytes.len());
     let mut at = start;
     for (span, replacement) in changes {
-        if span.start < at || span.end > text.len() {
+        if span.start < at || span.end > bytes.len() {
             return Err(LibraryFileError(
                 "the 3D models do not match the footprint".into(),
             ));
         }
-        footprint.push_str(&text[at..span.start]);
-        footprint.push_str(&replacement);
+        footprint.extend_from_slice(&bytes[at..span.start]);
+        footprint.extend_from_slice(replacement.as_bytes());
         at = span.end;
     }
-    footprint.push_str(&text[at..]);
+    footprint.extend_from_slice(&bytes[at..]);
+    while footprint.last().is_some_and(u8::is_ascii_whitespace) {
+        footprint.pop();
+    }
 
     let [x0, y0, x1, y1] = content;
     let margin = OUTLINE_MARGIN_MM;
-    let mut board = String::with_capacity(footprint.len() + 2048);
+    let mut board = String::with_capacity(2048);
     board.push_str("(kicad_pcb\n\t(version 20241229)\n\t(generator \"kicad_parts\")\n");
     let _ = writeln!(
         board,
@@ -174,18 +180,20 @@ pub fn one_footprint_board(
         let _ = writeln!(board, "\t\t({} \"User.{user}\" user)", 37 + 2 * user);
     }
     board.push_str("\t)\n\t(setup\n\t\t(pad_to_mask_clearance 0)\n\t)\n\t(net 0 \"\")\n");
-    board.push_str(footprint.trim_end());
-    board.push('\n');
+    let mut trailer = String::from("\n");
     let _ = writeln!(
-        board,
+        trailer,
         "\t(gr_rect\n\t\t(start {} {})\n\t\t(end {} {})\n\t\t(stroke\n\t\t\t(width 0.05)\n\t\t\t(type solid)\n\t\t)\n\t\t(fill no)\n\t\t(layer \"Edge.Cuts\")\n\t)",
         number(x0 - margin),
         number(y0 - margin),
         number(x1 + margin),
         number(y1 + margin),
     );
-    board.push_str(")\n");
-    Ok(board)
+    trailer.push_str(")\n");
+    let mut out = board.into_bytes();
+    out.extend_from_slice(&footprint);
+    out.extend_from_slice(trailer.as_bytes());
+    Ok(out)
 }
 
 /// KiCad 9 and 10's layer numbers, as their own boards list them.
@@ -296,6 +304,7 @@ mod tests {
         ];
         let board =
             one_footprint_board(FOOTPRINT.as_bytes(), &uses, [-1.48, -0.73, 1.48, 0.73]).unwrap();
+        let board = String::from_utf8(board).unwrap();
         // The board reads as one list, with the footprint inside.
         let tree = Sexp::parse(board.as_bytes()).unwrap();
         assert_eq!(tree.head(), Some("kicad_pcb"));
@@ -353,10 +362,41 @@ mod tests {
         );
     }
 
+    /// An old vendor file in Latin-1: its bytes are kept, and the model
+    /// links after them are still replaced exactly.
+    #[test]
+    fn a_footprint_that_is_not_utf8_keeps_its_bytes() {
+        let mut bytes =
+            b"(footprint \"L\" (descr \"R\xE9sistance \xB5\") (layer \"F.Cu\")\n".to_vec();
+        bytes.extend_from_slice(
+            b"\t(model \"${X}/a.step\" (offset (xyz 0 0 0)))\n\t(model \"${X}/b.step\")\n)\n",
+        );
+        let blocks = model_blocks(&bytes).unwrap();
+        let uses = vec![
+            (
+                blocks[0].clone(),
+                ModelUse::File(PathBuf::from(r"C:\m\a.step")),
+            ),
+            (blocks[1].clone(), ModelUse::Leave),
+        ];
+        let board = one_footprint_board(&bytes, &uses, [-1.0, -1.0, 1.0, 1.0]).unwrap();
+        let find = |needle: &[u8]| board.windows(needle.len()).any(|window| window == needle);
+        assert!(
+            find(b"(descr \"R\xE9sistance \xB5\")"),
+            "the Latin-1 bytes are kept"
+        );
+        assert!(find(b"(model \"C:\\\\m\\\\a.step\" (offset (xyz 0 0 0)))"));
+        assert!(!find(b"b.step"));
+        let tree = Sexp::parse(&board).unwrap();
+        let footprint = tree.children("footprint").next().unwrap();
+        assert_eq!(footprint.children("model").count(), 1);
+    }
+
     #[test]
     fn the_footprint_goes_at_the_origin_whatever_its_own_placement() {
         let bytes = b"(footprint \"P\" (layer \"F.Cu\") (at 10 5 90) (pad \"1\" smd rect (at 1 0) (size 1 1) (layers \"F.Cu\")))";
         let board = one_footprint_board(bytes, &[], [-0.5, -0.5, 1.5, 0.5]).unwrap();
+        let board = String::from_utf8(board).unwrap();
         let tree = Sexp::parse(board.as_bytes()).unwrap();
         let footprint = tree.children("footprint").next().unwrap();
         assert_eq!(footprint.children("at").count(), 0, "{board}");
@@ -369,6 +409,7 @@ mod tests {
     fn a_board_without_models_still_holds_the_footprint() {
         let bytes = b"(footprint \"P\" (layer \"F.Cu\") (pad \"1\" smd rect (at 0 0) (size 1 1) (layers \"F.Cu\")))";
         let board = one_footprint_board(bytes, &[], [-0.5, -0.5, 0.5, 0.5]).unwrap();
+        let board = String::from_utf8(board).unwrap();
         let tree = Sexp::parse(board.as_bytes()).unwrap();
         assert_eq!(tree.children("footprint").count(), 1);
         assert_eq!(number(-0.0000001), "0");

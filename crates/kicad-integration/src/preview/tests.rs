@@ -1,4 +1,4 @@
-use super::glb::only_model_complaints;
+use super::glb::{only_model_complaints, whole_glb};
 use super::*;
 use crate::discovery::InstallSource;
 use crate::process::{CliSettingsFolder, RunError};
@@ -106,7 +106,7 @@ impl FakeCli {
         thread::sleep(Duration::from_millis(30));
         if args.first().is_some_and(|arg| arg == "pcb") {
             // `--output` names the GLB file itself.
-            fs::write(&out, b"glTF\x02\0\0\0 a 3D view")?;
+            fs::write(&out, fake_glb())?;
             self.running.fetch_sub(1, Ordering::SeqCst);
             return Ok(CliOutput {
                 code: Some(0),
@@ -575,7 +575,7 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 fn board_export<'a>(board: &'a str, models: &'a [PathBuf]) -> BoardExport<'a> {
     BoardExport {
         name: "R_0603",
-        board,
+        board: board.as_bytes(),
         models,
     }
 }
@@ -780,7 +780,7 @@ fn a_3d_export_that_could_not_read_a_model_still_counts() {
         let dir = tempfile::tempdir().unwrap();
         let runner: Runner = Arc::new(move |_, args, _| {
             let at = args.iter().position(|arg| arg == "--output").unwrap();
-            fs::write(&args[at + 1], b"glTF\x02\0\0\0 a 3D view").unwrap();
+            fs::write(&args[at + 1], fake_glb()).unwrap();
             Ok(CliOutput {
                 code: Some(code),
                 stdout: stdout.into(),
@@ -809,4 +809,32 @@ fn a_3d_export_that_could_not_read_a_model_still_counts() {
         matches!(crash, Err(PreviewError::ExportFailed { .. })),
         "{crash:?}"
     );
+}
+
+/// A GLB header whose length is its own, and nothing else.
+fn fake_glb() -> Vec<u8> {
+    let mut bytes = b"glTF".to_vec();
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&20u32.to_le_bytes());
+    bytes.extend_from_slice(b"JSON a 3D");
+    bytes.truncate(20);
+    bytes
+}
+
+#[test]
+fn only_a_whole_glb_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("b.glb");
+    fs::write(&file, fake_glb()).unwrap();
+    assert!(whole_glb(&file));
+    // Cut off, or with more than its header says: not whole.
+    fs::write(&file, &fake_glb()[..16]).unwrap();
+    assert!(!whole_glb(&file));
+    let mut longer = fake_glb();
+    longer.extend_from_slice(b"more");
+    fs::write(&file, longer).unwrap();
+    assert!(!whole_glb(&file));
+    fs::write(&file, b"glTF").unwrap();
+    assert!(!whole_glb(&file));
+    assert!(!whole_glb(&dir.path().join("none.glb")));
 }

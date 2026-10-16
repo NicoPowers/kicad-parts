@@ -40,7 +40,8 @@ use desktop_contract::{
 use kicad_integration::board::{ModelBlock, ModelUse, model_blocks, one_footprint_board};
 use kicad_integration::lib_table::{PathVariables, VariableSources};
 use kicad_integration::{
-    BoardExport, CacheOutcome, Discovery, KicadInstall, PreviewError, SUPPORTED_MAJOR, sha256_hex,
+    BoardExport, CacheOutcome, Discovery, KicadInstall, PreviewError, SUPPORTED_MAJOR,
+    preview::MODEL_COMPLAINTS as CLI_COMPLAINTS, sha256_hex,
 };
 use std::fs;
 use std::io::Read;
@@ -50,13 +51,6 @@ use std::path::{Path, PathBuf};
 pub const MAX_GLB_BYTES: u64 = 150 * 1024 * 1024;
 /// How much of a file is read to see that it holds a 3D model.
 const HEADER_BYTES: u64 = 4096;
-/// What kicad-cli prints about a 3D model it could not load.
-const CLI_COMPLAINTS: [&str; 4] = [
-    "readSTEP() failed",
-    "No model for filename",
-    "Could not add 3D model",
-    "File not found",
-];
 
 /// Where 3D model files are looked for.
 #[derive(Clone, Debug)]

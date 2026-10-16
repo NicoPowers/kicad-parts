@@ -33,7 +33,7 @@ mod queue;
 mod staging;
 
 pub use eviction::{UNUSED_FOR, remove_old_cache};
-pub use glb::{BoardExport, Glb};
+pub use glb::{BoardExport, Glb, MODEL_COMPLAINTS};
 pub use queue::{MAX_RUNNING, Selection};
 
 use crate::discovery::{KicadInstall, KicadVersion};

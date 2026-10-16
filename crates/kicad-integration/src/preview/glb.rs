@@ -18,6 +18,7 @@
 //! dropped when only older selections want them.
 
 use super::*;
+use crate::library_file::MODEL_EXTENSIONS;
 
 /// The GLB file in a 3D view's entry.
 const GLB_FILE: &str = "board.glb";
@@ -30,8 +31,8 @@ const BOARD_FILE: &str = "board.kicad_pcb";
 pub struct BoardExport<'a> {
     /// The footprint's name, for the entry's folder name.
     pub name: &'a str,
-    /// The `.kicad_pcb` text.
-    pub board: &'a str,
+    /// The `.kicad_pcb` file's bytes.
+    pub board: &'a [u8],
     /// Every 3D model file the board points at.
     pub models: &'a [PathBuf],
 }
@@ -60,7 +61,7 @@ impl PreviewCache {
         selection: Selection,
     ) -> Result<Glb, PreviewError> {
         let mut hasher = Sha256::new();
-        hash_part(&mut hasher, export.board.as_bytes());
+        hash_part(&mut hasher, export.board);
         for model in export.models {
             hash_part(&mut hasher, model.to_string_lossy().as_bytes());
             hash_part(&mut hasher, self.file_sha256(model)?.as_bytes());
@@ -205,7 +206,7 @@ impl PreviewCache {
         // export counts only when a GLB was written. It ends with code 2
         // when it could not read a 3D model, yet still writes the board;
         // the 3D view then says which model it could not read.
-        let written = starts_as_glb(&glb);
+        let written = whole_glb(&glb);
         let model_trouble =
             output.code == Some(2) && !output.timed_out && only_model_complaints(&output.message());
         if !(output.success() || model_trouble) || !written {
@@ -226,12 +227,9 @@ impl PreviewCache {
     }
 }
 
-/// The 3D model file types KiCad reads, in lower case.
-const MODEL_EXTENSIONS: [&str; 5] = ["step", "stp", "stpz", "wrl", "wrz"];
-
 /// What kicad-cli prints about a 3D model it could not load. It goes on
 /// without the model.
-const MODEL_COMPLAINTS: [&str; 4] = [
+pub const MODEL_COMPLAINTS: [&str; 4] = [
     "readSTEP() failed",
     "No model for filename",
     "Could not add 3D model",
@@ -256,16 +254,18 @@ pub(crate) fn only_model_complaints(message: &str) -> bool {
         })
 }
 
-/// Whether the file at `path` is longer than a GLB header and starts as
-/// one; only the first bytes are read.
-fn starts_as_glb(path: &Path) -> bool {
+/// Whether the file at `path` is a whole GLB: it starts as one, and the
+/// length its header gives is the file's size, so a file kicad-cli did not
+/// finish writing is never kept. Only the first bytes are read.
+pub(crate) fn whole_glb(path: &Path) -> bool {
     use std::io::Read;
+    let Ok(size) = fs::metadata(path).map(|metadata| metadata.len()) else {
+        return false;
+    };
     let mut header = [0u8; 12];
-    fs::metadata(path).is_ok_and(|metadata| metadata.len() > 12)
-        && fs::File::open(path)
-            .and_then(|mut file| file.read_exact(&mut header))
-            .is_ok()
-        && header.starts_with(b"glTF")
+    let read = fs::File::open(path).and_then(|mut file| file.read_exact(&mut header));
+    let length = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+    size > 12 && read.is_ok() && header.starts_with(b"glTF") && u64::from(length) == size
 }
 
 /// Adds `bytes` to `hasher` after its length, so parts never run together.

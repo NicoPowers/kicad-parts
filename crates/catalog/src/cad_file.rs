@@ -186,7 +186,7 @@ pub fn model_upload(bytes: &[u8], key: &str, file_name: &str) -> Result<CadUploa
 }
 
 /// The file types KiCad reads as 3D models, in lower case.
-pub const MODEL_EXTENSIONS: [&str; 5] = ["step", "stp", "stpz", "wrl", "wrz"];
+pub use kicad_integration::library_file::MODEL_EXTENSIONS;
 
 /// Whether the file `name` (or path) is one of KiCad's 3D model types, by
 /// its extension, without regard to case.

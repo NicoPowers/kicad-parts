@@ -326,6 +326,9 @@ fn file_version(children: &[Child]) -> Option<String> {
         .and_then(|child| child.first.clone())
 }
 
+/// The file types KiCad reads as 3D models, in lower case.
+pub const MODEL_EXTENSIONS: [&str; 5] = ["step", "stp", "stpz", "wrl", "wrz"];
+
 /// Every 3D model path in a footprint, in file order, extracted exactly as
 /// the CSV catalog fixture (`tooling/csv-catalog-fixture`) does, so the two
 /// always agree on what a footprint references.
