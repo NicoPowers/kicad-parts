@@ -76,6 +76,7 @@ use catalog::pocketbase::{
     ImportCommand, ImportOutcome, read_back, read_import_state, read_team, submit_import,
     submit_team_code,
 };
+use catalog_import::imports;
 use catalog_import::run_folder::RunFolder;
 use catalog_import::services::{self, Allow, Member};
 use std::io::{BufRead, Write};
@@ -126,30 +127,22 @@ fn pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let import = services::plan(&root, csv_file)?;
-    // Refuse uncommitted changes before starting PocketBase; prepare_import
+    // Refuse uncommitted changes before starting PocketBase; each import
     // checks again.
     services::check_committed(&root, &import, allow)?;
-    let reason = format!("Import the parts from database/{csv_file}.csv");
 
     let state = tempfile::tempdir()?;
     let (server, admin, _superuser) = services::start(&services::repository_root(), state.path())?;
-    // Each import reads the team catalog first, as a real import does: it
-    // refuses an older checkout and expects each part's current revision.
-    let (first_command, check) =
-        services::prepare_checked_import(&admin, &root, &import, &reason, allow)?;
-    // Standard output is the JSON summary; the check is for the person.
-    eprintln!("{}", check.report());
-    let first = submit_import(&admin, &first_command)?;
-    let after_first = read_back(&admin)?;
-    // Its correlation ID differs from the first one's because it expects
-    // the parts the first one made.
-    let second_command = services::prepare_import(&admin, &root, &import, &reason, allow)?;
-    let second = submit_import(&admin, &second_command)?;
-    let readback = read_back(&admin)?;
+    let imported = imports::import_twice(&admin, &root, std::slice::from_ref(&import), allow);
     server.stop();
+    let imported = imported?;
+    let (first, second) = (&imported.first[0], &imported.second[0]);
+    // Standard output is the JSON summary; the check is for the person.
+    eprintln!("{}", first.check.report());
 
-    let report = catalog_import::report(&oracle, csv_file, &readback, &root);
+    let report = catalog_import::report(&oracle, csv_file, &imported.readback, &root);
     let mut summary = report.summary();
+    let check = &first.check;
     summary["library_check"] = serde_json::json!({
         "to_fix": check.count(Group::ToFix),
         "not_in_catalog": check.count(Group::NotInCatalog),
@@ -157,10 +150,9 @@ fn pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "clean_up": check.count(Group::CleanUp),
     });
     summary["import"] = serde_json::json!({
-        "first": serde_json::from_str::<serde_json::Value>(&first.body)?,
-        "second": serde_json::from_str::<serde_json::Value>(&second.body)?,
-        "second_created_nothing": matches!(second.outcome, ImportOutcome::Noop { .. })
-            && after_first == readback,
+        "first": first.reply_json(),
+        "second": second.reply_json(),
+        "second_created_nothing": imported.second_created_nothing,
     });
     println!("{}", serde_json::to_string_pretty(&summary)?);
     if !report.is_lossless() {

@@ -10,6 +10,7 @@
 //!   catalog's latest imports.
 
 pub mod checkout;
+pub mod imports;
 pub mod run_folder;
 pub mod services;
 pub mod zero_loss;
