@@ -179,9 +179,9 @@ export async function launchApp({ args = [], dataDir = tempDir('data') } = {}) {
  * at this point, so the failure shows in the test results.
  *
  * `blankOut` lists selectors whose text changes from run to run, such as a
- * server port; save times (<time>) are always blanked out. Their text is
- * made transparent and hatched for the screenshot only, so the layout
- * stays real.
+ * server port; times (<time>) are always blanked out, with every digit
+ * shown as 0 first (see capture). Their text is made transparent and
+ * hatched for the screenshot only, so the layout stays real.
  * @param {{ blankOut?: string[] }} options
  */
 export async function screenshot(browser, name, { blankOut = [] } = {}) {
@@ -205,6 +205,21 @@ export async function capture(browser, file, blankOut = []) {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   });
   const blankedOut = await browser.execute((selectors) => {
+    // Clock times must not change a screenshot. Blanking a time still
+    // leaves its width, which moves with its digits by a fraction of a
+    // pixel, enough to shift the full stop after it. So every digit of a
+    // <time> becomes 0 for the screenshot: the same text every run, so the
+    // same width.
+    window.journeyRealTimes = [];
+    for (const time of document.querySelectorAll('time')) {
+      const walker = document.createTreeWalker(time, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const fixed = node.data.replace(/\d/g, '0');
+        // Change the text node in place, so the app keeps the node it owns.
+        window.journeyRealTimes.push({ node, real: node.data, fixed });
+        node.data = fixed;
+      }
+    }
     const elements = selectors.flatMap((s) => [...document.querySelectorAll(s)]);
     for (const el of elements) {
       // CSSOM, not a style attribute or <style> element, which the CSP blocks.
@@ -229,6 +244,11 @@ export async function capture(browser, file, blankOut = []) {
       for (const property of ['color', '-webkit-text-fill-color', 'background-image']) el.style.removeProperty(property);
       delete el.dataset.journeyBlankedOut;
     }
+    // Put the real times back, unless the app changed one meanwhile.
+    for (const { node, real, fixed } of window.journeyRealTimes ?? []) {
+      if (node.data === fixed) node.data = real;
+    }
+    delete window.journeyRealTimes;
   });
   return blankedOut;
 }

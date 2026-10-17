@@ -203,8 +203,9 @@ button:disabled {
   font-weight: 600;
 }
 
-/* Every time takes the same width, so blanking it out in a screenshot
-   leaves the rest of the line where it was. */
+/* Every time takes nearly the same width, so the line does not jump as the
+   minutes change. It is not exact enough for screenshots: the journeys
+   show every digit of a time as 0 (see capture in harness.mjs). */
 .kicad-libraries-status time {
   font-variant-numeric: tabular-nums;
 }
