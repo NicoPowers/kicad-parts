@@ -11,6 +11,7 @@
 
 pub mod checkout;
 pub mod csv_kicad_library;
+pub mod full_proof;
 pub mod imports;
 pub mod libraries;
 pub mod run_folder;

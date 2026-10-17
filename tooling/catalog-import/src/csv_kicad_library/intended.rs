@@ -24,7 +24,7 @@ pub fn explain(difference: &Difference) -> Option<&'static Intended> {
 }
 
 /// Every meant difference.
-pub static INTENDED: [Intended; 10] = [
+pub static INTENDED: [Intended; 11] = [
     Intended {
         name: "part-without-symbol",
         reason: "The row has no symbol: g-pcb.csv lists bare boards and has no Symbol column. A part without a symbol cannot be placed in a schematic, so KiCad gets no entry for it, as the CSV catalog's own library gave none. The part is still in the team catalog.",
@@ -69,8 +69,18 @@ pub static INTENDED: [Intended; 10] = [
     },
     Intended {
         name: "value-column",
-        reason: "Every entry has a Value column, so the text beside the symbol on a schematic comes from the part, never from the symbol's placeholder. A category without its own Value column fills it as the next rule says.",
+        reason: "Every entry has a Value column, so the text beside the symbol on a schematic comes from the part, never from the symbol's placeholder. A category without its own Value column fills it as the rule value-never-blank says.",
         matches: |difference| matches!(difference, Difference::ColumnAdded { column, .. } if column == "Value"),
+    },
+    Intended {
+        name: "shared-columns",
+        reason: "Every group has the same shared columns (Symbol, Footprint, Manufacturer, MPN, Description, Datasheet), so KiCad reads every part the same way. A category whose CSV file has no such column leaves it empty.",
+        matches: |difference| {
+            matches!(difference, Difference::ColumnAdded { column, empty: true, .. } if matches!(
+                column.as_str(),
+                "Symbol" | "Footprint" | "Manufacturer" | "MPN" | "Description" | "Datasheet"
+            ))
+        },
     },
     Intended {
         name: "value-never-blank",

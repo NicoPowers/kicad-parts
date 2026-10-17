@@ -122,7 +122,12 @@ pub enum Difference {
         value: String,
     },
     /// A column the generated table adds.
-    ColumnAdded { table: String, column: String },
+    ColumnAdded {
+        table: String,
+        column: String,
+        /// Every generated row leaves it empty.
+        empty: bool,
+    },
     /// A column with another value.
     ValueDiffers {
         table: String,
@@ -164,7 +169,7 @@ impl Difference {
         match self {
             Self::GroupAdded { table, .. } | Self::GroupMissing { table } => table.clone(),
             Self::EntryMissing { table, ipn, .. } => format!("{table} {ipn}"),
-            Self::ColumnAdded { table, column } => format!("{table} column {column}"),
+            Self::ColumnAdded { table, column, .. } => format!("{table} column {column}"),
             Self::ColumnLeftOut {
                 table, ipn, column, ..
             }
@@ -291,6 +296,10 @@ pub fn compare(csv: &CsvSide, generated: &GeneratedSide) -> Comparison {
                 differences.push(Difference::ColumnAdded {
                     table: name.clone(),
                     column: column.clone(),
+                    empty: mine
+                        .rows
+                        .iter()
+                        .all(|row| row.get(column).is_none_or(|value| value.is_empty())),
                 });
             }
         }

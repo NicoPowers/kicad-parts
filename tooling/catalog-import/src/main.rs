@@ -12,6 +12,19 @@
 //! data are deleted when the command ends; the repository is only read.
 //! Exits 1 if anything was lost.
 //!
+//! `catalog-import full-pilot [--allow-uncommitted-changes] [--every-difference] [REPOSITORY_ROOT]`
+//!
+//! The full-catalog proof (`full_proof`): imports every CSV file into one
+//! throwaway team server as a team would, twice; checks nothing is lost,
+//! file by file and across files; writes the KiCad libraries, again from
+//! the same server and from a second one, and shows they are
+//! byte-identical; compares them with `database/parts.sqlite`; and shows
+//! the CSV catalog did not change. Prints a report for people;
+//! `--every-difference` lists each difference from `parts.sqlite` on its
+//! own line. Everything it writes is in `target/full-catalog-proof/` and is
+//! deleted when it ends. Exits 1 if anything was lost or differs without a
+//! reason.
+//!
 //! `catalog-import local-team-server [--desktop | --json] [--csv FILES] [--team-code CODE]`
 //!
 //! Starts a disposable team server on 127.0.0.1 for trying the desktop app
@@ -78,7 +91,7 @@ use catalog::pocketbase::{
 };
 use catalog_import::run_folder::RunFolder;
 use catalog_import::services::{self, Allow, Member};
-use catalog_import::{imports, libraries};
+use catalog_import::{full_proof, imports, libraries};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::Command;
@@ -92,12 +105,13 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage: catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]\n       catalog-import local-team-server [--desktop | --json] [--csv g-res,g-cap ...] [--team-code MA]\n       catalog-import kicad-libraries --team-code MA [--csv g-res,g-cap ...] FOLDER\n       catalog-import kicad-libraries --server URL --email EMAIL FOLDER";
+const USAGE: &str = "usage: catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]\n       catalog-import full-pilot [--allow-uncommitted-changes] [--every-difference] [REPOSITORY_ROOT]\n       catalog-import local-team-server [--desktop | --json] [--csv g-res,g-cap ...] [--team-code MA]\n       catalog-import kicad-libraries --team-code MA [--csv g-res,g-cap ...] FOLDER\n       catalog-import kicad-libraries --server URL --email EMAIL FOLDER";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("pilot") => pilot(&args[1..]),
+        Some("full-pilot") => full_pilot(&args[1..]),
         Some("local-team-server") => local_team_server(&args[1..]),
         Some("kicad-libraries") => kicad_libraries(&args[1..]),
         _ => Err(USAGE.into()),
@@ -157,6 +171,45 @@ fn pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", serde_json::to_string_pretty(&summary)?);
     if !report.is_lossless() {
         return Err(format!("{} problem(s)", report.problems.len()).into());
+    }
+    Ok(())
+}
+
+fn full_pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    const ALLOW_UNCOMMITTED: &str = "--allow-uncommitted-changes";
+    const EVERY_DIFFERENCE: &str = "--every-difference";
+    let allow = Allow {
+        uncommitted_changes: args.iter().any(|arg| arg == ALLOW_UNCOMMITTED),
+        ..Allow::default()
+    };
+    let every_difference = args.iter().any(|arg| arg == EVERY_DIFFERENCE);
+    let positional: Vec<&String> = args
+        .iter()
+        .filter(|arg| *arg != ALLOW_UNCOMMITTED && *arg != EVERY_DIFFERENCE)
+        .collect();
+    if positional.len() > 1 || positional.iter().any(|arg| arg.starts_with("--")) {
+        return Err(USAGE.into());
+    }
+    let root = positional
+        .first()
+        .map(|arg| PathBuf::from(arg.as_str()))
+        .unwrap_or_else(services::repository_root);
+    let oracle = csv_catalog_fixture::load_manifest(
+        &root.join("fixtures/import/csv-catalog/manifest.json"),
+    )?;
+    // Under target/, never the system temp folder; a run that is killed
+    // outright is deleted by the next one.
+    let work = RunFolder::create(&full_proof::work_base(&services::repository_root()))?;
+    let proof = full_proof::run(&root, &oracle, work.path(), allow);
+    work.remove()?;
+    let proof = proof?;
+    print!("{}", full_proof::report::text(&proof, every_difference));
+    if !proof.passed() {
+        return Err(format!(
+            "{} thing(s) lost or different without a reason",
+            proof.failures().len()
+        )
+        .into());
     }
     Ok(())
 }
