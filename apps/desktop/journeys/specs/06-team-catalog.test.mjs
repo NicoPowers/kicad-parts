@@ -442,7 +442,7 @@ describe('team catalog: history, edits and conflicts', () => {
     });
     assert.equal(
       await textOf(browser, '.archive-form p'),
-      'KiCad and this app stop offering revision 2, so nobody new picks it. Designs that already use it keep it. Nothing is deleted. The current revision becomes revision 1.',
+      'This app stops offering revision 2, and KiCad lists it under Archived revisions, so nobody new picks it by mistake. Designs that already use it keep it. Nothing is deleted. The current revision becomes revision 1.',
     );
     await (await browser.$('#archive-reason')).setValue("KiCad's symbol confuses the assembly house");
     await assertAccessible(browser, '48-team-archive');
@@ -494,7 +494,7 @@ describe('team catalog: history, edits and conflicts', () => {
     await clickButton('.revision', 'Unarchive revision 2…');
     assert.equal(
       await textOf(browser, '.archive-form p'),
-      'KiCad and this app offer revision 2 again. The current revision becomes revision 2.',
+      'This app offers revision 2 again, and KiCad no longer lists it under Archived revisions. The current revision becomes revision 2.',
     );
     await clickButton('.archive-form', 'Cancel');
     // Focus goes back to the button that opened the form.

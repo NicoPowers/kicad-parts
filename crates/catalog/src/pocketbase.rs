@@ -1374,9 +1374,10 @@ pub fn submit_create(
 pub const ARCHIVE_ROUTE: &str = "/api/catalog/archives";
 
 /// Archives (or unarchives) revision `revision` of part `ipn`, with a
-/// reason. An archived revision is hidden from KiCad and the app, so nobody
-/// new picks it; designs that already use it keep it, and nothing is
-/// deleted. The part's current revision is its newest one not archived.
+/// reason. An archived revision is hidden from the app and set apart in
+/// KiCad's chooser, under Archived revisions, so nobody new picks it;
+/// designs that already use it keep it, and nothing is deleted. The
+/// part's current revision is its newest one not archived.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchiveCommand {
     pub correlation_id: CorrelationId,

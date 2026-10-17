@@ -492,8 +492,8 @@ pub struct TeamCsvReviewRequest {
 }
 
 /// One revision of a part and whether it is archived. An archived revision
-/// is hidden from KiCad and the app, so nobody new picks it; designs that
-/// already use it keep it.
+/// is hidden from the app and set apart in KiCad's chooser, so nobody new
+/// picks it; designs that already use it keep it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RevisionStatus {
     pub number: u32,

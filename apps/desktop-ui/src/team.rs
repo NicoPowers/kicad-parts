@@ -1786,10 +1786,12 @@ fn ArchiveSection(
             format!("The current revision becomes revision {after}.")
         };
         let explanation = if archived {
-            format!("KiCad and this app offer revision {number} again. {then}")
+            format!(
+                "This app offers revision {number} again, and KiCad no longer lists it under Archived revisions. {then}"
+            )
         } else {
             format!(
-                "KiCad and this app stop offering revision {number}, so nobody new picks it. Designs that already use it keep it. Nothing is deleted. {then}"
+                "This app stops offering revision {number}, and KiCad lists it under Archived revisions, so nobody new picks it by mistake. Designs that already use it keep it. Nothing is deleted. {then}"
             )
         };
         let question = if archived {
