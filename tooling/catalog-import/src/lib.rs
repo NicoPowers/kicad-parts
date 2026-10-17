@@ -10,6 +10,7 @@
 //!   catalog's latest imports.
 
 pub mod checkout;
+pub mod csv_kicad_library;
 pub mod imports;
 pub mod run_folder;
 pub mod services;
