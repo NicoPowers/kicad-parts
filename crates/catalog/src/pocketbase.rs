@@ -2434,9 +2434,14 @@ pub fn submit_team_code(client: &PocketBaseClient, code: &str) -> CollabResult<T
 /// was first saved). CSV reviews, remembered matches, import problems and
 /// audit entries are left empty. Use [`download_blob`] for the bytes that
 /// are needed.
+///
+/// Changes are read last. A save writes its Change and its records in one
+/// transaction, so every record read already has its Change, and a CAD
+/// item's first Change is never missing. Reading Changes first would miss
+/// the Change of an item saved during the reading; the libraries would then
+/// guess its age, and could rename it on the next update.
 pub fn read_revisions(client: &PocketBaseClient) -> CollabResult<CatalogReadback> {
-    Ok(CatalogReadback {
-        changes: client.list_records("catalog_changes", "", "seq")?,
+    let mut readback = CatalogReadback {
         parts: client.list_records("catalog_parts", "", "ipn")?,
         part_details: client.list_records("catalog_part_details", "", "part,number")?,
         part_revisions: client.list_records("catalog_part_revisions", "", "part,number")?,
@@ -2455,7 +2460,9 @@ pub fn read_revisions(client: &PocketBaseClient) -> CollabResult<CatalogReadback
         )?,
         blobs: client.list_records("catalog_blobs", "", "sha256")?,
         ..CatalogReadback::default()
-    })
+    };
+    readback.changes = client.list_records("catalog_changes", "", "seq")?;
+    Ok(readback)
 }
 
 /// The bytes of one stored blob. Fails if they do not hash to its
