@@ -15,9 +15,13 @@ import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import {
   assertAccessible,
+  capture,
+  comparePngs,
   editAsSomeoneElse,
   launchApp,
+  outDir,
   screenshot,
+  screenshotsDir,
   startTeamServer,
   teamSignIn,
   tempDir,
@@ -76,6 +80,37 @@ describe('KiCad libraries made from the team catalog', () => {
   });
 
   const folder = () => path.join(dataDir, 'kicad-libraries', 'MA');
+
+  /**
+   * Proves screenshot `name`, just taken, does not depend on the clock. It
+   * takes it again as if every time on screen said 11:11 and then 08:48
+   * (narrow and wide digits), and expects exactly the same pixels.
+   */
+  async function assertScreenshotIgnoresTheClock(name) {
+    const taken = path.join(screenshotsDir, `${name}.png`);
+    for (const fake of ['11:11', '08:48']) {
+      const file = path.join(outDir, 'clock-checks', `${name}-at-${fake.replace(':', '')}.png`);
+      await browser.execute((text) => {
+        window.journeyClockCheck = [];
+        for (const time of document.querySelectorAll('time')) {
+          const node = time.firstChild;
+          window.journeyClockCheck.push({ node, real: node.data });
+          node.data = text;
+        }
+      }, fake);
+      try {
+        await capture(browser, file, MACHINE_TEXT);
+      } finally {
+        await browser.execute((text) => {
+          for (const { node, real } of window.journeyClockCheck) if (node.data === text) node.data = real;
+          delete window.journeyClockCheck;
+        }, fake);
+      }
+      const differences = path.join(outDir, 'clock-checks', `${name}-at-${fake.replace(':', '')}-differences.png`);
+      const { differentPixels } = comparePngs(taken, file, differences);
+      assert.equal(differentPixels, 0, `${name} changes when the time shown is ${fake}: see ${differences}`);
+    }
+  }
 
   async function setOpen(selector, open) {
     await browser.execute(
@@ -223,6 +258,7 @@ describe('KiCad libraries made from the team catalog', () => {
     await scrollPanel('top');
     await assertAccessible(browser, '90-kicad-libraries-up-to-date');
     await screenshot(browser, '90-kicad-libraries-up-to-date', { blankOut: MACHINE_TEXT });
+    await assertScreenshotIgnoresTheClock('90-kicad-libraries-up-to-date');
     await scrollPanel('bottom');
     await screenshot(browser, '91-kicad-libraries-setup', { blankOut: MACHINE_TEXT });
   });
@@ -304,6 +340,7 @@ describe('KiCad libraries made from the team catalog', () => {
       );
       await assertAccessible(browser, '92-kicad-libraries-busy');
       await screenshot(browser, '92-kicad-libraries-busy', { blankOut: MACHINE_TEXT });
+      await assertScreenshotIgnoresTheClock('92-kicad-libraries-busy');
     } finally {
       fs.closeSync(lock);
     }
