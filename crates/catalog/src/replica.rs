@@ -89,7 +89,9 @@ impl ChangeRecords {
     pub fn fetch(client: &PocketBaseClient, changes: &[StoredChange]) -> CollabResult<Self> {
         let change_ids: Vec<&str> = changes.iter().map(|change| change.id.as_str()).collect();
         // The server saves archive entries only in archive and unarchive
-        // Changes (catalog_write_guards.pb.js), so only those are asked
+        // Changes (catalog_write_guards.pb.js; the test
+        // archive_entries_belong_to_archive_changes_only checks that the
+        // guard still says so), so only those are asked
         // about. Asking about the others would find nothing, and PocketBase
         // slows down replies that find nothing, by up to half a second,
         // once there are more than three in three seconds. A kind this
@@ -550,6 +552,29 @@ mod tests {
             current_revision_after: format!("{part}-{current}"),
             current_revision_number_after: current,
         }
+    }
+
+    #[test]
+    fn archive_entries_belong_to_archive_changes_only() {
+        // ChangeRecords::fetch asks for archive entries only in archive and
+        // unarchive Changes. That is safe only while the server's guard
+        // refuses an archive entry in a Change of any other kind.
+        let guards = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../infra/pocketbase/pb_hooks/catalog_write_guards.pb.js"),
+        )
+        .unwrap();
+        let rule = format!(
+            "const kind = archived ? \"{}\" : \"{}\";
+  if (!change || change.getString(\"kind\") !== kind",
+            ChangeKind::Archive.as_str(),
+            ChangeKind::Unarchive.as_str()
+        );
+        assert!(
+            guards.contains(&rule),
+            "the archive entry guard no longer ties entries to archive Changes"
+        );
+        assert!(guards.contains("}, \"catalog_archive_entries\");"));
     }
 
     #[test]

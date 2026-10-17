@@ -242,6 +242,8 @@ onRecordCreate((e) => {
     throw new Error(`an archive entry must name revision ${number} of its own part ${part}`);
   }
   const change = find("catalog_changes", entry.getString("change"));
+  // crates/catalog/src/replica.rs relies on this rule: it asks for archive
+  // entries only in archive and unarchive Changes. A test there checks it.
   const kind = archived ? "archive" : "unarchive";
   if (!change || change.getString("kind") !== kind || change.getInt("seq") !== entry.getInt("seq")) {
     throw new Error(`an archive entry must belong to a Change of kind ${kind} and copy its seq`);
