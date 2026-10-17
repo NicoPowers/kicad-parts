@@ -7,7 +7,7 @@
 //!   electrical rules check finds every entry and its exact symbol, through
 //!   the SQLite3 ODBC driver and KiCad's own libraries.
 //!
-//! KiCad finds all 177 entries. Two kinds of entry get a symbol other
+//! KiCad finds every entry: one per CSV row with a symbol. Two kinds of entry get a symbol other
 //! than the saved copy, each named by the test: the two whose symbol the
 //! CSV catalog itself lacks (the CSV catalog fixture lists them as
 //! missing-member symbol references), and the two that use a symbol of
@@ -94,7 +94,30 @@ fn kicad_finds_every_entry_of_the_whole_catalog() {
         );
     }
     drop(connection);
-    assert_eq!(entries.len(), 177, "every row with a symbol has an entry");
+    // One entry per CSV row with a symbol, as the CSV catalog fixture
+    // records the rows.
+    let rows_with_a_symbol = oracle
+        .catalog
+        .categories
+        .iter()
+        .flat_map(|category| {
+            let symbol = category
+                .document
+                .headers
+                .iter()
+                .position(|header| header == "Symbol");
+            category.document.rows.iter().filter(move |row| {
+                symbol
+                    .and_then(|column| row.get(column))
+                    .is_some_and(|cell| !cell.trim().is_empty())
+            })
+        })
+        .count();
+    assert_eq!(
+        entries.len(),
+        rows_with_a_symbol,
+        "every row with a symbol has an entry"
+    );
 
     // The entries whose symbol the CSV catalog lacks.
     let missing: BTreeSet<String> = oracle
