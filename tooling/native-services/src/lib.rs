@@ -22,6 +22,7 @@ mod minio;
 mod pins;
 mod pocketbase;
 mod process;
+mod readiness;
 pub mod s3;
 
 use std::fmt;

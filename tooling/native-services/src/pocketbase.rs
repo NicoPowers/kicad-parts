@@ -3,12 +3,13 @@
 use crate::fetch::Cache;
 use crate::pins::NativePins;
 use crate::process::{ServiceProcess, free_loopback_port, run_hidden};
+use crate::readiness::{answers_200, log_has_line_ending_with, wait_until_ready};
 use crate::{ServiceResult, error, random_name, random_token};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Returns the verified PocketBase executable for this host, downloading
 /// and unpacking the pinned release on first use.
@@ -149,6 +150,22 @@ pub fn upsert_superuser(
     Ok(())
 }
 
+/// How long PocketBase may take to apply migrations and start listening.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Whether the PocketBase we started on `port`, whose log so far is `log`,
+/// is ready: `Err` says why not.
+///
+/// PocketBase prints `Server started at http://127.0.0.1:<port>` only after
+/// it has applied migrations, loaded the hooks and bound the port. We need
+/// that line before we trust `/api/health`. Without it, when another
+/// test's PocketBase took the port first, the other server answered our
+/// health check, and our superuser then failed to sign in (kicad-parts-2091).
+fn pocketbase_is_ready(port: u16, log: &str) -> Result<(), String> {
+    log_has_line_ending_with(log, &format!("Server started at http://127.0.0.1:{port}"))?;
+    answers_200(&format!("http://127.0.0.1:{port}/api/health"))
+}
+
 /// A running PocketBase server on a random 127.0.0.1 port.
 pub struct PocketBaseServer {
     process: ServiceProcess,
@@ -158,7 +175,9 @@ pub struct PocketBaseServer {
 
 impl PocketBaseServer {
     /// Upserts `superuser`, then starts `serve` (which applies pending
-    /// migrations) and waits until `/api/health` answers.
+    /// migrations and loads the hooks before it listens) and waits until it
+    /// is ready: its own log says it listens on our port, and
+    /// `/api/health` answers 200. See [`pocketbase_is_ready`].
     ///
     /// Requiring the superuser here means no instance, blank, restored or
     /// upgraded, can start without one and open PocketBase's installer in
@@ -188,13 +207,17 @@ impl PocketBaseServer {
                 url,
                 options: options.clone(),
             };
-            match server.wait_until_healthy(Duration::from_secs(60)) {
+            match wait_until_ready(&mut server.process, START_TIMEOUT, |log| {
+                pocketbase_is_ready(port, log)
+            }) {
                 Ok(()) => {
                     server.check_no_installer()?;
                     return Ok(server);
                 }
                 Err(failure) => {
                     last_failure = failure.0;
+                    // Something else took the port before we bound it: try
+                    // another port. Any other failure is real.
                     if !server.process.log_tail().contains("bind") {
                         break;
                     }
@@ -202,32 +225,6 @@ impl PocketBaseServer {
             }
         }
         Err(error(format!("PocketBase did not start: {last_failure}")))
-    }
-
-    fn wait_until_healthy(&mut self, timeout: Duration) -> ServiceResult<()> {
-        let health = format!("{}/api/health", self.url);
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(2))
-            .build();
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Some(status) = self.process.exited() {
-                return Err(error(format!(
-                    "pocketbase exited with {status}:\n{}",
-                    self.process.log_tail()
-                )));
-            }
-            if matches!(agent.get(&health).call(), Ok(response) if response.status() == 200) {
-                return Ok(());
-            }
-            if Instant::now() > deadline {
-                return Err(error(format!(
-                    "pocketbase was not healthy after {timeout:?}:\n{}",
-                    self.process.log_tail()
-                )));
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
     }
 
     /// Fails if the log shows the installer banner.
@@ -266,6 +263,7 @@ impl PocketBaseServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::readiness::fake_server;
 
     #[test]
     fn the_installer_banner_is_recognised() {
@@ -277,6 +275,27 @@ mod tests {
             "Server started at http://127.0.0.1:8090
 ├─ REST API:  http://127.0.0.1:8090/api/"
         ));
+    }
+
+    #[test]
+    fn another_pocketbase_on_our_port_is_not_ours() {
+        // kicad-parts-2091: our PocketBase could not bind its port, and
+        // another test's PocketBase answered the health check.
+        let (port, _answers) = fake_server::start(&[("/api/health", 200)]);
+        let ours = "Error: listen tcp 127.0.0.1:52362: bind: Only one usage of each \
+                    socket address (protocol/network address/port) is normally permitted.\n";
+        let reason = pocketbase_is_ready(port, ours).unwrap_err();
+        assert!(reason.contains("Server started at"), "{reason}");
+    }
+
+    #[test]
+    fn our_pocketbase_is_ready_once_it_says_so_and_is_healthy() {
+        let (port, answers) = fake_server::start(&[("/api/health", 503)]);
+        let ours = format!("2026/10/17 21:04:05 Server started at http://127.0.0.1:{port}\n");
+        let reason = pocketbase_is_ready(port, &ours).unwrap_err();
+        assert!(reason.contains("answered 503"), "{reason}");
+        answers.lock().unwrap().insert("/api/health".into(), 200);
+        assert_eq!(pocketbase_is_ready(port, &ours), Ok(()));
     }
 
     #[test]
