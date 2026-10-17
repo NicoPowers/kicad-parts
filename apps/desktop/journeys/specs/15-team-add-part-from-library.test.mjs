@@ -271,7 +271,28 @@ describe('team catalog: add a part from our libraries', () => {
       document.querySelector('.part-fields').scrollTop = 0;
     });
     await assertAccessible(browser, '63-team-add-part-from-library');
-    await screenshot(browser, '63-team-add-part-from-library');
+    // The commit ID changes with every change to the CSV catalog's files,
+    // and is checked above, so it is blanked out: each time it appears, its
+    // text goes in a span of its own for the screenshot.
+    const commit = head.slice(0, 12);
+    const wrapped = await browser.execute((id) => {
+      const walker = document.createTreeWalker(document.querySelector('.add-checks'), NodeFilter.SHOW_TEXT);
+      const found = [];
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (node.textContent.includes(id)) found.push(node);
+      }
+      for (const node of found) {
+        const rest = node.splitText(node.textContent.indexOf(id));
+        rest.splitText(id.length);
+        const span = document.createElement('span');
+        span.dataset.journeyCommit = '';
+        rest.replaceWith(span);
+        span.append(rest);
+      }
+      return found.length;
+    }, commit);
+    assert.equal(wrapped, 2, `the commit ID ${commit} is in the symbol's and the footprint's checks`);
+    await screenshot(browser, '63-team-add-part-from-library', { blankOut: ['[data-journey-commit]'] });
   });
 
   it('saves the part with the references as in the library, and the Library check no longer lists them', async () => {
