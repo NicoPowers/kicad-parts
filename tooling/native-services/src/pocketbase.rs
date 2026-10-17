@@ -5,7 +5,6 @@ use crate::pins::NativePins;
 use crate::process::{ServiceProcess, free_loopback_port, run_hidden};
 use crate::readiness::{answers_200, log_has_line_ending_with, wait_until_ready};
 use crate::{ServiceResult, error, random_name, random_token};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -229,7 +228,7 @@ impl PocketBaseServer {
 
     /// Fails if the log shows the installer banner.
     pub fn check_no_installer(&self) -> ServiceResult<()> {
-        let log = fs::read_to_string(self.process.log_path()).unwrap_or_default();
+        let log = self.process.log();
         if shows_installer_banner(&log) {
             return Err(error(format!(
                 "PocketBase started its superuser installer, which opens a browser:

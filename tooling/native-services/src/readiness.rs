@@ -15,7 +15,6 @@
 
 use crate::process::ServiceProcess;
 use crate::{ServiceResult, error};
-use std::fs;
 use std::time::{Duration, Instant};
 
 /// How long one health check request may take before we try again.
@@ -43,7 +42,7 @@ pub(crate) fn wait_until_ready(
                 process.log_tail()
             )));
         }
-        let log = fs::read_to_string(process.log_path()).unwrap_or_default();
+        let log = process.log();
         let reason = match is_ready(&log) {
             Ok(()) => return Ok(()),
             Err(reason) => reason,

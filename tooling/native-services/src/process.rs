@@ -48,9 +48,16 @@ impl ServiceProcess {
         self.child.try_wait().ok().flatten()
     }
 
+    /// The whole service log so far. Bytes that aren't UTF-8 become
+    /// U+FFFD, so one odd byte never makes the log read as empty.
+    pub fn log(&self) -> String {
+        let bytes = fs::read(&self.log).unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
     /// The end of the service log, for error messages.
     pub fn log_tail(&self) -> String {
-        let text = fs::read_to_string(&self.log).unwrap_or_default();
+        let text = self.log();
         let lines: Vec<&str> = text.lines().collect();
         lines[lines.len().saturating_sub(30)..].join("\n")
     }
@@ -365,6 +372,25 @@ mod tests {
         command.raw_arg(format!("/C cmd /C mkdir \"{}\"", marker.display()));
         assert!(run_hidden("cmd", &mut command).unwrap().status.success());
         assert!(marker.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_log_with_a_byte_that_is_not_utf8_still_reads() {
+        let temporary = tempfile::tempdir().unwrap();
+        let log = temporary.path().join("service.log");
+        let mut command = Command::new("cmd");
+        command.args(["/C", "exit"]);
+        let mut service = ServiceProcess::spawn("cmd", command, &log).unwrap();
+        service.stop();
+        // One stray byte must not hide the line a readiness check waits for.
+        fs::write(
+            &log,
+            b"Server started at http://127.0.0.1:1\n\xff odd byte\n",
+        )
+        .unwrap();
+        assert!(service.log().contains("Server started at"));
+        assert!(service.log_tail().ends_with("\u{fffd} odd byte"));
     }
 
     #[cfg(windows)]
