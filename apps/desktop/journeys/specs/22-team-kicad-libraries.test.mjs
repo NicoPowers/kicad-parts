@@ -176,7 +176,7 @@ describe('KiCad libraries made from the team catalog', () => {
 
   it('writes the libraries, named with the code, and says how to add them to KiCad', async () => {
     const shown = await waitForState('up-to-date');
-    assert.match(shown.text, /^Up to date at \d\d:\d\d: \d+ parts, 0 older revisions and 0 archived revisions\.$/);
+    assert.match(shown.text, /^Up to date: \d+ parts, 0 older revisions and 0 archived revisions\. Updated at \d\d:\d\d\.$/);
     // The files are in the team's folder in the app's data folder.
     for (const file of ['MA-Parts.kicad_dbl', 'MA-Parts.sqlite', 'symbols/MA-res-20241209.kicad_sym']) {
       assert.ok(fs.existsSync(path.join(folder(), file)), `${file} was written`);
@@ -259,7 +259,7 @@ describe('KiCad libraries made from the team catalog', () => {
     // KiCad's own resistor: a new revision whose symbol is linked, not copied.
     await editAsSomeoneElse(server.url, otherToken, IPN, { Symbol: 'Device:R' }, "Use KiCad's resistor");
     const shown = await waitForState('up-to-date', before);
-    assert.match(shown.text, /: \d+ parts, 1 older revision and 0 archived revisions\.$/);
+    assert.match(shown.text, /: \d+ parts, 1 older revision and 0 archived revisions\. Updated at \d\d:\d\d\.$/);
     // Revision 1 keeps its files byte for byte.
     assert.deepEqual(fs.readFileSync(path.join(folder(), 'symbols', 'MA-res-20241209.kicad_sym')), symbols);
   });
@@ -294,7 +294,7 @@ describe('KiCad libraries made from the team catalog', () => {
       const failed = await waitForState('failed', undefined, 20_000);
       assert.match(
         failed.text,
-        /^The update at \d\d:\d\d failed\. Another update of these libraries is running, from this app or another one\. The next update tries again\.$/,
+        /^The last update failed\. Another update of these libraries is running, from this app or another one\. The next update tries again\. Tried at \d\d:\d\d\.$/,
       );
       // A status, not an alert: KiCad and the rest of the app still work.
       assert.equal(await browser.execute((s) => document.querySelector(s).getAttribute('role'), STATUS), 'status');

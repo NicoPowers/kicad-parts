@@ -140,15 +140,18 @@ pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> 
                     data-state="up-to-date"
                     data-at=at_ms.to_string()
                 >
-                    "Up to date at "
-                    {local_time(at_ms)}
                     {format!(
-                        ": {}, {} and {}.",
+                        "Up to date: {}, {} and {}.",
                         counted(current, "part", "parts"),
                         counted(older, "older revision", "older revisions"),
                         counted(archived, "archived revision", "archived revisions"),
                     )}
                     {restart}
+                    // The time comes last, so nothing after it moves with
+                    // its width.
+                    " Updated at "
+                    {local_time(at_ms)}
+                    "."
                 </p>
             }
             .into_any(),
@@ -159,10 +162,11 @@ pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> 
                     data-state="failed"
                     data-at=at_ms.to_string()
                 >
-                    "The update at "
-                    {local_time(at_ms)}
-                    " failed. "
+                    "The last update failed. "
                     {reason}
+                    " Tried at "
+                    {local_time(at_ms)}
+                    "."
                 </p>
             }
             .into_any(),
