@@ -4,7 +4,7 @@ use crate::fetch::{Cache, create_dir, publish, sha256_file, unique_suffix};
 use crate::pins::NativePins;
 use crate::pocketbase::make_executable;
 use crate::process::{ServiceProcess, free_loopback_port, run_hidden};
-use crate::readiness::{answers_200, wait_until_ready};
+use crate::readiness::{REQUEST_TIMEOUT, answers_200, wait_until_ready};
 use crate::s3::S3Client;
 use crate::{ServiceResult, error, random_token};
 use std::fs;
@@ -221,7 +221,9 @@ impl MinioServer {
                 .env("MINIO_CI_CD", "on");
             let mut process = ServiceProcess::spawn("minio", command, &work_dir.join("minio.log"))?;
             let endpoint = format!("http://127.0.0.1:{port}");
-            let s3 = S3Client::new(&endpoint, &access_key, &secret_key);
+            // Each try must give up quickly, so the whole wait keeps to START_TIMEOUT.
+            let s3 =
+                S3Client::new(&endpoint, &access_key, &secret_key).with_timeout(REQUEST_TIMEOUT);
             match wait_until_ready(&mut process, START_TIMEOUT, |_log| {
                 minio_is_ready(&endpoint, &s3)
             }) {
@@ -298,6 +300,24 @@ mod tests {
     use crate::repository_root;
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
+
+    #[test]
+    fn a_stalled_credentials_check_gives_up_after_the_request_timeout() {
+        // A server that accepts the connection and never answers, as a
+        // stalled MinIO would. The client keeps the connection open.
+        let silent = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = silent.local_addr().unwrap().port();
+        let s3 = S3Client::new(&format!("http://127.0.0.1:{port}"), "access", "secret")
+            .with_timeout(REQUEST_TIMEOUT);
+        let started = std::time::Instant::now();
+        assert!(s3.check_credentials().is_err());
+        assert!(
+            started.elapsed() < REQUEST_TIMEOUT * 3,
+            "{:?}",
+            started.elapsed()
+        );
+        drop(silent);
+    }
 
     #[test]
     fn minio_is_ready_only_for_bucket_calls_with_our_credentials() {

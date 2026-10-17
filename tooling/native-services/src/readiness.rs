@@ -19,7 +19,7 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 /// How long one health check request may take before we try again.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long to wait between tries.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);

@@ -55,6 +55,15 @@ impl S3Client {
         }
     }
 
+    /// The same client, but each request gives up after `timeout`
+    /// instead of 120 s.
+    pub fn with_timeout(self, timeout: Duration) -> Self {
+        Self {
+            agent: ureq::AgentBuilder::new().timeout(timeout).build(),
+            ..self
+        }
+    }
+
     /// Lists the buckets and ignores the answer. Only a server that knows
     /// these credentials accepts the call, so it proves we reached the
     /// server we started.
