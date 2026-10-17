@@ -142,8 +142,12 @@ pub fn text(proof: &Proof, every_difference: bool) -> String {
     let comparison = &proof.comparison;
     let _ = writeln!(
         out,
-        "{} of {} rows are an entry named <IPN>_v1 with the same values. Each Symbol and Footprint points at a generated copy with the CSV catalog's own bytes, or at KiCad's own library as written.",
+        "{} of {} rows have their entry, named <IPN>_v1. Every value is the same, apart from the differences below, each with its reason.",
         comparison.entries_found, comparison.csv_rows
+    );
+    let _ = writeln!(
+        out,
+        "Each Symbol and Footprint points at a generated copy with the CSV catalog's own bytes, or at KiCad's own library as the CSV writes it. Each 3D model link leads to a copy of the CSV catalog's model file."
     );
     let _ = writeln!(
         out,
@@ -217,6 +221,7 @@ fn subject(difference: &Difference) -> String {
         Difference::FieldDiffers { field, .. } => format!("KiCad field {field}"),
         Difference::EntryMissing { ipn, .. } => format!("no entry for {ipn}"),
         Difference::GroupAdded { table, .. } => format!("group {table}"),
+        Difference::LayoutDiffers { setting, .. } => format!("group setting {setting}"),
         other => other.place(),
     }
 }
