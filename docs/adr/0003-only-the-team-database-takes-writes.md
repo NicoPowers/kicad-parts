@@ -5,6 +5,6 @@ Each database has one job. The team server's PocketBase database is the only one
 ## Consequences
 
 - The desktop copy is in `crates/catalog/src/replica.rs`. It ignores a Change it has already applied, so nothing is missed or applied twice.
-- The generated KiCad database library isn't built yet (kicad-parts-f397).
+- The desktop writes the KiCad database library with `crates/kicad-libraries`, from one thread. It changes the SQLite database in place, in one transaction, so KiCad reads the old rows or the new ones.
 
 Mulch records: mx-95dadd.

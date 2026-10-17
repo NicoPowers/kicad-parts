@@ -41,7 +41,7 @@ The newest revision of a part or CAD item that is not archived.
 _Avoid_: Head, latest
 
 **Archived**:
-A revision hidden from KiCad's part chooser and from the app, so nobody new picks it. Designs that already use it still find it, nothing is deleted, and archiving can be undone, with a reason.
+A revision hidden from the app and set apart in KiCad's part chooser, under Archived revisions, so nobody new picks it by mistake. Designs that already use it still find it, nothing is deleted, and archiving can be undone, with a reason.
 _Avoid_: withdrawn, deleted, retired, obsolete, restore
 
 **Change**:

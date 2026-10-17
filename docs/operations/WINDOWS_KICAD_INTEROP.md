@@ -30,3 +30,23 @@ Use a supported KiCad installation on Windows and a disposable copy of the appli
 - Record any failure as a follow-up issue. A skipped manual check must not be reported as an automated pass.
 
 When a check can be automated with `kicad-cli`, such as parsing, upgrading, or exporting a file, automate it and drop it from this list.
+
+## KiCad libraries made from the team catalog
+
+The desktop app writes KiCad libraries from the team catalog into `kicad-libraries` in its data folder (kicad-parts-f397). `tooling/catalog-import/tests/kicad_libraries.rs` already checks them with the installed KiCad 10:
+
+- `kicad-cli sym export svg` and `fp export svg` draw every generated symbol and footprint.
+- `kicad-cli sch erc` finds every entry of the database library through the SQLite3 ODBC driver: current, older, archived, and current again after an archive. It reports an entry that does not exist.
+- `kicad-cli pcb drc` finds a generated footprint whose 3D model link was rewritten, and reports a link to a footprint that does not exist.
+
+Only KiCad's editors can show the rest. Use KiCad settings you can throw away, or note what you change.
+
+1. **Make the libraries.** Start the team server with `cargo run --locked -p catalog-import -- local-team-server --desktop` and sign in. Open the KiCad settings at the top right. Under **KiCad libraries**, wait for "Up to date". The libraries are deleted when the command stops, so keep it running.
+2. **Add them to KiCad.** Copy the symbol libraries. In KiCad, choose **Preferences > Manage Symbol Libraries**, right-click the table on the **Global Libraries** tab, and choose **Paste**. Check that `team-parts` and the `g-` symbol libraries appear, with **Show** cleared for the `g-` ones. Choose **OK**. Paste the footprint libraries the same way in **Manage Footprint Libraries**. If pasting does nothing, add each library by hand with the nickname and path shown, and note it.
+3. **Place a part.** In the schematic editor, open **Add Symbol**. Check that each category is one group, such as `team-parts - Resistors`, and that the `g-` symbol libraries are not listed. Place `RES-0000-0470_v1`. Check its fields: IPN `RES-0000-0470` without `_v1`, Revision `1`, Value, Manufacturer, MPN and Datasheet. Check that its footprint is `g-Resistor_SMD:R_0603_1608Metric_v1`.
+4. **Look at the footprint and model.** Update the board from the schematic. Check the footprint's pads, and that its 3D model shows in the 3D viewer.
+5. **See a new revision arrive.** Keep KiCad open. In the app, change the part's symbol, such as to `Device:R`, which adds revision 2. Wait for "Up to date" in the app, then about 10 seconds more. Close and open **Add Symbol**. Check that `RES-0000-0470_v2` is under Resistors and `RES-0000-0470_v1` is under **Older revisions**, without restarting KiCad. Note how long it took.
+6. **Archive a revision.** In the app, archive revision 2. Check that `RES-0000-0470_v2` moves to **Archived revisions** and `_v1` back to Resistors. KiCad can hide only a whole library, so archived revisions stay listed under that group.
+7. **Update from Library keeps the revision.** In the schematic that holds `_v1`, run **Tools > Update Symbols from Library**. Check that the symbol stays `RES-0000-0470_v1` with revision 1's symbol, and that only the part details changed. Do the same while `_v1` is under **Older revisions**: category fields, such as Tolerance, should stay as they were, because that group has only the fields every category shares. Then run **Tools > Update Footprints from Library** in the board, and check that the footprint stays `R_0603_1608Metric_v1`.
+8. **A new group needs a restart.** Add a part with a symbol in a category that had none. The app says the groups or fields changed. Check that the new group appears only after KiCad restarts.
+9. **Safe while KiCad is open.** With KiCad open and a part placed, save several changes in the app quickly. Check that KiCad shows no load error and that the placed part still updates from the library.
