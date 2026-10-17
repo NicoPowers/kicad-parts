@@ -1,13 +1,13 @@
 //! Calls into the Tauri shell. Payload shapes come from `desktop-contract`.
 
 use desktop_contract::{
-    AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, LibrariesView,
-    LibraryCheckView, LibraryItemDetail, LibraryItemRequest, LibraryItems, LibraryItemsRequest,
-    OurLibraries, PartDetail, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
-    SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest, TeamDownload,
-    TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest, TeamIpnCheck,
-    TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest,
-    TeamSameMpn, TeamStatus, command,
+    AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, KicadLibrariesStatus,
+    LibrariesView, LibraryCheckView, LibraryItemDetail, LibraryItemRequest, LibraryItems,
+    LibraryItemsRequest, OurLibraries, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
+    SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
+    TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest,
+    TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick,
+    TeamPickRequest, TeamSameMpn, TeamStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -120,6 +120,18 @@ struct CsvReviewArgs {
 
 pub async fn team_status() -> Result<TeamStatus, String> {
     call(command::TEAM_STATUS, &NoArgs {}).await
+}
+
+pub async fn kicad_libraries_status() -> Result<KicadLibrariesStatus, String> {
+    call(command::KICAD_LIBRARIES_STATUS, &NoArgs {}).await
+}
+
+pub async fn kicad_libraries_update() -> Result<KicadLibrariesStatus, String> {
+    call(command::KICAD_LIBRARIES_UPDATE, &NoArgs {}).await
+}
+
+pub async fn kicad_libraries_open_folder() -> Result<(), String> {
+    call(command::KICAD_LIBRARIES_OPEN_FOLDER, &NoArgs {}).await
 }
 
 pub async fn team_sign_in(request: SignInRequest) -> Result<TeamStatus, String> {

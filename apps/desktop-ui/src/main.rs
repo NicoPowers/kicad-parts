@@ -7,6 +7,7 @@ mod add_part;
 mod backend;
 mod cad_choice;
 mod edit_cad;
+mod kicad_libraries;
 mod libraries;
 mod library_check;
 mod part_list;
@@ -19,6 +20,7 @@ use desktop_contract::{
     PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet, TeamPart,
     TeamSession, TeamStatus, unit_label,
 };
+use kicad_libraries::KicadLibrariesSection;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use libraries::{BrowseFor, BrowserActions, LibrariesDialog};
@@ -32,6 +34,8 @@ const SEARCH_DEBOUNCE: Duration = Duration::from_millis(120);
 /// How often the UI asks whether the team catalog has new Changes. The app
 /// itself hears about them through PocketBase realtime.
 const TEAM_POLL: Duration = Duration::from_millis(500);
+/// How often the UI asks how the KiCad libraries are doing.
+const LIBRARIES_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, PartialEq)]
 enum Load<T> {
@@ -121,6 +125,18 @@ fn App() -> impl IntoView {
     };
     refresh_team();
     set_interval(refresh_team, TEAM_POLL);
+    let kicad_libraries = RwSignal::new(None::<desktop_contract::KicadLibrariesStatus>);
+    let refresh_libraries = move || {
+        spawn_local(async move {
+            if let Ok(latest) = backend::kicad_libraries_status().await {
+                if kicad_libraries.with_untracked(|known| known.as_ref() != Some(&latest)) {
+                    kicad_libraries.set(Some(latest));
+                }
+            }
+        });
+    };
+    refresh_libraries();
+    set_interval(refresh_libraries, LIBRARIES_POLL);
 
     // The library check, for people who can edit: worked out by the app
     // once per change of the team catalog (who is signed in, a new Change
@@ -253,7 +269,12 @@ fn App() -> impl IntoView {
                     "Libraries"
                 </button>
                 <TeamBadge team=team_badge set_team=team />
-                <KicadBadge status=status kicad_epoch=kicad_epoch override_input=override_input />
+                <KicadBadge
+                    status=status
+                    kicad_epoch=kicad_epoch
+                    override_input=override_input
+                    libraries=kicad_libraries
+                />
             </header>
             <KicadProblem status=status kicad_epoch=kicad_epoch override_input=override_input />
             <SettingsProblem status=status />
@@ -417,6 +438,7 @@ fn KicadBadge(
     status: RwSignal<Load<AppStatus>>,
     kicad_epoch: RwSignal<u32>,
     override_input: RwSignal<String>,
+    libraries: RwSignal<Option<desktop_contract::KicadLibrariesStatus>>,
 ) -> impl IntoView {
     move || match status.get() {
         Load::Loading => view! { <p class="kicad-badge">"Looking for KiCad…"</p> }.into_any(),
@@ -453,6 +475,7 @@ fn KicadBadge(
                                 saved=app.kicad_override.is_some()
                                 rejected=app.override_rejected.clone()
                             />
+                            <KicadLibrariesSection status=libraries />
                         </div>
                     </details>
                 }

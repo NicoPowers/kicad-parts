@@ -166,6 +166,95 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+/* The KiCad settings panel scrolls when its KiCad libraries section is
+   taller than the window. */
+.kicad-settings > .kicad-settings-body {
+  max-height: calc(100vh - 4.5rem);
+  overflow-y: auto;
+}
+
+/* KiCad libraries, in the KiCad settings panel */
+.kicad-libraries {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+}
+
+.kicad-libraries h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.kicad-libraries h3 {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.95rem;
+}
+
+.kicad-libraries h4 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.kicad-libraries .override-row {
+  margin-bottom: 0.75rem;
+}
+
+.kicad-libraries-status {
+  font-weight: 600;
+}
+
+.kicad-libraries-failed,
+.kicad-libraries-missing {
+  padding: 0.4rem 0.6rem;
+  background: var(--warn-soft);
+  border-left: 4px solid var(--warn-line);
+  border-radius: 4px;
+}
+
+.kicad-libraries-problems {
+  margin-bottom: 0.75rem;
+}
+
+.kicad-libraries-problems ul,
+.kicad-libraries-steps {
+  margin: 0.4rem 0 0.75rem;
+  padding-left: 1.3rem;
+}
+
+.kicad-libraries-steps li + li {
+  margin-top: 0.3rem;
+}
+
+.kicad-library-table {
+  margin-top: 0.75rem;
+}
+
+.kicad-library-table-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.3rem;
+}
+
+.kicad-library-table-head button {
+  padding: 0.1rem 0.7rem;
+  font-size: 0.85rem;
+}
+
+.kicad-library-table pre {
+  margin: 0;
+  max-height: 9rem;
+  overflow: auto;
+  padding: 0.5rem 0.6rem;
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* KiCad problem panel */
 .kicad-problem {
   margin: 1rem 1.25rem 0;

@@ -4,16 +4,17 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use catalog_browser::kicad_libraries::KicadLibraries;
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
     AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, FootprintDrawing,
-    LibrariesView, LibraryCheckView, LibraryItemDetail, LibraryItemRequest, LibraryItems,
-    LibraryItemsRequest, OurLibraries, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
-    SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
-    TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest,
-    TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick,
-    TeamPickRequest, TeamSameMpn, TeamStatus,
+    KicadLibrariesStatus, LibrariesView, LibraryCheckView, LibraryItemDetail, LibraryItemRequest,
+    LibraryItems, LibraryItemsRequest, OurLibraries, PartDetail, PreviewOutcome, PreviewRequest,
+    PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest,
+    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
+    TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
+    TeamPick, TeamPickRequest, TeamSameMpn, TeamStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -23,6 +24,7 @@ use tauri::{Manager, PhysicalSize, State};
 
 type Browser = Arc<CatalogBrowser>;
 type Team = Arc<TeamCatalog>;
+type Libraries = Arc<KicadLibraries>;
 
 /// Launch options. Every option exists so tests and unusual installs can run
 /// the app without touching the user's settings or KiCad search.
@@ -30,8 +32,8 @@ type Team = Arc<TeamCatalog>;
 struct LaunchOptions {
     /// `--catalog-root DIR`: holds `database/`, `symbols/`, `footprints/`.
     catalog_root: Option<PathBuf>,
-    /// `--data-dir DIR`: settings and preview cache, instead of the
-    /// per-user application directories.
+    /// `--data-dir DIR`: settings, preview cache and the KiCad libraries,
+    /// instead of the per-user application directories.
     data_dir: Option<PathBuf>,
     /// `--kicad-search-root DIR` (repeatable): look for KiCad only here.
     kicad_search_roots: Vec<PathBuf>,
@@ -514,6 +516,46 @@ async fn library_preview(
     blocking(move || browser.library_preview(&request)).await
 }
 
+#[tauri::command]
+async fn kicad_libraries_status(
+    libraries: State<'_, Libraries>,
+) -> Result<KicadLibrariesStatus, String> {
+    let libraries = libraries.inner().clone();
+    blocking(move || libraries.status()).await
+}
+
+#[tauri::command]
+async fn kicad_libraries_update(
+    libraries: State<'_, Libraries>,
+) -> Result<KicadLibrariesStatus, String> {
+    let libraries = libraries.inner().clone();
+    // Runs on the libraries' own thread; this only asks for it.
+    blocking(move || libraries.update_now()).await
+}
+
+/// Shows the KiCad libraries folder in the system's file manager.
+#[tauri::command]
+async fn kicad_libraries_open_folder(libraries: State<'_, Libraries>) -> Result<(), String> {
+    let folder = libraries.inner().folder().to_path_buf();
+    blocking(move || {
+        std::fs::create_dir_all(&folder)
+            .map_err(|error| format!("Could not make {}: {error}", folder.display()))?;
+        let manager = if cfg!(windows) {
+            "explorer"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        std::process::Command::new(manager)
+            .arg(&folder)
+            .spawn()
+            .map(drop)
+            .map_err(|error| format!("Could not open {}: {error}", folder.display()))
+    })
+    .await?
+}
+
 fn main() {
     let options = match LaunchOptions::parse(std::env::args_os().skip(1)) {
         Ok(options) => options,
@@ -534,6 +576,13 @@ fn main() {
             if let Some(scale) = display_scale {
                 size_window_in_screen_pixels(app, scale)?;
             }
+            // The KiCad libraries belong to this computer and are made again
+            // from the team catalog, but KiCad reads them, so they are kept
+            // with the app's data, not in its cache that may be cleared.
+            let libraries_dir = match &options.data_dir {
+                Some(dir) => dir.join("kicad-libraries"),
+                None => app.path().app_local_data_dir()?.join("kicad-libraries"),
+            };
             let (config_dir, cache_dir) = match &options.data_dir {
                 Some(dir) => (dir.join("config"), dir.join("cache")),
                 None => {
@@ -575,12 +624,13 @@ fn main() {
             app.manage(Arc::new(browser));
             // Only the server address and email are saved; the session
             // stays in memory and ends with the app.
-            let team = TeamCatalog::open(
+            let team = Arc::new(TeamCatalog::open(
                 config_dir.join("team.json"),
                 options.team_server.clone(),
                 options.team_email.clone(),
-            );
-            app.manage(Arc::new(team));
+            ));
+            app.manage(team.clone());
+            app.manage(Arc::new(KicadLibraries::start(libraries_dir, team)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -614,6 +664,9 @@ fn main() {
             library_items,
             library_item,
             library_preview,
+            kicad_libraries_status,
+            kicad_libraries_update,
+            kicad_libraries_open_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -736,6 +789,9 @@ mod tests {
             command::TEAM_PICK,
             command::OUR_LIBRARIES,
             command::TEAM_ITEM_PREVIEW,
+            command::KICAD_LIBRARIES_STATUS,
+            command::KICAD_LIBRARIES_UPDATE,
+            command::KICAD_LIBRARIES_OPEN_FOLDER,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

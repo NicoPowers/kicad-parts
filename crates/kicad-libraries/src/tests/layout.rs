@@ -93,7 +93,8 @@ fn each_revision_gets_an_entry_and_each_cad_revision_a_name() {
         (outcome.current, outcome.older, outcome.archived),
         (2, 1, 0)
     );
-    assert!(outcome.database_changed && outcome.layout_changed);
+    assert!(outcome.database_changed && !outcome.layout_changed);
+    assert!(outcome.written.contains(&DBL_FILE.to_owned()));
 
     // The current revisions are under their category; the older one is in
     // its own group.
@@ -413,7 +414,10 @@ fn a_file_changed_outside_the_app_is_kept_and_named() {
         .replace("0.825", "0.9");
     fs::write(&footprint, &edited).unwrap();
     match run(&fixture, &folder) {
-        Err(UpdateError::Changed(file)) => assert_eq!(file, footprint),
+        Err(error @ UpdateError::Changed(_)) => assert_eq!(
+            error.message(&folder),
+            "footprints/g-Resistor_SMD.pretty/R_0603_1608Metric_v1.kicad_mod was changed outside this app, so it was left as it is. Delete that file, then update again to write it from the team catalog."
+        ),
         other => panic!("expected the changed footprint to be named: {other:?}"),
     }
     assert_eq!(fs::read_to_string(&footprint).unwrap(), edited);
@@ -483,4 +487,42 @@ fn names_windows_refuses_are_left_out_or_encoded() {
     let row = &rows(&folder, "category_res")[0];
     assert_eq!(row["Symbol"], "CON:R_v1");
     assert_eq!(row["Footprint"], "NUL:R_0603_v1;g-Resistor_SMD:CON.x_v1");
+}
+
+#[test]
+fn a_new_group_says_kicad_needs_a_restart() {
+    let folder = test_folder("new-group");
+    let mut fixture = resistors();
+    run(&fixture, &folder).unwrap();
+    // The first regulator gives its category a group.
+    let symbol = fixture.symbol("g-reg:LDO", "");
+    fixture.part(
+        "REG-0000-0001",
+        "reg",
+        &[("Voltage", "3.3V"), ("Current", "1A")],
+        "AP2112K-3.3",
+    );
+    fixture.revision("REG-0000-0001", Cad::Bound(&symbol), &[], false);
+    let outcome = run(&fixture, &folder).unwrap();
+    assert!(outcome.layout_changed);
+    let groups: Vec<String> = dbl(&folder)["libraries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|library| library["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            "Voltage regulators",
+            "Resistors",
+            "Older revisions",
+            "Archived revisions"
+        ]
+    );
+    let row = &rows(&folder, "category_reg")[0];
+    assert_eq!(
+        (row["Voltage"].as_str(), row["Value"].as_str()),
+        ("3.3V", "AP2112K-3.3")
+    );
 }

@@ -59,8 +59,9 @@ pub struct Outcome {
     pub written: Vec<String>,
     /// The database changed.
     pub database_changed: bool,
-    /// The `.kicad_dbl` changed, such as for a new category or field. A
-    /// running KiCad keeps the one it loaded until it restarts.
+    /// The `.kicad_dbl` was there and changed, such as for a new category
+    /// or field. A running KiCad keeps the one it loaded until it
+    /// restarts.
     pub layout_changed: bool,
     /// What could not be made, in plain sentences.
     pub problems: Vec<String>,
@@ -84,34 +85,39 @@ pub enum UpdateError {
     Database(String),
 }
 
+impl UpdateError {
+    /// What went wrong, in plain sentences, naming files inside `folder`
+    /// by their path from it, such as `symbols/g-res.kicad_sym`.
+    pub fn message(&self, folder: &Path) -> String {
+        self.describe(Some(folder))
+    }
+
+    fn describe(&self, folder: Option<&Path>) -> String {
+        let name = |file: &Path| match folder.and_then(|folder| file.strip_prefix(folder).ok()) {
+            Some(inside) => inside.to_string_lossy().replace('\\', "/"),
+            None => file.display().to_string(),
+        };
+        match self {
+            Self::InUse(file) => format!(
+                "KiCad or another program has {} open, so the old file was kept. The next update tries again.",
+                name(file)
+            ),
+            Self::Changed(file) => format!(
+                "{} was changed outside this app, so it was left as it is. Delete that file, then update again to write it from the team catalog.",
+                name(file)
+            ),
+            Self::Blob(message) => {
+                format!("A file could not be read from the team server: {message}")
+            }
+            Self::Io(file, error) => format!("{} could not be written: {error}", name(file)),
+            Self::Database(message) => format!("The database could not be updated: {message}"),
+        }
+    }
+}
+
 impl fmt::Display for UpdateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InUse(file) => write!(
-                formatter,
-                "KiCad or another program has {} open, so the old file was kept. The next update tries again.",
-                file.display()
-            ),
-            Self::Changed(file) => write!(
-                formatter,
-                "{} was changed outside this app, so it was left as it is. Delete that file, then update again to write it from the team catalog.",
-                file.display()
-            ),
-            Self::Blob(message) => write!(
-                formatter,
-                "A file could not be read from the team server: {message}"
-            ),
-            Self::Io(file, error) => {
-                write!(
-                    formatter,
-                    "{} could not be written: {error}",
-                    file.display()
-                )
-            }
-            Self::Database(message) => {
-                write!(formatter, "The database could not be updated: {message}")
-            }
-        }
+        formatter.write_str(&self.describe(None))
     }
 }
 
@@ -170,9 +176,10 @@ pub fn update(
         database::sync(&folder.join(DATABASE_FILE), &plan.tables).map_err(UpdateError::Database)?;
     let dbl = database::dbl_json(&plan.tables);
     let dbl_path = folder.join(DBL_FILE);
-    if read_if_there(&dbl_path)?.as_deref() != Some(dbl.as_bytes()) {
+    let existing_dbl = read_if_there(&dbl_path)?;
+    if existing_dbl.as_deref() != Some(dbl.as_bytes()) {
         write_whole(&dbl_path, dbl.as_bytes())?;
-        outcome.layout_changed = true;
+        outcome.layout_changed = existing_dbl.is_some();
         outcome.written.push(DBL_FILE.to_owned());
     }
     for table in &plan.tables {

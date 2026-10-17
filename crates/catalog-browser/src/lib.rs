@@ -7,6 +7,7 @@
 mod add_part;
 pub mod drawing;
 mod git;
+pub mod kicad_libraries;
 mod libraries;
 mod library;
 mod library_part;

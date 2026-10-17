@@ -1366,6 +1366,11 @@ impl TeamCatalog {
         self.known.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The signed-in client, for updating the KiCad libraries.
+    pub(crate) fn client_for_libraries(&self) -> Result<PocketBaseClient, String> {
+        self.client()
+    }
+
     fn client(&self) -> Result<PocketBaseClient, String> {
         self.lock()
             .session

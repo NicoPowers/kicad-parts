@@ -45,6 +45,9 @@ pub mod command {
     pub const FOOTPRINT_DRAWING: &str = "footprint_drawing";
     pub const FOOTPRINT_3D: &str = "footprint_3d";
     pub const FOOTPRINT_GLB: &str = "footprint_glb";
+    pub const KICAD_LIBRARIES_STATUS: &str = "kicad_libraries_status";
+    pub const KICAD_LIBRARIES_UPDATE: &str = "kicad_libraries_update";
+    pub const KICAD_LIBRARIES_OPEN_FOLDER: &str = "kicad_libraries_open_folder";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1417,6 +1420,77 @@ pub struct LibraryItemDetail {
     pub model: String,
     /// The Catalog parts that use it.
     pub used_by: Vec<PartUse>,
+}
+
+// The KiCad libraries made from the team catalog (kicad-parts-f397): a
+// database library with one entry per part revision, and the symbols,
+// footprints and 3D models it uses, kept up to date while signed in.
+
+/// The KiCad libraries, as the KiCad settings panel shows them.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KicadLibrariesStatus {
+    pub state: KicadLibrariesState,
+    /// The folder the libraries are in.
+    pub folder: String,
+    /// The libraries to add to KiCad, once an update has worked out which
+    /// there are; empty before.
+    pub libraries: Vec<KicadLibrary>,
+    /// The symbol libraries as text KiCad's Manage Symbol Libraries dialog
+    /// takes pasted in; blank before the first update.
+    pub symbol_table: String,
+    /// The same for Manage Footprint Libraries.
+    pub footprint_table: String,
+    /// What the last update could not make, in plain sentences.
+    pub problems: Vec<String>,
+    pub odbc_driver: OdbcDriver,
+    /// How many seconds KiCad waits before it reads the database again.
+    pub refresh_seconds: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum KicadLibrariesState {
+    /// Not signed in to a team catalog, so nothing is updated.
+    SignedOut,
+    /// Signed in; the first update waits for the team catalog to catch up.
+    Waiting,
+    Updating,
+    UpToDate {
+        /// When the last update finished, in milliseconds since 1970 (UTC).
+        at_ms: u64,
+        /// Entries under their category, older and archived.
+        current: u32,
+        older: u32,
+        archived: u32,
+        /// The groups or fields changed, which a running KiCad sees only
+        /// after a restart.
+        restart_kicad: bool,
+    },
+    Failed {
+        at_ms: u64,
+        /// A plain sentence, such as which file KiCad holds open.
+        reason: String,
+    },
+}
+
+/// One library a person adds to KiCad.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KicadLibrary {
+    /// `parts` (the database library), `symbols` or `footprints`.
+    pub kind: String,
+    pub nickname: String,
+    pub path: String,
+}
+
+/// Whether the SQLite3 ODBC driver KiCad reads the database through is
+/// installed.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OdbcDriver {
+    Installed,
+    Missing,
+    /// Not checked on this system.
+    Unknown,
 }
 
 #[cfg(test)]

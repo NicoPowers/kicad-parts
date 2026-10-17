@@ -13,6 +13,7 @@ collaboration = { path = "../collaboration" }
 csv-catalog = { path = "../csv-catalog" }
 desktop-contract = { path = "../desktop-contract" }
 kicad-integration = { path = "../kicad-integration" }
+kicad-libraries = { path = "../kicad-libraries" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
