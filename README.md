@@ -23,7 +23,7 @@ The console prints three accounts and their passwords, which are new each time. 
 
 See [Try the team catalog by hand](docs/operations/TRY_THE_TEAM_CATALOG.md) for what to try.
 
-To check that moving the whole CSV catalog into a team catalog loses nothing, see [Move your CSV catalog into the team catalog](docs/operations/MOVE_THE_CSV_CATALOG.md).
+To check that the whole CSV catalog can move into a team catalog without losing anything, see [Check that your CSV catalog can move to a team catalog](docs/operations/MOVE_THE_CSV_CATALOG.md).
 
 ### Checks before a change is done
 Build the desktop app as above, then run these from the repository root. All must pass.

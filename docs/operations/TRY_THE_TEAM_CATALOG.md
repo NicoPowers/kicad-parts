@@ -2,7 +2,7 @@
 
 This starts a throwaway team server on your computer and opens the desktop app connected to it. You can then edit a resistor, move a part to another category, replace its footprint with a file, see its history, archive a revision, review new CSV values that an import did not apply, see the library check, add a part from our libraries, browse every symbol and footprint library, and place the team's parts in KiCad. Nothing you do changes the CSV catalog or anything else in the repository.
 
-To check that moving your whole CSV catalog into the team catalog loses nothing, see [Move your CSV catalog into the team catalog](MOVE_THE_CSV_CATALOG.md).
+To check that your whole CSV catalog can move into a team catalog without losing anything, see [Check that your CSV catalog can move to a team catalog](MOVE_THE_CSV_CATALOG.md).
 
 ## Build once
 
