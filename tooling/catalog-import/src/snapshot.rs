@@ -50,6 +50,11 @@ impl Snapshot {
         self.files.is_empty()
     }
 
+    /// Each file's SHA-256, by path.
+    pub fn into_files(self) -> BTreeMap<String, String> {
+        self.files
+    }
+
     /// The same snapshot without the file at `path`, for a file that is
     /// meant to differ, such as the one that names the team.
     pub fn without(mut self, path: &str) -> Self {

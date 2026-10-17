@@ -3,8 +3,13 @@
 //! full-catalog proof, so a new difference needs a decision: fix the
 //! generated libraries, or add a rule with its reason.
 //!
-//! Each rule matches as narrowly as it can: it checks the values, not only
-//! the column, so a wrong value in a column with a rule still fails.
+//! Each rule matches as narrowly as it can, so a wrong value is never
+//! excused. A rule about a value checks the value itself. A rule about a
+//! whole column, such as `entry-per-revision`, relies on `compare_row`,
+//! which checks that column in every row as its own difference: Entry by
+//! name, Revision against the number in the entry's name, and Exclude from
+//! BOM against the CSV catalog's own symbol and footprints. A column added
+//! empty must be empty in every row.
 
 use super::{Difference, Row};
 use catalog::csv_import::{ColumnRoute, route_column};
@@ -24,7 +29,17 @@ pub fn explain(difference: &Difference) -> Option<&'static Intended> {
 }
 
 /// Every meant difference.
-pub static INTENDED: [Intended; 11] = [
+pub static INTENDED: [Intended; 12] = [
+    Intended {
+        name: "parts-sqlite-is-older",
+        reason: "parts.sqlite is a frozen copy that nothing can build again, so it keeps the values the CSV files had when it was made. Someone changed the CSV file since, and recorded the change in the CSV catalog fixture. The generated library is compared with today's CSV file instead.",
+        matches: |difference| {
+            matches!(
+                difference,
+                Difference::PartsSqliteIsOlder { recorded: true, .. }
+            )
+        },
+    },
     Intended {
         name: "part-without-symbol",
         reason: "The row has no symbol: g-pcb.csv lists bare boards and has no Symbol column. A part without a symbol cannot be placed in a schematic, so KiCad gets no entry for it, as the CSV catalog's own library gave none. The part is still in the team catalog.",
@@ -60,10 +75,21 @@ pub static INTENDED: [Intended; 11] = [
             }
             Difference::FieldDiffers {
                 field,
+                entry,
                 csv: None,
                 generated: Some(number),
                 ..
-            } => field == "Revision" && number.parse::<u32>().is_ok(),
+            } => field == "Revision" && entry.ends_with(&format!("_v{number}")),
+            Difference::LayoutDiffers {
+                setting,
+                csv,
+                generated,
+                ..
+            } => match setting.as_str() {
+                "key" => csv == "IPN" && generated == "Entry",
+                "exclude_from_bom" => csv.is_empty() && generated == "Exclude from BOM",
+                _ => false,
+            },
             _ => false,
         },
     },
@@ -177,7 +203,7 @@ fn is_fallback_value(shown: &str, row: &Row) -> bool {
     }
 }
 
-/// The `parts.sqlite` value behind the KiCad field `field`: the column of
+/// The CSV row's value behind the KiCad field `field`: the column of
 /// the same name, or `Sim_Name` for KiCad's `Sim.Name`.
 fn column_of<'a>(field: &str, row: &'a Row) -> Option<&'a str> {
     let column = match field.strip_prefix("Sim.") {
