@@ -137,7 +137,7 @@ fn generated_side() -> GeneratedSide {
         Table {
             columns: vec!["Entry".into()],
             rows: Vec::new(),
-            group: group("Entry", Some("Exclude from BOM"), &[]),
+            group: group("Entry", Some("Exclude from BOM"), &["IPN", "Revision"]),
         },
     );
     side.symbols.insert(
@@ -327,25 +327,62 @@ fn a_stray_entry_fails() {
     );
 }
 
-/// The key, Symbol and Footprint columns of each group are compared.
+/// A change to a group of the generated library.
+type Change = dyn Fn(&mut Group);
+
+/// Each generated group needs its own key, Symbol and Footprint columns,
+/// Exclude from BOM setting and Revision field. A setting that falls back
+/// to the CSV catalog's own value fails as surely as any other.
 #[test]
 fn a_changed_group_setting_fails() {
-    let mut generated = generated_side();
-    let res = generated.library.tables.get_mut("category_res").unwrap();
-    res.group.as_mut().unwrap().footprints = "Symbol".into();
-    fails_once(&generated, "category_res footprints");
-
-    let mut generated = generated_side();
-    let older = generated.library.tables.get_mut("older_revisions").unwrap();
-    older.group.as_mut().unwrap().key = "IPN".into();
-    let failed = unexplained(&compare(&csv_side(), &generated));
-    assert!(
-        failed.is_empty(),
-        "IPN is the CSV catalog's own key: {failed:?}"
-    );
-    let older = generated.library.tables.get_mut("older_revisions").unwrap();
-    older.group.as_mut().unwrap().key = "MPN".into();
-    fails_once(&generated, "older_revisions key");
+    // Changes `table`'s group in a fresh generated library and returns
+    // the failures that name `setting` as a required one.
+    let required_failures = |table: &str, setting: &str, change: &Change| {
+        let mut generated = generated_side();
+        change(
+            generated
+                .library
+                .tables
+                .get_mut(table)
+                .unwrap()
+                .group
+                .as_mut()
+                .unwrap(),
+        );
+        unexplained(&compare(&csv_side(), &generated))
+            .into_iter()
+            .filter(|failure| {
+                failure.starts_with(&format!(
+                    "{table} {setting}: the generated library must have"
+                ))
+            })
+            .count()
+    };
+    let cases: [(&str, &str, &Change); 7] = [
+        ("category_res", "footprints", &|group| {
+            group.footprints = "Symbol".into()
+        }),
+        ("category_res", "symbols", &|group| {
+            group.symbols = "Footprint".into()
+        }),
+        ("older_revisions", "key", &|group| group.key = "MPN".into()),
+        // The CSV catalog's own values: still wrong for the generated one.
+        ("category_res", "key", &|group| group.key = "IPN".into()),
+        ("older_revisions", "key", &|group| group.key = "IPN".into()),
+        ("category_res", "exclude_from_bom", &|group| {
+            group.exclude_from_bom = None
+        }),
+        ("category_res", "Revision field", &|group| {
+            group.fields.retain(|(column, _)| column != "Revision")
+        }),
+    ];
+    for (table, setting, change) in cases {
+        assert_eq!(
+            required_failures(table, setting, change),
+            1,
+            "{table} {setting}"
+        );
+    }
 }
 
 /// Revision must be the number in the entry's name, and Exclude from BOM

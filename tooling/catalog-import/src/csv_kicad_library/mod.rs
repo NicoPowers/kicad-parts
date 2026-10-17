@@ -10,9 +10,11 @@
 //! made from the CSV files one way (one table per file, every value as
 //! text, rows in file order), so the comparison builds the same tables from
 //! today's CSV files and compares the generated library with those. It
-//! then compares those tables with the frozen copy: each place where the
-//! frozen copy is older than the CSV files must be one the CSV catalog
-//! fixture records, or the proof fails. Today they are the same.
+//! then lists where the frozen copy is older than the CSV files. That list
+//! is for the report: the proof refuses to start until the CSV catalog
+//! fixture is current, and recording the fixture records every such place,
+//! so in a real run each one is explained. The check only guards against a
+//! fixture edited by hand. Today the two are the same.
 //!
 //! Every difference is listed field by field. Each one that is meant is
 //! matched by one rule in [`intended::INTENDED`], which says why; one that
@@ -209,6 +211,14 @@ pub enum Difference {
         csv: String,
         generated: String,
     },
+    /// A group setting of the generated `.kicad_dbl` that is not what the
+    /// generated library needs. No rule explains it.
+    LayoutWrong {
+        table: String,
+        setting: String,
+        needed: String,
+        found: String,
+    },
     /// A CSV row with no generated entry.
     EntryMissing {
         table: String,
@@ -275,7 +285,8 @@ impl Difference {
         match self {
             Self::PartsSqliteIsOlder { place, .. } => place.clone(),
             Self::GroupAdded { table, .. } | Self::GroupMissing { table } => table.clone(),
-            Self::LayoutDiffers { table, setting, .. } => format!("{table} {setting}"),
+            Self::LayoutDiffers { table, setting, .. }
+            | Self::LayoutWrong { table, setting, .. } => format!("{table} {setting}"),
             Self::EntryMissing { table, ipn, .. } => format!("{table} {ipn}"),
             Self::EntryAdded { table, entry } => format!("{table} {entry}"),
             Self::ColumnAdded { table, column, .. } => format!("{table} column {column}"),
@@ -312,6 +323,9 @@ impl Difference {
             Self::LayoutDiffers { csv, generated, .. } => format!(
                 "{place}: the CSV catalog's library says {csv:?}, the generated one {generated:?}."
             ),
+            Self::LayoutWrong { needed, found, .. } => {
+                format!("{place}: the generated library must have {needed:?}, but has {found:?}.")
+            }
             Self::EntryMissing { .. } => format!("{place}: no entry is generated."),
             Self::EntryAdded { .. } => {
                 format!("{place}: an entry that no CSV row makes.")
@@ -474,6 +488,7 @@ pub fn compare(csv: &CsvSide, generated: &GeneratedSide) -> Comparison {
             .filter(|code| csv_tables.contains_key(*code));
         let csv_group = csv_table.and_then(|code| csv_tables[code].group.as_ref());
         if let Some(group) = &table.group {
+            required_layout(name, group, &mut differences);
             compare_layout(
                 name,
                 csv_group.unwrap_or(&Group::csv_catalog_layout()),
@@ -511,7 +526,10 @@ pub fn compare(csv: &CsvSide, generated: &GeneratedSide) -> Comparison {
 }
 
 /// Where the frozen `parts.sqlite` differs from the tables built from
-/// today's CSV files: tables, columns, rows (by IPN) and cells.
+/// today's CSV files: tables, columns, rows (by IPN) and cells. This is
+/// for the report. The proof starts only with a current fixture, which
+/// records each such place, so none fails in a real run; a place the
+/// fixture does not record means someone edited the fixture by hand.
 fn compare_frozen(csv: &CsvSide) -> Vec<Difference> {
     let notes = &csv.notes;
     let mut differences = Vec::new();
@@ -580,8 +598,47 @@ fn compare_frozen(csv: &CsvSide) -> Vec<Difference> {
     differences
 }
 
-/// Compares a group's settings: the key, the Symbol and Footprint columns
-/// and the Exclude from BOM column.
+/// What every generated group must have, whatever the CSV catalog's
+/// library says: entries found by their revision name (ADR 0012), the
+/// symbol and footprints from their columns, Exclude from BOM set from its
+/// column, so KiCad leaves test points out of the BOM, and a Revision
+/// field. Checked on its own, so a setting that falls back to the CSV
+/// catalog's value cannot pass as "the same as the CSV".
+fn required_layout(table: &str, mine: &Group, differences: &mut Vec<Difference>) {
+    let revision_field = mine
+        .fields
+        .iter()
+        .any(|(column, name)| column == "Revision" && name == "Revision");
+    let required = [
+        ("key", "Entry", Some(mine.key.as_str())),
+        ("symbols", "Symbol", Some(mine.symbols.as_str())),
+        ("footprints", "Footprint", Some(mine.footprints.as_str())),
+        (
+            "exclude_from_bom",
+            "Exclude from BOM",
+            mine.exclude_from_bom.as_deref(),
+        ),
+        (
+            "Revision field",
+            "Revision",
+            revision_field.then_some("Revision"),
+        ),
+    ];
+    for (setting, needed, found) in required {
+        if found != Some(needed) {
+            differences.push(Difference::LayoutWrong {
+                table: table.to_owned(),
+                setting: setting.to_owned(),
+                needed: needed.to_owned(),
+                found: found.unwrap_or_default().to_owned(),
+            });
+        }
+    }
+}
+
+/// Compares a group's settings with the CSV catalog's library, for the
+/// report: the key, the Symbol and Footprint columns and the Exclude from
+/// BOM column. [`required_layout`] is what makes a wrong setting fail.
 fn compare_layout(table: &str, csv: &Group, mine: &Group, differences: &mut Vec<Difference>) {
     let settings = [
         ("key", Some(&csv.key), Some(&mine.key)),
