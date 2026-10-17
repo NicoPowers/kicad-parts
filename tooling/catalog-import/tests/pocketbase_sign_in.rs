@@ -137,10 +137,18 @@ fn signing_in_while_others_save_ends_like_the_server() {
         .outcome,
     );
     let before = read_back(&admin).unwrap();
-    let mut by_id: Vec<&str> = before.parts.iter().map(|part| part.ipn.as_str()).collect();
-    by_id.sort_by_key(|ipn| before.part(ipn).unwrap().id.clone());
-    let first_page_ipn = by_id[0].to_owned();
-    assert!(by_id.len() > 2 * PARTS_PER_PAGE, "the resistors fill pages");
+    let mut ids: Vec<&str> = before.parts.iter().map(|part| part.id.as_str()).collect();
+    ids.sort();
+    assert!(ids.len() > 2 * PARTS_PER_PAGE, "the resistors fill pages");
+    let first_page_ipn = before
+        .parts
+        .iter()
+        .find(|part| part.id == ids[0])
+        .unwrap()
+        .ipn
+        .clone();
+    // The ID the second page starts after: the last one the first page read.
+    let cursor = ids[PARTS_PER_PAGE - 1].to_owned();
 
     // Just before the second page is read, others save three Changes: new
     // details for a part the first page already read, an archive that
@@ -195,9 +203,19 @@ fn signing_in_while_others_save_ends_like_the_server() {
     // It ends exactly like the server: every part, its current revision
     // and its current details, and the newest Change.
     let after = read_back(&admin).unwrap();
+    // Some new parts sort before the cursor, so the pages missed them and
+    // only the replay can add them. Without one, this test would no longer
+    // cover that case.
+    let added: Vec<&str> = after
+        .parts
+        .iter()
+        .map(|part| part.id.as_str())
+        .filter(|id| !ids.contains(id))
+        .collect();
+    assert!(!added.is_empty(), "the capacitors came");
     assert!(
-        after.parts.len() > before.parts.len(),
-        "the capacitors came"
+        added.iter().any(|id| *id < cursor.as_str()),
+        "no part added during the sign-in sorts before the cursor {cursor}"
     );
     assert_eq!(replica_state(&replica), server_state(&after));
     assert_eq!(replica.checkpoint(), latest_change_seq(&viewer).unwrap());
@@ -256,8 +274,7 @@ fn signing_in_while_others_save_ends_like_the_server() {
 fn signing_in_reads_the_current_state_in_a_few_requests() {
     // However long the history, signing in reads the newest Change, one
     // page per PARTS_PER_PAGE parts (the last one shorter, possibly empty),
-    // and the Changes after the first
-    // read: here none.
+    // and the Changes saved since the newest one: here none.
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
