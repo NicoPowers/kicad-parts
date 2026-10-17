@@ -68,6 +68,8 @@
 //! `--csv` ones) and the code `--team-code` gives, as `local-team-server`
 //! does, and deletes it after reading. Prints one JSON summary: entry
 //! counts, files written, problems, and how long reading and writing took.
+//! Libraries from disposable team servers count as one team's, so running
+//! it again updates the same folder.
 
 use catalog::library_check::Group;
 use catalog::pocketbase::{
@@ -386,6 +388,10 @@ fn import_all(
     Ok(())
 }
 
+/// The team ID `kicad-libraries` records for libraries made from a
+/// disposable team server.
+const DISPOSABLE_TEAM: &str = "disposable-local-team-server";
+
 /// Where `kicad-libraries` reads the team catalog.
 #[derive(Debug, PartialEq)]
 enum LibrariesFrom {
@@ -494,11 +500,18 @@ fn kicad_libraries(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "The team on {server_url} has no team code yet, so no KiCad libraries are made. Someone who can edit the team catalog chooses it in the desktop app's KiCad settings."
         )
     })?;
-    let team = kicad_libraries::Team {
-        id: settings.id,
-        server: server_url,
-        naming,
+    // Every disposable team server is made from the same CSV catalog, so
+    // they count as one team: running the command again updates the same
+    // folder instead of refusing it as another team's.
+    let (id, server) = if local.is_some() {
+        (
+            DISPOSABLE_TEAM.to_owned(),
+            "a disposable local team server".to_owned(),
+        )
+    } else {
+        (settings.id, server_url)
     };
+    let team = kicad_libraries::Team { id, server, naming };
     let imported = started.elapsed();
     let reading = Instant::now();
     let readback = read_back(&client)?;
