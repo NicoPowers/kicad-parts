@@ -204,53 +204,81 @@ export async function capture(browser, file, blankOut = []) {
   await browser.execute(() => {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   });
-  const blankedOut = await browser.execute((selectors) => {
-    // Clock times must not change a screenshot. Blanking a time still
-    // leaves its width, which moves with its digits by a fraction of a
-    // pixel, enough to shift the full stop after it. So every digit of a
-    // <time> becomes 0 for the screenshot: the same text every run, so the
-    // same width.
-    window.journeyRealTimes = [];
-    for (const time of document.querySelectorAll('time')) {
-      const walker = document.createTreeWalker(time, NodeFilter.SHOW_TEXT);
-      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-        const fixed = node.data.replace(/\d/g, '0');
-        // Change the text node in place, so the app keeps the node it owns.
-        window.journeyRealTimes.push({ node, real: node.data, fixed });
-        node.data = fixed;
+  // Clock times must not change a screenshot. Blanking a time still leaves
+  // its width, which moves with its digits by a fraction of a pixel, enough
+  // to shift the full stop after it. So every digit of a <time> shows as 0
+  // for the screenshot: the same text every run, so the same width.
+  await showTimeDigitsAs(browser, '0', CAPTURE_TIMES);
+  try {
+    const blankedOut = await browser.execute((selectors) => {
+      const elements = selectors.flatMap((s) => [...document.querySelectorAll(s)]);
+      for (const el of elements) {
+        // CSSOM, not a style attribute or <style> element, which the CSP blocks.
+        el.style.setProperty('color', 'transparent', 'important');
+        el.style.setProperty('-webkit-text-fill-color', 'transparent', 'important');
+        el.style.setProperty(
+          'background-image',
+          'repeating-linear-gradient(135deg, #98a2b3 0 1px, transparent 1px 5px)',
+          'important',
+        );
+        el.dataset.journeyBlankedOut = '';
       }
-    }
-    const elements = selectors.flatMap((s) => [...document.querySelectorAll(s)]);
-    for (const el of elements) {
-      // CSSOM, not a style attribute or <style> element, which the CSP blocks.
-      el.style.setProperty('color', 'transparent', 'important');
-      el.style.setProperty('-webkit-text-fill-color', 'transparent', 'important');
-      el.style.setProperty(
-        'background-image',
-        'repeating-linear-gradient(135deg, #98a2b3 0 1px, transparent 1px 5px)',
-        'important',
-      );
-      el.dataset.journeyBlankedOut = '';
-    }
-    return elements.length;
-  }, ['time', ...blankOut]);
+      return elements.length;
+    }, ['time', ...blankOut]);
+    await browser.execute(
+      () =>
+        new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))),
+    );
+    await browser.saveScreenshot(file);
+    return blankedOut;
+  } finally {
+    // Always undo, even if the screenshot failed: a later test must see
+    // the real text and colours, or it fails for a confusing reason.
+    await browser.execute(() => {
+      for (const el of document.querySelectorAll('[data-journey-blanked-out]')) {
+        for (const property of ['color', '-webkit-text-fill-color', 'background-image']) el.style.removeProperty(property);
+        delete el.dataset.journeyBlankedOut;
+      }
+    });
+    await restoreTimes(browser, CAPTURE_TIMES);
+  }
+}
+
+/** Where capture keeps the real text of the times it changes. */
+const CAPTURE_TIMES = 'journeyCaptureTimes';
+
+/**
+ * Shows every digit of every <time> as `digit`, keeping the real text in
+ * `window[key]` for restoreTimes. It changes each text node in place, so
+ * the app keeps the nodes it owns, and the text keeps its length.
+ */
+export async function showTimeDigitsAs(browser, digit, key) {
   await browser.execute(
-    () =>
-      new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))),
+    (shownDigit, savedKey) => {
+      const saved = [];
+      for (const time of document.querySelectorAll('time')) {
+        const walker = document.createTreeWalker(time, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          const shown = node.data.replace(/\d/g, shownDigit);
+          saved.push({ node, real: node.data, shown });
+          node.data = shown;
+        }
+      }
+      window[savedKey] = saved;
+    },
+    digit,
+    key,
   );
-  await browser.saveScreenshot(file);
-  await browser.execute(() => {
-    for (const el of document.querySelectorAll('[data-journey-blanked-out]')) {
-      for (const property of ['color', '-webkit-text-fill-color', 'background-image']) el.style.removeProperty(property);
-      delete el.dataset.journeyBlankedOut;
+}
+
+/** Puts back the times showTimeDigitsAs changed, unless the app changed one meanwhile. */
+export async function restoreTimes(browser, key) {
+  await browser.execute((savedKey) => {
+    for (const { node, real, shown } of window[savedKey] ?? []) {
+      if (node.data === shown) node.data = real;
     }
-    // Put the real times back, unless the app changed one meanwhile.
-    for (const { node, real, fixed } of window.journeyRealTimes ?? []) {
-      if (node.data === fixed) node.data = real;
-    }
-    delete window.journeyRealTimes;
-  });
-  return blankedOut;
+    delete window[savedKey];
+  }, key);
 }
 
 /**
