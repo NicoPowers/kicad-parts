@@ -283,7 +283,7 @@ fn second_server_libraries(
 /// fixture. Every check compares with the fixture, so a change it has not
 /// recorded would show as many confusing losses; one plain message says
 /// what to do instead.
-fn check_fixture_is_current(repository: &Path, oracle: &Manifest) -> Result<(), String> {
+pub fn check_fixture_is_current(repository: &Path, oracle: &Manifest) -> Result<(), String> {
     let now = csv_catalog_fixture::build_manifest(repository).map_err(|error| {
         format!("The CSV catalog could not be read to compare it with its fixture: {error}")
     })?;
