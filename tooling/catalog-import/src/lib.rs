@@ -13,6 +13,7 @@ pub mod checkout;
 pub mod imports;
 pub mod run_folder;
 pub mod services;
+pub mod snapshot;
 pub mod zero_loss;
 
 pub use zero_loss::{ZeroLossReport, report};
