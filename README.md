@@ -23,6 +23,25 @@ The console prints three accounts and their passwords, which are new each time. 
 
 See [Try the team catalog by hand](docs/operations/TRY_THE_TEAM_CATALOG.md) for what to try.
 
+To check that moving the whole CSV catalog into a team catalog loses nothing, see [Move your CSV catalog into the team catalog](docs/operations/MOVE_THE_CSV_CATALOG.md).
+
+### Checks before a change is done
+Build the desktop app as above, then run these from the repository root. All must pass.
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy -q -p kicad-parts-desktop-ui --target wasm32-unknown-unknown --locked -- -D warnings
+cargo test --workspace --locked --no-fail-fast
+cargo run -q --locked -p csv-catalog-fixture -- check .
+for f in database/g-*.csv; do n=$(basename "$f" .csv); cargo run -q --locked -p catalog-import -- pilot . "$n"; done
+cargo run -q --locked -p catalog-import -- full-pilot
+npm run journeys --prefix apps/desktop/journeys
+ml doctor
+```
+
+The pilots check each CSV file on its own, in an empty team catalog. The full pilot checks the whole CSV catalog together, and the KiCad libraries made from it.
+
 ## API credentials (optional)
 Some scripts use DigiKey and Mouser APIs. To use them, copy the example secrets file and add your keys:
 
