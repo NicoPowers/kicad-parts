@@ -417,10 +417,15 @@ export async function assertAccessible(browser, name, { disabledRules = [] } = {
         // page parts seems to overlap them (elmPartiallyObscuring). The page
         // outside the dialog, apart from the dialog's own ancestors, is
         // inert under the backdrop, so it cannot be the text's background,
-        // as long as the dialog itself is solid, not see-through.
+        // as long as the dialog itself is solid, not see-through. An open
+        // header menu's panel, such as the KiCad settings, is drawn over the
+        // page the same way: under a solid panel, the page outside it cannot
+        // be its text's background either.
         const modal = el.closest('dialog');
-        if (modal?.matches(':modal') && solid(modal)) {
-          for (let node = modal; node.parentElement; node = node.parentElement) {
+        const panel = el.closest('details[open] > .kicad-settings-body');
+        const cover = modal?.matches(':modal') ? modal : panel;
+        if (cover && solid(cover)) {
+          for (let node = cover; node.parentElement; node = node.parentElement) {
             for (const sibling of node.parentElement.children) if (sibling !== node) covering.add(sibling);
           }
         }
