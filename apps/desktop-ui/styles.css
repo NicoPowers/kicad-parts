@@ -203,6 +203,12 @@ button:disabled {
   font-weight: 600;
 }
 
+/* Every time takes the same width, so blanking it out in a screenshot
+   leaves the rest of the line where it was. */
+.kicad-libraries-status time {
+  font-variant-numeric: tabular-nums;
+}
+
 .kicad-libraries-failed,
 .kicad-libraries-missing {
   padding: 0.4rem 0.6rem;

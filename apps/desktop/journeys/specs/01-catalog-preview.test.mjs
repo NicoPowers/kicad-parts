@@ -41,8 +41,11 @@ describe('catalog search with exact KiCad previews', () => {
     await waitForText(browser, '.kicad-badge-ready', /^KiCad 10\.\d+\.\d+$/);
     assert.equal(await textOf(browser, '.catalog-summary'), '178 parts from 21 CSV files');
     assert.equal(await textOf(browser, '.empty-state h2'), 'No part selected');
+    // The headings people see; a closed header menu shows none of its own.
     const headings = await browser.execute(() =>
-      [...document.querySelectorAll('h1, h2, h3')].map((h) => `${h.tagName}:${h.textContent.trim()}`),
+      [...document.querySelectorAll('h1, h2, h3')]
+        .filter((h) => h.checkVisibility())
+        .map((h) => `${h.tagName}:${h.textContent.trim()}`),
     );
     assert.deepEqual(headings, ['H1:KiCad Parts', 'H2:No part selected']);
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 0);
