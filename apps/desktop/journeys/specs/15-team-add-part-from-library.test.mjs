@@ -90,8 +90,16 @@ function listEnd(text, open) {
 /** A committed copy of the CSV catalog with the hand-drawn items. */
 function catalogCopy() {
   const copy = tempDir('catalog');
-  for (const folder of FOLDERS) {
-    fs.cpSync(path.join(repoRoot, folder), path.join(copy, folder), { recursive: true });
+  // Only the files git tracks: a leftover in a working copy, such as a
+  // .bak file, would change the commit ID the form shows.
+  const tracked = spawnSync('git', ['-C', repoRoot, 'ls-files', '-z', '--', ...FOLDERS], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  assert.equal(tracked.status, 0, tracked.stderr);
+  for (const file of tracked.stdout.split('\0').filter(Boolean)) {
+    fs.mkdirSync(path.dirname(path.join(copy, file)), { recursive: true });
+    fs.copyFileSync(path.join(repoRoot, file), path.join(copy, file));
   }
   const symbols = path.join(copy, 'symbols/g-cap.kicad_sym');
   const library = fs.readFileSync(symbols, 'utf8');

@@ -599,7 +599,7 @@ describe('footprint 3D view', () => {
       `the camera at ${low.cameraHeight} is between the board top ${low.boardTop} and the scene middle ${low.sceneMiddle}`,
     );
     assert.ok(low.silkscreen > 100, `${low.silkscreen} silkscreen pixels from low down`);
-    await capture(browser, path.join(screenshotsDir, '88-footprint-3d-low-drawn.png'), PATHS);
+    await capture(browser, path.join(screenshotsDir, '93-footprint-3d-low-drawn.png'), PATHS);
     await browser.keys('Escape');
     await browser.waitUntil(async () => !(await isOpen(browser, LIBRARY_CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
     await browser.keys('Escape');

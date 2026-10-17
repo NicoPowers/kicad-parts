@@ -1,10 +1,13 @@
 // KiCad libraries journey (kicad-parts-f397): signed in to a team server,
-// the app writes the KiCad libraries into its data folder and keeps them
-// up to date. The KiCad settings panel says how they are doing, offers
-// Update now, and shows what to paste into KiCad once. An edit by someone
-// else that adds a revision updates them by itself, and a file changed
-// outside the app is named plainly. Open folder is never clicked: it opens
-// a File Explorer window on the person's desktop.
+// the app writes the team's KiCad libraries into its data folder and keeps
+// them up to date. No libraries are made until the team has a code, which
+// someone who can edit chooses once, after a confirmation. The KiCad
+// settings panel then shows the code, says how the libraries are doing,
+// offers Update now, shows what to paste into KiCad once, and lists other
+// teams' libraries on this computer. An edit by someone else that adds a
+// revision updates them by itself, a file changed outside the app is
+// named, and an update that cannot run says why. Open folder is never
+// clicked: it opens a File Explorer window on the person's desktop.
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -17,6 +20,7 @@ import {
   screenshot,
   startTeamServer,
   teamSignIn,
+  tempDir,
   textOf,
   waitForLiveUpdates,
   waitForText,
@@ -25,7 +29,6 @@ import {
 const IPN = 'RES-0000-0470';
 const BADGE = '.team-settings > summary';
 const STATUS = '.kicad-libraries-status';
-const SECTION = '.kicad-libraries';
 /** Text that differs between machines and runs: paths and the kicad-cli location. */
 const MACHINE_TEXT = [
   '.kicad-libraries-folder',
@@ -48,7 +51,21 @@ describe('KiCad libraries made from the team catalog', () => {
     let other;
     [editor, other] = server.accounts;
     otherToken = await teamSignIn(server.url, other);
-    ({ browser, dataDir } = await launchApp({
+    dataDir = tempDir('data');
+    // Another team's libraries are already on this computer, with code SL.
+    const sl = path.join(dataDir, 'kicad-libraries', 'SL');
+    fs.mkdirSync(sl, { recursive: true });
+    fs.writeFileSync(
+      path.join(sl, '.kicad-parts.json'),
+      JSON.stringify({
+        team_id: 'another-team',
+        server: 'http://127.0.0.1:9999',
+        code: 'SL',
+        updated_at_ms: Date.UTC(2026, 9, 16, 9, 30),
+      }),
+    );
+    ({ browser } = await launchApp({
+      dataDir,
       args: [`--team-server=${server.url}`, `--team-email=${editor.email}`],
     }));
   });
@@ -58,12 +75,16 @@ describe('KiCad libraries made from the team catalog', () => {
     await server?.stop();
   });
 
-  const folder = () => path.join(dataDir, 'kicad-libraries');
+  const folder = () => path.join(dataDir, 'kicad-libraries', 'MA');
 
   async function setOpen(selector, open) {
-    await browser.execute((s, o) => {
-      document.querySelector(s).open = o;
-    }, selector, open);
+    await browser.execute(
+      (s, o) => {
+        document.querySelector(s).open = o;
+      },
+      selector,
+      open,
+    );
   }
 
   async function state() {
@@ -73,16 +94,19 @@ describe('KiCad libraries made from the team catalog', () => {
     }, STATUS);
   }
 
-  /** Waits until the status is up to date at a time other than `before`. */
-  async function waitForUpdate(before, timeout = 60_000) {
+  /** Waits until the status is `wanted`, at a time other than `before` if given. */
+  async function waitForState(wanted, before = undefined, timeout = 60_000) {
     let last;
     await browser.waitUntil(
       async () => {
         last = await state();
-        return last.state === 'up-to-date' && last.at !== before;
+        return last.state === wanted && (before === undefined || last.at !== before);
       },
-      { timeout, interval: 100, timeoutMsg: `the libraries were never updated; last: ${JSON.stringify(last)}` },
-    );
+      { timeout, interval: 100 },
+    ).catch(async (error) => {
+      const panel = await browser.execute(() => document.querySelector('.kicad-libraries')?.innerText ?? '(no section)');
+      throw new Error(`the libraries never became ${wanted}; last: ${JSON.stringify(last)}; the section says: ${panel}; ${error.message}`);
+    });
     return last;
   }
 
@@ -93,13 +117,22 @@ describe('KiCad libraries made from the team catalog', () => {
     }, to);
   }
 
+  async function typeCode(code) {
+    const input = await browser.$('#team-code-input');
+    await input.setValue(code);
+    await (await browser.$('form[aria-label="Team code"] button[type="submit"]')).click();
+    await browser.waitUntil(async () => browser.execute(() => document.querySelector('.team-code-confirm') !== null), {
+      timeout: 10_000,
+      timeoutMsg: 'the confirmation never showed',
+    });
+  }
+
   it('says to sign in first', async () => {
     await waitForText(browser, '.kicad-badge-ready', /^KiCad 10\.\d+\.\d+$/);
     await setOpen('.kicad-settings', true);
     await waitForText(browser, STATUS, 'Sign in to the team catalog to make the KiCad libraries.');
     assert.equal(await textOf(browser, '#kicad-libraries-heading'), 'KiCad libraries');
     assert.equal(await (await browser.$('#kicad-libraries-update')).isEnabled(), false);
-    assert.equal(await textOf(browser, '.kicad-libraries-folder'), folder());
     // Nothing to add to KiCad before the first update.
     assert.equal(await browser.execute(() => document.querySelector('#kicad-symbol-libraries')), null);
     assert.equal(fs.existsSync(folder()), false);
@@ -108,43 +141,72 @@ describe('KiCad libraries made from the team catalog', () => {
     await setOpen('.kicad-settings', false);
   });
 
-  it('writes the libraries once signed in, and says how to add them to KiCad', async () => {
+  it('makes no libraries until the team has a code, chosen once with a confirmation', async () => {
     await setOpen('.kicad-settings', false);
     await setOpen('.team-settings', true);
     await (await browser.$('aria/Password')).setValue(editor.password);
     await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();
     await waitForText(browser, BADGE, `Team catalog · ${editor.name}`);
+    await setOpen('.team-settings', false);
     await waitForLiveUpdates(browser);
     await setOpen('.kicad-settings', true);
-    const shown = await waitForUpdate(null);
+    await waitForState('needs-code');
+    assert.equal((await state()).text, 'No KiCad libraries are made until the team has a code.');
+    assert.equal(await (await browser.$('#kicad-libraries-update')).isEnabled(), false);
+    assert.match(await textOf(browser, '#team-code-hint'), /boards save those names, so it can never change\.$/);
+    // A code another team's libraries on this computer use is warned about.
+    await typeCode('sl');
+    assert.match(await textOf(browser, '#team-code-confirm-text'), /^Use SL as the team code\? Every member's KiCad libraries will be named SL-Parts, SL-Resistor_SMD and so on/);
+    assert.match(
+      await textOf(browser, '.team-code-warning'),
+      /^The SL libraries of another team, from the team server http:\/\/127\.0\.0\.1:9999, are already on this computer\./,
+    );
+    await assertAccessible(browser, '89-kicad-libraries-team-code');
+    await screenshot(browser, '89-kicad-libraries-team-code', { blankOut: MACHINE_TEXT });
+    const cancel = await browser.$$('.team-code-confirm button');
+    await cancel[1].click();
+    assert.equal(await browser.execute(() => document.querySelector('.team-code-confirm')), null);
+    // The code this team takes.
+    await typeCode('MA');
+    assert.equal(await browser.execute(() => document.querySelector('.team-code-warning')), null);
+    await (await browser.$('#team-code-confirm')).click();
+    await waitForText(browser, '#team-code', 'Team code: MA, chosen by Local Editor. It names the team\'s libraries and never changes.');
+    assert.equal(await browser.execute(() => document.querySelector('#team-code-input')), null);
+  });
+
+  it('writes the libraries, named with the code, and says how to add them to KiCad', async () => {
+    const shown = await waitForState('up-to-date');
     assert.match(shown.text, /^Up to date at \d\d:\d\d: \d+ parts, 0 older revisions and 0 archived revisions\.$/);
-    // The files are in the app's data folder.
-    for (const file of ['team-parts.kicad_dbl', 'team-parts.sqlite', 'symbols/g-res.kicad_sym']) {
+    // The files are in the team's folder in the app's data folder.
+    for (const file of ['MA-Parts.kicad_dbl', 'MA-Parts.sqlite', 'symbols/MA-res-20241209.kicad_sym']) {
       assert.ok(fs.existsSync(path.join(folder(), file)), `${file} was written`);
     }
-    const pretty = path.join(folder(), 'footprints', 'g-Resistor_SMD.pretty');
+    const pretty = path.join(folder(), 'footprints', 'MA-Resistor_SMD.pretty');
     assert.ok(fs.readdirSync(pretty).includes('R_0603_1608Metric_v1.kicad_mod'));
+    assert.equal(await textOf(browser, '.kicad-libraries-folder'), folder());
     // What to paste into KiCad: every library by nickname and full path.
     const slashed = folder().replaceAll('\\', '/');
     const symbols = await textOf(browser, '#kicad-symbol-libraries');
     assert.ok(symbols.startsWith('(sym_lib_table\n  (version 7)\n'), symbols);
     assert.ok(
-      symbols.includes(`(lib (name "team-parts")(type "Database")(uri "${slashed}/team-parts.kicad_dbl")`),
+      symbols.includes(`(lib (name "MA-Parts")(type "Database")(uri "${slashed}/MA-Parts.kicad_dbl")`),
       symbols,
     );
     assert.ok(
-      symbols.includes(`(lib (name "g-res")(type "KiCad")(uri "${slashed}/symbols/g-res.kicad_sym")(options "")(descr "Team symbols for team-parts")(hidden))`),
+      symbols.includes(
+        `(lib (name "MA-res-20241209")(type "KiCad")(uri "${slashed}/symbols/MA-res-20241209.kicad_sym")(options "")(descr "Team symbols that MA-Parts uses")(hidden))`,
+      ),
       symbols,
     );
     const footprints = await textOf(browser, '#kicad-footprint-libraries');
     assert.ok(
-      footprints.includes(`(lib (name "g-Resistor_SMD")(type "KiCad")(uri "${slashed}/footprints/g-Resistor_SMD.pretty")`),
+      footprints.includes(`(lib (name "MA-Resistor_SMD")(type "KiCad")(uri "${slashed}/footprints/MA-Resistor_SMD.pretty")`),
       footprints,
     );
     const steps = await browser.execute(() =>
       [...document.querySelectorAll('.kicad-libraries-steps li')].map((li) => li.textContent.trim()),
     );
-    assert.equal(steps.length, 3);
+    assert.equal(steps.length, 2);
     assert.match(steps[0], /Preferences, then Manage Symbol Libraries\. On the Global Libraries tab, right-click the table, choose Paste, then choose OK\./);
     assert.match(steps[1], /Manage Footprint Libraries/);
     assert.match(
@@ -155,11 +217,14 @@ describe('KiCad libraries made from the team catalog', () => {
       await textOf(browser, '.kicad-libraries-driver'),
       /^KiCad reads the parts through the SQLite3 ODBC driver, which is (installed|not installed\. Install the 64-bit SQLite3 ODBC driver, then restart KiCad)\.$/,
     );
+    // The other team's libraries are listed, and stay as they are.
+    assert.match(await textOf(browser, '.kicad-libraries-other-teams'), /^SL, from http:\/\/127\.0\.0\.1:9999, updated at \d\d:\d\d$/);
+    assert.deepEqual(fs.readdirSync(path.join(dataDir, 'kicad-libraries', 'SL')), ['.kicad-parts.json']);
     await scrollPanel('top');
-    await assertAccessible(browser, '89-kicad-libraries-up-to-date');
-    await screenshot(browser, '89-kicad-libraries-up-to-date', { blankOut: MACHINE_TEXT });
+    await assertAccessible(browser, '90-kicad-libraries-up-to-date');
+    await screenshot(browser, '90-kicad-libraries-up-to-date', { blankOut: MACHINE_TEXT });
     await scrollPanel('bottom');
-    await screenshot(browser, '90-kicad-libraries-setup', { blankOut: MACHINE_TEXT });
+    await screenshot(browser, '91-kicad-libraries-setup', { blankOut: MACHINE_TEXT });
   });
 
   it('copies the libraries to paste into KiCad', async () => {
@@ -171,58 +236,75 @@ describe('KiCad libraries made from the team catalog', () => {
         window.journeyCopied.push(text);
       };
     });
-    await (await browser.$('#kicad-symbol-libraries-copy')).click();
-    await waitForText(browser, '#kicad-symbol-libraries-copy', 'Copied');
+    const copy = await browser.$('#kicad-symbol-libraries-copy');
+    assert.equal(await copy.getAttribute('class'), 'kicad-library-copy');
+    assert.equal(await textOf(browser, '#kicad-symbol-libraries-copy'), 'Copy the symbol libraries');
+    await copy.click();
+    await waitForText(browser, '#kicad-symbol-libraries-copy', 'Copied the symbol libraries');
+    await waitForText(browser, '#kicad-libraries-copied', 'Copied the symbol libraries.');
     await (await browser.$('#kicad-footprint-libraries-copy')).click();
-    await waitForText(browser, '#kicad-footprint-libraries-copy', 'Copied');
+    await waitForText(browser, '#kicad-footprint-libraries-copy', 'Copied the footprint libraries');
     // What was copied is the text shown, which ends with a line break.
     const copied = (await browser.execute(() => window.journeyCopied)).map((text) => text.trim());
     assert.deepEqual(copied, [
       await textOf(browser, '#kicad-symbol-libraries'),
       await textOf(browser, '#kicad-footprint-libraries'),
     ]);
-    await waitForText(browser, '#kicad-symbol-libraries-copy', 'Copy', 5_000);
+    await waitForText(browser, '#kicad-symbol-libraries-copy', 'Copy the symbol libraries', 5_000);
   });
 
   it('updates by itself after someone else adds a revision', async () => {
     const before = (await state()).at;
-    const symbols = fs.readFileSync(path.join(folder(), 'symbols', 'g-res.kicad_sym'));
+    const symbols = fs.readFileSync(path.join(folder(), 'symbols', 'MA-res-20241209.kicad_sym'));
     // KiCad's own resistor: a new revision whose symbol is linked, not copied.
     await editAsSomeoneElse(server.url, otherToken, IPN, { Symbol: 'Device:R' }, "Use KiCad's resistor");
-    const shown = await waitForUpdate(before);
+    const shown = await waitForState('up-to-date', before);
     assert.match(shown.text, /: \d+ parts, 1 older revision and 0 archived revisions\.$/);
     // Revision 1 keeps its files byte for byte.
-    assert.deepEqual(fs.readFileSync(path.join(folder(), 'symbols', 'g-res.kicad_sym')), symbols);
+    assert.deepEqual(fs.readFileSync(path.join(folder(), 'symbols', 'MA-res-20241209.kicad_sym')), symbols);
   });
 
-  it('updates at once on Update now', async () => {
+  it('updates at once on Update now, and names a file changed outside the app', async () => {
     const before = (await state()).at;
+    const file = path.join(folder(), 'footprints', 'MA-Resistor_SMD.pretty', 'R_0603_1608Metric_v1.kicad_mod');
+    const original = fs.readFileSync(file);
+    fs.chmodSync(file, 0o666);
+    fs.writeFileSync(file, Buffer.concat([original, Buffer.from('\n')]));
     await scrollPanel('top');
     await (await browser.$('#kicad-libraries-update')).click();
-    await waitForUpdate(before, 20_000);
+    await waitForState('up-to-date', before, 20_000);
+    await waitForText(browser, '.kicad-libraries-problems > summary', '1 item to look at');
+    assert.equal(
+      await browser.execute(() => document.querySelector('.kicad-libraries-problems li').textContent),
+      'footprints/MA-Resistor_SMD.pretty/R_0603_1608Metric_v1.kicad_mod was changed outside this app, so it was kept as it is. Delete that file, then update again to write it from the team catalog.',
+    );
+    fs.rmSync(file);
+    const again = (await state()).at;
+    await (await browser.$('#kicad-libraries-update')).click();
+    await waitForState('up-to-date', again, 20_000);
+    assert.deepEqual(fs.readFileSync(file), original);
+    assert.equal(await browser.execute(() => document.querySelector('.kicad-libraries-problems')), null);
   });
 
-  it('names a file changed outside the app, and writes it again once deleted', async () => {
-    const file = path.join(folder(), 'footprints', 'g-Resistor_SMD.pretty', 'R_0603_1608Metric_v1.kicad_mod');
-    const original = fs.readFileSync(file);
-    fs.writeFileSync(file, Buffer.concat([original, Buffer.from('\n')]));
+  it('says plainly when an update cannot run', async () => {
+    // Another program holds the folder's lock, as a second app would.
+    const lock = fs.openSync(path.join(folder(), '.update.lock'), 'r+');
+    try {
+      await (await browser.$('#kicad-libraries-update')).click();
+      const failed = await waitForState('failed', undefined, 20_000);
+      assert.match(
+        failed.text,
+        /^The update at \d\d:\d\d failed\. Another update of these libraries is running, from this app or another one\. The next update tries again\.$/,
+      );
+      // A status, not an alert: KiCad and the rest of the app still work.
+      assert.equal(await browser.execute((s) => document.querySelector(s).getAttribute('role'), STATUS), 'status');
+      await assertAccessible(browser, '92-kicad-libraries-failed');
+      await screenshot(browser, '92-kicad-libraries-failed', { blankOut: MACHINE_TEXT });
+    } finally {
+      fs.closeSync(lock);
+    }
     await (await browser.$('#kicad-libraries-update')).click();
-    await browser.waitUntil(async () => (await state()).state === 'failed', {
-      timeout: 20_000,
-      timeoutMsg: 'the update never failed',
-    });
-    assert.match(
-      (await state()).text,
-      /^The update at \d\d:\d\d failed\. footprints\/g-Resistor_SMD\.pretty\/R_0603_1608Metric_v1\.kicad_mod was changed outside this app, so it was left as it is\. Delete that file, then update again to write it from the team catalog\.$/,
-    );
-    // A status, not an alert: KiCad and the rest of the app still work.
-    assert.equal(await browser.execute((s) => document.querySelector(s).getAttribute('role'), STATUS), 'status');
-    await assertAccessible(browser, '91-kicad-libraries-failed');
-    await screenshot(browser, '91-kicad-libraries-failed', { blankOut: MACHINE_TEXT });
-    fs.rmSync(file);
-    await (await browser.$('#kicad-libraries-update')).click();
-    await waitForUpdate(null);
-    assert.deepEqual(fs.readFileSync(file), original);
+    await waitForState('up-to-date', undefined, 20_000);
     await setOpen('.kicad-settings', false);
   });
 });

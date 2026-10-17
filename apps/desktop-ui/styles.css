@@ -259,6 +259,8 @@ button:disabled {
 }
 
 .team-code-form input {
+  flex: 0 0 5rem;
+  min-width: 0;
   width: 5rem;
   font: inherit;
   padding: 0.4rem 0.6rem;
