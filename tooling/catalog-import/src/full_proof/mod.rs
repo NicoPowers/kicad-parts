@@ -151,7 +151,7 @@ pub fn run(
     let team = crate::libraries::disposable_team(naming.clone());
 
     // 1. Import twice into the first team server.
-    let (server, admin, _superuser) = services::start(repository, &work.join("server-a"))?;
+    let (server, admin, _superuser) = start_server(&work.join("server-a"))?;
     let imported = imports::import_twice(&admin, repository, &planned, allow);
     let imported = match imported {
         Ok(imported) => imported,
@@ -270,12 +270,28 @@ fn second_server_libraries(
     root: &Path,
     team: &kicad_libraries::Team,
 ) -> Result<(), String> {
-    let (server, admin, _superuser) = services::start(repository, state)?;
+    let (server, admin, _superuser) = start_server(state)?;
     let readback: Result<CatalogReadback, String> =
         imports::import_in_order(&admin, repository, planned, allow)
             .and_then(|_| read_back(&admin).map_err(|error| error.to_string()));
     server.stop();
     crate::libraries::write(root, &readback?, team).map(|_| ())
+}
+
+/// Starts a team server with its state under `state`. Its PocketBase,
+/// migrations and hooks come from this tool's own repository, as for
+/// `pilot`: the checkout being proved supplies only the CSV catalog.
+fn start_server(
+    state: &Path,
+) -> Result<
+    (
+        native_services::PocketBaseServer,
+        collaboration::PocketBaseClient,
+        native_services::Superuser,
+    ),
+    String,
+> {
+    services::start(&services::repository_root(), state)
 }
 
 /// Every file of the libraries under `root`, apart from the one that names
