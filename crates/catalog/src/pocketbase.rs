@@ -1723,11 +1723,18 @@ pub fn part_revisions(
 /// `id = "a" || id = "b" || ...` filters of at most 40 IDs each, which keeps
 /// request URLs short.
 fn id_filters(ids: &[&str]) -> Vec<String> {
-    ids.chunks(40)
+    any_of_filters("id", ids)
+}
+
+/// `field = "a" || field = "b" || ...` filters of at most 40 values each,
+/// which keeps request URLs short.
+fn any_of_filters(field: &str, values: &[&str]) -> Vec<String> {
+    values
+        .chunks(40)
         .map(|chunk| {
             chunk
                 .iter()
-                .map(|id| format!("id = {}", Value::from(*id)))
+                .map(|value| format!("{field} = {}", Value::from(*value)))
                 .collect::<Vec<_>>()
                 .join(" || ")
         })
@@ -1767,12 +1774,7 @@ pub fn cad_item_revisions_in_changes(
     change_ids: &[&str],
 ) -> CollabResult<Vec<StoredCadItemRevision>> {
     let mut revisions = Vec::new();
-    for chunk in change_ids.chunks(40) {
-        let filter = chunk
-            .iter()
-            .map(|id| format!("change = {}", Value::from(*id)))
-            .collect::<Vec<_>>()
-            .join(" || ");
+    for filter in any_of_filters("change", change_ids) {
         revisions.extend(client.list_records::<StoredCadItemRevision>(
             "catalog_cad_item_revisions",
             &filter,
@@ -1792,6 +1794,10 @@ pub fn has_cad_item(client: &PocketBaseClient, kind: CadItemKind, key: &str) -> 
 }
 
 /// Every Change after `checkpoint`, in `seq` order.
+///
+/// The list is read in pages by position, which is safe here: a new Change
+/// always gets the next `seq`, so it lands after every page already read,
+/// and Changes are never deleted.
 pub fn changes_since(
     client: &PocketBaseClient,
     checkpoint: u64,
@@ -1845,13 +1851,20 @@ pub fn latest_import_run(
     client.first_record("catalog_audit_entries", &filter, "-csv_import_number")
 }
 
-/// The archive entries one Change saved.
-pub fn archive_entries_in_change(
+/// The archive entries the Changes with these IDs saved.
+///
+/// This and the other `*_in_changes` reads page by position, which is safe:
+/// a Change saves all its records in one transaction, so once it can be
+/// read, nothing is ever added to or removed from what it saved.
+pub fn archive_entries_in_changes(
     client: &PocketBaseClient,
-    change_id: &str,
+    change_ids: &[&str],
 ) -> CollabResult<Vec<StoredArchiveEntry>> {
-    let filter = format!("change = {}", Value::from(change_id));
-    client.list_records("catalog_archive_entries", &filter, "part")
+    let mut entries = Vec::new();
+    for filter in any_of_filters("change", change_ids) {
+        entries.extend(client.list_records("catalog_archive_entries", &filter, "seq")?);
+    }
+    Ok(entries)
 }
 
 /// The part revisions with these IDs.
@@ -1870,22 +1883,131 @@ pub fn part_revisions_by_id(
     Ok(revisions)
 }
 
-/// The part details one Change saved.
-pub fn details_in_change(
+/// The part details the Changes with these IDs saved.
+pub fn details_in_changes(
     client: &PocketBaseClient,
-    change_id: &str,
+    change_ids: &[&str],
 ) -> CollabResult<Vec<StoredPartDetails>> {
-    let filter = format!("change = {}", Value::from(change_id));
-    client.list_records("catalog_part_details", &filter, "part,number")
+    let mut details = Vec::new();
+    for filter in any_of_filters("change", change_ids) {
+        details.extend(client.list_records("catalog_part_details", &filter, "part,number")?);
+    }
+    Ok(details)
 }
 
-/// The part revisions one Change published.
-pub fn revisions_in_change(
+/// The part revisions the Changes with these IDs published.
+pub fn revisions_in_changes(
     client: &PocketBaseClient,
-    change_id: &str,
+    change_ids: &[&str],
 ) -> CollabResult<Vec<StoredPartRevision>> {
-    let filter = format!("change = {}", Value::from(change_id));
-    client.list_records("catalog_part_revisions", &filter, "part,number")
+    let mut revisions = Vec::new();
+    for filter in any_of_filters("change", change_ids) {
+        revisions.extend(client.list_records("catalog_part_revisions", &filter, "part,number")?);
+    }
+    Ok(revisions)
+}
+
+/// The `seq` of the newest Change, or 0 before the first.
+pub fn latest_change_seq(client: &PocketBaseClient) -> CollabResult<u64> {
+    #[derive(Deserialize)]
+    struct Seq {
+        seq: u64,
+    }
+    Ok(client
+        .first_record_fields::<Seq>("catalog_changes", "", "-seq", "seq")?
+        .map_or(0, |change| change.seq))
+}
+
+/// Up to `limit` parts whose IDs sort after `after` (from the first part
+/// when `after` is empty), in ID order, each with its current revision and
+/// current details. One request.
+///
+/// To read every part, pass the last ID of each page as the next `after`.
+/// That pages by a key, not by position, so a part added between two pages
+/// never makes another part show twice or not at all. The new part itself
+/// is missed if its ID sorts before `after`.
+pub fn current_parts_after(
+    client: &PocketBaseClient,
+    after: &str,
+    limit: usize,
+) -> CollabResult<Vec<StoredCurrentPart>> {
+    // Only what the replica keeps, which leaves out the large `source`
+    // documents.
+    const FIELDS: &str = "id,\
+        expand.current_revision.id,expand.current_revision.number,\
+        expand.current_revision.snapshot,expand.current_revision.snapshot_sha256,\
+        expand.current_details.id,expand.current_details.number,\
+        expand.current_details.snapshot,expand.current_details.snapshot_sha256";
+    let mut query = vec![
+        ("perPage", limit.to_string()),
+        ("sort", "id".to_owned()),
+        ("expand", "current_revision,current_details".to_owned()),
+        ("fields", FIELDS.to_owned()),
+        ("skipTotal", "1".to_owned()),
+    ];
+    if !after.is_empty() {
+        query.push(("filter", format!("id > {}", Value::from(after))));
+    }
+    let reply = client.get_with_query("/api/collections/catalog_parts/records", &query)?;
+    let page: PartsPage = reply.json()?;
+    page.items
+        .into_iter()
+        .map(|item| {
+            // Every part gets both in the Change that adds it, so a gap
+            // means the server answered something unexpected.
+            let missing = |what: &str| {
+                CollabError::Protocol(format!("part {} came without its {what}", item.id))
+            };
+            Ok(StoredCurrentPart {
+                revision: item
+                    .expand
+                    .current_revision
+                    .ok_or_else(|| missing("current revision"))?,
+                details: item
+                    .expand
+                    .current_details
+                    .ok_or_else(|| missing("current details"))?,
+                id: item.id,
+            })
+        })
+        .collect()
+}
+
+/// One reply to [`current_parts_after`], as PocketBase sends it.
+#[derive(Deserialize)]
+struct PartsPage {
+    items: Vec<PartsPageItem>,
+}
+
+#[derive(Deserialize)]
+struct PartsPageItem {
+    id: String,
+    #[serde(default)]
+    expand: PartsPageExpand,
+}
+
+#[derive(Default, Deserialize)]
+struct PartsPageExpand {
+    current_revision: Option<StoredCurrentRecord>,
+    current_details: Option<StoredCurrentRecord>,
+}
+
+/// A part with its current revision and current details, as
+/// [`current_parts_after`] reads them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredCurrentPart {
+    pub id: String,
+    pub revision: StoredCurrentRecord,
+    pub details: StoredCurrentRecord,
+}
+
+/// What the replica keeps of a saved revision or of saved part details.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct StoredCurrentRecord {
+    pub id: String,
+    pub number: u32,
+    pub snapshot: String,
+    pub snapshot_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

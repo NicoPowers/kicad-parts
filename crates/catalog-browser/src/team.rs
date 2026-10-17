@@ -8,9 +8,9 @@
 //! again after a restart asks for the password.
 //!
 //! While signed in, a background thread keeps a [`CatalogReplica`] in step
-//! with the server: it subscribes to realtime notifications of new Changes
-//! and, after any disconnect, reconnects and catches up from the last
-//! Change `seq` it applied. The UI polls [`TeamCatalog::status`], whose
+//! with the server: it subscribes to realtime notifications of new Changes,
+//! reads the current state of every part, and, after any disconnect,
+//! reconnects and catches up from the last Change `seq` it applied. The UI polls [`TeamCatalog::status`], whose
 //! `checkpoint` grows whenever anyone publishes a Change and whose `imports`
 //! grows when a CSV import run finishes (a run may find CSV changes without
 //! publishing a Change) or after catching up.
@@ -1783,13 +1783,16 @@ fn loopback_url(text: &str) -> Result<String, String> {
     Ok(url.to_owned())
 }
 
-/// Follows new Changes until `stop` is set: subscribe, catch up from the
-/// checkpoint, apply each notification; on any break, wait and do it all
-/// again, waiting twice as long after each failed try (up to
-/// [`MAX_RECONNECT_DELAY`]). Catching up after subscribing means a Change
-/// published in between arrives twice at most, and the replica ignores the
-/// copy. If the server rejects the sign-in, it stops and asks the person to
-/// sign in again instead of retrying.
+/// Follows new Changes until `stop` is set: subscribe, catch up, apply each
+/// notification; on any break, wait and do it all again, waiting twice as
+/// long after each failed try (up to [`MAX_RECONNECT_DELAY`]). The first
+/// catch-up reads the current state of every part
+/// ([`CatalogReplica::from_server`]); later ones replay only the Changes
+/// after the checkpoint. Catching up after subscribing means a Change
+/// published in between arrives twice at most, once in the catch-up and
+/// once as a notification, and the replica ignores the second copy. If the
+/// server rejects the sign-in, it stops and asks the person to sign in
+/// again instead of retrying.
 fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBool) {
     let set = |updates: LiveUpdates| {
         live.lock().unwrap_or_else(|e| e.into_inner()).updates = updates;
@@ -1814,7 +1817,17 @@ fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBo
         let result = (|| -> Result<(), CollabError> {
             let mut connection = RealtimeConnection::connect(client.base_url(), CONNECT_TIMEOUT)?;
             connection.subscribe(client, &[CHANGES_TOPIC, AUDIT_TOPIC])?;
-            update_replica(&|replica| replica.catch_up(client).map(|_| ()))?;
+            update_replica(&|replica| {
+                // A replica that has applied nothing yet starts from the
+                // current state, which is much quicker than replaying
+                // every Change ever made.
+                if replica.checkpoint() == 0 {
+                    *replica = CatalogReplica::from_server(client)?;
+                } else {
+                    replica.catch_up(client)?;
+                }
+                Ok(())
+            })?;
             // An import run may have finished while disconnected.
             imported();
             set(LiveUpdates::Live);

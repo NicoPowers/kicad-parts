@@ -1,6 +1,8 @@
 //! A local copy of every part's current revision and current details, kept
 //! in step with the team server's Changes.
 //!
+//! # Following Changes
+//!
 //! Changes are numbered by `seq` without gaps. The replica applies them
 //! strictly in that order and remembers the last one it applied (its
 //! checkpoint). A Change can arrive twice, through a realtime notification
@@ -8,17 +10,66 @@
 //! so nothing is missed or applied twice. This follows
 //! `collaboration::Replica`, which does the same for the provisional
 //! `collab_*` records.
+//!
+//! # Starting at sign-in
+//!
+//! Replaying every Change from the first would download every revision and
+//! every saved copy of part details ever made, so sign-in would get slower
+//! as the history grows. [`CatalogReplica::from_server`] reads the current
+//! state instead, then replays only the Changes saved meanwhile:
+//!
+//! 1. Note the newest Change's `seq`, N.
+//! 2. Read every part's current revision and current details, in pages
+//!    ordered by part ID.
+//! 3. Take N as the checkpoint, and replay every Change after N in order.
+//!
+//! Others may save while the pages are read. So each part is read as it
+//! was at some moment after Change N, not all at the same moment, and a
+//! part added meanwhile may be missed. The replay still ends exactly right:
+//!
+//! - Only Changes move a part's current revision or details. A Change saves
+//!   everything it moves in one transaction, and the server's write guards
+//!   (`catalog_write_guards.pb.js`) refuse any other move. Step 3 lists the
+//!   Changes after step 2 ends, so it includes every Change whose work step
+//!   2 saw. If one were missing, [`CatalogReplica::apply`] would refuse the
+//!   gap and the sign-in would fail and be tried again.
+//! - Applying a Change sets what it saved, whatever the replica held: its
+//!   new revision, or the revision its archive entry names, becomes
+//!   current, and so do its new details. So a part that a replayed Change
+//!   touched ends as the last such Change left it, as on the server.
+//! - A part that no Change after N touched has not moved since N, so its
+//!   page read it right.
+//! - Parts are never deleted, and paging by ID never skips a part that
+//!   existed before step 2 began. So a part the pages missed was added by a
+//!   Change after N, and the replay adds it.
+//!
+//! During the replay, a part may briefly go back to an older state. Nobody
+//! sees that, because `from_server` returns only the finished replica.
 
+use crate::change::ChangeKind;
 use crate::part::{PartDetails, PartRevision};
 use crate::pocketbase::{
-    StoredArchiveEntry, StoredChange, StoredPartDetails, StoredPartRevision,
-    archive_entries_in_change, changes_since, details_in_change, part_revisions_by_id,
-    revisions_in_change,
+    StoredArchiveEntry, StoredChange, StoredCurrentPart, StoredCurrentRecord, StoredPartDetails,
+    StoredPartRevision, archive_entries_in_changes, changes_since, current_parts_after,
+    details_in_changes, latest_change_seq, part_revisions_by_id, revisions_in_changes,
 };
 use collaboration::{ApplyResult, CollabError, CollabResult, PocketBaseClient};
 use std::collections::BTreeMap;
 
-/// What one Change saved, as the replica needs it.
+/// Parts read per request at sign-in. A part with its current revision and
+/// details is about 1.5 KB, so a full page is under 1 MB.
+pub const PARTS_PER_PAGE: usize = 500;
+
+/// The most records PocketBase returns in one page; it quietly sends this
+/// many when asked for more.
+const POCKETBASE_MAX_PAGE: usize = 1000;
+
+/// Changes whose records one catch-up step reads together: a few requests
+/// for all of them, instead of four for each.
+const CHANGES_PER_READ: usize = 40;
+
+/// What some Changes saved, as the replica needs it. Each record names its
+/// Change, so one read can serve several Changes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChangeRecords {
     pub details: Vec<StoredPartDetails>,
@@ -30,18 +81,31 @@ pub struct ChangeRecords {
 }
 
 impl ChangeRecords {
-    /// Everything the Change with ID `change_id` saved.
-    pub fn fetch(client: &PocketBaseClient, change_id: &str) -> CollabResult<Self> {
-        let archive_entries = archive_entries_in_change(client, change_id)?;
+    /// Everything `changes` saved.
+    pub fn fetch(client: &PocketBaseClient, changes: &[StoredChange]) -> CollabResult<Self> {
+        let change_ids: Vec<&str> = changes.iter().map(|change| change.id.as_str()).collect();
+        // The server saves archive entries only in archive and unarchive
+        // Changes (catalog_write_guards.pb.js), so only those are asked
+        // about. Asking about the others would find nothing, and PocketBase
+        // slows down replies that find nothing, by up to half a second,
+        // once there are more than three in three seconds. A kind this
+        // version does not know is asked about too.
+        let archiving: Vec<&str> = changes
+            .iter()
+            .filter(|change| {
+                matches!(
+                    ChangeKind::parse(&change.kind),
+                    Some(ChangeKind::Archive | ChangeKind::Unarchive) | None
+                )
+            })
+            .map(|change| change.id.as_str())
+            .collect();
+        let archive_entries = archive_entries_in_changes(client, &archiving)?;
         let ids: Vec<&str> = archive_entries
             .iter()
             .map(|entry| entry.current_revision_after.as_str())
             .collect();
-        let made_current = if ids.is_empty() {
-            Vec::new()
-        } else {
-            part_revisions_by_id(client, &ids)?
-        };
+        let made_current = part_revisions_by_id(client, &ids)?;
         // Without the revision an entry makes current, the replica cannot
         // apply the Change; an error makes the follower reconnect and catch
         // up instead of guessing.
@@ -51,13 +115,13 @@ impl ChangeRecords {
                 .any(|revision| revision.id == entry.current_revision_after)
         }) {
             return Err(CollabError::Protocol(format!(
-                "Change {change_id} makes revision {} current, which could not be fetched",
-                missing.current_revision_after
+                "Change {} makes revision {} current, which could not be fetched",
+                missing.change, missing.current_revision_after
             )));
         }
         Ok(Self {
-            details: details_in_change(client, change_id)?,
-            revisions: revisions_in_change(client, change_id)?,
+            details: details_in_changes(client, &change_ids)?,
+            revisions: revisions_in_changes(client, &change_ids)?,
             archive_entries,
             made_current,
         })
@@ -91,9 +155,90 @@ pub struct CatalogReplica {
     applied: Vec<u64>,
 }
 
+/// One saved revision or one saved copy of part details, as the replica
+/// takes it, wherever it was read from.
+struct Saved<'a> {
+    part: &'a str,
+    id: &'a str,
+    number: u32,
+    snapshot: &'a str,
+    snapshot_sha256: &'a str,
+}
+
+impl<'a> Saved<'a> {
+    fn current(part: &'a str, record: &'a StoredCurrentRecord) -> Self {
+        Self {
+            part,
+            id: &record.id,
+            number: record.number,
+            snapshot: &record.snapshot,
+            snapshot_sha256: &record.snapshot_sha256,
+        }
+    }
+}
+
+impl<'a> From<&'a StoredPartRevision> for Saved<'a> {
+    fn from(revision: &'a StoredPartRevision) -> Self {
+        Self {
+            part: &revision.part,
+            id: &revision.id,
+            number: revision.number,
+            snapshot: &revision.snapshot,
+            snapshot_sha256: &revision.snapshot_sha256,
+        }
+    }
+}
+
+impl<'a> From<&'a StoredPartDetails> for Saved<'a> {
+    fn from(details: &'a StoredPartDetails) -> Self {
+        Self {
+            part: &details.part,
+            id: &details.id,
+            number: details.number,
+            snapshot: &details.snapshot,
+            snapshot_sha256: &details.snapshot_sha256,
+        }
+    }
+}
+
 impl CatalogReplica {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A replica of the team server as it is now, for signing in. It reads
+    /// every part's current state in pages, then replays the Changes saved
+    /// meanwhile; the module documentation explains why that ends right.
+    pub fn from_server(client: &PocketBaseClient) -> CollabResult<Self> {
+        Self::from_server_in_pages(client, PARTS_PER_PAGE)
+    }
+
+    /// [`CatalogReplica::from_server`], reading `parts_per_page` parts per
+    /// request. Tests use small pages so that others can save between them.
+    pub fn from_server_in_pages(
+        client: &PocketBaseClient,
+        parts_per_page: usize,
+    ) -> CollabResult<Self> {
+        // A page shorter than asked for marks the end, so never ask for
+        // more than PocketBase sends.
+        let parts_per_page = parts_per_page.clamp(1, POCKETBASE_MAX_PAGE);
+        let mut replica = Self {
+            checkpoint: latest_change_seq(client)?,
+            ..Self::default()
+        };
+        let mut after = String::new();
+        loop {
+            let page = current_parts_after(client, &after, parts_per_page)?;
+            for part in &page {
+                replica.read_part(part);
+            }
+            match page.last() {
+                Some(last) if page.len() == parts_per_page => after.clone_from(&last.id),
+                _ => break,
+            }
+        }
+        replica.catch_up(client)?;
+        Ok(replica)
     }
 
     /// The `seq` of the last applied Change (0 before any).
@@ -111,14 +256,17 @@ impl CatalogReplica {
         self.parts.get(self.ipns.get(ipn)?)
     }
 
-    /// Every applied `seq`, in the order applied.
+    /// Every `seq` applied one by one, in the order applied. Changes that a
+    /// replica from [`CatalogReplica::from_server`] read as part of the
+    /// current state are not listed.
     pub fn applied_sequences(&self) -> &[u64] {
         &self.applied
     }
 
     /// Applies `change`, which saved `records`, if it is the next one after
     /// the checkpoint. A Change may hold only details, only revisions, only
-    /// an archive entry, or a mix.
+    /// an archive entry, or a mix. `records` may also hold what other
+    /// Changes saved, which is ignored.
     pub fn apply(&mut self, change: &StoredChange, records: &ChangeRecords) -> ApplyResult {
         if change.seq <= self.checkpoint {
             return ApplyResult::Duplicate;
@@ -129,39 +277,34 @@ impl CatalogReplica {
                 received: change.seq,
             };
         }
-        // Every revision an archive entry makes current must be at hand;
-        // otherwise nothing is applied and the caller catches up.
-        let complete = records
+        let archive_entries: Vec<&StoredArchiveEntry> = records
             .archive_entries
             .iter()
             .filter(|entry| entry.change == change.id)
-            .all(|entry| {
+            .collect();
+        // Every revision an archive entry makes current must be at hand;
+        // otherwise nothing is applied and the caller catches up.
+        let made_current: Option<Vec<&StoredPartRevision>> = archive_entries
+            .iter()
+            .map(|entry| {
                 records
                     .made_current
                     .iter()
-                    .any(|revision| revision.id == entry.current_revision_after)
-            });
-        if !complete {
+                    .find(|revision| revision.id == entry.current_revision_after)
+            })
+            .collect();
+        let Some(made_current) = made_current else {
             return ApplyResult::Gap {
                 checkpoint: self.checkpoint,
                 received: change.seq,
             };
-        }
+        };
         for saved in records
             .details
             .iter()
             .filter(|saved| saved.change == change.id)
         {
-            let part = self.parts.entry(saved.part.clone()).or_default();
-            if part.details_number < saved.number {
-                let parsed: Option<PartDetails> = serde_json::from_str(&saved.snapshot).ok();
-                if let Some(parsed) = &parsed {
-                    self.ipns.insert(parsed.ipn.clone(), saved.part.clone());
-                }
-                part.details_id.clone_from(&saved.id);
-                part.details_number = saved.number;
-                part.details = parsed;
-            }
+            self.take_details(saved.into());
         }
         // A new revision is always the part's newest, so it becomes current.
         for revision in records
@@ -169,56 +312,72 @@ impl CatalogReplica {
             .iter()
             .filter(|revision| revision.change == change.id)
         {
-            self.make_current(revision);
+            self.make_current(revision.into());
         }
         // An archive or unarchive moves the current revision to the one its
         // entry names, which may be older.
-        for entry in records
-            .archive_entries
-            .iter()
-            .filter(|entry| entry.change == change.id)
-        {
-            if let Some(revision) = records
-                .made_current
-                .iter()
-                .find(|revision| revision.id == entry.current_revision_after)
-            {
-                self.make_current(revision);
-            }
+        for revision in made_current {
+            self.make_current(revision.into());
         }
         self.checkpoint = change.seq;
         self.applied.push(change.seq);
         ApplyResult::Applied
     }
 
-    fn make_current(&mut self, revision: &StoredPartRevision) {
-        let parsed: Option<PartRevision> = serde_json::from_str(&revision.snapshot).ok();
+    /// Takes a part as one page of the sign-in read found it.
+    fn read_part(&mut self, part: &StoredCurrentPart) {
+        self.take_details(Saved::current(&part.id, &part.details));
+        self.make_current(Saved::current(&part.id, &part.revision));
+    }
+
+    /// Makes `saved` the part's current details. Like
+    /// [`CatalogReplica::make_current`], it takes what it is given, even if
+    /// the replica held newer details: that only happens while replaying
+    /// over a sign-in read, and the replay then reaches the newer ones too.
+    fn take_details(&mut self, saved: Saved) {
+        let parsed: Option<PartDetails> = serde_json::from_str(saved.snapshot).ok();
         if let Some(parsed) = &parsed {
-            self.ipns.insert(parsed.ipn.clone(), revision.part.clone());
+            self.ipns.insert(parsed.ipn.clone(), saved.part.to_owned());
         }
-        let part = self.parts.entry(revision.part.clone()).or_default();
-        part.revision_id.clone_from(&revision.id);
-        part.number = revision.number;
-        part.snapshot_sha256.clone_from(&revision.snapshot_sha256);
+        let part = self.parts.entry(saved.part.to_owned()).or_default();
+        part.details_id = saved.id.to_owned();
+        part.details_number = saved.number;
+        part.details = parsed;
+    }
+
+    /// Makes `saved` the part's current revision, even if it is older:
+    /// archiving moves the current revision back.
+    fn make_current(&mut self, saved: Saved) {
+        let parsed: Option<PartRevision> = serde_json::from_str(saved.snapshot).ok();
+        if let Some(parsed) = &parsed {
+            self.ipns.insert(parsed.ipn.clone(), saved.part.to_owned());
+        }
+        let part = self.parts.entry(saved.part.to_owned()).or_default();
+        part.revision_id = saved.id.to_owned();
+        part.number = saved.number;
+        part.snapshot_sha256 = saved.snapshot_sha256.to_owned();
         part.revision = parsed;
     }
 
     /// Fetches and applies every Change after the checkpoint. Returns how
     /// many were applied.
     pub fn catch_up(&mut self, client: &PocketBaseClient) -> CollabResult<usize> {
+        let changes = changes_since(client, self.checkpoint)?;
         let mut applied = 0;
-        for change in changes_since(client, self.checkpoint)? {
-            let records = ChangeRecords::fetch(client, &change.id)?;
-            match self.apply(&change, &records) {
-                ApplyResult::Applied => applied += 1,
-                ApplyResult::Duplicate => {}
-                ApplyResult::Gap {
-                    checkpoint,
-                    received,
-                } => {
-                    return Err(CollabError::Protocol(format!(
-                        "the Changes skip from {checkpoint} to {received}"
-                    )));
+        for batch in changes.chunks(CHANGES_PER_READ) {
+            let records = ChangeRecords::fetch(client, batch)?;
+            for change in batch {
+                match self.apply(change, &records) {
+                    ApplyResult::Applied => applied += 1,
+                    ApplyResult::Duplicate => {}
+                    ApplyResult::Gap {
+                        checkpoint,
+                        received,
+                    } => {
+                        return Err(CollabError::Protocol(format!(
+                            "the Changes skip from {checkpoint} to {received}"
+                        )));
+                    }
                 }
             }
         }
@@ -247,7 +406,7 @@ impl CatalogReplica {
                 }
             });
         }
-        let records = ChangeRecords::fetch(client, &change.id)?;
+        let records = ChangeRecords::fetch(client, std::slice::from_ref(change))?;
         Ok(self.apply(change, &records))
     }
 }
@@ -255,6 +414,7 @@ impl CatalogReplica {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::part::{PART_DETAILS_SCHEMA, PART_REVISION_SCHEMA};
 
     fn change(seq: u64) -> StoredChange {
         StoredChange {
@@ -272,6 +432,41 @@ mod tests {
         }
     }
 
+    /// The IPN of test part `part`, such as `P` for `p`.
+    fn ipn(part: &str) -> String {
+        part.to_uppercase()
+    }
+
+    /// Details `number` of `part`, with its number as the Value, so every
+    /// saved copy differs.
+    fn details_snapshot(part: &str, number: u32) -> String {
+        PartDetails {
+            schema: PART_DETAILS_SCHEMA.into(),
+            ipn: ipn(part),
+            category: "res".into(),
+            fields: vec![crate::part::DetailField {
+                name: "Value".into(),
+                value: number.to_string(),
+            }],
+            manufacturer_parts: vec![],
+        }
+        .canonical_json()
+    }
+
+    fn revision_snapshot(part: &str, number: u32) -> String {
+        PartRevision {
+            schema: PART_REVISION_SCHEMA.into(),
+            ipn: ipn(part),
+            cad_fields: vec![crate::part::DetailField {
+                name: "Symbol".into(),
+                value: format!("lib:{part}-{number}"),
+            }],
+            cad_references: vec![],
+            excluded_from_bom: false,
+        }
+        .canonical_json()
+    }
+
     fn details(seq: u64, part: &str, number: u32) -> StoredPartDetails {
         StoredPartDetails {
             id: format!("{part}-details-{number}"),
@@ -279,7 +474,7 @@ mod tests {
             number,
             predecessor: String::new(),
             change: format!("change{seq}"),
-            snapshot: "{}".into(),
+            snapshot: details_snapshot(part, number),
             snapshot_sha256: format!("{number:064}"),
             source: "{}".into(),
         }
@@ -292,7 +487,7 @@ mod tests {
             number,
             predecessor: String::new(),
             change: format!("change{seq}"),
-            snapshot: "{}".into(),
+            snapshot: revision_snapshot(part, number),
             snapshot_sha256: format!("{number:064}"),
             source: "{}".into(),
             cad_item_revisions: vec![],
@@ -432,5 +627,222 @@ mod tests {
         );
         assert_eq!(replica.parts()["p"].number, 2);
         assert_eq!(replica.applied_sequences(), [1, 2, 3, 4, 5]);
+    }
+
+    /// A short team history, Change by Change, that moves each kind of
+    /// state: new parts, new details, new revisions, and archives and an
+    /// unarchive, which move the current revision back and forth. It ends
+    /// with an archive, so a part ends on an older revision than it had.
+    fn history() -> Vec<(StoredChange, ChangeRecords)> {
+        vec![
+            (
+                change(1),
+                records(
+                    &[details(1, "p", 1), details(1, "q", 1)],
+                    &[revision(1, "p", 1), revision(1, "q", 1)],
+                    &[],
+                    &[],
+                ),
+            ),
+            (change(2), records(&[details(2, "p", 2)], &[], &[], &[])),
+            (
+                change(3),
+                records(
+                    &[details(3, "r", 1)],
+                    &[revision(3, "p", 2), revision(3, "r", 1)],
+                    &[],
+                    &[],
+                ),
+            ),
+            (
+                change(4),
+                records(
+                    &[],
+                    &[],
+                    &[archive(4, "p", 2, true, 1)],
+                    &[revision(1, "p", 1)],
+                ),
+            ),
+            (
+                change(5),
+                records(&[details(5, "q", 2)], &[revision(5, "q", 2)], &[], &[]),
+            ),
+            (
+                change(6),
+                records(
+                    &[],
+                    &[],
+                    &[archive(6, "p", 2, false, 2)],
+                    &[revision(2, "p", 2)],
+                ),
+            ),
+            (
+                change(7),
+                records(
+                    &[],
+                    &[],
+                    &[archive(7, "p", 2, true, 1)],
+                    &[revision(1, "p", 1)],
+                ),
+            ),
+        ]
+    }
+
+    /// `part` as a sign-in page reads it from a replica in that state.
+    fn page_entry(part: &str, known: &ReplicaPart) -> StoredCurrentPart {
+        StoredCurrentPart {
+            id: part.into(),
+            revision: StoredCurrentRecord {
+                id: known.revision_id.clone(),
+                number: known.number,
+                snapshot: revision_snapshot(part, known.number),
+                snapshot_sha256: known.snapshot_sha256.clone(),
+            },
+            details: StoredCurrentRecord {
+                id: known.details_id.clone(),
+                number: known.details_number,
+                snapshot: details_snapshot(part, known.details_number),
+                snapshot_sha256: format!("{:064}", known.details_number),
+            },
+        }
+    }
+
+    /// Every way to pick, for each part, the moment its page was read: any
+    /// state from `noted` to the last, or never (missed by paging). A part
+    /// that existed at `noted` is never missed.
+    fn read_moments(
+        noted: usize,
+        last: usize,
+        parts: &[&str],
+        at: &[CatalogReplica],
+    ) -> Vec<Vec<Option<usize>>> {
+        let mut ways = vec![vec![]];
+        for part in parts {
+            let mut choices: Vec<Option<usize>> = (noted..=last).map(Some).collect();
+            if !at[noted].parts().contains_key(*part) {
+                choices.push(None);
+            }
+            ways = ways
+                .into_iter()
+                .flat_map(|way| {
+                    choices.iter().map(move |choice| {
+                        let mut way = way.clone();
+                        way.push(*choice);
+                        way
+                    })
+                })
+                .collect();
+        }
+        ways
+    }
+
+    #[test]
+    fn a_sign_in_read_ends_right_whenever_others_save_during_it() {
+        // The replica after each Change, applied one by one: at[k] has
+        // Changes 1 to k.
+        let history = history();
+        let mut at = vec![CatalogReplica::new()];
+        for (change, records) in &history {
+            let mut next = at.last().unwrap().clone();
+            assert_eq!(next.apply(change, records), ApplyResult::Applied);
+            at.push(next);
+        }
+        let last = history.len();
+        // What the server holds at the end: revision and details numbers.
+        let numbers = |replica: &CatalogReplica| -> Vec<(String, u32, u32)> {
+            replica
+                .parts()
+                .iter()
+                .map(|(id, part)| (id.clone(), part.number, part.details_number))
+                .collect()
+        };
+        assert_eq!(
+            numbers(&at[last]),
+            [("p".into(), 1, 2), ("q".into(), 2, 2), ("r".into(), 1, 1)]
+        );
+        let parts = ["p", "q", "r"];
+        let mut cases = 0;
+        // Sign-in notes Change `noted` as the newest, then reads each part
+        // at its own moment while others save Changes up to the last.
+        for noted in 0..=last {
+            for moments in read_moments(noted, last, &parts, &at) {
+                let mut replica = CatalogReplica {
+                    checkpoint: noted as u64,
+                    ..CatalogReplica::default()
+                };
+                for (part, moment) in parts.iter().zip(&moments) {
+                    if let Some(known) = moment.and_then(|k| at[k].parts().get(*part)) {
+                        replica.read_part(&page_entry(part, known));
+                    }
+                }
+                for (change, records) in &history[noted..] {
+                    assert_eq!(replica.apply(change, records), ApplyResult::Applied);
+                }
+                assert_eq!(
+                    (replica.checkpoint(), replica.parts(), &replica.ipns),
+                    (at[last].checkpoint(), at[last].parts(), &at[last].ipns),
+                    "noted {noted}, parts read at {moments:?}"
+                );
+                cases += 1;
+            }
+        }
+        assert!(cases > 500, "only {cases} cases");
+    }
+
+    #[test]
+    fn a_change_that_arrives_twice_applies_once() {
+        // Sign-in noted Change 3, read the parts after Change 4 had been
+        // saved, then replayed Change 4.
+        let history = history();
+        let mut at4 = CatalogReplica::new();
+        for (change, records) in &history[..4] {
+            assert_eq!(at4.apply(change, records), ApplyResult::Applied);
+        }
+        let mut replica = CatalogReplica {
+            checkpoint: 3,
+            ..CatalogReplica::default()
+        };
+        for (part, known) in at4.parts() {
+            replica.read_part(&page_entry(part, known));
+        }
+        let (fourth, records) = &history[3];
+        assert_eq!(replica.apply(fourth, records), ApplyResult::Applied);
+        let signed_in = replica.clone();
+        // The realtime notification of Change 4, sent while signing in,
+        // comes in afterwards: it changes nothing. So does an older one.
+        assert_eq!(replica.apply(fourth, records), ApplyResult::Duplicate);
+        assert_eq!(
+            replica.apply(&history[1].0, &history[1].1),
+            ApplyResult::Duplicate
+        );
+        assert_eq!(replica, signed_in);
+        // The next Change follows on.
+        let (fifth, records) = &history[4];
+        assert_eq!(replica.apply(fifth, records), ApplyResult::Applied);
+        assert_eq!(replica.parts()["q"].number, 2);
+        assert_eq!(replica.applied_sequences(), [4, 5]);
+    }
+
+    #[test]
+    fn records_of_other_changes_are_ignored() {
+        // One catch-up reads the records of many Changes at once; each
+        // Change applies only its own.
+        let all = history()
+            .into_iter()
+            .fold(ChangeRecords::default(), |mut all, (_, records)| {
+                all.details.extend(records.details);
+                all.revisions.extend(records.revisions);
+                all.archive_entries.extend(records.archive_entries);
+                all.made_current.extend(records.made_current);
+                all
+            });
+        let mut together = CatalogReplica::new();
+        let mut one_by_one = CatalogReplica::new();
+        for (change, records) in history() {
+            assert_eq!(together.apply(&change, &all), ApplyResult::Applied);
+            assert_eq!(one_by_one.apply(&change, &records), ApplyResult::Applied);
+            assert_eq!(together, one_by_one, "after Change {}", change.seq);
+        }
+        assert_eq!(together.part_by_ipn("P").unwrap().number, 1);
     }
 }
