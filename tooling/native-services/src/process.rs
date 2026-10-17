@@ -118,8 +118,10 @@ pub fn run_hidden_with_input(
         .map_err(|io| error(format!("waiting for {name} failed: {io}")))
 }
 
-/// A port that was free on 127.0.0.1 a moment ago. Callers retry with a
-/// new port if a service then fails to bind it.
+/// A port that was free on 127.0.0.1 a moment ago. Another process can
+/// take it before our service binds it. So callers retry with a new port
+/// when their service fails to bind. They also check that whatever answers
+/// on the port is their own service (see `readiness`).
 pub fn free_loopback_port() -> ServiceResult<u16> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|io| error(format!("cannot reserve a loopback port: {io}")))?;
