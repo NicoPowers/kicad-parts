@@ -1,7 +1,8 @@
 //! The desktop keeps the signed-in team's KiCad libraries up to date
 //! (kicad-parts-f397): nothing is made until the team has a code; then
 //! after the sign-in catches up, after a Change by someone else, and on
-//! Update now. Each team gets its own folder. A disposable PocketBase on
+//! Update now. Each team gets its own folder, and a code another team's
+//! libraries use stops the updates. A disposable PocketBase on
 //! 127.0.0.1 has the resistors imported; the libraries are written under
 //! target/.
 
@@ -231,10 +232,38 @@ fn the_libraries_follow_the_team_catalog() {
         updated_at(state).is_some_and(|at| Some(at) != before)
     });
 
+    // On a computer where another team's libraries already use MA, nothing
+    // is written, and asking again changes nothing.
+    let crowded = folder.with_file_name("desktop-code-taken");
+    let _ = std::fs::remove_dir_all(&crowded);
+    std::fs::create_dir_all(crowded.join("MA")).unwrap();
+    let theirs = r#"{"team_id":"another-team","server":"http://127.0.0.1:9999","code":"MA","updated_at_ms":1}"#;
+    std::fs::write(crowded.join("MA").join(kicad_libraries::STATE_FILE), theirs).unwrap();
+    let clash = KicadLibraries::start(crowded.clone(), team.clone());
+    let taken = KicadLibrariesState::CodeTaken {
+        code: "MA".into(),
+        other_server: "http://127.0.0.1:9999".into(),
+        server: server.url().to_owned(),
+    };
+    wait_for(&clash, "the code to be taken", |state| *state == taken);
+    clash.update_now();
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(clash.status().state, taken);
+    let left: Vec<_> = std::fs::read_dir(crowded.join("MA"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, [".kicad-parts.json"]);
+    assert_eq!(
+        std::fs::read_to_string(crowded.join("MA").join(kicad_libraries::STATE_FILE)).unwrap(),
+        theirs
+    );
+
     team.sign_out();
     wait_for(&libraries, "signing out", |state| {
         *state == KicadLibrariesState::SignedOut
     });
     server.stop();
     clear_read_only(&folder);
+    let _ = std::fs::remove_dir_all(&crowded);
 }

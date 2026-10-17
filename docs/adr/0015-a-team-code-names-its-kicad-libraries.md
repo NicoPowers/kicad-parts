@@ -13,6 +13,6 @@ Boards save footprint library names, and a board must work for everyone on the t
 
 - The code is 2 or 3 capital letters or digits, starting with a letter. Until roles exist (kicad-parts-5514), any member who can edit the Catalog chooses it, after a confirmation. `POST /api/team/code` refuses to change it; a superuser fixes a mistake before any board uses it (see `docs/operations/TRY_THE_TEAM_CATALOG.md`).
 - No KiCad libraries are made until the team has a code.
-- Each team's libraries live in `kicad-libraries/<CODE>/`, which records the team's settings record ID. Signing in updates only that team's folder, and a folder that belongs to another team is never written.
+- Each team's libraries live in `kicad-libraries/<CODE>/`, which records the team's settings record ID. Signing in updates only that team's folder, and a folder that belongs to another team is never written. If another team's folder already uses the code, the app stops updating and says how to fix it. It tries again only after the sign-in or the code changes; there is no override.
 
 Mulch records: mx-472044, mx-544722, mx-a97f8c.

@@ -1479,6 +1479,22 @@ pub enum KicadLibrariesState {
         older: u32,
         archived: u32,
     },
+    /// Another update of the same folder was running, from this app or
+    /// another one, so this one tries again later.
+    Busy {
+        at_ms: u64,
+    },
+    /// Another team's libraries on this computer use the team's code, and
+    /// KiCad cannot hold both. Nothing is written, and nothing is tried
+    /// again, until the sign-in or the team's code changes.
+    CodeTaken {
+        code: String,
+        /// The other team's server.
+        other_server: String,
+        /// The signed-in team's server, where a superuser can change its
+        /// code.
+        server: String,
+    },
     Failed {
         at_ms: u64,
         /// A plain sentence, such as which file KiCad holds open.

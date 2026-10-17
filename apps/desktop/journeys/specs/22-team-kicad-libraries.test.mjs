@@ -6,7 +6,7 @@
 // offers Update now, shows what to paste into KiCad once, and lists other
 // teams' libraries on this computer. An edit by someone else that adds a
 // revision updates them by itself, a file changed outside the app is
-// named, and an update that cannot run says why. Open folder is never
+// named, and an update that must wait its turn says so. Open folder is never
 // clicked: it opens a File Explorer window on the person's desktop.
 
 import assert from 'node:assert/strict';
@@ -286,20 +286,24 @@ describe('KiCad libraries made from the team catalog', () => {
     assert.equal(await browser.execute(() => document.querySelector('.kicad-libraries-problems')), null);
   });
 
-  it('says plainly when an update cannot run', async () => {
+  it('says plainly when an update must wait its turn', async () => {
     // Another program holds the folder's lock, as a second app would.
     const lock = fs.openSync(path.join(folder(), '.update.lock'), 'r+');
     try {
       await (await browser.$('#kicad-libraries-update')).click();
-      const failed = await waitForState('failed', undefined, 20_000);
+      const busy = await waitForState('busy', undefined, 20_000);
       assert.match(
-        failed.text,
-        /^The last update failed\. Another update of these libraries is running, from this app or another one\. The next update tries again\. Tried at \d\d:\d\d\.$/,
+        busy.text,
+        /^Another update of these libraries is running, from this app or another one, so this one waits\. It tries again in 30 seconds\. Tried at \d\d:\d\d\.$/,
       );
-      // A status, not an alert: KiCad and the rest of the app still work.
+      // A plain status, not a failure or an alert.
       assert.equal(await browser.execute((s) => document.querySelector(s).getAttribute('role'), STATUS), 'status');
-      await assertAccessible(browser, '92-kicad-libraries-failed');
-      await screenshot(browser, '92-kicad-libraries-failed', { blankOut: MACHINE_TEXT });
+      assert.equal(
+        await browser.execute((s) => document.querySelector(s).classList.contains('kicad-libraries-failed'), STATUS),
+        false,
+      );
+      await assertAccessible(browser, '92-kicad-libraries-busy');
+      await screenshot(browser, '92-kicad-libraries-busy', { blankOut: MACHINE_TEXT });
     } finally {
       fs.closeSync(lock);
     }

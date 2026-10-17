@@ -96,10 +96,14 @@ pub enum UpdateError {
     /// Another update of the same folder is running.
     Busy,
     /// The folder for the team's code belongs to another team, so it was
-    /// not changed.
+    /// not changed. It stays that way until this team's code changes: KiCad
+    /// cannot hold two libraries with one name.
     OtherTeam {
         folder: PathBuf,
         code: String,
+        /// The team server of the team whose libraries are in the folder.
+        other_server: String,
+        /// This team's server, where a superuser can change its code.
         server: String,
     },
     /// The folder's path has a character the SQLite3 ODBC driver's
@@ -139,8 +143,13 @@ impl UpdateError {
                 name(file)
             ),
             Self::Busy => "Another update of these libraries is running, from this app or another one. The next update tries again.".to_owned(),
-            Self::OtherTeam { folder, code, server } => format!(
-                "The folder {} holds the {code} libraries of another team, on the team server {server}, so it was not changed. KiCad cannot have two libraries with the same name, so this team needs another code.",
+            Self::OtherTeam {
+                folder,
+                code,
+                other_server,
+                server,
+            } => format!(
+                "Two teams on this computer use the code {code}, and KiCad can't hold both. The folder {} holds the {code} libraries of the team on {other_server}, so it was not changed. To fix this, a superuser of {server} changes this team's code before any board uses it. Then sign in again.",
                 folder.display()
             ),
             Self::Folder(folder) => format!(
@@ -210,19 +219,24 @@ pub fn update(
     if !folder_is_usable(folder) {
         return Err(UpdateError::Folder(folder.to_path_buf()));
     }
+    let other_team = |state: FolderState| UpdateError::OtherTeam {
+        folder: folder.to_path_buf(),
+        code: naming.code().to_owned(),
+        other_server: state.server,
+        server: team.server.clone(),
+    };
+    // Checked before the lock too, so another team's folder does not even
+    // get a lock file.
+    if let Some(state) = read_state(folder).filter(|state| state.team_id != team.id) {
+        return Err(other_team(state));
+    }
     std::fs::create_dir_all(folder)
         .map_err(|error| UpdateError::Io(folder.to_path_buf(), error))?;
     let _lock = FolderLock::take(folder)
         .map_err(|error| UpdateError::Io(folder.join(LOCK_FILE), error))?
         .ok_or(UpdateError::Busy)?;
     let mut state = match read_state(folder) {
-        Some(state) if state.team_id != team.id => {
-            return Err(UpdateError::OtherTeam {
-                folder: folder.to_path_buf(),
-                code: naming.code().to_owned(),
-                server: state.server,
-            });
-        }
+        Some(state) if state.team_id != team.id => return Err(other_team(state)),
         Some(state) => state,
         None => FolderState::default(),
     };

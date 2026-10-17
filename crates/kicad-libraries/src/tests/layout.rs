@@ -785,7 +785,8 @@ fn each_team_has_its_own_folder_and_another_teams_folder_is_never_written() {
         Err(error @ UpdateError::OtherTeam { .. }) => {
             let message = error.message(&root);
             assert!(
-                message.contains("holds the MA libraries of another team, on the team server http://127.0.0.1:8090"),
+                message.starts_with("Two teams on this computer use the code MA, and KiCad can't hold both. The folder ")
+                    && message.contains(" holds the MA libraries of the team on http://127.0.0.1:8090, so it was not changed. To fix this, a superuser of http://127.0.0.1:8092 changes this team's code before any board uses it. Then sign in again."),
                 "{message}"
             );
         }

@@ -155,6 +155,36 @@ pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> 
                 </p>
             }
             .into_any(),
+            // Not a failure: it waits its turn.
+            KicadLibrariesState::Busy { at_ms } => view! {
+                <p
+                    class="kicad-libraries-status"
+                    role="status"
+                    data-state="busy"
+                    data-at=at_ms.to_string()
+                >
+                    "Another update of these libraries is running, from this app or another one, so this one waits. It tries again in 30 seconds. Tried at "
+                    {local_time(at_ms)}
+                    "."
+                </p>
+            }
+            .into_any(),
+            KicadLibrariesState::CodeTaken {
+                code,
+                other_server,
+                server,
+            } => view! {
+                <p
+                    class="kicad-libraries-status kicad-libraries-failed"
+                    role="status"
+                    data-state="code-taken"
+                >
+                    {format!(
+                        "Two teams on this computer use the code {code}, and KiCad can't hold both. The {code} libraries here belong to the team on {other_server}, so none are made for this team. To fix this, a superuser of {server} changes this team's code before any board uses it. Then sign out and sign in again."
+                    )}
+                </p>
+            }
+            .into_any(),
             KicadLibrariesState::Failed { at_ms, reason } => view! {
                 <p
                     class="kicad-libraries-status kicad-libraries-failed"
@@ -177,7 +207,9 @@ pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> 
             known.as_ref().is_some_and(|known| {
                 !matches!(
                     known.state,
-                    KicadLibrariesState::SignedOut | KicadLibrariesState::NeedsCode
+                    KicadLibrariesState::SignedOut
+                        | KicadLibrariesState::NeedsCode
+                        | KicadLibrariesState::CodeTaken { .. }
                 )
             })
         })

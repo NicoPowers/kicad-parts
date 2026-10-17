@@ -2,7 +2,9 @@
 //! once the sign-in has caught up, and again about 2 seconds after the last
 //! new Change, so a burst of Changes causes one update. "Update now" runs
 //! one at once. A failed update, such as when KiCad holds a file open, is
-//! tried again after a while.
+//! tried again after a while. When another team's libraries on this
+//! computer use the team's code, nothing is tried again until the sign-in
+//! or the code changes: KiCad cannot hold both, and there is no override.
 //!
 //! The libraries are named with the team's code, which the team server
 //! keeps: no libraries are made until someone who can edit chooses it.
@@ -23,8 +25,8 @@ use desktop_contract::{
     OtherTeamLibraries, TeamCode, TeamCodeCheck, TeamSession,
 };
 use kicad_libraries::{
-    Library, LibraryKind, Naming, Team, kicad_process, odbc, setup, team_code_problem, team_folder,
-    team_folders,
+    Library, LibraryKind, Naming, Team, UpdateError, kicad_process, odbc, setup, team_code_problem,
+    team_folder, team_folders,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -285,6 +287,9 @@ struct Schedule {
     seen: Option<((String, u64), Instant)>,
     /// When to try again after a failure.
     retry: Option<Instant>,
+    /// Who is signed in and the team's code, when another team's libraries
+    /// use that code: no update runs until they change, even when asked.
+    stuck: Option<String>,
 }
 
 impl Schedule {
@@ -292,6 +297,9 @@ impl Schedule {
     fn due(&mut self, position: &(String, u64), asked: bool, now: Instant) -> bool {
         if self.seen.as_ref().map(|(seen, _)| seen) != Some(position) {
             self.seen = Some((position.clone(), now));
+        }
+        if self.stuck.as_ref() == Some(&position.0) {
+            return false;
         }
         if asked {
             return true;
@@ -384,11 +392,11 @@ fn follow(root: &Path, team: &TeamCatalog, shared: &Shared) {
             }
         };
         let position = (format!("{who}\n{}", settings.code), *checkpoint);
-        let asked = shared.asked.load(Ordering::SeqCst);
+        // An "Update now" that cannot run is dropped, not kept for later.
+        let asked = shared.asked.swap(false, Ordering::SeqCst);
         if !schedule.due(&position, asked, Instant::now()) {
             continue;
         }
-        shared.asked.store(false, Ordering::SeqCst);
         shared.set(KicadLibrariesState::Updating);
         let target = Team {
             id: settings.id.clone(),
@@ -396,7 +404,7 @@ fn follow(root: &Path, team: &TeamCatalog, shared: &Shared) {
             naming,
         };
         let result = update_once(root, team, &target);
-        schedule.done = Some(position);
+        schedule.done = Some(position.clone());
         let mut known = shared.lock();
         match result {
             Ok(outcome) => {
@@ -416,7 +424,24 @@ fn follow(root: &Path, team: &TeamCatalog, shared: &Shared) {
                 known.layout_changed_at_ms = outcome.layout_changed_at_ms;
                 known.problems = outcome.problems;
             }
-            Err(reason) => {
+            Err(Stopped::Busy) => {
+                schedule.retry = Some(Instant::now() + RETRY);
+                known.state = KicadLibrariesState::Busy { at_ms: now_ms() };
+            }
+            Err(Stopped::CodeTaken {
+                code,
+                other_server,
+                server,
+            }) => {
+                schedule.retry = None;
+                schedule.stuck = Some(position.0);
+                known.state = KicadLibrariesState::CodeTaken {
+                    code,
+                    other_server,
+                    server,
+                };
+            }
+            Err(Stopped::Failed(reason)) => {
                 schedule.retry = Some(Instant::now() + RETRY);
                 known.state = KicadLibrariesState::Failed {
                     at_ms: now_ms(),
@@ -427,19 +452,46 @@ fn follow(root: &Path, team: &TeamCatalog, shared: &Shared) {
     }
 }
 
+/// Why an update did not finish.
+enum Stopped {
+    /// Another update of the folder is running.
+    Busy,
+    /// Another team's libraries use the code.
+    CodeTaken {
+        code: String,
+        other_server: String,
+        server: String,
+    },
+    /// Anything else, in plain sentences.
+    Failed(String),
+}
+
 /// One update from the team server the app is signed in to.
 fn update_once(
     root: &Path,
     team: &TeamCatalog,
     target: &Team,
-) -> Result<kicad_libraries::Outcome, String> {
-    let client = team.client_for_libraries()?;
+) -> Result<kicad_libraries::Outcome, Stopped> {
+    let client = team.client_for_libraries().map_err(Stopped::Failed)?;
     let records = read_revisions(&client)
-        .map_err(|error| format!("The team catalog could not be read: {error}"))?;
+        .map_err(|error| Stopped::Failed(format!("The team catalog could not be read: {error}")))?;
     kicad_libraries::update(root, &records, target, &mut |blob| {
         download_blob(&client, blob).map_err(|error| error.to_string())
     })
-    .map_err(|error| error.message(&team_folder(root, target.naming.code())))
+    .map_err(|error| match error {
+        UpdateError::Busy => Stopped::Busy,
+        UpdateError::OtherTeam {
+            code,
+            other_server,
+            server,
+            ..
+        } => Stopped::CodeTaken {
+            code,
+            other_server,
+            server,
+        },
+        other => Stopped::Failed(other.message(&team_folder(root, target.naming.code()))),
+    })
 }
 
 #[cfg(test)]
@@ -473,5 +525,24 @@ mod tests {
         // Someone else signing in, or a new team code, updates at once.
         schedule.retry = None;
         assert!(schedule.due(&("server\nyou\nMA".to_owned(), 10), false, at(41.0)));
+    }
+
+    #[test]
+    fn a_code_another_team_uses_stops_updates_until_it_changes() {
+        let start = Instant::now();
+        let at = |seconds: f64| start + Duration::from_secs_f64(seconds);
+        let mut schedule = Schedule::default();
+        let taken = ("server\nme\nMA".to_owned(), 7);
+        assert!(schedule.due(&taken, false, at(0.0)));
+        schedule.done = Some(taken.clone());
+        schedule.stuck = Some(taken.0.clone());
+        // Not after a while, not after new Changes, not when asked.
+        assert!(!schedule.due(&taken, false, at(100.0)));
+        let later = ("server\nme\nMA".to_owned(), 9);
+        assert!(!schedule.due(&later, false, at(101.0)));
+        assert!(!schedule.due(&later, false, at(110.0)));
+        assert!(!schedule.due(&later, true, at(111.0)));
+        // A new code does.
+        assert!(schedule.due(&("server\nme\nMB".to_owned(), 9), false, at(112.0)));
     }
 }
