@@ -9,8 +9,10 @@
 //
 // Signed-in members may read the record; only the route and superusers
 // write it. To fix a mistaken code before any board uses it, a superuser
-// clears or edits the code field in the PocketBase dashboard, and every
-// member deletes their kicad-libraries/<old code> folder.
+// clears or edits the code field in the PocketBase dashboard. Every member
+// then signs out and signs in again, because the app reads the team's
+// settings only at sign-in, and deletes their kicad-libraries/<old code>
+// folder.
 //
 // The undo refuses a team server whose team has a code, because the older
 // version cannot keep it.
