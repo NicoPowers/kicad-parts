@@ -989,15 +989,22 @@ fn link(
     reference.reference.clone()
 }
 
-/// The Value field: the category's value field (Resistance for variable
-/// resistors, Color for optoelectronics, as `#gplm.kicad_dbl` maps them,
-/// and Value otherwise), else the main MPN, else the IPN.
+/// The categories whose value, the text a schematic shows beside the
+/// symbol, is a field other than `Value`, as `database/#gplm.kicad_dbl`
+/// maps them: a crystal shows its frequency, not its MPN.
+const VALUE_FIELDS: [(&str, &str); 3] = [
+    ("rvr", "Resistance"),
+    ("opt", "Color"),
+    ("osc", "Frequency"),
+];
+
+/// The Value field: the category's value field (see [`VALUE_FIELDS`], and
+/// Value otherwise), else the main MPN, else the IPN.
 fn value_of(category: &CategoryDetails, details: &PartDetails) -> String {
-    let field = match category.code.as_str() {
-        "rvr" => "Resistance",
-        "opt" => "Color",
-        _ => "Value",
-    };
+    let field = VALUE_FIELDS
+        .iter()
+        .find(|(code, _)| *code == category.code)
+        .map_or("Value", |(_, field)| field);
     [
         details.field(field).unwrap_or_default(),
         details
@@ -1097,6 +1104,46 @@ mod tests {
         assert_eq!(current_number(&[1, 2, 3], &archived), Some(2));
         assert_eq!(current_number(&[1], &BTreeSet::new()), Some(1));
         assert_eq!(current_number(&[], &BTreeSet::new()), None);
+    }
+
+    /// What a schematic shows beside the symbol is what the CSV catalog's
+    /// own KiCad library showed: a crystal's frequency, a trimmer's
+    /// resistance, an LED's colour, or else the Value field; and when that
+    /// is blank, the MPN, then the IPN, so it is never empty.
+    #[test]
+    fn the_value_follows_the_csv_catalogs_own_kicad_library() {
+        let details = |category: &str, fields: &[(&str, &str)], mpn: &str| PartDetails {
+            schema: String::new(),
+            ipn: "OSC-0001-0256".to_owned(),
+            category: category.to_owned(),
+            fields: fields
+                .iter()
+                .map(|(name, value)| catalog::DetailField {
+                    name: (*name).to_owned(),
+                    value: (*value).to_owned(),
+                })
+                .collect(),
+            manufacturer_parts: [mpn]
+                .iter()
+                .filter(|mpn| !mpn.is_empty())
+                .map(|mpn| catalog::ManufacturerPart {
+                    manufacturer: "TXC".to_owned(),
+                    mpn: (*mpn).to_owned(),
+                })
+                .collect(),
+        };
+        let value = |code: &str, fields: &[(&str, &str)], mpn: &str| {
+            value_of(
+                &CategoryDetails::starting(code, Vec::new()),
+                &details(code, fields, mpn),
+            )
+        };
+        assert_eq!(value("osc", &[("Frequency", "25MHz")], "8Y-25"), "25MHz");
+        assert_eq!(value("rvr", &[("Resistance", "10k")], "3314J"), "10k");
+        assert_eq!(value("opt", &[("Color", "Red")], "LED1"), "Red");
+        assert_eq!(value("res", &[("Value", "47")], "RC0603"), "47");
+        assert_eq!(value("osc", &[("Frequency", "")], "D2SX"), "D2SX");
+        assert_eq!(value("ics", &[], ""), "OSC-0001-0256");
     }
 
     #[test]
