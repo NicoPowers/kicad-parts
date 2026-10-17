@@ -55,6 +55,13 @@ impl S3Client {
         }
     }
 
+    /// Lists the buckets and ignores the answer. Only a server that knows
+    /// these credentials accepts the call, so it proves we reached the
+    /// server we started.
+    pub fn check_credentials(&self) -> ServiceResult<()> {
+        self.send("GET", "/", &[], &[]).map(|_| ())
+    }
+
     pub fn create_bucket(&self, bucket: &str) -> ServiceResult<()> {
         self.send("PUT", &format!("/{bucket}"), &[], &[])
             .map(|_| ())

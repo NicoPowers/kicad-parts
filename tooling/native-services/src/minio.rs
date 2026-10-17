@@ -4,6 +4,7 @@ use crate::fetch::{Cache, create_dir, publish, sha256_file, unique_suffix};
 use crate::pins::NativePins;
 use crate::pocketbase::make_executable;
 use crate::process::{ServiceProcess, free_loopback_port, run_hidden};
+use crate::readiness::{answers_200, wait_until_ready};
 use crate::s3::S3Client;
 use crate::{ServiceResult, error, random_token};
 use std::fs;
@@ -182,7 +183,8 @@ pub struct MinioServer {
 
 impl MinioServer {
     /// Starts MinIO over `data_dir` (which it formats when empty) and waits
-    /// until it is ready. `work_dir` holds its log and certificate
+    /// until it is ready for bucket calls (see [`minio_is_ready`]).
+    /// `work_dir` holds its log and certificate
     /// directory, so nothing is written to the user's home.
     pub fn start(binary: &Path, data_dir: &Path, work_dir: &Path) -> ServiceResult<Self> {
         create_dir(data_dir)?;
@@ -219,7 +221,10 @@ impl MinioServer {
                 .env("MINIO_CI_CD", "on");
             let mut process = ServiceProcess::spawn("minio", command, &work_dir.join("minio.log"))?;
             let endpoint = format!("http://127.0.0.1:{port}");
-            match wait_until_live(&mut process, &endpoint, Duration::from_secs(60)) {
+            let s3 = S3Client::new(&endpoint, &access_key, &secret_key);
+            match wait_until_ready(&mut process, START_TIMEOUT, |_log| {
+                minio_is_ready(&endpoint, &s3)
+            }) {
                 Ok(()) => {
                     return Ok(Self {
                         process,
@@ -267,43 +272,62 @@ impl MinioServer {
     }
 }
 
-fn wait_until_live(
-    process: &mut ServiceProcess,
-    endpoint: &str,
-    timeout: Duration,
-) -> ServiceResult<()> {
-    // "live" answers before the drive is initialised; "ready" waits for it.
-    let ready = format!("{endpoint}/minio/health/ready");
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(2))
-        .build();
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = process.exited() {
-            return Err(error(format!(
-                "minio exited with {status}:\n{}",
-                process.log_tail()
-            )));
-        }
-        if matches!(agent.get(&ready).call(), Ok(response) if response.status() == 200) {
-            return Ok(());
-        }
-        if Instant::now() > deadline {
-            return Err(error(format!(
-                "minio was not ready after {timeout:?}:\n{}",
-                process.log_tail()
-            )));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+/// How long MinIO may take to format its drive and load its state.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Whether the MinIO we started at `endpoint` is ready for bucket calls:
+/// `Err` says why not. `s3` signs with that MinIO's root credentials.
+///
+/// `/minio/health/ready` is not enough. In this release it answers 200
+/// while MinIO is still starting, and only adds the header
+/// `X-Minio-Server-Status: offline`. Bucket calls made then fail with
+/// 503 XMinioServerNotInitialized (kicad-parts-2c4e).
+///
+/// `/minio/health/cluster` answers 200 only once storage, bucket metadata
+/// and users are loaded. A signed call with our own credentials then
+/// proves the server is ours, and not another one that took the port.
+fn minio_is_ready(endpoint: &str, s3: &S3Client) -> Result<(), String> {
+    answers_200(&format!("{endpoint}/minio/health/cluster"))?;
+    s3.check_credentials().map_err(|failure| failure.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::readiness::fake_server;
     use crate::repository_root;
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
+
+    #[test]
+    fn minio_is_ready_only_for_bucket_calls_with_our_credentials() {
+        // A starting MinIO, as kicad-parts-2c4e saw it: "ready" says 200,
+        // but the cluster check (and every bucket call) says 503.
+        let (port, answers) = fake_server::start(&[
+            ("/minio/health/ready", 200),
+            ("/minio/health/cluster", 503),
+            ("/", 503),
+        ]);
+        let endpoint = format!("http://127.0.0.1:{port}");
+        let s3 = S3Client::new(&endpoint, "access", "secret");
+        let reason = minio_is_ready(&endpoint, &s3).unwrap_err();
+        assert!(
+            reason.contains("/minio/health/cluster answered 503"),
+            "{reason}"
+        );
+
+        // Started, but another server's: it refuses our credentials.
+        answers
+            .lock()
+            .unwrap()
+            .insert("/minio/health/cluster".into(), 200);
+        answers.lock().unwrap().insert("/".into(), 403);
+        let reason = minio_is_ready(&endpoint, &s3).unwrap_err();
+        assert!(reason.contains("403"), "{reason}");
+
+        answers.lock().unwrap().insert("/".into(), 200);
+        assert_eq!(minio_is_ready(&endpoint, &s3), Ok(()));
+    }
 
     #[test]
     fn the_minio_build_cannot_pick_up_anything_from_this_machine() {

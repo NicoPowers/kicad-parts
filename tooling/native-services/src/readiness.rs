@@ -1,12 +1,14 @@
 //! Waiting until a service we started can do real work.
 //!
 //! Each service has its own readiness check, because "the process answers"
-//! is not enough. One thing went wrong before:
+//! is not enough. Two things went wrong before:
 //!
 //! - We pick a free port and then start the service, so another test's
 //!   service can take that port in between. Ours then fails to bind, but
 //!   the other service answers our health check. So a check must prove the
 //!   service is ours: by its own log, or by our own credentials.
+//! - MinIO's `/minio/health/ready` answers 200 before MinIO can serve
+//!   bucket calls. So a check must mean "ready for the calls a test makes".
 //!
 //! [`wait_until_ready`] runs a service's check until it passes, and fails
 //! with a plain message if the service exits or the time runs out.
