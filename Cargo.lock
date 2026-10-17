@@ -389,6 +389,7 @@ dependencies = [
  "csv-catalog-fixture",
  "desktop-contract",
  "kicad-integration",
+ "kicad-libraries",
  "native-services",
  "rusqlite",
  "serde",

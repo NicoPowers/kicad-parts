@@ -199,7 +199,7 @@ fn rows_hold_the_fields_and_link_exact_revisions() {
     assert_eq!(dbl["meta"]["version"], 1);
     assert_eq!(
         dbl["source"]["connection_string"],
-        "DRIVER={SQLite3};DATABASE=${CWD}/team-parts.sqlite"
+        "DRIVER={SQLite3 ODBC Driver};DATABASE=${CWD}/team-parts.sqlite"
     );
     let libraries = dbl["libraries"].as_array().unwrap();
     let groups: Vec<&str> = libraries

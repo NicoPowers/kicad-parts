@@ -370,7 +370,7 @@ pub fn replace_model_references(content: &str, paths: &[Option<String>]) -> (Str
         let after = start + "(model".len();
         let rest = &content[after..];
         let value_start = after + (rest.len() - rest.trim_start().len());
-        if content[value_start..].chars().next() != Some('"') {
+        if !content[value_start..].starts_with('"') {
             continue;
         }
         // Scanned exactly as model_references reads it.
