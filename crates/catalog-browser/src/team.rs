@@ -10,10 +10,12 @@
 //! While signed in, a background thread keeps a [`CatalogReplica`] in step
 //! with the server: it subscribes to realtime notifications of new Changes,
 //! reads the current state of every part, and, after any disconnect,
-//! reconnects and catches up from the last Change `seq` it applied. The UI polls [`TeamCatalog::status`], whose
-//! `checkpoint` grows whenever anyone publishes a Change and whose `imports`
-//! grows when a CSV import run finishes (a run may find CSV changes without
-//! publishing a Change) or after catching up.
+//! reconnects and catches up from the last Change `seq` it applied.
+//!
+//! The UI polls [`TeamCatalog::status`], whose `checkpoint` grows whenever
+//! anyone publishes a Change and whose `imports` grows when a CSV import
+//! run finishes (a run may find CSV changes without publishing a Change) or
+//! after catching up.
 
 use crate::PartValues;
 use catalog::library_check::{chosen_footprint_problems, judge_model_link};
