@@ -2,6 +2,8 @@
 
 Terms use plain, everyday words. Each glossary lists old or rejected terms under _Avoid_.
 
+Decisions for every context are in [docs/adr/](./docs/adr/), numbered in one list. The contexts have no ADR folders of their own.
+
 ## Contexts
 
 - [Catalog](./docs/contexts/catalog/CONTEXT.md) — the parts a team designs with: what each one is, its number, how its details changed, and which exact CAD items it uses
