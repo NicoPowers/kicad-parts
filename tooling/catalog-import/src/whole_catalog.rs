@@ -20,11 +20,11 @@
 use crate::zero_loss::{ZeroLossReport, latest_import_run};
 use catalog::category::category_id;
 use catalog::csv_import::SUBSTITUTES_PATH;
-use catalog::pocketbase::CatalogReadback;
+use catalog::pocketbase::{CatalogReadback, StoredImportProblem};
 use catalog::{
     BlobId, CadItemId, CadItemKind, CadItemRevisionId, PartDetailsId, PartId, PartRevisionId,
 };
-use csv_catalog_fixture::Manifest;
+use csv_catalog_fixture::{AssetManifest, ImportProblem, Manifest};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -72,6 +72,8 @@ pub enum NotForTheImport {
     /// A 3D model link, or its problem, in a footprint file no CSV row
     /// binds.
     FootprintNoRowBinds,
+    /// A note that `database/parts.sqlite` differs from today's CSV files.
+    FrozenPartsSqlite,
 }
 
 impl NotForTheImport {
@@ -79,6 +81,9 @@ impl NotForTheImport {
         match self {
             Self::OldShellScript => {
                 "It is about database/update_db.sh, the old script that built parts.sqlite. The import reads the CSV files themselves, so what the script leaves out is not lost."
+            }
+            Self::FrozenPartsSqlite => {
+                "It says database/parts.sqlite differs from today's CSV files. parts.sqlite is a frozen copy that nothing can rebuild, so it keeps the old values. The import reads the CSV files themselves, so their new values are imported."
             }
             Self::FootprintNoRowBinds => {
                 "It is in a footprint file that no CSV row binds: rows name it without its library, as a choice for KiCad's footprint filter, or name KiCad's own footprint. The import stores only footprints a row binds, so it has no 3D model to keep. The library check lists the file."
@@ -172,7 +177,7 @@ pub fn check(
     let (substitutes_lost, orphans_kept) = substitutes_rows(oracle, readback, &imported);
     lost.extend(substitutes_lost);
 
-    let stored_cad = stored_cad(oracle, readback, reports);
+    let stored_cad = stored_cad(&oracle.assets, &stored_by_reports(reports), readback);
     lost.extend(stored_cad.lost);
     not_imported.extend(stored_cad.not_imported);
 
@@ -181,18 +186,15 @@ pub fn check(
         .flat_map(|report| report.explained_problems.iter().map(String::as_str))
         .chain(orphans_kept.iter().map(String::as_str))
         .collect();
-    let (problems_lost, problems_not_imported) =
-        fixture_problems(oracle, reports, &stored_cad.bound_footprints);
+    let (problems_lost, problems_not_imported) = fixture_problems(
+        &oracle.import_problems,
+        &recorded_by_reports(reports),
+        &stored_cad.bound_footprints,
+        &oracle.sqlite_projection.path,
+    );
     lost.extend(problems_lost);
     not_imported.extend(problems_not_imported);
-    for problem in &readback.problems {
-        if !explained.contains(problem.id.as_str()) {
-            lost.push(format!(
-                "The team catalog has an import problem that no CSV file explains: {} at {} in {}.",
-                problem.code, problem.location, problem.path
-            ));
-        }
-    }
+    lost.extend(unexplained_problems(&readback.problems, &explained));
 
     WholeCatalog {
         rows: oracle.catalog.row_count,
@@ -411,52 +413,56 @@ pub fn substitutes_rows_accounted(
 }
 
 /// What [`stored_cad`] found.
-struct StoredCad {
-    symbols: usize,
-    footprints: usize,
-    models: usize,
+#[derive(Debug, Default)]
+pub struct StoredCad {
+    pub symbols: usize,
+    pub footprints: usize,
+    pub models: usize,
     /// The repository paths of the footprint files a part binds.
-    bound_footprints: BTreeSet<String>,
-    not_imported: Vec<NotImported>,
-    lost: Vec<String>,
+    pub bound_footprints: BTreeSet<String>,
+    pub not_imported: Vec<NotImported>,
+    pub lost: Vec<String>,
 }
 
-/// Checks that every symbol and footprint a CSV row uses from the CSV
-/// catalog's own libraries, and every 3D model those footprints link to,
-/// is stored with its license.
-fn stored_cad(
-    oracle: &Manifest,
-    readback: &CatalogReadback,
-    reports: &[ZeroLossReport],
-) -> StoredCad {
-    // Each file's report checked the bytes; here only that some file
-    // stored each one, with a license.
-    let stored: BTreeMap<(&str, &str), &crate::zero_loss::CadItemAccount> = reports
+/// The symbols and footprints some CSV file stored with a license, by
+/// (kind, reference), each with its repository path. Each file's report
+/// checked the bytes; the whole catalog only needs some file to store
+/// each one.
+fn stored_by_reports(reports: &[ZeroLossReport]) -> BTreeMap<(String, String), Option<String>> {
+    reports
         .iter()
         .flat_map(|report| &report.cad_items)
         .filter(|account| account.cad_item_revision.is_some() && account.license.is_some())
-        .map(|account| ((account.kind.as_str(), account.reference.as_str()), account))
-        .collect();
-    let mut found = StoredCad {
-        symbols: 0,
-        footprints: 0,
-        models: 0,
-        bound_footprints: BTreeSet::new(),
-        not_imported: Vec::new(),
-        lost: Vec::new(),
-    };
-    for reference in oracle
-        .assets
+        .map(|account| {
+            (
+                (account.kind.clone(), account.reference.clone()),
+                account.oracle_asset_path.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Checks that every symbol and footprint a CSV row uses from the CSV
+/// catalog's own libraries (`assets`, from the CSV catalog fixture) is in
+/// `stored` (see [`stored_by_reports`]), and that every 3D model those
+/// footprints link to has a revision in `readback` with a license.
+pub fn stored_cad(
+    assets: &AssetManifest,
+    stored: &BTreeMap<(String, String), Option<String>>,
+    readback: &CatalogReadback,
+) -> StoredCad {
+    let mut found = StoredCad::default();
+    for reference in assets
         .symbol_references
         .iter()
-        .chain(&oracle.assets.footprint_references)
+        .chain(&assets.footprint_references)
         .filter(|reference| reference.local && reference.status == "resolved")
     {
-        match stored.get(&(reference.kind.as_str(), reference.reference.as_str())) {
+        match stored.get(&(reference.kind.clone(), reference.reference.clone())) {
             Some(_) if reference.kind == "symbol" => found.symbols += 1,
-            Some(account) => {
+            Some(path) => {
                 found.footprints += 1;
-                if let Some(path) = &account.oracle_asset_path {
+                if let Some(path) = path {
                     found.bound_footprints.insert(path.clone());
                 }
             }
@@ -470,8 +476,7 @@ fn stored_cad(
     }
     // Two footprints may link to one 3D model file; it is stored once.
     let mut models = BTreeSet::new();
-    for model in oracle
-        .assets
+    for model in assets
         .model_references
         .iter()
         .filter(|model| model.status == "resolved")
@@ -489,8 +494,7 @@ fn stored_cad(
             });
             continue;
         }
-        let empty = oracle
-            .assets
+        let empty = assets
             .models_3d
             .iter()
             .any(|file| &file.path == path && file.bytes == 0);
@@ -522,40 +526,49 @@ fn stored_cad(
     found
 }
 
-/// Checks that every import problem the CSV catalog fixture expects was
-/// recorded and explained by some CSV file's report, or is one of the
-/// kinds no import takes in. Returns what is lost and what is not for the
-/// import.
-fn fixture_problems(
-    oracle: &Manifest,
-    reports: &[ZeroLossReport],
-    bound_footprints: &BTreeSet<String>,
-) -> (Vec<String>, Vec<NotImported>) {
-    let recorded: BTreeSet<(&str, &str, &str)> = reports
+/// The import problems the CSV catalog fixture expects that some CSV
+/// file's report found recorded, by (code, path, location).
+fn recorded_by_reports(reports: &[ZeroLossReport]) -> BTreeSet<(String, String, String)> {
+    reports
         .iter()
         .flat_map(|report| &report.oracle_import_problems)
         .filter(|account| account.stored.is_some())
         .map(|account| {
             (
-                account.code.as_str(),
-                account.path.as_str(),
-                account.location.as_str(),
+                account.code.clone(),
+                account.path.clone(),
+                account.location.clone(),
             )
         })
-        .collect();
+        .collect()
+}
+
+/// Checks that every import problem the CSV catalog fixture expects
+/// (`expected`) was recorded and explained by some CSV file's report
+/// (`recorded`, see [`recorded_by_reports`]), or is one of the kinds no
+/// import takes in. `parts_sqlite` is the path of the CSV catalog's own
+/// KiCad database. Returns what is lost and what is not for the import.
+pub fn fixture_problems(
+    expected: &[ImportProblem],
+    recorded: &BTreeSet<(String, String, String)>,
+    bound_footprints: &BTreeSet<String>,
+    parts_sqlite: &str,
+) -> (Vec<String>, Vec<NotImported>) {
     let mut lost = Vec::new();
     let mut not_imported = Vec::new();
-    for problem in &oracle.import_problems {
+    for problem in expected {
         let key = (
-            problem.code.as_str(),
-            problem.path.as_str(),
-            problem.location.as_str(),
+            problem.code.clone(),
+            problem.path.clone(),
+            problem.location.clone(),
         );
         if recorded.contains(&key) {
             continue;
         }
         let why = if problem.code == "update-script-omits-csv-table" {
             Some(NotForTheImport::OldShellScript)
+        } else if problem.path == parts_sqlite {
+            Some(NotForTheImport::FrozenPartsSqlite)
         } else if problem.path.starts_with("footprints/")
             && !bound_footprints.contains(&problem.path)
         {
@@ -578,6 +591,25 @@ fn fixture_problems(
         }
     }
     (lost, not_imported)
+}
+
+/// The stored import problems no CSV file's report explains (`explained`
+/// holds the IDs that are). Each one keeps something the checks cannot
+/// place, so the proof fails.
+pub fn unexplained_problems(
+    problems: &[StoredImportProblem],
+    explained: &BTreeSet<&str>,
+) -> Vec<String> {
+    problems
+        .iter()
+        .filter(|problem| !explained.contains(problem.id.as_str()))
+        .map(|problem| {
+            format!(
+                "The team catalog has an import problem that no CSV file explains: {} at {} in {}.",
+                problem.code, problem.location, problem.path
+            )
+        })
+        .collect()
 }
 
 /// Every import problem in the team catalog, counted by kind.
@@ -605,6 +637,8 @@ fn problem_groups(readback: &CatalogReadback) -> Vec<ProblemGroup> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use catalog::pocketbase::{StoredCadItemRevision, StoredPart};
+    use csv_catalog_fixture::{Asset, CadReference, ModelReference};
 
     #[test]
     fn an_ipn_in_two_csv_files_is_lost() {
@@ -671,5 +705,234 @@ mod tests {
         for (code, meaning) in MEANINGS {
             assert!(!code.is_empty() && meaning.ends_with('.'), "{code}");
         }
+    }
+
+    fn reference(kind: &str, name: &str, path: &str, status: &str) -> CadReference {
+        CadReference {
+            kind: kind.into(),
+            reference: name.into(),
+            source_ipns: vec!["RES-0000-0470".into()],
+            local: true,
+            status: status.into(),
+            asset_path: Some(path.into()),
+        }
+    }
+
+    const FOOTPRINT: &str = "footprints/g-Resistor_SMD.pretty/R_0603.kicad_mod";
+    const MODEL: &str = "3d-models/g-Resistor_SMD.3dshapes/R_0603.step";
+
+    /// One symbol, one footprint and the footprint's 3D model.
+    fn assets() -> AssetManifest {
+        AssetManifest {
+            symbols: Vec::new(),
+            footprints: Vec::new(),
+            models_3d: vec![Asset {
+                path: MODEL.into(),
+                byte_sha256: "aa".into(),
+                semantic_sha256: "aa".into(),
+                bytes: 10,
+            }],
+            symbol_references: vec![reference(
+                "symbol",
+                "g-res:R",
+                "symbols/g-res.kicad_sym",
+                "resolved",
+            )],
+            footprint_references: vec![
+                reference("footprint", "g-Resistor_SMD:R_0603", FOOTPRINT, "resolved"),
+                // Missing from its library: the row's own import problem
+                // keeps it, so it needs no stored item.
+                reference("footprint", "g-Resistor_SMD:R_9999", "x", "missing-member"),
+            ],
+            model_references: vec![ModelReference {
+                source_footprint: FOOTPRINT.into(),
+                reference: "${GITPLM_PARTS}/3d-models/R_0603.step".into(),
+                scope: "local".into(),
+                status: "resolved".into(),
+                asset_path: Some(MODEL.into()),
+            }],
+        }
+    }
+
+    fn stored(items: &[(&str, &str, Option<&str>)]) -> BTreeMap<(String, String), Option<String>> {
+        items
+            .iter()
+            .map(|(kind, name, path)| {
+                (
+                    (kind.to_string(), name.to_string()),
+                    path.map(str::to_owned),
+                )
+            })
+            .collect()
+    }
+
+    fn model_revision(license: &str) -> StoredCadItemRevision {
+        StoredCadItemRevision {
+            id: "r".into(),
+            cad_item: CadItemId::new(CadItemKind::Model3d, MODEL).to_string(),
+            number: 1,
+            predecessor: String::new(),
+            change: "c".into(),
+            blob: "b".into(),
+            snapshot_sha256: String::new(),
+            snapshot: String::new(),
+            license: license.into(),
+            source: String::new(),
+        }
+    }
+
+    #[test]
+    fn every_used_symbol_footprint_and_model_must_be_stored_with_a_license() {
+        let all = stored(&[
+            ("symbol", "g-res:R", Some("symbols/g-res.kicad_sym")),
+            ("footprint", "g-Resistor_SMD:R_0603", Some(FOOTPRINT)),
+        ]);
+        let readback = CatalogReadback {
+            cad_item_revisions: vec![model_revision("unknown-needs-review")],
+            ..CatalogReadback::default()
+        };
+        let found = stored_cad(&assets(), &all, &readback);
+        assert_eq!(found.lost, Vec::<String>::new());
+        assert_eq!((found.symbols, found.footprints, found.models), (1, 1, 1));
+
+        // A symbol no file stored is lost.
+        let without_symbol = stored(&[("footprint", "g-Resistor_SMD:R_0603", Some(FOOTPRINT))]);
+        let found = stored_cad(&assets(), &without_symbol, &readback);
+        assert_eq!(
+            found.lost,
+            ["The symbol g-res:R that RES-0000-0470 uses is not stored with its license."]
+        );
+
+        // A 3D model with no revision, or one with no license, is lost.
+        for readback in [
+            CatalogReadback::default(),
+            CatalogReadback {
+                cad_item_revisions: vec![model_revision("")],
+                ..CatalogReadback::default()
+            },
+        ] {
+            let found = stored_cad(&assets(), &all, &readback);
+            assert_eq!(found.lost.len(), 1, "{:?}", found.lost);
+            assert!(found.lost[0].starts_with("The 3D model 3d-models/"));
+        }
+
+        // A model of a footprint no row binds is named, not lost.
+        let found = stored_cad(
+            &assets(),
+            &stored(&[("symbol", "g-res:R", None)]),
+            &CatalogReadback::default(),
+        );
+        assert_eq!(found.lost.len(), 1, "only the footprint: {:?}", found.lost);
+        assert_eq!(found.not_imported.len(), 1);
+    }
+
+    fn problem(code: &str, path: &str, location: &str) -> ImportProblem {
+        ImportProblem {
+            code: code.into(),
+            path: path.into(),
+            location: location.into(),
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn every_import_problem_the_fixture_expects_is_recorded_or_not_for_the_import() {
+        let expected = [
+            problem("missing-3d-model-reference", FOOTPRINT, "model=a.step"),
+            problem(
+                "update-script-omits-csv-table",
+                "database/update_db.sh",
+                "table[pcb]",
+            ),
+            problem(
+                "sqlite-cell-differs-from-csv",
+                "database/parts.sqlite",
+                "table[osc].rows[IPN=OSC-1].fields[Description]",
+            ),
+            problem(
+                "unresolved-3d-model-reference",
+                "footprints/g-Package_DFN_QFN.pretty/Unused.kicad_mod",
+                "model=/home/x.step",
+            ),
+        ];
+        let recorded: BTreeSet<(String, String, String)> = [(
+            "missing-3d-model-reference".to_owned(),
+            FOOTPRINT.to_owned(),
+            "model=a.step".to_owned(),
+        )]
+        .into();
+        let bound: BTreeSet<String> = [FOOTPRINT.to_owned()].into();
+        let (lost, not_imported) =
+            fixture_problems(&expected, &recorded, &bound, "database/parts.sqlite");
+        assert_eq!(lost, Vec::<String>::new());
+        assert_eq!(not_imported.len(), 3);
+
+        // The same problem not recorded, in a footprint a row binds, is lost.
+        let (lost, _) =
+            fixture_problems(&expected, &BTreeSet::new(), &bound, "database/parts.sqlite");
+        assert_eq!(
+            lost,
+            [
+                "The import problem missing-3d-model-reference at model=a.step in footprints/g-Resistor_SMD.pretty/R_0603.kicad_mod is not recorded, so what it keeps is lost."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stored_problem_no_csv_file_explains_fails() {
+        let stored = |id: &str| StoredImportProblem {
+            id: id.into(),
+            code: "mpn-without-manufacturer".into(),
+            subject: "RFM-0000-0001".into(),
+            path: "database/g-rfm.csv".into(),
+            location: "rows[IPN=RFM-0000-0001].MPN2".into(),
+            message: String::new(),
+            detail: String::new(),
+            audit_entry: String::new(),
+        };
+        let problems = [stored("explained"), stored("stray")];
+        let explained: BTreeSet<&str> = ["explained"].into();
+        assert_eq!(
+            unexplained_problems(&problems, &explained),
+            [
+                "The team catalog has an import problem that no CSV file explains: mpn-without-manufacturer at rows[IPN=RFM-0000-0001].MPN2 in database/g-rfm.csv."
+            ]
+        );
+    }
+
+    /// A record whose ID its content does not give would be copied by the
+    /// next import instead of found.
+    #[test]
+    fn a_record_id_that_does_not_come_from_its_content_fails() {
+        let part = |ipn: &str, id: String| StoredPart {
+            id,
+            ipn: ipn.into(),
+            ipn_prefix: String::new(),
+            variant: String::new(),
+            current_revision: String::new(),
+            current_revision_number: 1,
+            current_details: String::new(),
+            current_details_number: 1,
+            first_change: String::new(),
+        };
+        let good = part(
+            "RES-0000-0470",
+            PartId::for_text("RES-0000-0470").to_string(),
+        );
+        let readback = CatalogReadback {
+            parts: vec![good.clone()],
+            ..CatalogReadback::default()
+        };
+        assert!(ids_not_from_content(&readback).is_empty());
+
+        let readback = CatalogReadback {
+            parts: vec![good, part("RES-0000-1000", "000000000000000".into())],
+            cad_item_revisions: vec![model_revision("unknown-needs-review")],
+            ..CatalogReadback::default()
+        };
+        let lost = ids_not_from_content(&readback);
+        assert_eq!(lost.len(), 2, "{lost:?}");
+        assert!(lost[0].starts_with("Part RES-0000-1000 has the ID 000000000000000"));
+        assert!(lost[1].starts_with("Revision 1 of CAD item"));
     }
 }
