@@ -51,6 +51,19 @@
 //! `target/local-team-server/run-<process id>` and is deleted when it stops,
 //! including on Ctrl+C; a run killed outright is deleted by the next run.
 //! Nothing else is written.
+//!
+//! `catalog-import kicad-libraries [--csv FILES] FOLDER`
+//! `catalog-import kicad-libraries --server URL --email EMAIL FOLDER`
+//!
+//! Writes the KiCad libraries the desktop app makes (kicad-parts-f397) into
+//! `FOLDER`, without the app: the database library with one entry per part
+//! revision, and the symbols, footprints and 3D models it uses. With
+//! `--server`, it reads that team server, signed in as `EMAIL` with the
+//! password in the `KICAD_PARTS_PASSWORD` environment variable. Otherwise
+//! it starts a disposable team server with every CSV file imported (or
+//! only the `--csv` ones), as `local-team-server` does, and deletes it
+//! after reading. Prints one JSON summary: entry counts, files written,
+//! problems, and how long reading and writing took.
 
 use catalog::library_check::Group;
 use catalog::pocketbase::{
@@ -62,6 +75,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Mutex, mpsc};
+use std::time::Instant;
 
 fn main() {
     if let Err(error) = run() {
@@ -70,13 +84,14 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage: catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]\n       catalog-import local-team-server [--desktop | --json] [--csv g-res,g-cap ...]";
+const USAGE: &str = "usage: catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]\n       catalog-import local-team-server [--desktop | --json] [--csv g-res,g-cap ...]\n       catalog-import kicad-libraries [--csv g-res,g-cap ...] FOLDER\n       catalog-import kicad-libraries --server URL --email EMAIL FOLDER";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("pilot") => pilot(&args[1..]),
         Some("local-team-server") => local_team_server(&args[1..]),
+        Some("kicad-libraries") => kicad_libraries(&args[1..]),
         _ => Err(USAGE.into()),
     }
 }
@@ -194,20 +209,7 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     // Files share CAD items (one
     // footprint serves several categories), so each import reads the team
     // catalog first, as an importer does.
-    for each in &planned {
-        let csv_file = &each.csv_file;
-        let state = read_import_state(&admin)?;
-        let command = ImportCommand::new(
-            each,
-            &format!("Import the parts from database/{csv_file}.csv"),
-        )
-        .expecting(&state)
-        .allowing_uncommitted_changes(services::has_uncommitted_changes(each));
-        let reply = submit_import(&admin, &command)?;
-        if !matches!(reply.outcome, ImportOutcome::Applied { .. }) {
-            return Err(format!("the import of {csv_file} did not apply: {}", reply.body).into());
-        }
-    }
+    import_all(&admin, &planned)?;
     let members = [
         services::add_member(&admin, "Local Editor", "editor@example.test", true)?,
         services::add_member(&admin, "Second Editor", "second.editor@example.test", true)?,
@@ -345,6 +347,138 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         std::process::exit(130);
     }
     removed?;
+    Ok(())
+}
+
+/// Imports `planned` one CSV file after another, each reading the team
+/// catalog first, as an importer does.
+fn import_all(
+    admin: &collaboration::PocketBaseClient,
+    planned: &[catalog::CsvImport],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for each in planned {
+        let csv_file = &each.csv_file;
+        let state = read_import_state(admin)?;
+        let command = ImportCommand::new(
+            each,
+            &format!("Import the parts from database/{csv_file}.csv"),
+        )
+        .expecting(&state)
+        .allowing_uncommitted_changes(services::has_uncommitted_changes(each));
+        let reply = submit_import(admin, &command)?;
+        if !matches!(reply.outcome, ImportOutcome::Applied { .. }) {
+            return Err(format!("the import of {csv_file} did not apply: {}", reply.body).into());
+        }
+    }
+    Ok(())
+}
+
+/// Where `kicad-libraries` reads the team catalog.
+#[derive(Debug, PartialEq)]
+enum LibrariesFrom {
+    /// A disposable team server with these CSV files (empty for all).
+    Local(Vec<String>),
+    /// A running team server, signed in as this email.
+    Server { url: String, email: String },
+}
+
+/// Where `kicad-libraries` reads from and the folder it writes; `None`
+/// for arguments that are not understood.
+fn libraries_options(args: &[String]) -> Option<(LibrariesFrom, PathBuf)> {
+    let mut chosen = Vec::new();
+    let (mut url, mut email, mut folder) = (None, None, None);
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--csv" => {
+                for name in rest.next()?.split(',').map(str::trim) {
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let name = name.trim_end_matches(".csv").to_owned();
+                    if !chosen.contains(&name) {
+                        chosen.push(name);
+                    }
+                }
+            }
+            "--server" if url.is_none() => url = Some(rest.next()?.clone()),
+            "--email" if email.is_none() => email = Some(rest.next()?.clone()),
+            other if !other.starts_with("--") && folder.is_none() => {
+                folder = Some(PathBuf::from(other));
+            }
+            _ => return None,
+        }
+    }
+    let from = match (url, email) {
+        (None, None) => LibrariesFrom::Local(chosen),
+        (Some(url), Some(email)) if chosen.is_empty() => LibrariesFrom::Server { url, email },
+        _ => return None,
+    };
+    Some((from, folder?))
+}
+
+fn kicad_libraries(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let (from, folder) = libraries_options(args).ok_or(USAGE)?;
+    let folder = std::path::absolute(folder)?;
+    let started = Instant::now();
+    let mut local = None;
+    let client = match from {
+        LibrariesFrom::Server { url, email } => {
+            let password = std::env::var("KICAD_PARTS_PASSWORD").map_err(
+                |_| "Set KICAD_PARTS_PASSWORD to the password of the team member you sign in as.",
+            )?;
+            collaboration::PocketBaseClient::new(&url).authenticate("users", &email, &password)?
+        }
+        LibrariesFrom::Local(chosen) => {
+            let root = services::repository_root();
+            let csv_files = if chosen.is_empty() {
+                services::csv_files(&root)?
+            } else {
+                chosen
+            };
+            let planned = services::plan_all(&root, &csv_files)?;
+            let run = RunFolder::create(&root.join("target").join("local-team-server"))?;
+            let (server, admin, _superuser) = services::start(&root, run.path())?;
+            import_all(&admin, &planned)?;
+            local = Some((server, run));
+            admin
+        }
+    };
+    let imported = started.elapsed();
+    let reading = Instant::now();
+    let readback = read_back(&client)?;
+    let read = reading.elapsed();
+    if let Some((server, run)) = local {
+        server.stop();
+        run.remove()?;
+    }
+    let writing = Instant::now();
+    let outcome = kicad_libraries::update(&folder, &readback, &mut |blob| Ok(blob.bytes.clone()))?;
+    let written = writing.elapsed();
+    let libraries: Vec<serde_json::Value> = outcome
+        .libraries
+        .iter()
+        .map(|library| serde_json::json!({ "nickname": library.nickname, "path": library.path }))
+        .collect();
+    let summary = serde_json::json!({
+        "folder": folder.display().to_string(),
+        "entries": {
+            "current": outcome.current,
+            "older": outcome.older,
+            "archived": outcome.archived,
+        },
+        "files_written": outcome.written.len(),
+        "database_changed": outcome.database_changed,
+        "layout_changed": outcome.layout_changed,
+        "libraries": libraries,
+        "problems": outcome.problems,
+        "seconds": {
+            "start_and_import": imported.as_secs_f64(),
+            "read_team_catalog": read.as_secs_f64(),
+            "write_libraries": written.as_secs_f64(),
+        },
+    });
+    println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
 }
 
@@ -528,6 +662,44 @@ mod tests {
             "g-res",
         ] {
             assert!(options(refused).is_none(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn kicad_libraries_reads_a_local_or_a_running_server() {
+        let args =
+            |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_owned).collect() };
+        let options = |text: &str| libraries_options(&args(text));
+        assert_eq!(
+            options("out"),
+            Some((LibrariesFrom::Local(Vec::new()), PathBuf::from("out")))
+        );
+        assert_eq!(
+            options("--csv g-res,g-cap.csv out"),
+            Some((
+                LibrariesFrom::Local(vec!["g-res".into(), "g-cap".into()]),
+                PathBuf::from("out")
+            ))
+        );
+        assert_eq!(
+            options("--server http://127.0.0.1:8090 --email a@example.test out"),
+            Some((
+                LibrariesFrom::Server {
+                    url: "http://127.0.0.1:8090".into(),
+                    email: "a@example.test".into()
+                },
+                PathBuf::from("out")
+            ))
+        );
+        for refused in [
+            "",
+            "--csv g-res",
+            "a b",
+            "--server http://x out",
+            "--server http://x --email e --csv g-res out",
+            "--json out",
+        ] {
+            assert_eq!(options(refused), None, "{refused}");
         }
     }
 
