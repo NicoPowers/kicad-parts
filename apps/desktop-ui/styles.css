@@ -235,6 +235,52 @@ button:disabled {
   margin-top: 0.75rem;
 }
 
+/* The Copy buttons' hidden words need a positioned parent. */
+.kicad-library-copy {
+  position: relative;
+}
+
+.kicad-libraries-new,
+.team-code-confirm {
+  padding: 0.4rem 0.6rem;
+  background: var(--accent-soft);
+  border-left: 4px solid var(--accent);
+  border-radius: 4px;
+}
+
+.team-code-form label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.2rem;
+}
+
+.team-code-form .hint {
+  color: var(--muted);
+}
+
+.team-code-form input {
+  width: 5rem;
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+  text-transform: uppercase;
+}
+
+.team-code-confirm {
+  margin: 0.6rem 0;
+}
+
+.team-code-problem,
+.team-code-warning {
+  color: #6b4a00;
+}
+
+.kicad-libraries-other-teams {
+  margin: 0.4rem 0 0;
+  padding-left: 1.3rem;
+}
+
 .kicad-library-table-head {
   display: flex;
   align-items: center;

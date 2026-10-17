@@ -12,7 +12,7 @@
 //! data are deleted when the command ends; the repository is only read.
 //! Exits 1 if anything was lost.
 //!
-//! `catalog-import local-team-server [--desktop | --json] [--csv FILES]`
+//! `catalog-import local-team-server [--desktop | --json] [--csv FILES] [--team-code CODE]`
 //!
 //! Starts a disposable team server on 127.0.0.1 for trying the desktop app
 //! by hand: a PocketBase with every CSV file of the CSV catalog imported
@@ -20,6 +20,9 @@
 //! can edit, one who can only read), each with a new random password. It
 //! prints the server address and the accounts, then:
 //!
+//! - with `--team-code MA`, gives the team that code, which names its KiCad
+//!   libraries (MA-Parts); without it, someone who can edit chooses it in
+//!   the desktop app;
 //! - with `--csv g-res,g-cap` (a comma list; may be given more than once),
 //!   imports only those CSV files, which starts faster and leaves the rest
 //!   of the CSV catalog's parts out of the team catalog;
@@ -52,22 +55,24 @@
 //! including on Ctrl+C; a run killed outright is deleted by the next run.
 //! Nothing else is written.
 //!
-//! `catalog-import kicad-libraries [--csv FILES] FOLDER`
+//! `catalog-import kicad-libraries --team-code CODE [--csv FILES] FOLDER`
 //! `catalog-import kicad-libraries --server URL --email EMAIL FOLDER`
 //!
 //! Writes the KiCad libraries the desktop app makes (kicad-parts-f397) into
-//! `FOLDER`, without the app: the database library with one entry per part
-//! revision, and the symbols, footprints and 3D models it uses. With
-//! `--server`, it reads that team server, signed in as `EMAIL` with the
-//! password in the `KICAD_PARTS_PASSWORD` environment variable. Otherwise
-//! it starts a disposable team server with every CSV file imported (or
-//! only the `--csv` ones), as `local-team-server` does, and deletes it
-//! after reading. Prints one JSON summary: entry counts, files written,
-//! problems, and how long reading and writing took.
+//! `FOLDER/<team code>`, without the app: the database library with one
+//! entry per part revision, and the symbols, footprints and 3D models it
+//! uses. With `--server`, it reads that team server, signed in as `EMAIL`
+//! with the password in the `KICAD_PARTS_PASSWORD` environment variable,
+//! and refuses if the team has no code yet. Otherwise it starts a
+//! disposable team server with every CSV file imported (or only the
+//! `--csv` ones) and the code `--team-code` gives, as `local-team-server`
+//! does, and deletes it after reading. Prints one JSON summary: entry
+//! counts, files written, problems, and how long reading and writing took.
 
 use catalog::library_check::Group;
 use catalog::pocketbase::{
-    ImportCommand, ImportOutcome, read_back, read_import_state, submit_import,
+    ImportCommand, ImportOutcome, read_back, read_import_state, read_team, submit_import,
+    submit_team_code,
 };
 use catalog_import::run_folder::RunFolder;
 use catalog_import::services::{self, Allow, Member};
@@ -84,7 +89,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage: catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]\n       catalog-import local-team-server [--desktop | --json] [--csv g-res,g-cap ...]\n       catalog-import kicad-libraries [--csv g-res,g-cap ...] FOLDER\n       catalog-import kicad-libraries --server URL --email EMAIL FOLDER";
+const USAGE: &str = "usage: catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]\n       catalog-import local-team-server [--desktop | --json] [--csv g-res,g-cap ...] [--team-code MA]\n       catalog-import kicad-libraries --team-code MA [--csv g-res,g-cap ...] FOLDER\n       catalog-import kicad-libraries --server URL --email EMAIL FOLDER";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -170,7 +175,8 @@ enum Then {
 }
 
 fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let (then, chosen) = server_options(args).ok_or(USAGE)?;
+    let (team_code, args) = team_code_option(args).ok_or(USAGE)?;
+    let (then, chosen) = server_options(&args).ok_or(USAGE)?;
     let desktop = desktop_binary();
     if then == Then::OpenDesktop && !desktop.is_file() {
         return Err(format!(
@@ -210,6 +216,9 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     // footprint serves several categories), so each import reads the team
     // catalog first, as an importer does.
     import_all(&admin, &planned)?;
+    if let Some(code) = &team_code {
+        submit_team_code(&admin, code)?;
+    }
     let members = [
         services::add_member(&admin, "Local Editor", "editor@example.test", true)?,
         services::add_member(&admin, "Second Editor", "second.editor@example.test", true)?,
@@ -233,7 +242,11 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             writeln!(
                 out,
                 "{}",
-                serde_json::json!({ "url": server.url(), "accounts": accounts })
+                serde_json::json!({
+                    "url": server.url(),
+                    "accounts": accounts,
+                    "teamCode": team_code,
+                })
             )?;
             out.flush()?;
             drop(out);
@@ -417,19 +430,48 @@ fn libraries_options(args: &[String]) -> Option<(LibrariesFrom, PathBuf)> {
     Some((from, folder?))
 }
 
+/// The `--team-code CODE` among `args`, checked, and the other arguments;
+/// `None` when it is given twice or is not a team code.
+fn team_code_option(args: &[String]) -> Option<(Option<String>, Vec<String>)> {
+    let mut code = None;
+    let mut rest = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--team-code" {
+            let value = args.next()?;
+            if code.is_some() || kicad_libraries::team_code_problem(value).is_some() {
+                return None;
+            }
+            code = Some(value.clone());
+        } else {
+            rest.push(arg.clone());
+        }
+    }
+    Some((code, rest))
+}
+
 fn kicad_libraries(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let (from, folder) = libraries_options(args).ok_or(USAGE)?;
+    let (team_code, args) = team_code_option(args).ok_or(USAGE)?;
+    let (from, folder) = libraries_options(&args).ok_or(USAGE)?;
     let folder = std::path::absolute(folder)?;
     let started = Instant::now();
     let mut local = None;
-    let client = match from {
+    let (client, server_url) = match from {
         LibrariesFrom::Server { url, email } => {
+            if team_code.is_some() {
+                return Err("The team code of a running team server is chosen in the desktop app, not with --team-code.".into());
+            }
             let password = std::env::var("KICAD_PARTS_PASSWORD").map_err(
                 |_| "Set KICAD_PARTS_PASSWORD to the password of the team member you sign in as.",
             )?;
-            collaboration::PocketBaseClient::new(&url).authenticate("users", &email, &password)?
+            let client = collaboration::PocketBaseClient::new(&url)
+                .authenticate("users", &email, &password)?;
+            (client, url)
         }
         LibrariesFrom::Local(chosen) => {
+            let Some(code) = &team_code else {
+                return Err("Give the disposable team server a team code, such as --team-code MA: it names the KiCad libraries.".into());
+            };
             let root = services::repository_root();
             let csv_files = if chosen.is_empty() {
                 services::csv_files(&root)?
@@ -440,9 +482,22 @@ fn kicad_libraries(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let run = RunFolder::create(&root.join("target").join("local-team-server"))?;
             let (server, admin, _superuser) = services::start(&root, run.path())?;
             import_all(&admin, &planned)?;
+            submit_team_code(&admin, code)?;
+            let url = server.url().to_owned();
             local = Some((server, run));
-            admin
+            (admin, url)
         }
+    };
+    let settings = read_team(&client)?;
+    let naming = kicad_libraries::Naming::new(&settings.code).map_err(|_| {
+        format!(
+            "The team on {server_url} has no team code yet, so no KiCad libraries are made. Someone who can edit the team catalog chooses it in the desktop app's KiCad settings."
+        )
+    })?;
+    let team = kicad_libraries::Team {
+        id: settings.id,
+        server: server_url,
+        naming,
     };
     let imported = started.elapsed();
     let reading = Instant::now();
@@ -453,7 +508,9 @@ fn kicad_libraries(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         run.remove()?;
     }
     let writing = Instant::now();
-    let outcome = kicad_libraries::update(&folder, &readback, &mut |blob| Ok(blob.bytes.clone()))?;
+    let outcome = kicad_libraries::update(&folder, &readback, &team, &mut |blob| {
+        Ok(blob.bytes.clone())
+    })?;
     let written = writing.elapsed();
     let libraries: Vec<serde_json::Value> = outcome
         .libraries
@@ -461,7 +518,8 @@ fn kicad_libraries(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .map(|library| serde_json::json!({ "nickname": library.nickname, "path": library.path }))
         .collect();
     let summary = serde_json::json!({
-        "folder": folder.display().to_string(),
+        "folder": outcome.folder.display().to_string(),
+        "team_code": team.naming.code(),
         "entries": {
             "current": outcome.current,
             "older": outcome.older,
@@ -662,6 +720,24 @@ mod tests {
             "g-res",
         ] {
             assert!(options(refused).is_none(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_team_code_is_taken_out_and_checked() {
+        let args =
+            |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_owned).collect() };
+        assert_eq!(
+            team_code_option(&args("--json --team-code MA --csv g-res")),
+            Some((Some("MA".to_owned()), args("--json --csv g-res")))
+        );
+        assert_eq!(team_code_option(&args("out")), Some((None, args("out"))));
+        for refused in [
+            "--team-code",
+            "--team-code ma",
+            "--team-code MA --team-code SL",
+        ] {
+            assert_eq!(team_code_option(&args(refused)), None, "{refused}");
         }
     }
 

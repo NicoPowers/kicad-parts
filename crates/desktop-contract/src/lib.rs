@@ -48,6 +48,9 @@ pub mod command {
     pub const KICAD_LIBRARIES_STATUS: &str = "kicad_libraries_status";
     pub const KICAD_LIBRARIES_UPDATE: &str = "kicad_libraries_update";
     pub const KICAD_LIBRARIES_OPEN_FOLDER: &str = "kicad_libraries_open_folder";
+    pub const KICAD_LIBRARIES_COPIED: &str = "kicad_libraries_copied";
+    pub const TEAM_CODE_CHECK: &str = "team_code_check";
+    pub const TEAM_CODE_SET: &str = "team_code_set";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1430,7 +1433,10 @@ pub struct LibraryItemDetail {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KicadLibrariesStatus {
     pub state: KicadLibrariesState,
-    /// The folder the libraries are in.
+    /// The signed-in team's code, which names its libraries.
+    pub team_code: TeamCode,
+    /// The folder the team's libraries are in; the folder of every team's
+    /// libraries while the team has no code.
     pub folder: String,
     /// The libraries to add to KiCad, once an update has worked out which
     /// there are; empty before.
@@ -1440,11 +1446,19 @@ pub struct KicadLibrariesStatus {
     pub symbol_table: String,
     /// The same for Manage Footprint Libraries.
     pub footprint_table: String,
+    /// Libraries that appeared since the setup text was last copied: the
+    /// person must add them to KiCad.
+    pub new_libraries: Vec<KicadLibrary>,
+    /// The groups or fields changed while a KiCad that started earlier is
+    /// still running: it sees them only after a restart.
+    pub restart_kicad: bool,
     /// What the last update could not make, in plain sentences.
     pub problems: Vec<String>,
     pub odbc_driver: OdbcDriver,
     /// How many seconds KiCad waits before it reads the database again.
     pub refresh_seconds: u32,
+    /// Other teams' libraries on this computer, which stay as they are.
+    pub other_teams: Vec<OtherTeamLibraries>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1454,6 +1468,8 @@ pub enum KicadLibrariesState {
     SignedOut,
     /// Signed in; the first update waits for the team catalog to catch up.
     Waiting,
+    /// The team has no code yet, so no libraries are made.
+    NeedsCode,
     Updating,
     UpToDate {
         /// When the last update finished, in milliseconds since 1970 (UTC).
@@ -1462,15 +1478,51 @@ pub enum KicadLibrariesState {
         current: u32,
         older: u32,
         archived: u32,
-        /// The groups or fields changed, which a running KiCad sees only
-        /// after a restart.
-        restart_kicad: bool,
     },
     Failed {
         at_ms: u64,
         /// A plain sentence, such as which file KiCad holds open.
         reason: String,
     },
+}
+
+/// The signed-in team's code.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TeamCode {
+    /// Not signed in, or not read from the team server yet.
+    Unknown,
+    /// The team has no code yet.
+    Missing {
+        /// This person may choose it.
+        can_set: bool,
+        /// Who may choose it, to ask.
+        editors: Vec<String>,
+    },
+    Set {
+        code: String,
+        set_by: String,
+    },
+}
+
+/// What choosing `code` would do, before it is saved.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamCodeCheck {
+    /// Why it is not a team code; nothing may be saved.
+    pub problem: Option<String>,
+    /// A reason to think twice, such as another team's libraries on this
+    /// computer using the same code.
+    pub warning: Option<String>,
+}
+
+/// Another team's libraries on this computer.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OtherTeamLibraries {
+    pub code: String,
+    /// The team server they were made from.
+    pub server: String,
+    /// When they were last updated, in milliseconds since 1970 (UTC).
+    pub updated_at_ms: Option<u64>,
 }
 
 /// One library a person adds to KiCad.

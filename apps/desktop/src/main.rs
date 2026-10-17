@@ -11,7 +11,7 @@ use desktop_contract::{
     AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, FootprintDrawing,
     KicadLibrariesStatus, LibrariesView, LibraryCheckView, LibraryItemDetail, LibraryItemRequest,
     LibraryItems, LibraryItemsRequest, OurLibraries, PartDetail, PreviewOutcome, PreviewRequest,
-    PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest,
+    PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCodeCheck,
     TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
     TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
     TeamPick, TeamPickRequest, TeamSameMpn, TeamStatus,
@@ -533,10 +533,40 @@ async fn kicad_libraries_update(
     blocking(move || libraries.update_now()).await
 }
 
+/// The person copied the setup text for `kind` (`symbols` or
+/// `footprints`).
+#[tauri::command]
+async fn kicad_libraries_copied(
+    libraries: State<'_, Libraries>,
+    kind: String,
+) -> Result<KicadLibrariesStatus, String> {
+    let libraries = libraries.inner().clone();
+    blocking(move || libraries.copied(&kind)).await
+}
+
+#[tauri::command]
+async fn team_code_check(
+    libraries: State<'_, Libraries>,
+    code: String,
+) -> Result<TeamCodeCheck, String> {
+    let libraries = libraries.inner().clone();
+    blocking(move || libraries.check_code(&code)).await
+}
+
+/// Chooses the team's code on the team server, once.
+#[tauri::command]
+async fn team_code_set(
+    libraries: State<'_, Libraries>,
+    code: String,
+) -> Result<KicadLibrariesStatus, String> {
+    let libraries = libraries.inner().clone();
+    blocking(move || libraries.set_code(&code)).await?
+}
+
 /// Shows the KiCad libraries folder in the system's file manager.
 #[tauri::command]
 async fn kicad_libraries_open_folder(libraries: State<'_, Libraries>) -> Result<(), String> {
-    let folder = libraries.inner().folder().to_path_buf();
+    let folder = libraries.inner().folder();
     blocking(move || {
         std::fs::create_dir_all(&folder)
             .map_err(|error| format!("Could not make {}: {error}", folder.display()))?;
@@ -667,6 +697,9 @@ fn main() {
             kicad_libraries_status,
             kicad_libraries_update,
             kicad_libraries_open_folder,
+            kicad_libraries_copied,
+            team_code_check,
+            team_code_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -792,6 +825,9 @@ mod tests {
             command::KICAD_LIBRARIES_STATUS,
             command::KICAD_LIBRARIES_UPDATE,
             command::KICAD_LIBRARIES_OPEN_FOLDER,
+            command::KICAD_LIBRARIES_COPIED,
+            command::TEAM_CODE_CHECK,
+            command::TEAM_CODE_SET,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

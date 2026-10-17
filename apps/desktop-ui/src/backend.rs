@@ -134,6 +134,28 @@ pub async fn kicad_libraries_open_folder() -> Result<(), String> {
     call(command::KICAD_LIBRARIES_OPEN_FOLDER, &NoArgs {}).await
 }
 
+#[derive(Serialize)]
+struct KindArgs<'a> {
+    kind: &'a str,
+}
+
+pub async fn kicad_libraries_copied(kind: &str) -> Result<KicadLibrariesStatus, String> {
+    call(command::KICAD_LIBRARIES_COPIED, &KindArgs { kind }).await
+}
+
+#[derive(Serialize)]
+struct CodeArgs<'a> {
+    code: &'a str,
+}
+
+pub async fn team_code_check(code: &str) -> Result<desktop_contract::TeamCodeCheck, String> {
+    call(command::TEAM_CODE_CHECK, &CodeArgs { code }).await
+}
+
+pub async fn team_code_set(code: &str) -> Result<KicadLibrariesStatus, String> {
+    call(command::TEAM_CODE_SET, &CodeArgs { code }).await
+}
+
 pub async fn team_sign_in(request: SignInRequest) -> Result<TeamStatus, String> {
     call(command::TEAM_SIGN_IN, &SignInArgs { request }).await
 }

@@ -3552,6 +3552,7 @@ module.exports = {
   isCadItemRevision: isCadItemRevision,
   trimSpace: trimSpace,
   isReservedName: isReservedName,
+  catalogEditor: catalogEditor,
   hasInvisible: hasInvisible,
   guardedCollection: guardedCollection,
   collectionChangeProblem: collectionChangeProblem,

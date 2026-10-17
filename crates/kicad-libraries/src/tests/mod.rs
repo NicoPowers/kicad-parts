@@ -3,9 +3,10 @@
 mod layout;
 mod safety;
 
+use crate::{Naming, Team};
 use catalog::pocketbase::{
     CatalogReadback, StoredArchiveEntry, StoredBlob, StoredCadItem, StoredCadItemRevision,
-    StoredCategoryRevision, StoredPart, StoredPartDetails, StoredPartRevision,
+    StoredCategoryRevision, StoredChange, StoredPart, StoredPartDetails, StoredPartRevision,
 };
 use catalog::{
     BlobId, CadItemDetails, CadItemId, CadItemKind, CadItemRevisionId, CadReference,
@@ -15,14 +16,40 @@ use catalog::{
 };
 use std::path::{Path, PathBuf};
 
+/// The team the tests write for, with code `MA`.
+pub fn team() -> Team {
+    Team {
+        id: "team-settings-ma".into(),
+        server: "http://127.0.0.1:8090".into(),
+        naming: Naming::new("MA").unwrap(),
+    }
+}
+
 /// A folder under `target/` for one test, emptied first.
 pub fn test_folder(name: &str) -> PathBuf {
     let folder = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/kicad-libraries-tests")
         .join(name);
+    clear_read_only(&folder);
     let _ = std::fs::remove_dir_all(&folder);
     std::fs::create_dir_all(&folder).unwrap();
     std::path::absolute(folder).unwrap()
+}
+
+/// Clears the read-only mark of every file under `folder`, so it can be
+/// deleted or changed.
+pub fn clear_read_only(folder: &Path) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            clear_read_only(&path);
+        } else {
+            let _ = crate::files::set_read_only(&path, false);
+        }
+    }
 }
 
 /// A symbol entry as the CSV import stores one: the exact bytes of one
@@ -54,6 +81,8 @@ pub fn footprint_bytes(name: &str, models: &[&str]) -> Vec<u8> {
 pub struct Fixture {
     pub catalog: CatalogReadback,
     seq: u64,
+    /// The KiCad file version new symbol revisions say they were saved in.
+    pub symbol_version: Option<String>,
 }
 
 /// A CAD item revision a part or footprint names.
@@ -104,6 +133,26 @@ impl Fixture {
             });
     }
 
+    /// Records the next Change and returns its ID.
+    fn change(&mut self) -> String {
+        self.seq += 1;
+        let id = format!("change-{}", self.seq);
+        self.catalog.changes.push(StoredChange {
+            id: id.clone(),
+            seq: self.seq,
+            kind: "edit".into(),
+            reason: String::new(),
+            correlation_id: id.clone(),
+            actor: String::new(),
+            actor_name: String::new(),
+            created: String::new(),
+            source_commit: String::new(),
+            sources: String::new(),
+            summary: String::new(),
+        });
+        id
+    }
+
     fn blob(&mut self, bytes: Vec<u8>) -> String {
         let sha256 = sha256_hex(&bytes);
         let id = BlobId::new(&sha256).to_string();
@@ -131,11 +180,12 @@ impl Fixture {
     ) -> Bound {
         let id = CadItemId::new(kind, key).to_string();
         if !self.catalog.cad_items.iter().any(|item| item.id == id) {
+            let change = self.change();
             self.catalog.cad_items.push(StoredCadItem {
                 id: id.clone(),
                 kind: kind.as_str().to_owned(),
                 key: key.to_owned(),
-                first_change: String::new(),
+                first_change: change,
             });
         }
         let number = self
@@ -150,7 +200,15 @@ impl Fixture {
             kind,
             key: key.to_owned(),
             format: format.to_owned(),
-            format_version: (kind != CadItemKind::Model3d).then(|| "20241209".to_owned()),
+            format_version: match kind {
+                CadItemKind::Symbol => Some(
+                    self.symbol_version
+                        .clone()
+                        .unwrap_or_else(|| "20241209".to_owned()),
+                ),
+                CadItemKind::Footprint => Some("20241229".to_owned()),
+                CadItemKind::Model3d => None,
+            },
             blob_sha256: sha256_hex(&bytes),
             blob_size: bytes.len() as u64,
             model_references: models,

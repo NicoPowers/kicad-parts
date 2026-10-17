@@ -2,32 +2,39 @@
 //! SQLite3 ODBC driver, and the `.kicad_dbl` file that tells KiCad how.
 //!
 //! KiCad may be reading the database at any moment, so it is changed in
-//! place, in one transaction, and only when something differs: a reader
-//! sees the old rows or the new ones, never a mix. The database uses
-//! write-ahead logging, so readers never block the update and the update
-//! never blocks them. Tables and columns are only ever added, because a
-//! running KiCad keeps the `.kicad_dbl` it loaded and would fail on a
-//! table or column it expects that is gone.
+//! place, in one transaction, and only when something differs. A query
+//! sees one table as it was before the update or after it, never half
+//! changed. KiCad's background refresh reads one table at a time, outside
+//! a transaction (`backgroundRefreshWorker` in KiCad's
+//! `eeschema/sch_io/database/sch_io_database.cpp`), so during one refresh a
+//! row that moves between groups can show in both or in neither. A placed
+//! part's link still resolves, because KiCad's `LoadSymbol` then looks in
+//! every table. The database uses write-ahead logging, so readers never
+//! block the update and the update never blocks them.
+//!
+//! Tables and columns are only ever added, because a running KiCad keeps
+//! the `.kicad_dbl` it loaded and would fail on a table or column it
+//! expects that is gone. A row is only deleted when its entry moves to
+//! another table: an entry missing from the Catalog's latest reading keeps
+//! its row, because a design may link to it.
 
-use crate::plan::{EXCLUDE_FROM_BOM, FIXED_COLUMNS, TablePlan};
+use crate::plan::{EXCLUDE_FROM_BOM, FIXED_COLUMNS, Naming, TablePlan};
 use rusqlite::{Connection, TransactionBehavior, params_from_iter};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
-/// The database file, next to the `.kicad_dbl`.
-pub const DATABASE_FILE: &str = "team-parts.sqlite";
 /// How long the update waits for a reader that holds a lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often KiCad reads the database again, in seconds, so new entries
 /// show up without restarting it.
 pub const REFRESH_SECONDS: u32 = 10;
 
-/// The `.kicad_dbl` for `tables`: the listed ones become groups, keyed by
-/// entry name alone (`globally_unique_keys`), so a placed part's link
-/// never names its group and keeps working when its row moves.
-pub fn dbl_json(tables: &[TablePlan]) -> String {
+/// The `.kicad_dbl` for `tables`: each becomes a group, keyed by entry
+/// name alone (`globally_unique_keys`), so a placed part's link never
+/// names its group and keeps working when its row moves.
+pub fn dbl_json(tables: &[TablePlan], naming: &Naming) -> String {
     let fixed_field = |column: &str, shown_on_add: bool, in_chooser: bool| {
         json!({
             "column": column,
@@ -39,7 +46,6 @@ pub fn dbl_json(tables: &[TablePlan]) -> String {
     };
     let libraries: Vec<Value> = tables
         .iter()
-        .filter(|table| table.listed)
         .map(|table| {
             let mut fields = vec![
                 fixed_field("IPN", false, true),
@@ -72,7 +78,7 @@ pub fn dbl_json(tables: &[TablePlan]) -> String {
         .collect();
     let dbl = json!({
         "meta": { "version": 1 },
-        "name": "Team parts",
+        "name": naming.database_nickname(),
         "description": "Parts from the team catalog, one entry per revision. Made by the KiCad Parts app, which replaces any change made here.",
         "globally_unique_keys": true,
         "source": {
@@ -85,8 +91,9 @@ pub fn dbl_json(tables: &[TablePlan]) -> String {
             // `{SQLite3}` of the CSV catalog's .kicad_dbl names no
             // installed driver, so KiCad could not load it.
             "connection_string": format!(
-                "DRIVER={{{}}};DATABASE=${{CWD}}/{DATABASE_FILE}",
-                crate::odbc::DRIVER
+                "DRIVER={{{}}};DATABASE=${{CWD}}/{}",
+                crate::odbc::DRIVER,
+                naming.database_file()
             ),
         },
         "cache": { "max_size": 256, "max_age": REFRESH_SECONDS },
@@ -108,9 +115,18 @@ struct Existing {
     rows: BTreeMap<String, Vec<String>>,
 }
 
-/// Brings the database at `path` to `tables`, in one transaction. Returns
-/// whether anything changed. Creates the database the first time.
-pub fn sync(path: &Path, tables: &[TablePlan]) -> Result<bool, String> {
+/// What [`sync`] did.
+#[derive(Debug, Default)]
+pub struct Synced {
+    pub changed: bool,
+    /// Entries kept although the plan has them in no table.
+    pub kept: Vec<String>,
+}
+
+/// Brings the database at `path` to `tables`, in one transaction that
+/// reads the tables as well as changing them, so nothing changes between
+/// the reading and the writing. Creates the database the first time.
+pub fn sync(path: &Path, tables: &[TablePlan]) -> Result<Synced, String> {
     let fail = |error: rusqlite::Error| format!("{error}");
     let mut connection = Connection::open(path).map_err(fail)?;
     connection.busy_timeout(BUSY_TIMEOUT).map_err(fail)?;
@@ -122,21 +138,29 @@ pub fn sync(path: &Path, tables: &[TablePlan]) -> Result<bool, String> {
         // KiCad already reads keeps its mode, which is still safe.
         let _ = connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0));
     }
-    let existing = read_tables(&connection, tables).map_err(fail)?;
-    let statements = changes(tables, &existing);
-    if statements.is_empty() {
-        return Ok(false);
-    }
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(fail)?;
+    let existing = read_tables(&transaction, tables).map_err(fail)?;
+    let (statements, kept) = changes(tables, &existing);
+    if statements.is_empty() {
+        // Nothing to write: end the transaction without touching the file.
+        transaction.rollback().map_err(fail)?;
+        return Ok(Synced {
+            changed: false,
+            kept,
+        });
+    }
     for (sql, values) in &statements {
         transaction
             .execute(sql, params_from_iter(values.iter()))
             .map_err(fail)?;
     }
     transaction.commit().map_err(fail)?;
-    Ok(true)
+    Ok(Synced {
+        changed: true,
+        kept,
+    })
 }
 
 fn read_tables(
@@ -219,9 +243,18 @@ fn sql_value(column: &str, value: &str) -> rusqlite::types::Value {
 }
 
 /// The statements that bring `existing` to `tables`, in a fixed order:
-/// tables in plan order, and in each, new columns, then removed rows, then
-/// changed rows, then new rows, each by entry.
-fn changes(tables: &[TablePlan], existing: &BTreeMap<String, Existing>) -> Vec<Statement> {
+/// tables in plan order, and in each, new columns, then rows that moved
+/// away, then changed and new rows by entry. Also the entries kept because
+/// the plan has them in no table.
+fn changes(
+    tables: &[TablePlan],
+    existing: &BTreeMap<String, Existing>,
+) -> (Vec<Statement>, Vec<String>) {
+    let planned: BTreeSet<&str> = tables
+        .iter()
+        .flat_map(|table| table.rows.iter().map(|row| row.entry()))
+        .collect();
+    let mut kept = Vec::new();
     let mut statements = Vec::new();
     for table in tables {
         let wanted: Vec<String> = FIXED_COLUMNS
@@ -284,7 +317,15 @@ fn changes(tables: &[TablePlan], existing: &BTreeMap<String, Existing>) -> Vec<S
             .map(|row| (row.entry(), full(&row.values)))
             .collect();
         for entry in old_rows.keys() {
-            if !new_rows.contains_key(entry.as_str()) {
+            if new_rows.contains_key(entry.as_str()) {
+                continue;
+            }
+            if !planned.contains(entry.as_str()) {
+                // Missing from this reading of the Catalog, such as a part
+                // whose details could not be read: a design may link to
+                // it, so its row stays as it was.
+                kept.push(entry.clone());
+            } else {
                 statements.push((
                     format!("DELETE FROM {name} WHERE \"Entry\" = ?1"),
                     vec![rusqlite::types::Value::Text(entry.clone())],
@@ -331,5 +372,6 @@ fn changes(tables: &[TablePlan], existing: &BTreeMap<String, Existing>) -> Vec<S
             }
         }
     }
-    statements
+    kept.sort();
+    (statements, kept)
 }

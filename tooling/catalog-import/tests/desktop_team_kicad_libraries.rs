@@ -1,14 +1,17 @@
-//! The desktop keeps the KiCad libraries up to date while signed in
-//! (kicad-parts-f397): after the sign-in catches up, after a Change by
-//! someone else, and on Update now. A disposable PocketBase on 127.0.0.1
-//! has the resistors imported; the libraries are written under target/.
+//! The desktop keeps the signed-in team's KiCad libraries up to date
+//! (kicad-parts-f397): nothing is made until the team has a code; then
+//! after the sign-in catches up, after a Change by someone else, and on
+//! Update now. Each team gets its own folder. A disposable PocketBase on
+//! 127.0.0.1 has the resistors imported; the libraries are written under
+//! target/.
 
 use catalog::PartRevision;
 use catalog::pocketbase::{EditCommand, ImportCommand, read_back, submit_edit, submit_import};
 use catalog_browser::kicad_libraries::KicadLibraries;
 use catalog_browser::team::TeamCatalog;
 use catalog_import::services;
-use desktop_contract::{KicadLibrariesState, SignInRequest};
+use desktop_contract::{KicadLibrariesState, SignInRequest, TeamCode};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,6 +41,24 @@ fn updated_at(state: &KicadLibrariesState) -> Option<u64> {
     }
 }
 
+/// Clears every read-only mark under `folder`, so it can be deleted.
+fn clear_read_only(folder: &Path) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            clear_read_only(&path);
+        } else if let Ok(metadata) = std::fs::metadata(&path) {
+            let mut permissions = metadata.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(&path, permissions);
+        }
+    }
+}
+
 #[test]
 fn the_libraries_follow_the_team_catalog() {
     let root = services::repository_root();
@@ -50,27 +71,80 @@ fn the_libraries_follow_the_team_catalog() {
             .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
     )
     .unwrap();
-    let member = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
+    let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
+    let viewer = services::add_member(&admin, "Vic Viewer", "vic@example.test", false).unwrap();
     let folder = root
         .join("target")
         .join("kicad-libraries-tests")
         .join("desktop");
+    clear_read_only(&folder);
     let _ = std::fs::remove_dir_all(&folder);
+    // Another team's libraries are already on this computer, with the code
+    // SL.
+    std::fs::create_dir_all(folder.join("SL")).unwrap();
+    std::fs::write(
+        folder.join("SL").join(kicad_libraries::STATE_FILE),
+        r#"{"team_id":"another-team","server":"http://127.0.0.1:9999","code":"SL","updated_at_ms":1}"#,
+    )
+    .unwrap();
 
+    let sign_in = |team: &TeamCatalog, member: &services::Member| {
+        team.sign_in(SignInRequest {
+            server_url: server.url().to_owned(),
+            email: member.email.clone(),
+            password: member.password.clone(),
+        });
+    };
+
+    // A member who cannot edit sees who may choose the code, and cannot.
+    let team = Arc::new(TeamCatalog::open(
+        state.path().join("viewer.json"),
+        Some(server.url().to_owned()),
+        None,
+    ));
+    let libraries = KicadLibraries::start(folder.clone(), team.clone());
+    assert_eq!(libraries.status().state, KicadLibrariesState::SignedOut);
+    sign_in(&team, &viewer);
+    wait_for(&libraries, "the team to need a code", |state| {
+        *state == KicadLibrariesState::NeedsCode
+    });
+    assert_eq!(
+        libraries.status().team_code,
+        TeamCode::Missing {
+            can_set: false,
+            editors: vec!["Ada Editor".to_owned()]
+        }
+    );
+    assert_eq!(
+        libraries.set_code("MA").unwrap_err(),
+        "Only team members who can edit the catalog can choose the team code."
+    );
+    team.sign_out();
+
+    // Someone who can edit chooses it.
     let team = Arc::new(TeamCatalog::open(
         state.path().join("team.json"),
         Some(server.url().to_owned()),
         None,
     ));
     let libraries = KicadLibraries::start(folder.clone(), team.clone());
-    assert_eq!(libraries.status().state, KicadLibrariesState::SignedOut);
-    assert!(libraries.status().symbol_table.is_empty());
-
-    team.sign_in(SignInRequest {
-        server_url: server.url().to_owned(),
-        email: member.email.clone(),
-        password: member.password.clone(),
+    sign_in(&team, &editor);
+    wait_for(&libraries, "the team to need a code", |state| {
+        *state == KicadLibrariesState::NeedsCode
     });
+    assert!(libraries.status().symbol_table.is_empty());
+    assert!(!folder.join("MA").exists(), "no libraries without a code");
+    let check = libraries.check_code("ma");
+    assert!(check.problem.is_some());
+    let check = libraries.check_code("SL");
+    assert_eq!(check.problem, None);
+    assert!(
+        check.warning.unwrap().contains(
+            "The SL libraries of another team, from the team server http://127.0.0.1:9999"
+        )
+    );
+    assert_eq!(libraries.check_code("MA").warning, None);
+    libraries.set_code("MA").unwrap();
     let first = wait_for(&libraries, "the first update", |state| {
         updated_at(state).is_some()
     });
@@ -78,25 +152,47 @@ fn the_libraries_follow_the_team_catalog() {
         current,
         older,
         archived,
-        restart_kicad,
         ..
     } = first
     else {
         unreachable!()
     };
     assert!(current > 10, "{current}");
-    assert_eq!((older, archived, restart_kicad), (0, 0, false));
+    assert_eq!((older, archived), (0, 0));
     let status = libraries.status();
-    assert!(folder.join("team-parts.kicad_dbl").is_file());
-    assert!(folder.join("symbols").join("g-res.kicad_sym").is_file());
+    assert!(!status.restart_kicad);
+    assert_eq!(
+        status.team_code,
+        TeamCode::Set {
+            code: "MA".into(),
+            set_by: "Ada Editor".into()
+        }
+    );
+    let team_folder = folder.join("MA");
+    assert_eq!(status.folder, team_folder.display().to_string());
+    assert!(team_folder.join("MA-Parts.kicad_dbl").is_file());
+    assert!(
+        team_folder
+            .join("symbols")
+            .join("MA-res-20241209.kicad_sym")
+            .is_file()
+    );
     assert!(
         status
             .symbol_table
-            .contains("(lib (name \"team-parts\")(type \"Database\")")
+            .contains("(lib (name \"MA-Parts\")(type \"Database\")")
     );
-    assert!(status.footprint_table.contains("(name \"g-Resistor_SMD\")"));
+    assert!(
+        status
+            .footprint_table
+            .contains("(name \"MA-Resistor_SMD\")")
+    );
     assert_eq!(status.libraries[0].kind, "parts");
     assert_eq!(status.problems, Vec::<String>::new());
+    // The other team's libraries are listed and left as they are.
+    assert_eq!(status.other_teams.len(), 1);
+    assert_eq!(status.other_teams[0].code, "SL");
+    assert_eq!(std::fs::read_dir(folder.join("SL")).unwrap().count(), 1);
 
     // Someone else changes a symbol, which adds a revision: one update
     // follows by itself, about two seconds later.
@@ -139,4 +235,5 @@ fn the_libraries_follow_the_team_catalog() {
         *state == KicadLibrariesState::SignedOut
     });
     server.stop();
+    clear_read_only(&folder);
 }

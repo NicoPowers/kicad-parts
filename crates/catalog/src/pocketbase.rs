@@ -2367,14 +2367,76 @@ pub fn read_back(client: &PocketBaseClient) -> CollabResult<CatalogReadback> {
     Ok(readback)
 }
 
+/// The route that reads the team's settings.
+pub const TEAM_ROUTE: &str = "/api/team";
+/// The route that sets the team code, once.
+pub const TEAM_CODE_ROUTE: &str = "/api/team/code";
+
+/// The team's settings (`GET /api/team`, see `infra/pocketbase/pb_hooks/
+/// team.pb.js`).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamSettings {
+    /// The settings record's ID, which names the team on every computer.
+    pub id: String,
+    /// Such as `MA`; blank until someone who can edit chooses it.
+    pub code: String,
+    /// Who chose the code.
+    #[serde(default)]
+    pub code_set_by: String,
+    /// The members who may choose it.
+    #[serde(default)]
+    pub editors: Vec<String>,
+}
+
+/// Reads the team's settings.
+pub fn read_team(client: &PocketBaseClient) -> CollabResult<TeamSettings> {
+    client.get(TEAM_ROUTE)?.json()
+}
+
+/// What setting the team code did.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TeamCodeOutcome {
+    Applied,
+    /// The team already had this code.
+    Noop,
+    /// The team already has another code, which never changes.
+    AlreadySet {
+        code: String,
+    },
+}
+
+/// Sets the team code. Only members who can edit the Catalog may.
+pub fn submit_team_code(client: &PocketBaseClient, code: &str) -> CollabResult<TeamCodeOutcome> {
+    let body = serde_json::json!({
+        "correlationId": collaboration::CorrelationId::generate().to_string(),
+        "code": code,
+    });
+    let reply = client.post_json(TEAM_CODE_ROUTE, &body)?;
+    if reply.status == 409 {
+        let answer: Value = serde_json::from_str(&reply.body)
+            .map_err(|parse| CollabError::Protocol(format!("{parse}: {}", reply.body)))?;
+        return Ok(TeamCodeOutcome::AlreadySet {
+            code: answer["code"].as_str().unwrap_or_default().to_owned(),
+        });
+    }
+    let answer: Value = reply.json()?;
+    Ok(match answer["outcome"].as_str() {
+        Some("noop") => TeamCodeOutcome::Noop,
+        _ => TeamCodeOutcome::Applied,
+    })
+}
+
 /// Reads the Catalog records that say what each part and CAD item is and
 /// which revisions exist, without downloading any blob: parts, part
 /// details, part revisions, archive entries, categories, CAD items, CAD
-/// item revisions and blob records. Changes, CSV reviews, remembered
-/// matches, import problems and audit entries are left empty. Use
-/// [`download_blob`] for the bytes that are needed.
+/// item revisions, blob records and Changes (which say when each CAD item
+/// was first saved). CSV reviews, remembered matches, import problems and
+/// audit entries are left empty. Use [`download_blob`] for the bytes that
+/// are needed.
 pub fn read_revisions(client: &PocketBaseClient) -> CollabResult<CatalogReadback> {
     Ok(CatalogReadback {
+        changes: client.list_records("catalog_changes", "", "seq")?,
         parts: client.list_records("catalog_parts", "", "ipn")?,
         part_details: client.list_records("catalog_part_details", "", "part,number")?,
         part_revisions: client.list_records("catalog_part_revisions", "", "part,number")?,
