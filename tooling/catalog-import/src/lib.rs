@@ -8,6 +8,15 @@
 //!   migrations and hooks, and prepares import commands.
 //! - [`checkout`] refuses to import from a checkout older than the team
 //!   catalog's latest imports.
+//! - [`imports`] imports CSV files as a team does, once or twice.
+//! - [`whole_catalog`] checks what lies between the CSV files once all of
+//!   them are imported into one team catalog.
+//! - [`csv_kicad_library`] compares the generated KiCad libraries with the
+//!   CSV catalog's own, `database/parts.sqlite`, and holds the list of
+//!   meant differences.
+//! - [`full_proof`] runs all of it for `catalog-import full-pilot`, with
+//!   [`libraries`] writing the KiCad libraries and [`snapshot`] showing
+//!   which files kept their bytes.
 
 pub mod checkout;
 pub mod csv_kicad_library;
