@@ -28,11 +28,18 @@ fn the_team_code_is_set_once_by_someone_who_can_edit() {
     let editor = member(&server, &admin, "Ada Editor", true);
     let viewer = member(&server, &admin, "Vic Viewer", false);
 
-    // Every member reads the settings: no code yet, and who may choose it.
+    // Someone who can edit but has no name.
+    services::add_member(&admin, "", "nameless@example.test", true).unwrap();
+
+    // Every member reads the settings: no code yet, and who may choose it,
+    // by name only: the others are counted, never shown by email.
     let settings = read_team(&viewer).unwrap();
     assert_eq!(settings.code, "");
     assert_eq!(settings.id.len(), 15);
     assert_eq!(settings.editors, ["Ada Editor"]);
+    assert_eq!(settings.unnamed_editors, 1);
+    let body = viewer.get(catalog::pocketbase::TEAM_ROUTE).unwrap().body;
+    assert!(!body.contains('@'), "{body}");
 
     // A member who cannot edit is refused.
     match submit_team_code(&viewer, "MA") {

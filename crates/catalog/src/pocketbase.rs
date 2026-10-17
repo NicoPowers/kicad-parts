@@ -2384,9 +2384,13 @@ pub struct TeamSettings {
     /// Who chose the code.
     #[serde(default)]
     pub code_set_by: String,
-    /// The members who may choose it.
+    /// The names of the members who may choose it.
     #[serde(default)]
     pub editors: Vec<String>,
+    /// How many members may choose it but have no name. The route never
+    /// gives their emails.
+    #[serde(default)]
+    pub unnamed_editors: u32,
 }
 
 /// Reads the team's settings.

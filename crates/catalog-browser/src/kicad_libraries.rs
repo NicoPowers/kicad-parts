@@ -139,6 +139,7 @@ impl KicadLibraries {
             (_, Some(team)) if team.code.is_empty() => TeamCode::Missing {
                 can_set: known.can_edit,
                 editors: team.editors.clone(),
+                unnamed_editors: team.unnamed_editors,
             },
             (_, Some(team)) => TeamCode::Set {
                 code: team.code.clone(),

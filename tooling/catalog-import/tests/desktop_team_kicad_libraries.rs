@@ -112,7 +112,8 @@ fn the_libraries_follow_the_team_catalog() {
         libraries.status().team_code,
         TeamCode::Missing {
             can_set: false,
-            editors: vec!["Ada Editor".to_owned()]
+            editors: vec!["Ada Editor".to_owned()],
+            unnamed_editors: 0,
         }
     );
     assert_eq!(

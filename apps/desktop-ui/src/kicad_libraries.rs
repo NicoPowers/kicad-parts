@@ -431,16 +431,32 @@ fn TeamCodeChoice(status: RwSignal<Option<KicadLibrariesStatus>>) -> impl IntoVi
                 </p>
             }
             .into_any(),
-            Some(TeamCode::Missing { can_set: false, editors }) => view! {
+            Some(TeamCode::Missing {
+                can_set: false,
+                mut editors,
+                unnamed_editors,
+            }) => view! {
                 <p class="team-code" id="team-code">
-                    {if editors.is_empty() {
-                        "The team has no code yet. Ask someone who can edit the team catalog to choose it.".to_owned()
-                    } else {
-                        format!(
-                            "The team has no code yet. Ask someone who can edit the team catalog to choose it: {}.",
-                            listed(&editors)
-                        )
-                    }}
+                    {
+                        // Members are named, never shown by email.
+                        match unnamed_editors {
+                            0 => {}
+                            1 => editors.push(
+                                "a member without a name in the team catalog".to_owned(),
+                            ),
+                            many => editors.push(format!(
+                                "{many} members without a name in the team catalog"
+                            )),
+                        }
+                        if editors.is_empty() {
+                            "The team has no code yet. Ask someone who can edit the team catalog to choose it.".to_owned()
+                        } else {
+                            format!(
+                                "The team has no code yet. Ask someone who can edit the team catalog to choose it: {}.",
+                                listed(&editors)
+                            )
+                        }
+                    }
                 </p>
             }
             .into_any(),

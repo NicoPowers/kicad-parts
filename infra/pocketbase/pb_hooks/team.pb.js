@@ -4,9 +4,11 @@
 // 1792500000_team_settings.js).
 //
 // GET /api/team, for any signed-in member:
-//   200 { id, code, codeSetBy, editors: [name] }
+//   200 { id, code, codeSetBy, editors: [name], unnamedEditors }
 //   id names the team on every computer; code is blank until chosen;
-//   editors are the members who may choose it, so others know who to ask.
+//   editors are the names of the members who may choose it, so others know
+//   who to ask. Members are shown by name only, never by email:
+//   unnamedEditors counts those who may choose it but have no name.
 //
 // POST /api/team/code, for members marked can_edit_catalog and superusers:
 //   { correlationId, code }
@@ -24,14 +26,24 @@ routerAdd(
     if (!settings) {
       throw new NotFoundError("this team server has no team settings");
     }
-    const editors = $app
-      .findRecordsByFilter("users", "can_edit_catalog = true", "name,email", 100, 0)
-      .map((user) => user.getString("name") || user.getString("email"));
+    const lib = require(`${__hooks}/catalog_lib.js`);
+    const editors = [];
+    let unnamedEditors = 0;
+    for (const user of $app.findRecordsByFilter("users", "can_edit_catalog = true", "name", 100, 0)) {
+      // The same names a Change shows; a reserved name is no name.
+      const name = user.getString("name");
+      if (name && !lib.isReservedName(name)) {
+        editors.push(name);
+      } else {
+        unnamedEditors += 1;
+      }
+    }
     return e.json(200, {
       id: settings.id,
       code: settings.getString("code"),
       codeSetBy: settings.getString("code_set_by"),
       editors: editors,
+      unnamedEditors: unnamedEditors,
     });
   },
   $apis.requireAuth("users", "_superusers"),

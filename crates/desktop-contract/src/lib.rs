@@ -1496,8 +1496,11 @@ pub enum TeamCode {
     Missing {
         /// This person may choose it.
         can_set: bool,
-        /// Who may choose it, to ask.
+        /// Who may choose it, to ask, by name.
         editors: Vec<String>,
+        /// How many others may choose it but have no name.
+        #[serde(default)]
+        unnamed_editors: u32,
     },
     Set {
         code: String,
