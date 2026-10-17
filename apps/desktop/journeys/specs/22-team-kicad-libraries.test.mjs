@@ -20,8 +20,10 @@ import {
   editAsSomeoneElse,
   launchApp,
   outDir,
+  restoreTimes,
   screenshot,
   screenshotsDir,
+  showTimeDigitsAs,
   startTeamServer,
   teamSignIn,
   tempDir,
@@ -83,32 +85,23 @@ describe('KiCad libraries made from the team catalog', () => {
 
   /**
    * Proves screenshot `name`, just taken, does not depend on the clock. It
-   * takes it again as if every time on screen said 11:11 and then 08:48
-   * (narrow and wide digits), and expects exactly the same pixels.
+   * takes it again with every digit of every time shown as 1 (narrow) and
+   * then as 8 (wide), and expects exactly the same pixels.
    */
   async function assertScreenshotIgnoresTheClock(name) {
     const taken = path.join(screenshotsDir, `${name}.png`);
-    for (const fake of ['11:11', '08:48']) {
-      const file = path.join(outDir, 'clock-checks', `${name}-at-${fake.replace(':', '')}.png`);
-      await browser.execute((text) => {
-        window.journeyClockCheck = [];
-        for (const time of document.querySelectorAll('time')) {
-          const node = time.firstChild;
-          window.journeyClockCheck.push({ node, real: node.data });
-          node.data = text;
-        }
-      }, fake);
+    for (const digit of ['1', '8']) {
+      const file = path.join(outDir, 'clock-checks', `${name}-digits-${digit}.png`);
+      await showTimeDigitsAs(browser, digit, 'journeyClockCheck');
       try {
         await capture(browser, file, MACHINE_TEXT);
       } finally {
-        await browser.execute((text) => {
-          for (const { node, real } of window.journeyClockCheck) if (node.data === text) node.data = real;
-          delete window.journeyClockCheck;
-        }, fake);
+        await restoreTimes(browser, 'journeyClockCheck');
       }
-      const differences = path.join(outDir, 'clock-checks', `${name}-at-${fake.replace(':', '')}-differences.png`);
-      const { differentPixels } = comparePngs(taken, file, differences);
-      assert.equal(differentPixels, 0, `${name} changes when the time shown is ${fake}: see ${differences}`);
+      const differences = path.join(outDir, 'clock-checks', `${name}-digits-${digit}-differences.png`);
+      const { differentPixels, sizeProblem } = comparePngs(taken, file, differences);
+      assert.equal(sizeProblem, undefined, `${name} with every time digit ${digit}: ${sizeProblem}`);
+      assert.equal(differentPixels, 0, `${name} changes when every time digit is ${digit}: see ${differences}`);
     }
   }
 
