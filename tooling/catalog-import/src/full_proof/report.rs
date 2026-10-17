@@ -137,7 +137,7 @@ pub fn text(proof: &Proof, every_difference: bool) -> String {
 
     section(
         &mut out,
-        "4. Compared with the CSV catalog's own KiCad library (database/parts.sqlite)",
+        "4. Compared with the CSV catalog's own KiCad library (built from today's CSV files; database/parts.sqlite is a frozen, older copy)",
     );
     let comparison = &proof.comparison;
     let _ = writeln!(

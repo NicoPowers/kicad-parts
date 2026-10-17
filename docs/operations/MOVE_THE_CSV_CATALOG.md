@@ -37,7 +37,7 @@ The first line says **PASSED** or **FAILED**. Then each step has a short section
 - **Nothing lost** counts the fields it checked and the CAD files stored with their license. It lists the **import problems**: things that could not become part of the catalog, such as a footprint whose 3D model file is missing. An import problem keeps the value, so nothing is dropped. Fix them in the CSV catalog when you can.
 - **Not imported, and why** lists the few things the import never takes in, each with its reason. For example, the old `update_db.sh` script left a table out, but the import reads the CSV files themselves.
 - **KiCad libraries** says how many entries KiCad gets. Each part revision is one entry, such as `RES-0000-0470_v1`.
-- **Compared with the CSV catalog's own KiCad library** lists every difference, grouped, each with its reason. For example, supplier part numbers and prices are not sent to KiCad, and a bare board with no symbol gets no entry. Add `--every-difference` to see each difference on its own line.
+- **Compared with the CSV catalog's own KiCad library** (built from today's CSV files) lists every difference, grouped, each with its reason. For example, supplier part numbers and prices are not sent to KiCad, and a bare board with no symbol gets no entry. Add `--every-difference` to see each difference on its own line.
 - **Time** says how long each step took.
 
 ## If the proof fails
