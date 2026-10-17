@@ -186,6 +186,12 @@ pub struct ZeroLossReport {
     pub oracle_import_problems: Vec<ProblemAccount>,
     /// Stored import problems that no oracle import problem or row explains.
     pub other_problems: Vec<String>,
+    /// The IDs of the stored import problems this file's rows, CAD and
+    /// oracle import problems explain. With every CSV file imported into
+    /// one team catalog, each stored problem must be explained by one of
+    /// the files (see `whole_catalog`).
+    #[serde(skip)]
+    pub explained_problems: BTreeSet<String>,
     pub changes: Vec<ChangeAccount>,
     /// Every field, with its oracle and stored values.
     pub field_accounts: Vec<FieldAccount>,
@@ -922,6 +928,7 @@ impl<'a> Reporter<'a> {
             model_references,
             oracle_import_problems,
             other_problems,
+            explained_problems: explained,
             changes,
             field_accounts: fields.accounts,
             problems: self.problems,
@@ -950,6 +957,7 @@ impl<'a> Reporter<'a> {
             model_references: vec![],
             oracle_import_problems: vec![],
             other_problems: vec![],
+            explained_problems: BTreeSet::new(),
             changes,
             field_accounts: vec![],
             problems: self.problems,
@@ -1331,17 +1339,7 @@ impl<'a> Reporter<'a> {
 
     /// The latest import run of this CSV file and what it recorded.
     fn latest_import_run(&self) -> Option<(&'a StoredAuditEntry, ImportRun)> {
-        let readback = self.readback;
-        readback
-            .audit_entries
-            .iter()
-            .filter(|entry| {
-                entry.action == CSV_IMPORT_ACTION
-                    && entry.csv_file == self.csv_file
-                    && entry.csv_import_number > 0
-            })
-            .max_by_key(|entry| entry.csv_import_number)
-            .and_then(|entry| Some((entry, entry.import_run()?)))
+        latest_import_run(self.readback, &self.csv_file)
     }
 
     /// Part `ipn`'s revision `number` and details `details_number`, checked
@@ -2250,6 +2248,24 @@ impl<'a> Reporter<'a> {
         }
         accounts
     }
+}
+
+/// The latest import run of `csv_file` (such as `g-res`) in `readback`,
+/// and what it recorded.
+pub fn latest_import_run<'a>(
+    readback: &'a CatalogReadback,
+    csv_file: &str,
+) -> Option<(&'a StoredAuditEntry, ImportRun)> {
+    readback
+        .audit_entries
+        .iter()
+        .filter(|entry| {
+            entry.action == CSV_IMPORT_ACTION
+                && entry.csv_file == csv_file
+                && entry.csv_import_number > 0
+        })
+        .max_by_key(|entry| entry.csv_import_number)
+        .and_then(|entry| Some((entry, entry.import_run()?)))
 }
 
 /// Whether a symbol the revision binds says `(in_bom no)` in its stored
