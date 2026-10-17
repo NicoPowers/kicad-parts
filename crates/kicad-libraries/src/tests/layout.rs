@@ -542,6 +542,31 @@ fn a_file_changed_outside_the_app_is_kept_and_reported_and_the_rest_goes_on() {
 }
 
 #[test]
+fn a_file_saved_into_the_libraries_from_outside_is_left_alone_and_reported() {
+    let root = test_folder("saved-in");
+    let folder = root.join("MA");
+    let fixture = resistors();
+    run(&fixture, &root).unwrap();
+    // KiCad lets someone save into a footprint library folder, and a file
+    // can be copied in by hand.
+    let footprint = "footprints/MA-Resistor_SMD.pretty/My_Resistor.kicad_mod";
+    let symbols = "symbols/mine.kicad_sym";
+    fs::write(folder.join(footprint), "(footprint \"My_Resistor\")\n").unwrap();
+    fs::write(folder.join(symbols), "(kicad_symbol_lib)\n").unwrap();
+    // Hidden files and File Explorer's are not reported.
+    fs::write(folder.join("symbols/desktop.ini"), "").unwrap();
+    let outcome = run(&fixture, &root).unwrap();
+    let said = |file: &str| {
+        format!(
+            "{file} did not come from the team catalog. This app leaves it alone, but no one else on the team gets it. Keep your own symbols and footprints in a library of your own."
+        )
+    };
+    assert_eq!(outcome.problems, [said(footprint), said(symbols)]);
+    assert_eq!(text(&folder, footprint), "(footprint \"My_Resistor\")\n");
+    assert_eq!(text(&folder, symbols), "(kicad_symbol_lib)\n");
+}
+
+#[test]
 fn symbols_saved_in_different_kicad_versions_never_share_a_file() {
     let root = test_folder("versions");
     let folder = root.join("MA");

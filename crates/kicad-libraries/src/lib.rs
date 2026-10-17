@@ -22,7 +22,8 @@
 //! changes, so files already written are only checked, never rewritten;
 //! an update adds entries and moves rows between groups, and never takes
 //! an entry away. CAD that KiCad's own libraries hold stays a link to
-//! KiCad's library and is not copied. Generated files are read-only.
+//! KiCad's library and is not copied. Generated files are read-only, and
+//! files in the folder that the Catalog does not make are reported.
 
 mod database;
 mod files;
@@ -281,6 +282,11 @@ pub fn update(
             missing_symbols.insert(format!("{}:{name}", library.nickname));
         }
     }
+    for file in files_not_from_the_catalog(folder, &plan) {
+        outcome.problems.push(format!(
+            "{file} did not come from the team catalog. This app leaves it alone, but no one else on the team gets it. Keep your own symbols and footprints in a library of your own."
+        ));
+    }
     for table in &plan.tables {
         for row in &table.rows {
             let symbol = &row.values[SYMBOL_COLUMN];
@@ -321,6 +327,50 @@ pub fn update(
         }
     }
     Ok(outcome)
+}
+
+/// The files in the `symbols` and `footprints` folders that `plan` does
+/// not make, by path from `folder` with `/`, such as a footprint someone
+/// saved into a library with KiCad: KiCad lets them, because the folders
+/// can be written. Hidden files and the ones File Explorer makes are left
+/// out.
+fn files_not_from_the_catalog(folder: &Path, plan: &plan::Plan<'_>) -> Vec<String> {
+    fn walk(base: &Path, folder: &Path, found: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if name.starts_with('.') || name == "desktop.ini" || name == "thumbs.db" {
+                continue;
+            }
+            if path.is_dir() {
+                walk(base, &path, found);
+            } else if let Ok(inside) = path.strip_prefix(base) {
+                found.push(inside.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    // Windows paths ignore case.
+    let planned: BTreeSet<String> = plan
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(
+            plan.symbol_libraries
+                .iter()
+                .map(|library| library.path.as_str()),
+        )
+        .map(str::to_lowercase)
+        .collect();
+    let mut found = Vec::new();
+    for kind in ["symbols", "footprints"] {
+        walk(folder, &folder.join(kind), &mut found);
+    }
+    found.retain(|file| !planned.contains(&file.to_lowercase()));
+    found.sort();
+    found
 }
 
 /// The symbol and footprint libraries `plan` has that the folder does not

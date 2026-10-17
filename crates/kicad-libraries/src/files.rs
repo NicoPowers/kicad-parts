@@ -4,9 +4,20 @@
 //! temporary name starts with `.` and ends in `.tmp`, which KiCad never
 //! reads as a library.
 //!
-//! Generated files are marked read-only, so KiCad's editors open them as
-//! read-only libraries. Only the update itself clears the mark, to replace
-//! a file.
+//! Generated files are marked read-only. Only the update itself clears
+//! the mark, to replace a file. KiCad 10 treats them differently:
+//!
+//! - A symbol library is one file, and KiCad checks whether that file can
+//!   be written, so the symbol editor opens it as read-only.
+//! - A footprint library is a `.pretty` folder, and KiCad checks whether
+//!   the folder can be written (`pcb_io_kicad_sexpr.cpp`, lines 105 and
+//!   3674-3680). The folder can be written, so the footprint editor treats
+//!   the library as one it can change. Saving over a generated footprint
+//!   fails, because that file is read-only (line 3495), but saving a new
+//!   footprint into the folder works.
+//!
+//! So an update reports any file in the `symbols` and `footprints` folders
+//! that the Catalog does not make, and leaves it alone.
 
 use std::fs;
 use std::io::{self, Write};
