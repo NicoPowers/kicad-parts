@@ -402,7 +402,7 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
     fails(&|copy| copy.problems.clear(), "no import problem");
     fails(
         &|copy| copy.blobs[0].bytes.push(b' '),
-        "stored blob is not the declared bytes",
+        "the stored file is not the bytes its revision names",
     );
     fails(&|copy| copy.audit_entries.clear(), "has 0 audit entries");
     // The header line and row bytes the import run recorded must rebuild
@@ -414,7 +414,7 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
                 file["header_raw"] = header.into();
             })
         },
-        "rebuilt from PocketBase",
+        "as the team catalog recorded it",
     );
     fails(
         &|copy| {
@@ -423,7 +423,7 @@ fn the_resistor_csv_file_imports_idempotently_and_losslessly() {
                 file["rows"][3] = row.into();
             })
         },
-        "rebuilt from PocketBase",
+        "as the team catalog recorded it",
     );
     // Rows split differently from the file are caught even though they
     // rebuild the same bytes.

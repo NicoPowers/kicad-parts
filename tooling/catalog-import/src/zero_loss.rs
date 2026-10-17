@@ -483,7 +483,9 @@ impl<'a> Reporter<'a> {
             .iter()
             .find(|category| category.table == table)
         else {
-            self.problem(format!("the oracle has no category `{table}`"));
+            self.problem(format!(
+                "the CSV catalog fixture has no CSV file for the category `{table}`"
+            ));
             return self.empty(Vec::new());
         };
         let document = &category.document;
@@ -550,7 +552,7 @@ impl<'a> Reporter<'a> {
                     let stored = record.get(position).cloned();
                     if stored.as_deref() != Some(value.as_str()) {
                         self.problem(format!(
-                            "row {row_number} field {column}: oracle {value:?}, problem kept {stored:?}"
+                            "row {row_number} field {column}: the CSV file says {value:?}, but the import problem that keeps the row has {stored:?}"
                         ));
                     }
                     fields.account(row_number, &ipn, column, IMPORT_PROBLEM, value, stored);
@@ -743,7 +745,7 @@ impl<'a> Reporter<'a> {
                 };
                 if stored.as_deref() != Some(value.as_str()) {
                     self.problem(format!(
-                        "row {row_number} ({ipn}) field {column}: oracle {value:?}, stored {stored:?} in {destination}"
+                        "row {row_number} ({ipn}) field {column}: the CSV file says {value:?}, but the team catalog has {stored:?} in {destination}"
                     ));
                 }
                 fields.account(row_number, &ipn, column, destination, value, stored);
@@ -839,7 +841,7 @@ impl<'a> Reporter<'a> {
         let removed_parts = self.removed_parts(&source_path, &part_rows, &mut explained);
         if csv.rebuilt_byte_sha256 != document.byte_sha256 {
             self.problem(format!(
-                "{source_path} rebuilt from PocketBase hashes to {}, not the oracle's {}",
+                "{source_path} as the team catalog recorded it is not the file in the CSV catalog fixture (SHA-256 {} instead of {})",
                 csv.rebuilt_byte_sha256, document.byte_sha256
             ));
         }
@@ -887,7 +889,7 @@ impl<'a> Reporter<'a> {
         let field_count = fields.accounts.len();
         if field_count != document.rows.len() * headers.len() {
             self.problem(format!(
-                "{field_count} fields accounted for, but the oracle has {}",
+                "{field_count} fields were found in the team catalog, but the CSV file has {}",
                 document.rows.len() * headers.len()
             ));
         }
@@ -1428,7 +1430,7 @@ impl<'a> Reporter<'a> {
         };
         if file.byte_sha256 != oracle_byte_sha256 {
             self.problem(format!(
-                "the latest import run read {path} with byte hash {}, not the oracle's {oracle_byte_sha256}",
+                "the latest import read a different {path} (SHA-256 {}) from the one in the CSV catalog fixture ({oracle_byte_sha256})",
                 file.byte_sha256
             ));
         }
@@ -1449,7 +1451,7 @@ impl<'a> Reporter<'a> {
             Ok(table) => table.records,
             Err(error) => {
                 self.problem(format!(
-                    "{path} rebuilt from PocketBase does not parse: {error}"
+                    "{path} as the team catalog recorded it cannot be read as CSV: {error}"
                 ));
                 Vec::new()
             }
@@ -1463,7 +1465,7 @@ impl<'a> Reporter<'a> {
         }
         if records.len() != oracle_rows.len() {
             self.problem(format!(
-                "{path} rebuilt from PocketBase has {} rows, the oracle {}",
+                "{path} as the team catalog recorded it has {} rows, but the CSV file has {}",
                 records.len(),
                 oracle_rows.len()
             ));
@@ -1471,7 +1473,7 @@ impl<'a> Reporter<'a> {
         for (index, (record, oracle_row)) in records.iter().zip(oracle_rows).enumerate() {
             if &padded(record.fields.clone(), oracle_row.len()) != oracle_row {
                 self.problem(format!(
-                    "row {} of {path} rebuilt from PocketBase is not the oracle's row",
+                    "row {} of {path} as the team catalog recorded it is not the row in the CSV file",
                     index + 1
                 ));
             }
@@ -1541,7 +1543,7 @@ impl<'a> Reporter<'a> {
         let csv = self.rebuild_csv(run, &document.path, &document.byte_sha256, &document.rows);
         if csv.rebuilt_byte_sha256 != document.byte_sha256 {
             self.problem(format!(
-                "{} rebuilt from PocketBase hashes to {}, not the oracle's {}",
+                "{} as the team catalog recorded it is not the file in the CSV catalog fixture (SHA-256 {} instead of {})",
                 document.path, csv.rebuilt_byte_sha256, document.byte_sha256
             ));
         }
@@ -1580,7 +1582,7 @@ impl<'a> Reporter<'a> {
             }) {
                 if &padded(strings(&detail["record"]), row.len()) != row {
                     self.problem(format!(
-                        "substitutes.csv row {row_number} of {ipn}: its import problem does not hold the oracle row"
+                        "substitutes.csv row {row_number} of {ipn}: its import problem does not hold the row as the file has it"
                     ));
                 }
                 explained.insert(problem.id.clone());
@@ -1669,7 +1671,7 @@ impl<'a> Reporter<'a> {
                     .or_default() += 1;
                 if stored.as_deref() != Some(value.as_str()) {
                     self.problem(format!(
-                        "substitutes.csv row {row_number} field {column}: oracle {value:?}, stored {stored:?} in {destination}"
+                        "substitutes.csv row {row_number} field {column}: the file says {value:?}, but the team catalog has {stored:?} in {destination}"
                     ));
                 }
             }
@@ -1888,7 +1890,7 @@ impl<'a> Reporter<'a> {
                     }
                 }
                 (target, local, status) => self.problem(format!(
-                    "{} (oracle: local={local}, {status}) is stored as {target:?}",
+                    "{} (the CSV catalog fixture says local={local}, {status}) is stored as {target:?}",
                     reference.reference
                 )),
             }
@@ -1950,14 +1952,17 @@ impl<'a> Reporter<'a> {
             self.problem(format!("{reference}: license is not explicit"));
         }
         let Some(blob) = readback.blob(&revision.blob) else {
-            self.problem(format!("{reference}: blob {} is missing", revision.blob));
+            self.problem(format!(
+                "{reference}: the stored file {} is missing",
+                revision.blob
+            ));
             return;
         };
         account.blob_sha256 = Some(blob.sha256.clone());
         account.blob_bytes = Some(blob.bytes.len());
         if blob.sha256 != snapshot.blob_sha256 || sha256_hex(&blob.bytes) != blob.sha256 {
             self.problem(format!(
-                "{reference}: stored blob is not the declared bytes"
+                "{reference}: the stored file is not the bytes its revision names"
             ));
         }
         // A revision made from a file chosen in the app (kicad-parts-3b8b)
@@ -1983,7 +1988,7 @@ impl<'a> Reporter<'a> {
             };
             if !matches {
                 self.problem(format!(
-                    "{reference}: the revision made in the app is not the oracle's file"
+                    "{reference}: the revision made in the app is not the CSV catalog's file"
                 ));
             }
             return;
@@ -1994,7 +1999,7 @@ impl<'a> Reporter<'a> {
         };
         if Some(source.path.as_str()) != account.oracle_asset_path.as_deref() {
             self.problem(format!(
-                "{reference}: Source names {}, the oracle {:?}",
+                "{reference}: its Source names {}, but the CSV catalog fixture names {:?}",
                 source.path, account.oracle_asset_path
             ));
         }
@@ -2003,12 +2008,14 @@ impl<'a> Reporter<'a> {
             None => {
                 if Some(source.byte_sha256.as_str()) != oracle_file_sha {
                     self.problem(format!(
-                        "{reference}: Source names file hash {}, the oracle {oracle_file_sha:?}",
+                        "{reference}: its Source names a file with SHA-256 {}, but the CSV catalog fixture has {oracle_file_sha:?}",
                         source.byte_sha256
                     ));
                 }
                 if Some(blob.sha256.as_str()) != oracle_file_sha {
-                    self.problem(format!("{reference}: blob is not the oracle's file"));
+                    self.problem(format!(
+                        "{reference}: the stored file is not the CSV catalog's file"
+                    ));
                 }
             }
             // One symbol: the blob is exactly that whole top-level symbol in
@@ -2021,7 +2028,7 @@ impl<'a> Reporter<'a> {
                 let file_sha256 = sha256_hex(&file);
                 if Some(file_sha256.as_str()) != oracle_file_sha {
                     self.problem(format!(
-                        "{reference}: {} is not the oracle's file",
+                        "{reference}: {} is not the file in the CSV catalog fixture",
                         source.path
                     ));
                 } else {
@@ -2035,7 +2042,7 @@ impl<'a> Reporter<'a> {
                     let bytes = whole.clone().and_then(|span| file.get(span));
                     if bytes != Some(blob.bytes.as_slice()) {
                         self.problem(format!(
-                            "{reference}: blob is not the whole symbol `{item}` of the oracle's file ({whole:?})"
+                            "{reference}: the stored symbol is not the whole symbol `{item}` of the CSV catalog's file ({whole:?})"
                         ));
                     }
                     // When the source names this very file, its range must
@@ -2086,7 +2093,7 @@ impl<'a> Reporter<'a> {
                 Some(stored) => {
                     if stored.scope != model.scope {
                         self.problem(format!(
-                            "3D model {}: scope {} but the oracle says {}",
+                            "3D model {}: the team catalog says {} but the CSV catalog fixture says {}",
                             model.reference, stored.scope, model.scope
                         ));
                     }
@@ -2147,7 +2154,7 @@ impl<'a> Reporter<'a> {
                         }
                         (target, status) => {
                             self.problem(format!(
-                                "3D model {}: stored {target:?}, oracle {status}",
+                                "3D model {}: the team catalog has {target:?}, but the CSV catalog fixture says {status}",
                                 model.reference
                             ));
                             format!("{target:?}")
@@ -2235,7 +2242,7 @@ impl<'a> Reporter<'a> {
                     explained.insert(stored.id.clone());
                 }
                 None => self.problem(format!(
-                    "oracle import problem {} {} {} is not stored",
+                    "the import problem {} {} {} that the CSV catalog fixture expects is not recorded",
                     problem.code, problem.path, problem.location
                 )),
             }
