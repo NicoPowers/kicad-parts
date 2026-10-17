@@ -52,6 +52,8 @@ pub fn all_migrations() -> Vec<String> {
 }
 
 /// Starts an instance (upserting `superuser` first) and signs in as it.
+/// `PocketBaseServer::start` already fails if PocketBase showed its
+/// browser installer.
 pub fn start(
     options: &PocketBaseOptions,
     superuser: &Superuser,
@@ -60,8 +62,6 @@ pub fn start(
     let admin = PocketBaseClient::new(server.url())
         .authenticate("_superusers", &superuser.email, &superuser.password)
         .unwrap();
-    // Guard: PocketBase must not have shown its browser installer.
-    server.check_no_installer().unwrap();
     (server, admin)
 }
 

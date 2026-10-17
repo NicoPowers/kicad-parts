@@ -38,9 +38,6 @@ pub fn start(
     let admin = PocketBaseClient::new(server.url())
         .authenticate("_superusers", &superuser.email, &superuser.password)
         .map_err(|error| error.to_string())?;
-    server
-        .check_no_installer()
-        .map_err(|error| error.to_string())?;
     Ok((server, admin, superuser))
 }
 
