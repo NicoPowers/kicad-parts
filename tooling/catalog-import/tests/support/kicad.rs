@@ -234,9 +234,15 @@ pub fn saved_copy(folder: &Path, share: &Path, link: &str) -> String {
         "Footprint",
         footprints.first().copied().unwrap_or_default(),
     );
+    // KiCad keeps the footprint choices as its footprint filters, one per
+    // space, so a space inside a name is written `{space}`.
     text = remove_property(&text, "ki_fp_filters");
     if !footprints.is_empty() {
-        text = set_property(&text, "ki_fp_filters", &footprints.join(" "));
+        let filters: Vec<String> = footprints
+            .iter()
+            .map(|footprint| footprint.replace(' ', "{space}"))
+            .collect();
+        text = set_property(&text, "ki_fp_filters", &filters.join(" "));
     }
     for (column, field) in &row.fields {
         text = set_property(&text, field, &row.values[column]);
