@@ -135,6 +135,7 @@ pub fn run(
     allow: Allow,
 ) -> Result<Proof, String> {
     let started = Instant::now();
+    check_fixture_is_current(repository, oracle)?;
     let csv_catalog_before =
         Snapshot::of_csv_catalog(repository).map_err(|error| error.to_string())?;
     let csv_files = services::csv_files(repository).map_err(|error| error.to_string())?;
@@ -276,6 +277,42 @@ fn second_server_libraries(
             .and_then(|_| read_back(&admin).map_err(|error| error.to_string()));
     server.stop();
     crate::libraries::write(root, &readback?, team).map(|_| ())
+}
+
+/// Refuses to start when the CSV catalog differs from the CSV catalog
+/// fixture. Every check compares with the fixture, so a change it has not
+/// recorded would show as many confusing losses; one plain message says
+/// what to do instead.
+fn check_fixture_is_current(repository: &Path, oracle: &Manifest) -> Result<(), String> {
+    let now = csv_catalog_fixture::build_manifest(repository).map_err(|error| {
+        format!("The CSV catalog could not be read to compare it with its fixture: {error}")
+    })?;
+    let differences = csv_catalog_fixture::compare(oracle, &now);
+    if differences.is_empty() {
+        return Ok(());
+    }
+    let shown: Vec<String> = differences
+        .iter()
+        .take(5)
+        .map(|difference| format!("  - {}", difference.path))
+        .collect();
+    let more = match differences.len() {
+        count if count > 5 => format!(
+            "
+  and {} more",
+            count - 5
+        ),
+        _ => String::new(),
+    };
+    Err(format!(
+        "The CSV catalog has changed since its fixture was recorded, so the proof did not start. It differs here:
+{}{more}
+If you meant these changes, record them in the fixture:
+  cargo run --locked -p csv-catalog-fixture -- write .
+Then commit fixtures/import/csv-catalog/manifest.json with your change, and run the proof again.",
+        shown.join("
+")
+    ))
 }
 
 /// Starts a team server with its state under `state`. Its PocketBase,
