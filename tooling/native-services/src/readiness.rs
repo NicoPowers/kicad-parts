@@ -7,6 +7,8 @@
 //!   service can take that port in between. Ours then fails to bind, but
 //!   the other service answers our health check. So a check must prove the
 //!   service is ours: by its own log, or by our own credentials.
+//!   On Linux, MinIO sets SO_REUSEPORT, so two MinIOs can share a port and
+//!   the credentials check is not full proof there. Windows is fine.
 //! - MinIO's `/minio/health/ready` answers 200 before MinIO can serve
 //!   bucket calls. So a check must mean "ready for the calls a test makes".
 //!
@@ -138,11 +140,12 @@ mod tests {
     fn a_log_line_must_end_with_the_text() {
         let log = "2026/10/17 21:04:05 Server started at http://127.0.0.1:52362\r\n\
                    ├─ REST API:  http://127.0.0.1:52362/api/\n\
-                   API: http://127.0.0.1:59003 \n";
+                   2026/10/17 21:05:11 Server started at http://127.0.0.1:60001 \n";
         let started = |port: u16| format!("Server started at http://127.0.0.1:{port}");
         assert!(log_has_line_ending_with(log, &started(52362)).is_ok());
         assert!(log_has_line_ending_with(log, &started(5236)).is_err());
-        assert!(log_has_line_ending_with(log, "API: http://127.0.0.1:59003").is_ok());
+        // Trailing spaces and carriage returns do not count.
+        assert!(log_has_line_ending_with(log, &started(60001)).is_ok());
         let reason = log_has_line_ending_with("", &started(52362)).unwrap_err();
         assert!(reason.contains("does not yet say"), "{reason}");
     }
@@ -162,16 +165,11 @@ mod waiting_tests {
     use super::*;
     use std::process::Command;
 
-    /// A stand-in service: one process that runs for 30 s, or until the
-    /// test drops it.
+    /// A stand-in service: one process that runs for about 60 s, or until
+    /// the test drops it.
     fn stand_in_service(log: &std::path::Path) -> ServiceProcess {
-        let mut command = Command::new("powershell");
-        command.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Start-Sleep -Seconds 30",
-        ]);
+        let mut command = Command::new("ping");
+        command.args(["-n", "60", "127.0.0.1"]);
         ServiceProcess::spawn("stand-in", command, log).unwrap()
     }
 
