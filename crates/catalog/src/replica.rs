@@ -155,9 +155,10 @@ pub struct CatalogReplica {
     applied: Vec<u64>,
 }
 
-/// One saved revision or one saved copy of part details, as the replica
-/// takes it, wherever it was read from.
-struct Saved<'a> {
+/// One saved part revision, as the replica takes it, wherever it was read
+/// from. Revisions and details have their own types, so neither can be
+/// taken as the other.
+struct SavedRevision<'a> {
     part: &'a str,
     id: &'a str,
     number: u32,
@@ -165,7 +166,16 @@ struct Saved<'a> {
     snapshot_sha256: &'a str,
 }
 
-impl<'a> Saved<'a> {
+/// One saved copy of part details, as the replica takes it, wherever it was
+/// read from.
+struct SavedDetails<'a> {
+    part: &'a str,
+    id: &'a str,
+    number: u32,
+    snapshot: &'a str,
+}
+
+impl<'a> SavedRevision<'a> {
     fn current(part: &'a str, record: &'a StoredCurrentRecord) -> Self {
         Self {
             part,
@@ -177,7 +187,18 @@ impl<'a> Saved<'a> {
     }
 }
 
-impl<'a> From<&'a StoredPartRevision> for Saved<'a> {
+impl<'a> SavedDetails<'a> {
+    fn current(part: &'a str, record: &'a StoredCurrentRecord) -> Self {
+        Self {
+            part,
+            id: &record.id,
+            number: record.number,
+            snapshot: &record.snapshot,
+        }
+    }
+}
+
+impl<'a> From<&'a StoredPartRevision> for SavedRevision<'a> {
     fn from(revision: &'a StoredPartRevision) -> Self {
         Self {
             part: &revision.part,
@@ -189,14 +210,13 @@ impl<'a> From<&'a StoredPartRevision> for Saved<'a> {
     }
 }
 
-impl<'a> From<&'a StoredPartDetails> for Saved<'a> {
+impl<'a> From<&'a StoredPartDetails> for SavedDetails<'a> {
     fn from(details: &'a StoredPartDetails) -> Self {
         Self {
             part: &details.part,
             id: &details.id,
             number: details.number,
             snapshot: &details.snapshot,
-            snapshot_sha256: &details.snapshot_sha256,
         }
     }
 }
@@ -304,7 +324,7 @@ impl CatalogReplica {
             .iter()
             .filter(|saved| saved.change == change.id)
         {
-            self.take_details(saved.into());
+            self.set_current_details(saved.into());
         }
         // A new revision is always the part's newest, so it becomes current.
         for revision in records
@@ -312,12 +332,12 @@ impl CatalogReplica {
             .iter()
             .filter(|revision| revision.change == change.id)
         {
-            self.make_current(revision.into());
+            self.set_current_revision(revision.into());
         }
         // An archive or unarchive moves the current revision to the one its
         // entry names, which may be older.
         for revision in made_current {
-            self.make_current(revision.into());
+            self.set_current_revision(revision.into());
         }
         self.checkpoint = change.seq;
         self.applied.push(change.seq);
@@ -326,15 +346,15 @@ impl CatalogReplica {
 
     /// Takes a part as one page of the sign-in read found it.
     fn read_part(&mut self, part: &StoredCurrentPart) {
-        self.take_details(Saved::current(&part.id, &part.details));
-        self.make_current(Saved::current(&part.id, &part.revision));
+        self.set_current_details(SavedDetails::current(&part.id, &part.details));
+        self.set_current_revision(SavedRevision::current(&part.id, &part.revision));
     }
 
     /// Makes `saved` the part's current details. Like
-    /// [`CatalogReplica::make_current`], it takes what it is given, even if
+    /// [`CatalogReplica::set_current_revision`], it takes what it is given, even if
     /// the replica held newer details: that only happens while replaying
     /// over a sign-in read, and the replay then reaches the newer ones too.
-    fn take_details(&mut self, saved: Saved) {
+    fn set_current_details(&mut self, saved: SavedDetails) {
         let parsed: Option<PartDetails> = serde_json::from_str(saved.snapshot).ok();
         if let Some(parsed) = &parsed {
             self.ipns.insert(parsed.ipn.clone(), saved.part.to_owned());
@@ -347,7 +367,7 @@ impl CatalogReplica {
 
     /// Makes `saved` the part's current revision, even if it is older:
     /// archiving moves the current revision back.
-    fn make_current(&mut self, saved: Saved) {
+    fn set_current_revision(&mut self, saved: SavedRevision) {
         let parsed: Option<PartRevision> = serde_json::from_str(saved.snapshot).ok();
         if let Some(parsed) = &parsed {
             self.ipns.insert(parsed.ipn.clone(), saved.part.to_owned());
