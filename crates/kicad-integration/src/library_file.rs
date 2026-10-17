@@ -355,6 +355,148 @@ pub fn model_references(content: &str) -> Vec<String> {
     paths
 }
 
+/// `content` with its 3D model paths replaced: the path of the `n`th
+/// `(model "...")`, counted as [`model_references`] counts them, becomes
+/// `paths[n]` when that is `Some`, and stays as it is otherwise. Paths are
+/// written as they appear between the quotes, so escape a new path with
+/// [`escape_text`] first. Nothing else changes. Also returns every path as
+/// it was, in file order, so a caller can check it replaced the paths it
+/// meant to.
+pub fn replace_model_references(content: &str, paths: &[Option<String>]) -> (String, Vec<String>) {
+    let mut output = String::with_capacity(content.len());
+    let mut found = Vec::new();
+    let mut copied = 0;
+    for (start, _) in content.match_indices("(model") {
+        let after = start + "(model".len();
+        let rest = &content[after..];
+        let value_start = after + (rest.len() - rest.trim_start().len());
+        if content[value_start..].chars().next() != Some('"') {
+            continue;
+        }
+        // Scanned exactly as model_references reads it.
+        let text_start = value_start + 1;
+        let mut escaped = false;
+        let mut text_end = content.len();
+        for (offset, ch) in content[text_start..].char_indices() {
+            if !escaped && ch == '"' {
+                text_end = text_start + offset;
+                break;
+            }
+            escaped = !escaped && ch == '\\';
+        }
+        if let Some(Some(path)) = paths.get(found.len()) {
+            output.push_str(&content[copied..text_start]);
+            output.push_str(path);
+            copied = text_end;
+        }
+        found.push(content[text_start..text_end].to_owned());
+    }
+    output.push_str(&content[copied..]);
+    (output, found)
+}
+
+/// `text` written inside a KiCad quoted string: a backslash or a double
+/// quote gets a backslash before it, and a line break is written `\n`.
+pub fn escape_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' | '"' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            '\n' => escaped.push_str("\\n"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+/// One top-level `(symbol "FROM" ...)` entry renamed to `to`. KiCad names
+/// each unit of a symbol after it, such as `R_US_0_1`, so every unit
+/// directly inside the entry whose name starts with `FROM_` is renamed to
+/// start with `to_`. Nothing else changes, so renaming back gives the
+/// same bytes. Refuses an entry that is not named `from`.
+pub fn rename_symbol_entry(
+    entry: &[u8],
+    from: &str,
+    to: &str,
+) -> Result<Vec<u8>, LibraryFileError> {
+    let (head, children) = root_children(entry)?;
+    if head != "symbol" {
+        return Err(LibraryFileError(format!(
+            "a symbol entry starts with `symbol`, not `{head}`"
+        )));
+    }
+    let (range, name) =
+        list_name(entry, 0).ok_or_else(|| LibraryFileError("the symbol has no name".into()))?;
+    if name != from {
+        return Err(LibraryFileError(format!(
+            "the symbol is named `{name}`, not `{from}`"
+        )));
+    }
+    let mut replacements = vec![(range, to.to_owned())];
+    let unit_prefix = format!("{from}_");
+    for child in children.iter().filter(|child| child.head == "symbol") {
+        if let Some((range, unit)) = list_name(entry, child.span.start) {
+            if let Some(suffix) = unit.strip_prefix(&unit_prefix) {
+                replacements.push((range, format!("{to}_{suffix}")));
+            }
+        }
+    }
+    let mut renamed = Vec::with_capacity(entry.len() + 16);
+    let mut copied = 0;
+    for (range, name) in replacements {
+        renamed.extend_from_slice(&entry[copied..range.start]);
+        renamed.push(b'"');
+        renamed.extend_from_slice(escape_text(&name).as_bytes());
+        renamed.push(b'"');
+        copied = range.end;
+    }
+    renamed.extend_from_slice(&entry[copied..]);
+    Ok(renamed)
+}
+
+/// The byte range of the name of the list opening at `open` (its first
+/// word after the head, quotes included) and the name unescaped, when the
+/// name is a quoted string.
+fn list_name(bytes: &[u8], open: usize) -> Option<(Range<usize>, String)> {
+    let mut index = open + 1;
+    let skip_space = |index: &mut usize| {
+        while bytes.get(*index).is_some_and(u8::is_ascii_whitespace) {
+            *index += 1;
+        }
+    };
+    skip_space(&mut index);
+    while bytes
+        .get(index)
+        .is_some_and(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'(' | b')' | b'"'))
+    {
+        index += 1;
+    }
+    skip_space(&mut index);
+    if bytes.get(index) != Some(&b'"') {
+        return None;
+    }
+    let start = index;
+    let mut value = Vec::new();
+    index += 1;
+    loop {
+        match bytes.get(index)? {
+            b'\\' => {
+                value.push(*bytes.get(index + 1)?);
+                index += 2;
+            }
+            b'"' => break,
+            byte => {
+                value.push(*byte);
+                index += 1;
+            }
+        }
+    }
+    Some((start..index + 1, String::from_utf8(value).ok()?))
+}
+
 /// One node of a KiCad s-expression: a list, or a word (an atom or a quoted
 /// string, unescaped).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -688,6 +830,47 @@ mod tests {
                 "${GITPLM_PARTS}/3d-models/x.step".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn replaces_only_the_model_paths_asked_for() {
+        let footprint = "(footprint \"R\"\n (model \"${KICAD9_3DMODEL_DIR}/R.step\"\n (offset)) (model_x \"no\") (model \"a\\\\b.step\") (model\n\t\"${GITPLM_PARTS}/3d-models/x.step\"))";
+        let (same, found) = replace_model_references(footprint, &[]);
+        assert_eq!(same, footprint);
+        assert_eq!(found, model_references(footprint));
+        let (replaced, found) = replace_model_references(
+            footprint,
+            &[
+                None,
+                Some(escape_text("C:/x \"y\".step")),
+                Some("C:/Data/x.step".into()),
+            ],
+        );
+        assert_eq!(found.len(), 3);
+        assert_eq!(
+            replaced,
+            "(footprint \"R\"\n (model \"${KICAD9_3DMODEL_DIR}/R.step\"\n (offset)) (model_x \"no\") (model \"C:/x \\\"y\\\".step\") (model\n\t\"C:/Data/x.step\"))"
+        );
+        // Putting the old paths back gives the same bytes.
+        let back: Vec<Option<String>> = found.iter().cloned().map(Some).collect();
+        let (restored, _) = replace_model_references(&replaced, &back);
+        assert_eq!(restored, footprint);
+    }
+
+    #[test]
+    fn renames_a_symbol_and_its_units_only() {
+        let entry = "(symbol \"R_US\"\n\t(property \"Value\" \"R_US\")\n\t(symbol \"R_US_0_1\" (rectangle))\n\t(symbol \"R_US_1_1\" (pin passive line (number \"1\")))\n\t(symbol \"Other_1_1\")\n)";
+        let renamed = rename_symbol_entry(entry.as_bytes(), "R_US", "R_US_v2").unwrap();
+        assert_eq!(
+            String::from_utf8(renamed.clone()).unwrap(),
+            "(symbol \"R_US_v2\"\n\t(property \"Value\" \"R_US\")\n\t(symbol \"R_US_v2_0_1\" (rectangle))\n\t(symbol \"R_US_v2_1_1\" (pin passive line (number \"1\")))\n\t(symbol \"Other_1_1\")\n)"
+        );
+        assert_eq!(
+            rename_symbol_entry(&renamed, "R_US_v2", "R_US").unwrap(),
+            entry.as_bytes()
+        );
+        assert!(rename_symbol_entry(entry.as_bytes(), "C", "C_v1").is_err());
+        assert!(rename_symbol_entry(b"(footprint \"R_US\")", "R_US", "R_US_v1").is_err());
     }
 
     #[test]

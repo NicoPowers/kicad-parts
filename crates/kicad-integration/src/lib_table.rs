@@ -139,6 +139,32 @@ impl LibTable {
             .collect();
         Ok(Self { version, rows })
     }
+
+    /// The table as KiCad 10 writes a table of `kind` (version 7), one row
+    /// per line. KiCad's Manage Libraries dialog takes this text pasted in.
+    pub fn format(&self, kind: TableKind) -> String {
+        use crate::library_file::escape_text;
+        let mut text = format!("({}\n  (version 7)\n", kind.head());
+        for row in &self.rows {
+            text.push_str(&format!(
+                "  (lib (name \"{}\")(type \"{}\")(uri \"{}\")(options \"{}\")(descr \"{}\")",
+                escape_text(&row.name),
+                escape_text(&row.kind),
+                escape_text(&row.uri),
+                escape_text(&row.options),
+                escape_text(&row.descr)
+            ));
+            if row.disabled {
+                text.push_str("(disabled)");
+            }
+            if row.hidden {
+                text.push_str("(hidden)");
+            }
+            text.push_str(")\n");
+        }
+        text.push_str(")\n");
+        text
+    }
 }
 
 /// Path variables, such as `KICAD10_SYMBOL_DIR`, and their values.
@@ -541,6 +567,43 @@ mod tests {
     fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn a_formatted_table_reads_back_the_same() {
+        let table = LibTable {
+            version: Some("7".into()),
+            rows: vec![
+                LibTableRow {
+                    name: "team-parts".into(),
+                    kind: "Database".into(),
+                    uri: "C:/Users/A \"B\"/team-parts.kicad_dbl".into(),
+                    descr: "Parts".into(),
+                    ..LibTableRow::default()
+                },
+                LibTableRow {
+                    name: "g-res".into(),
+                    kind: "KiCad".into(),
+                    uri: "C:\\x\\g-res.kicad_sym".into(),
+                    hidden: true,
+                    ..LibTableRow::default()
+                },
+            ],
+        };
+        let text = table.format(TableKind::Symbol);
+        assert!(
+            text.starts_with(
+                "(sym_lib_table\n  (version 7)\n  (lib (name \"team-parts\")(type \"Database\")"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("(descr \"\")(hidden))\n)\n"), "{text}");
+        assert_eq!(
+            LibTable::parse(text.as_bytes(), TableKind::Symbol).unwrap(),
+            table
+        );
+        let footprints = table.format(TableKind::Footprint);
+        assert!(footprints.starts_with("(fp_lib_table\n"));
     }
 
     #[test]

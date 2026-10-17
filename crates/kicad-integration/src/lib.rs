@@ -37,7 +37,7 @@ pub use preview::{
     BoardExport, CacheOutcome, Glb, MAX_RUNNING, Preview, PreviewCache, PreviewError, PreviewImage,
     Selection, StoredItem, remove_old_cache, sha256_hex,
 };
-pub use process::CliSettingsFolder;
+pub use process::{CliOutput, CliSettingsFolder, RunError, run_kicad_cli};
 pub use resolver::{
     LibRef, LibraryOrigin, LibraryResolver, ResolveError, ResolvedFootprint, ResolvedSymbol,
     footprint_choices,
