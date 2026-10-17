@@ -135,11 +135,6 @@ impl From<WriteError> for UpdateError {
 /// Gives the bytes of a stored blob, such as by downloading them.
 pub type BlobSource<'a> = dyn FnMut(&StoredBlob) -> Result<Vec<u8>, String> + 'a;
 
-/// The libraries [`update`] would make in `folder`, without writing.
-pub fn libraries(folder: &Path, catalog: &CatalogReadback) -> Vec<Library> {
-    setup::libraries(folder, &plan::plan(catalog, folder))
-}
-
 /// Brings the KiCad libraries in `folder` to `catalog`. Blob bytes come
 /// from `blobs`, and only for files not written yet. Only one update may
 /// run on a folder at a time.
