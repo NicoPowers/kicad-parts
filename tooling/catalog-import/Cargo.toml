@@ -19,6 +19,8 @@ tempfile = "3.10"
 
 [dev-dependencies]
 base64 = "0.22"
+# The sign-in tests read in small pages (tests/pocketbase_sign_in.rs).
+catalog = { path = "../../crates/catalog", features = ["test-support"] }
 catalog-browser = { path = "../../crates/catalog-browser" }
 desktop-contract = { path = "../../crates/desktop-contract" }
 # Inspects a rolled-back data.db while PocketBase is stopped.

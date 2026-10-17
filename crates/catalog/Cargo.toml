@@ -22,3 +22,8 @@ zip = { version = "2", default-features = false, features = ["deflate-flate2", "
 
 [dev-dependencies]
 tempfile = "3.10"
+
+[features]
+# Lets integration tests choose the sign-in page size
+# (CatalogReplica::from_server_in_pages). The app never turns it on.
+test-support = []

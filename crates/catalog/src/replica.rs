@@ -62,7 +62,7 @@ use std::collections::BTreeMap;
 
 /// Parts read per request at sign-in. A part with its current revision and
 /// details is about 1.5 KB, so a full page is under 1 MB.
-pub const PARTS_PER_PAGE: usize = 500;
+const PARTS_PER_PAGE: usize = 500;
 
 /// The most records PocketBase returns in one page; it quietly sends this
 /// many when asked for more.
@@ -236,15 +236,21 @@ impl CatalogReplica {
     /// every part's current state in pages, then replays the Changes saved
     /// meanwhile; the module documentation explains why that ends right.
     pub fn from_server(client: &PocketBaseClient) -> CollabResult<Self> {
-        Self::from_server_in_pages(client, PARTS_PER_PAGE)
+        Self::read_from_server(client, PARTS_PER_PAGE)
     }
 
     /// [`CatalogReplica::from_server`], reading `parts_per_page` parts per
-    /// request. Tests use small pages so that others can save between them.
+    /// request. Only for tests, which use small pages so that others can
+    /// save between them; the `test-support` feature turns it on.
+    #[cfg(feature = "test-support")]
     pub fn from_server_in_pages(
         client: &PocketBaseClient,
         parts_per_page: usize,
     ) -> CollabResult<Self> {
+        Self::read_from_server(client, parts_per_page)
+    }
+
+    fn read_from_server(client: &PocketBaseClient, parts_per_page: usize) -> CollabResult<Self> {
         // A page shorter than asked for marks the end, so never ask for
         // more than PocketBase sends.
         let parts_per_page = parts_per_page.clamp(1, POCKETBASE_MAX_PAGE);
