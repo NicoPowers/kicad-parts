@@ -1,0 +1,21 @@
+[package]
+name = "kicad-libraries"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Makes KiCad libraries from the team catalog: a database library with one entry per part revision, and the symbols, footprints and 3D models it uses."
+
+[dependencies]
+catalog = { path = "../catalog" }
+kicad-integration = { path = "../kicad-integration" }
+# KiCad reads the database library through the SQLite3 ODBC driver; this
+# writes it. Already in Cargo.lock for the tests of other crates.
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[dev-dependencies]
+tempfile = "3.10"

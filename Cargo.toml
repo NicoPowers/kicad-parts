@@ -8,6 +8,7 @@ members = [
     "crates/csv-catalog",
     "crates/desktop-contract",
     "crates/kicad-integration",
+    "crates/kicad-libraries",
     "tooling/afk",
     "tooling/catalog-import",
     "tooling/csv-catalog-fixture",

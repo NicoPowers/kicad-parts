@@ -2366,6 +2366,49 @@ pub fn read_back(client: &PocketBaseClient) -> CollabResult<CatalogReadback> {
     Ok(readback)
 }
 
+/// Reads the Catalog records that say what each part and CAD item is and
+/// which revisions exist, without downloading any blob: parts, part
+/// details, part revisions, archive entries, categories, CAD items, CAD
+/// item revisions and blob records. Changes, CSV reviews, remembered
+/// matches, import problems and audit entries are left empty. Use
+/// [`download_blob`] for the bytes that are needed.
+pub fn read_revisions(client: &PocketBaseClient) -> CollabResult<CatalogReadback> {
+    Ok(CatalogReadback {
+        parts: client.list_records("catalog_parts", "", "ipn")?,
+        part_details: client.list_records("catalog_part_details", "", "part,number")?,
+        part_revisions: client.list_records("catalog_part_revisions", "", "part,number")?,
+        archive_entries: client.list_records("catalog_archive_entries", "", "seq")?,
+        categories: client.list_records("catalog_categories", "", "code")?,
+        category_revisions: client.list_records(
+            "catalog_category_revisions",
+            "",
+            "category,number",
+        )?,
+        cad_items: client.list_records("catalog_cad_items", "", "kind,key")?,
+        cad_item_revisions: client.list_records(
+            "catalog_cad_item_revisions",
+            "",
+            "cad_item,number",
+        )?,
+        blobs: client.list_records("catalog_blobs", "", "sha256")?,
+        ..CatalogReadback::default()
+    })
+}
+
+/// The bytes of one stored blob. Fails if they do not hash to its
+/// `sha256`.
+pub fn download_blob(client: &PocketBaseClient, blob: &StoredBlob) -> CollabResult<Vec<u8>> {
+    let token = client.file_token()?;
+    let bytes = client.download_file("catalog_blobs", &blob.id, &blob.file, Some(&token))?;
+    if sha256_hex(&bytes) != blob.sha256 || bytes.len() as u64 != blob.size {
+        return Err(CollabError::Protocol(format!(
+            "stored blob {} does not match its SHA-256 or size",
+            blob.sha256
+        )));
+    }
+    Ok(bytes)
+}
+
 /// Standard base64 with padding, as the import route decodes it.
 pub fn base64(bytes: &[u8]) -> String {
     use base64::Engine;
