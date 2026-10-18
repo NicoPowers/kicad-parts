@@ -4016,6 +4016,7 @@ module.exports = {
   requireOwnChange: requireOwnChange,
   requireNextChange: requireNextChange,
   requireMoveByOwnChange: requireMoveByOwnChange,
+  refuseProgrammingError: refuseProgrammingError,
   newestRevision: newestRevision,
   newestNotArchived: newestNotArchived,
   cadContent: cadContent,

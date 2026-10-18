@@ -215,6 +215,22 @@ onRecordUpdate((e) => {
   return e.next();
 }, "catalog_parts");
 
+// A new part starts with no current details or revision. Its first ones
+// are saved after it, in the same Change, and only the part-update guard
+// above may move it to them. Otherwise a part could start out pointing at
+// another part's records, which no desktop following Changes would see.
+onRecordCreate((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  const part = e.record;
+  if (part.getString("current_details") !== "" || part.getString("current_revision") !== "") {
+    lib.refuseProgrammingError(
+      e.app,
+      `the new part ${part.getString("ipn")} must start with no current details or revision. Save the part first, then its first details and revision.`,
+    );
+  }
+  return e.next();
+}, "catalog_parts");
+
 // New part revisions (archived or not), part details, CAD item revisions
 // and category revisions must come right after their owner's newest one
 // (catalog_lib.js numberedRecordProblem).

@@ -446,6 +446,33 @@ fn a_transaction_saves_one_change_numbered_right_after_the_newest() {
 }
 
 #[test]
+fn a_new_part_starts_with_no_current_details_or_revision() {
+    let team = Team::start();
+    let before = team.read();
+    let other = before.part(OTHER).unwrap().clone();
+    // A new part, in its own new Change, that already points at another
+    // part's records: a desktop signing in would show it, one following
+    // Changes never would.
+    for (pointer, value) in [
+        ("current_details", &other.current_details),
+        ("current_revision", &other.current_revision),
+    ] {
+        let mut fields = json!({
+            "ipn": "RES-9999-0001", "ipn_prefix": "RES", "variant": "0001",
+            "current_revision_number": 1, "current_details_number": 1,
+            "first_change": "$new",
+        });
+        fields[pointer] = json!(value);
+        team.refused(
+            json!({ "changes": 1, "records": [{ "collection": "catalog_parts", "fields": fields }] }),
+            &["the new part RES-9999-0001 must start with no current details or revision"],
+        );
+    }
+    assert_eq!(team.read(), before, "nothing was written");
+    team.server.stop();
+}
+
+#[test]
 fn a_part_moves_only_to_what_its_own_transactions_change_saved() {
     let team = Team::start();
     let readback = team.read();
