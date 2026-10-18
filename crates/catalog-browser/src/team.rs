@@ -787,13 +787,10 @@ impl TeamCatalog {
             Some(format!(
                 "{ipn} is already in the Catalog. An IPN is never reused."
             ))
-        } else if let Some(file) = csv.file_of(ipn) {
-            // A CSV row the team catalog has not imported yet.
-            Some(format!(
-                "{ipn} is already in {file}. An IPN is never reused."
-            ))
         } else {
-            None
+            // A CSV row the team catalog has not imported yet.
+            csv.file_of(ipn)
+                .map(|file| format!("{ipn} is already in {file}. An IPN is never reused."))
         };
         TeamIpnCheck { problem }
     }
