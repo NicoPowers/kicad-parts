@@ -2555,14 +2555,18 @@ function publishEdit(e) {
 const CREATE_SOURCE = "create";
 
 // The row of the latest import run of a CSV file that has `ipn` but did not
-// become a part, as { path, rowNumber }, or null (kicad-parts-3b72).
+// become a part, as { path }, or null (kicad-parts-3b72).
 //
 // Every other row of a latest run is a part already, or names a part that
-// is (duplicate-ipn, ipn-given-to-another-part), or has no valid IPN, so
-// the "already has a part" check covers those. Only a row with more fields
-// than headers (row-has-extra-fields) keeps a valid IPN without a part.
+// is (duplicate-ipn, ipn-given-to-another-part), so the "already has a
+// part" check covers those. Two kinds of row keep an IPN without a part:
+// - a row with more fields than headers (row-has-extra-fields);
+// - a row whose IPN is valid but for spaces around it (invalid-ipn), such
+//   as "RES-0003-0001 " from a spreadsheet, because the import reads IPNs
+//   exactly (crates/catalog ipn.rs).
 // Someone meant that IPN for a part, so giving it to another part in the
-// app would make the next import find two parts with one IPN.
+// app would make two parts with one IPN once the row is fixed. Only the
+// latest run of each CSV file counts: an older run's row may be gone.
 //
 // IPNs the CSV catalog has but no import has read yet are not here: only
 // the desktop app can see those, in its own folder (see
@@ -2570,7 +2574,7 @@ const CREATE_SOURCE = "create";
 function csvRowKeptWithIpn(txApp, ipn) {
   const kept = txApp.findRecordsByFilter(
     "catalog_import_problems",
-    "code = 'row-has-extra-fields' && detail ~ {:ipn}",
+    "(code = 'row-has-extra-fields' || code = 'invalid-ipn') && detail ~ {:ipn}",
     "",
     0,
     0,
@@ -2603,7 +2607,7 @@ function csvRowKeptWithIpn(txApp, ipn) {
     }
     const run = latestRuns[csvFile];
     if (run && Array.isArray(run.problems) && run.problems.indexOf(problem.id) >= 0) {
-      return { path: problem.getString("path"), rowNumber: detail.row_number };
+      return { path: problem.getString("path") };
     }
   }
   return null;
@@ -2760,8 +2764,9 @@ function publishCreate(e) {
           outcome: "ipn_taken",
           correlationId: request.correlationId,
           ipn: request.ipn,
-          message: `row ${keptRow.rowNumber} of ${keptRow.path} has the IPN ${request.ipn}; the row could not become a part, but its IPN is taken, and an IPN is never reused`,
+          message: `A row of ${keptRow.path} has the IPN ${request.ipn}, but the import could not make a part from it. An IPN is never reused.`,
           addedByYou: false,
+          csvFile: keptRow.path,
         },
       };
       return;

@@ -1330,6 +1330,11 @@ pub enum CreateOutcome {
         /// lost, sent again with changes.
         #[serde(default)]
         added_by_you: bool,
+        /// The CSV file, such as `database/g-res.csv`, whose row has the
+        /// IPN although the import could not make a part from it; empty
+        /// when the Catalog has a part with the IPN.
+        #[serde(default)]
+        csv_file: String,
     },
     #[serde(rename_all = "camelCase")]
     CorrelationReused {

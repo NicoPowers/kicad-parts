@@ -919,7 +919,11 @@ impl TeamCatalog {
                     self.wait_for_change(seq);
                     saved_then(reload(&client, &ipn), |part| PublishResult::Added { part })
                 }
-                CreateOutcome::IpnTaken { added_by_you, .. } => {
+                CreateOutcome::IpnTaken {
+                    added_by_you,
+                    csv_file,
+                    ..
+                } => {
                     let next_free = self.next_free_after(&ipn, csv);
                     // A part you added yourself (a save whose answer was
                     // lost) is offered to open; another part with this IPN
@@ -927,6 +931,12 @@ impl TeamCatalog {
                     let message = if added_by_you {
                         format!(
                             "You already added {ipn}, so nothing more was saved. Open it to check it, or, for another part, use the next free IPN, {next_free}."
+                        )
+                    } else if !csv_file.is_empty() {
+                        // The team server knows a row the import could not
+                        // make a part from.
+                        format!(
+                            "A row of {csv_file} has the IPN {ipn}, but the import could not make a part from it, so nothing was saved. The next free IPN is {next_free}."
                         )
                     } else {
                         format!(

@@ -21,11 +21,14 @@ use catalog::pocketbase::{
     submit_import,
 };
 use catalog::{CsvCatalog, DetailField, ManufacturerPart};
+use catalog_browser::csv_ipns::IpnsInCsv;
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use catalog_import::services;
 use collaboration::PocketBaseClient;
-use desktop_contract::{CsvRowForAnotherPart, SignInRequest};
+use desktop_contract::{
+    CsvRowForAnotherPart, Field, PublishResult, SignInRequest, TeamNewPartRequest,
+};
 use kicad_integration::SearchLocations;
 use native_services::PocketBaseServer;
 use serde_json::Value;
@@ -512,23 +515,10 @@ fn a_csv_review_can_never_take_a_row_for_another_part() {
     team.assert_nothing_lost("a row that became another part");
 }
 
-#[test]
-fn add_part_refuses_an_ipn_that_a_csv_row_has_even_when_the_row_made_no_part() {
-    let team = Team::start();
-    // A row with one field too many cannot become a part, but its IPN is
-    // meant for one.
-    const KEPT: &str = "RES-0107-0001";
-    let file = team.root().join(CSV);
-    let mut text = fs::read_to_string(&file).unwrap();
-    text.push_str(&format!(
-        "\"{KEPT}\",\"ERJ-3EKF1002V\",\"Panasonic\",\"RES 10K\",\"10k\",\"g-res:R_US\",\"g-Resistor_SMD:R_0603_1608Metric\",\"1%\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"one too many\"\n"
-    ));
-    fs::write(&file, text).unwrap();
-    team.import("kept-row");
-    let stored = team.read();
-    assert!(stored.part(KEPT).is_none());
-
-    let mut command = CreateCommand::new(KEPT, "res", "A new resistor");
+/// A new resistor with `ipn` that uses the Catalog's own symbol and
+/// footprint, as Add part sends it.
+fn create_command(ipn: &str) -> CreateCommand {
+    let mut command = CreateCommand::new(ipn, "res", "A new resistor");
     command.fields = vec![
         field("Description", "RES 10K 1% 1/10W 0603"),
         field("Value", "10k"),
@@ -539,21 +529,97 @@ fn add_part_refuses_an_ipn_that_a_csv_row_has_even_when_the_row_made_no_part() {
         field("Symbol", "g-res:R_US"),
         field("Footprint", "g-Resistor_SMD:R_0603_1608Metric"),
     ];
-    let reply = submit_create(&team.editor, &command).unwrap();
-    let CreateOutcome::IpnTaken {
-        message,
-        added_by_you,
-        ..
-    } = &reply.outcome
-    else {
-        panic!("not refused: {}", reply.body);
+    command
+}
+
+#[test]
+fn add_part_refuses_an_ipn_that_a_csv_row_has_even_when_the_row_made_no_part() {
+    let team = Team::start();
+    // A row with one field too many cannot become a part, and neither can a
+    // row whose IPN has a space after it, as spreadsheets leave. Both IPNs
+    // are meant for a part.
+    const EXTRA_FIELDS: &str = "RES-0107-0001";
+    const TRAILING_SPACE: &str = "RES-0110-0001";
+    let file = team.root().join(CSV);
+    let original = fs::read_to_string(&file).unwrap();
+    let mut text = original.clone();
+    text.push_str(&format!(
+        "\"{EXTRA_FIELDS}\",\"ERJ-3EKF1002V\",\"Panasonic\",\"RES 10K\",\"10k\",\"g-res:R_US\",\"g-Resistor_SMD:R_0603_1608Metric\",\"1%\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"one too many\"\n\"{TRAILING_SPACE} \",\"ERJ-3EKF1102V\",\"Panasonic\",\"RES 11K\",\"11k\",\"g-res:R_US\",\"g-Resistor_SMD:R_0603_1608Metric\",\"1%\",\"\"\n"
+    ));
+    fs::write(&file, text).unwrap();
+    team.import("kept-rows");
+    let stored = team.read();
+    assert!(stored.part(EXTRA_FIELDS).is_none());
+    assert!(stored.part(TRAILING_SPACE).is_none());
+
+    for ipn in [EXTRA_FIELDS, TRAILING_SPACE] {
+        let reply = submit_create(&team.editor, &create_command(ipn)).unwrap();
+        let CreateOutcome::IpnTaken {
+            message,
+            added_by_you,
+            csv_file,
+            ..
+        } = &reply.outcome
+        else {
+            panic!("{ipn} not refused: {}", reply.body);
+        };
+        assert!(!added_by_you);
+        assert_eq!(csv_file, CSV);
+        assert_eq!(
+            message,
+            &format!(
+                "A row of database/g-res.csv has the IPN {ipn}, but the import could not make a part from it. An IPN is never reused."
+            )
+        );
+    }
+    assert_eq!(team.read().counts(), stored.counts());
+
+    // The desktop passes the reason on, even when its own CSV folder lacks
+    // the row.
+    let data = tempfile::tempdir().unwrap();
+    let desktop = team.desktop(data.path());
+    let request = TeamNewPartRequest {
+        correlation_id: None,
+        ipn: EXTRA_FIELDS.into(),
+        reason: "A new resistor".into(),
+        category: "res".into(),
+        fields: ["Description", "Value", "Tolerance", "Datasheet"]
+            .iter()
+            .map(|name| Field {
+                name: (*name).into(),
+                value: String::new(),
+            })
+            .collect(),
+        manufacturer_parts: Vec::new(),
+        symbol: "g-res:R_US".into(),
+        footprint: "g-Resistor_SMD:R_0603_1608Metric".into(),
+        files: Vec::new(),
+        from: String::new(),
+        downloads: Vec::new(),
     };
-    assert!(!added_by_you);
+    let saved = desktop.add_part(request, &IpnsInCsv::default()).unwrap();
+    let PublishResult::IpnTaken { message, .. } = saved else {
+        panic!("not refused: {saved:?}");
+    };
     assert!(
-        message.contains("row 30 of database/g-res.csv has the IPN RES-0107-0001"),
+        message.starts_with(&format!(
+            "A row of database/g-res.csv has the IPN {EXTRA_FIELDS}, but the import could not make a part from it, so nothing was saved."
+        )),
         "{message}"
     );
-    assert_eq!(team.read().counts(), stored.counts());
+
+    // Once the latest import no longer finds those rows, their IPNs are
+    // free again: an older run's row may be gone.
+    fs::write(&file, original).unwrap();
+    team.import("rows-gone");
+    for ipn in [EXTRA_FIELDS, TRAILING_SPACE] {
+        let reply = submit_create(&team.editor, &create_command(ipn)).unwrap();
+        assert!(
+            matches!(reply.outcome, CreateOutcome::Applied { .. }),
+            "{ipn}: {}",
+            reply.body
+        );
+    }
 }
 
 #[test]
