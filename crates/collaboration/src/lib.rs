@@ -51,6 +51,9 @@ pub enum CollabError {
     Http { status: u16, message: String },
     /// The server answered something this client does not understand.
     Protocol(String),
+    /// The address may not receive a password: plain `http://` to another
+    /// computer. Nothing was sent.
+    Address(AddressRefusal),
 }
 
 impl fmt::Display for CollabError {
@@ -68,6 +71,7 @@ impl fmt::Display for CollabError {
                     "unexpected answer from the team server: {message}"
                 )
             }
+            Self::Address(refusal) => refusal.fmt(formatter),
         }
     }
 }

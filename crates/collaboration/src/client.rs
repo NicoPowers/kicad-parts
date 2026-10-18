@@ -1,5 +1,6 @@
 //! A blocking PocketBase REST client.
 
+use crate::address::ServerAddress;
 use crate::connection::ConnectionProblem;
 use crate::contract::{ChangeEntry, CommandOutcome, CommandReply, EditRecord, RecordSnapshot};
 use crate::tls::ServerTrust;
@@ -121,13 +122,19 @@ impl PocketBaseClient {
     }
 
     /// Signs in to an auth collection (`users`, or `_superusers`) and
-    /// returns a client that sends the token.
+    /// returns a client that sends the token. Refuses, before sending
+    /// anything, a plain `http://` server on another computer.
     pub fn authenticate(
         &self,
         collection: &str,
         identity: &str,
         password: &str,
     ) -> CollabResult<Self> {
+        // Checked here, not only at the sign-in form, so no caller can
+        // send a password unencrypted across a network.
+        ServerAddress::from_url(&self.base_url)
+            .and_then(|address| address.may_receive_password())
+            .map_err(CollabError::Address)?;
         let reply = self.post_json(
             &format!("/api/collections/{collection}/auth-with-password"),
             &serde_json::json!({ "identity": identity, "password": password }),
@@ -450,6 +457,7 @@ fn transport_error(error: &ureq::Error) -> CollabError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AddressRefusal;
 
     #[test]
     fn statuses_map_to_errors() {
@@ -485,6 +493,28 @@ mod tests {
             .unwrap_err();
         assert!(matches!(failure, CollabError::Transport(_)));
         assert!(!failure.to_string().contains("secret-token"), "{failure}");
+    }
+
+    #[test]
+    fn no_password_goes_unencrypted_to_another_computer() {
+        // team.example.test does not exist: the refusal comes before any
+        // request, so the test needs no network.
+        let failure = PocketBaseClient::new("http://team.example.test:8090/acme")
+            .authenticate("users", "a@example.test", "secret")
+            .unwrap_err();
+        assert!(
+            matches!(
+                &failure,
+                CollabError::Address(AddressRefusal::PlainHttpToAnotherComputer { suggestion })
+                    if suggestion == "https://team.example.test/acme"
+            ),
+            "{failure:?}"
+        );
+        // On this computer, the request is sent (and fails: nothing listens).
+        assert!(matches!(
+            PocketBaseClient::new("http://127.0.0.1:9").authenticate("users", "a", "b"),
+            Err(CollabError::Transport(_))
+        ));
     }
 
     #[test]
