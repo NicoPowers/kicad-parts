@@ -60,6 +60,7 @@ const CHANGE_FIELDS: [(&str, &str); 12] = [
 ///   In `fields`, "$new" stands for the last Change saved here, and
 ///   "$last" for the record saved just before.
 /// - `uncaught`: let a refusal through, so PocketBase answers it.
+/// - `noTransaction`: save with `$app` directly, in no transaction.
 const SAVE_HOOK: &str = r#"
 routerAdd("POST", "/api/test/save", (e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
@@ -122,7 +123,11 @@ routerAdd("POST", "/api/test/save", (e) => {
     }
   };
   try {
-    $app.runInTransaction(save);
+    if (body.noTransaction) {
+      save($app);
+    } else {
+      $app.runInTransaction(save);
+    }
   } catch (error) {
     if (body.uncaught) {
       throw error;
@@ -189,13 +194,14 @@ impl Team {
     fn refused(&self, body: Value, says: &[&str]) {
         let reply = self.save(body.clone());
         assert_eq!(reply.status, 409, "{body}: {}", reply.body);
+        let answer: Value = serde_json::from_str(&reply.body).unwrap();
+        let message = answer["refused"].as_str().unwrap();
         assert!(
-            reply.body.contains("Programming error in the team server"),
-            "{}",
-            reply.body
+            message.contains("Programming error in the team server"),
+            "{message}"
         );
         for words in says {
-            assert!(reply.body.contains(words), "{words}: {}", reply.body);
+            assert!(message.contains(words), "{words}: {message}");
         }
     }
 
@@ -383,27 +389,26 @@ fn server_code_must_name_the_change_saved_in_its_own_transaction() {
         if collection == "catalog_archive_entries" {
             record["fields"]["change"] = json!(archive_change.id);
         }
-        let named = record["fields"]
+        let (field, named) = record["fields"]
             .as_object()
             .unwrap()
             .iter()
             .find(|(name, _)| name.ends_with("change"))
-            .unwrap()
-            .1
-            .clone();
+            .unwrap();
         // With no Change saved in the transaction...
+        let record_of = format!("the new {collection} record ");
         let names = format!(
-            "a new {collection} record names Change {}",
+            "names Change {} in its \"{field}\" field",
             named.as_str().unwrap()
         );
         team.refused(
             json!({ "records": [record] }),
-            &[&names, "this transaction saved no Change"],
+            &[&record_of, &names, "this transaction saved no Change"],
         );
         // ...and with a new Change that the record does not name.
         team.refused(
             json!({ "changes": 1, "records": [record] }),
-            &[&names, "It must name Change"],
+            &[&record_of, &names, "It must name Change"],
         );
     }
     assert_eq!(team.read(), before, "nothing was written");
@@ -426,7 +431,7 @@ fn server_code_must_name_the_change_saved_in_its_own_transaction() {
                 "first_change": "",
             },
         }] }),
-        &["names no Change in first_change"],
+        &["names no Change in its \"first_change\" field"],
     );
     team.server.stop();
 }
@@ -447,6 +452,27 @@ fn a_transaction_saves_one_change_numbered_right_after_the_newest() {
     assert_eq!(team.read(), before, "nothing was written");
     team.saved(json!({ "changes": 1 }));
     assert_eq!(team.read().changes.last().unwrap().seq, newest + 1);
+    team.server.stop();
+}
+
+#[test]
+fn a_catalog_write_outside_a_transaction_is_refused() {
+    let team = Team::start();
+    let before = team.read();
+    let part = before.part(IPN).unwrap().clone();
+    let says = &[
+        "this save is not in a transaction. Save the Change and its records in one $app.runInTransaction.",
+    ];
+    // A new Change on its own, and then a Change with its details, each
+    // saved with $app directly: their records could be seen apart.
+    team.refused(json!({ "noTransaction": true, "changes": 1 }), says);
+    team.refused(
+        json!({ "noTransaction": true, "records": [
+            { "collection": "catalog_part_details", "next": part.id, "fields": { "change": before.changes[0].id } },
+        ] }),
+        says,
+    );
+    assert_eq!(team.read(), before, "nothing was written");
     team.server.stop();
 }
 
@@ -578,8 +604,9 @@ fn a_refusal_answers_500_and_is_logged_as_an_error() {
     let message: Value = serde_json::from_str(&reply.body).unwrap();
     let message = message["message"].as_str().unwrap();
     assert!(
-        message.starts_with("Programming error in the team server, not a user mistake: a new catalog_part_details record")
-            && message.ends_with("The save was refused. See catalog_write_guards.pb.js."),
+        message.starts_with(
+            "Programming error in the team server, not a user mistake: the new catalog_part_details record"
+        ) && message.ends_with("The write was refused. See catalog_write_guards.pb.js."),
         "{message}"
     );
     // In the server's own output...

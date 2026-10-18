@@ -42,9 +42,9 @@
 // The guards read committed records through the app PocketBase started
 // with; inside a hook, e.app is the transaction.
 onBootstrap((e) => {
-  e.next();
   const lib = require(`${__hooks}/catalog_lib.js`);
   lib.rememberCommittedApp(e.app);
+  return e.next();
 });
 
 onRecordCreateRequest(
@@ -174,13 +174,14 @@ onRecordUpdate((e) => {
     }
   }
   const find = (collection, id) => lib.recordById(e.app, collection, id);
+  // The details and revision the part moves to, if it moves.
+  const moved = { details: null, revision: null };
 
   // Details: stay, or move to the details saved right after them.
   const details = part.getString("current_details");
   const detailsNumber = part.getInt("current_details_number");
   const previousDetails = before.getString("current_details");
-  const detailsMoved = details !== previousDetails || detailsNumber !== before.getInt("current_details_number");
-  if (detailsMoved) {
+  if (details !== previousDetails || detailsNumber !== before.getInt("current_details_number")) {
     const record = find("catalog_part_details", details);
     if (!record || record.getString("part") !== part.id || record.getInt("number") !== detailsNumber) {
       throw new Error(`the current details of ${ipn} must be one of its own, numbered ${detailsNumber}`);
@@ -190,14 +191,13 @@ onRecordUpdate((e) => {
     if (detailsNumber !== previousNumber + 1 || record.getString("predecessor") !== previousDetails) {
       throw new Error(`the current details of ${ipn} can only move to the one saved right after it`);
     }
+    moved.details = record;
   }
 
   // Revision: stay, or move to the newest revision that is not archived.
   const revision = part.getString("current_revision");
   const revisionNumber = part.getInt("current_revision_number");
-  const revisionMoved =
-    revision !== before.getString("current_revision") || revisionNumber !== before.getInt("current_revision_number");
-  if (revisionMoved) {
+  if (revision !== before.getString("current_revision") || revisionNumber !== before.getInt("current_revision_number")) {
     const record = find("catalog_part_revisions", revision);
     if (!record || record.getString("part") !== part.id || record.getInt("number") !== revisionNumber) {
       throw new Error(`the current revision of ${ipn} must be one of its own, numbered ${revisionNumber}`);
@@ -208,9 +208,10 @@ onRecordUpdate((e) => {
         `the current revision of ${ipn} can only move to its newest revision that is not archived`,
       );
     }
+    moved.revision = record;
   }
-  if (detailsMoved || revisionMoved) {
-    lib.requireMoveByOwnChange(e.app, part, { details: detailsMoved, revision: revisionMoved });
+  if (moved.details || moved.revision) {
+    lib.requireMoveByOwnChange(e.app, part, moved);
   }
   return e.next();
 }, "catalog_parts");

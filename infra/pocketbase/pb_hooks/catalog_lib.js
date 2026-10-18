@@ -1583,29 +1583,34 @@ function numberedRecordProblem(txApp, record) {
 // ---- Every new record names its own transaction's Change -----------------------
 //
 // Desktops follow the Catalog Change by Change (crates/catalog/src/replica.rs).
-// For each new Change, a desktop fetches the records that name it, once. A
-// record that names an older Change would never reach a desktop that had
-// already applied that Change. So the write guards hold every save to two
-// rules:
+// For each new Change, a desktop fetches the records that name it, once, and
+// makes what they hold current. So the server keeps two directions in step:
 //
+// - A part moves only to what the Change saved in the same transaction
+//   saved: new details, a new revision, or an archive entry.
+// - Everything a Change saves for a part moves the part. Saving new details,
+//   a new revision or an archive entry moves it (catalog_write_guards.pb.js).
+//
+// For the first direction, the write guards hold every save to these rules:
+//
+// - Every Catalog write that names a Change runs in a transaction.
 // - A transaction saves at most one Change, numbered right after the
 //   newest.
 // - Every new record that names a Change names the one saved in the same
-//   transaction. A part's current details or revision may move only to
-//   what that Change saved.
+//   transaction. A record that named an older Change would never reach a
+//   desktop that had already applied that Change.
 //
 // How a guard finds the Change saved in this transaction: a transaction
 // sees its own writes at once, but other database connections see them
 // only once it is committed. In a hook, e.app is the transaction. The app
 // PocketBase started with reads through its own connections, so it sees
 // committed records only. The newest Change the transaction sees is its
-// own exactly when that app cannot find it. Outside a transaction both
-// see the same records, so no Change counts as this save's own.
+// own exactly when that app cannot find it.
 //
 // "The Change with the highest seq" is not enough on its own: server code
 // that saved no Change would pass by naming the newest committed one.
 //
-// A refused save is always a programming error in server code, never a
+// A refused write is always a programming error in server code, never a
 // person's mistake, so it answers 500 and is logged as an error.
 
 const COMMITTED_APP = "catalog.committedApp";
@@ -1622,9 +1627,10 @@ function newestChange(app) {
   return found.length > 0 ? found[0] : null;
 }
 
-// The Change saved earlier in the transaction `txApp` runs, or null when
-// it saved none or `txApp` is not a transaction.
-function changeOfThisTransaction(txApp) {
+// What the transaction `txApp` knows about Changes: `newest`, the newest
+// Change it sees or null, and `own`, that same Change when this
+// transaction saved it, else null. Call requireTransaction first.
+function changesSeen(txApp) {
   const committed = txApp.store().get(COMMITTED_APP);
   if (!committed) {
     refuseProgrammingError(
@@ -1633,10 +1639,40 @@ function changeOfThisTransaction(txApp) {
     );
   }
   const newest = newestChange(txApp);
-  if (!newest || recordById(committed, "catalog_changes", newest.id)) {
-    return null;
+  if (!newest) {
+    return { newest: null, own: null };
   }
-  return newest;
+  // A filter answers "none" only when nothing matches, and throws on a
+  // database error. recordById would read any error as "not found" and let
+  // an old Change pass as this transaction's own.
+  const found = committed.findRecordsByFilter("catalog_changes", "id = {:id}", "", 1, 0, { id: newest.id });
+  return { newest: newest, own: found.length === 0 ? newest : null };
+}
+
+// Refuses a Catalog write that is not in a transaction: no Change could
+// count as its own, and its Change and records could be seen apart.
+function requireTransaction(txApp) {
+  if (!txApp.isTransactional()) {
+    refuseProgrammingError(
+      txApp,
+      "this save is not in a transaction. Save the Change and its records in one $app.runInTransaction.",
+    );
+  }
+}
+
+// The catalog_changes collection, or null before the Catalog migrations
+// have made it. Any other error is real, so it is thrown and the write
+// fails.
+function changesCollection(app) {
+  try {
+    return app.findCachedCollectionByNameOrId("catalog_changes");
+  } catch (error) {
+    // PocketBase answers sql.ErrNoRows when the collection does not exist.
+    if (String(error).indexOf("no rows in result set") >= 0) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 // The fields of `collection` that name a Change: each relation field to
@@ -1660,7 +1696,7 @@ function changeFieldsOf(collection, changesCollectionId) {
 // { name, required, value }. `ownChangeId` is the ID of the Change this
 // transaction saved, or "" when it saved none. An optional field may stay
 // empty, as an audit entry's does for an import run that saved no Change.
-function changeFieldsProblem(collectionName, fields, ownChangeId) {
+function changeFieldsProblem(collectionName, recordId, fields, ownChangeId) {
   for (const field of fields) {
     if (field.value === "" && !field.required) {
       continue;
@@ -1669,10 +1705,11 @@ function changeFieldsProblem(collectionName, fields, ownChangeId) {
       continue;
     }
     const named = field.value === "" ? "no Change" : `Change ${field.value}`;
+    const record = `the new ${collectionName} record ${recordId} names ${named} in its "${field.name}" field`;
     if (ownChangeId === "") {
-      return `a new ${collectionName} record names ${named} in ${field.name}, but this transaction saved no Change. Save a new Change first, in the same transaction.`;
+      return `${record}, but this transaction saved no Change. Save a new Change first, in the same transaction.`;
     }
-    return `a new ${collectionName} record names ${named} in ${field.name}. It must name Change ${ownChangeId}, which this transaction saved.`;
+    return `${record}. It must name Change ${ownChangeId}, which this transaction saved.`;
   }
   return "";
 }
@@ -1691,12 +1728,13 @@ function newChangeProblem(seq, newest) {
   return "";
 }
 
-// Refuses a save that a write guard caught. Only wrong server code gets
+// Refuses a write that a write guard caught. Only wrong server code gets
 // here, so the message says so. The request answers 500 with the message.
 // It is also logged as an error twice: in the dashboard's Logs, and in the
 // server's own output, which is where a service manager keeps it.
 function refuseProgrammingError(app, problem) {
-  const message = `Programming error in the team server, not a user mistake: ${problem} The save was refused. See catalog_write_guards.pb.js.`;
+  const sentence = /[.!?]$/.test(problem) ? problem : problem + ".";
+  const message = `Programming error in the team server, not a user mistake: ${sentence} The write was refused. See catalog_write_guards.pb.js.`;
   app.logger().error(message);
   console.error(message);
   throw new InternalServerError(message);
@@ -1705,21 +1743,20 @@ function refuseProgrammingError(app, problem) {
 // Refuses a new record that names a Change other than its own
 // transaction's (see the rules above).
 function requireOwnChange(txApp, record) {
-  const collection = record.collection();
-  let changes = null;
-  try {
-    changes = txApp.findCollectionByNameOrId("catalog_changes");
-  } catch (_) {
-    // Before the Catalog migrations run, no field can name a Change.
+  const changes = changesCollection(txApp);
+  if (!changes) {
     return;
   }
+  const collection = record.collection();
   const fields = changeFieldsOf(collection, changes.id);
   if (fields.length === 0) {
     return;
   }
-  const own = changeOfThisTransaction(txApp);
+  requireTransaction(txApp);
+  const own = changesSeen(txApp).own;
   const problem = changeFieldsProblem(
     collection.name,
+    record.id,
     fields.map((field) => ({ name: field.name, required: field.required, value: record.getString(field.name) })),
     own ? own.id : "",
   );
@@ -1731,12 +1768,11 @@ function requireOwnChange(txApp, record) {
 // Refuses a new Change that is not the first in its transaction or that
 // is not numbered right after the newest.
 function requireNextChange(txApp, change) {
-  const newest = newestChange(txApp);
-  // This transaction's Change, when there is one, is always the newest.
-  const own = changeOfThisTransaction(txApp) !== null;
+  requireTransaction(txApp);
+  const seen = changesSeen(txApp);
   const problem = newChangeProblem(
     change.getInt("seq"),
-    newest ? { id: newest.id, seq: newest.getInt("seq"), own: own } : null,
+    seen.newest ? { id: seen.newest.id, seq: seen.newest.getInt("seq"), own: seen.own !== null } : null,
   );
   if (problem) {
     refuseProgrammingError(txApp, problem);
@@ -1744,25 +1780,23 @@ function requireNextChange(txApp, change) {
 }
 
 // Refuses a move of `part`'s current details or revision that the Change
-// saved in this transaction did not make. `moved` says which pointers
-// moved; the part-update guard has already checked where they point.
-// Details move only to details that Change saved. A revision moves only to
-// a revision that Change saved, or because of an archive entry in it.
+// saved in this transaction did not make. `moved` holds the details and
+// the revision the part now points at, each only if it moved; the
+// part-update guard has already checked them. Details move only to details
+// that Change saved. A revision moves only to a revision that Change saved,
+// or because of an archive entry in it.
 function requireMoveByOwnChange(txApp, part, moved) {
-  const own = changeOfThisTransaction(txApp);
+  requireTransaction(txApp);
+  const own = changesSeen(txApp).own;
   const ipn = part.getString("ipn");
-  if (moved.details) {
-    const details = recordById(txApp, "catalog_part_details", part.getString("current_details"));
-    if (!own || !details || details.getString("change") !== own.id) {
-      refuseProgrammingError(
-        txApp,
-        `the current details of ${ipn} moved to details that this transaction's Change did not save. Desktops would never hear of the move.`,
-      );
-    }
+  if (moved.details && (!own || moved.details.getString("change") !== own.id)) {
+    refuseProgrammingError(
+      txApp,
+      `the current details of ${ipn} moved to details that this transaction's Change did not save. Desktops would never hear of the move.`,
+    );
   }
   if (moved.revision) {
-    const revision = recordById(txApp, "catalog_part_revisions", part.getString("current_revision"));
-    const savedByOwn = own !== null && revision !== null && revision.getString("change") === own.id;
+    const savedByOwn = own !== null && moved.revision.getString("change") === own.id;
     const archivedByOwn =
       own !== null &&
       txApp.findRecordsByFilter("catalog_archive_entries", "part = {:part} && change = {:change}", "", 1, 0, {
@@ -4009,7 +4043,7 @@ module.exports = {
   NUMBERED_RECORDS: NUMBERED_RECORDS,
   numberedRecordProblem: numberedRecordProblem,
   rememberCommittedApp: rememberCommittedApp,
-  changeOfThisTransaction: changeOfThisTransaction,
+  changesSeen: changesSeen,
   changeFieldsOf: changeFieldsOf,
   changeFieldsProblem: changeFieldsProblem,
   newChangeProblem: newChangeProblem,
