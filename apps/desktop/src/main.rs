@@ -4,6 +4,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod sign_ins;
+
 use catalog_browser::kicad_libraries::KicadLibraries;
 use catalog_browser::teams::Teams;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
@@ -45,6 +47,10 @@ struct LaunchOptions {
     team_server: Option<String>,
     /// `--team-email EMAIL`: the email to suggest at sign-in.
     team_email: Option<String>,
+    /// `--sign-ins=memory` or `--sign-ins=until-closed`: keep team sign-ins
+    /// in memory instead of the system's credential store, so tests never
+    /// touch the person's store. See `sign_ins::for_tests`.
+    sign_ins: Option<String>,
     /// `--display-scale N` (Windows only, N from 0.5 to 4): draw N screen pixels per CSS
     /// pixel, whatever the Windows display scaling is. The journeys use 1, so
     /// their screenshots are 1280x800 on every machine.
@@ -81,6 +87,7 @@ impl LaunchOptions {
                 "--kicad-config-dir" => Target::KicadConfigDir,
                 "--team-server" => Target::TeamServer,
                 "--team-email" => Target::TeamEmail,
+                "--sign-ins" => Target::SignIns,
                 "--display-scale" => Target::DisplayScale,
                 // WebView and test drivers may add their own arguments.
                 _ => continue,
@@ -97,6 +104,7 @@ impl LaunchOptions {
                 Target::KicadConfigDir => options.kicad_config_dir = Some(PathBuf::from(&value)),
                 Target::TeamServer => options.team_server = Some(text()),
                 Target::TeamEmail => options.team_email = Some(text()),
+                Target::SignIns => options.sign_ins = Some(text()),
                 Target::DisplayScale => options.display_scale = Some(parse_scale(&text())?),
             }
         }
@@ -111,6 +119,7 @@ enum Target {
     KicadConfigDir,
     TeamServer,
     TeamEmail,
+    SignIns,
     DisplayScale,
 }
 
@@ -608,6 +617,16 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let sign_ins = match options.sign_ins.as_deref() {
+        None => sign_ins::system_or_memory(),
+        Some(choice) => match sign_ins::for_tests(choice) {
+            Ok(sign_ins) => sign_ins,
+            Err(message) => {
+                eprintln!("kicad-parts-desktop: {message}");
+                std::process::exit(2);
+            }
+        },
+    };
     // Both options need WebView2 switches, so they are Windows only.
     let display_scale = options.display_scale.filter(|_| cfg!(windows));
     let switches = webview_switches(display_scale, options.software_rendering && cfg!(windows));
@@ -666,10 +685,11 @@ fn main() {
                 kicad_documents_dir: app.path().document_dir().ok(),
             });
             app.manage(Arc::new(browser));
-            // Only each team's server address and email are saved; the
-            // sessions stay in memory and end with the app.
+            // Each team's server address and email are saved in a file;
+            // its renewable sign-in only in the credential store.
             let teams = Arc::new(Teams::open(
                 config_dir.join("team.json"),
+                sign_ins.clone(),
                 options.team_server.clone(),
                 options.team_email.clone(),
             ));
@@ -738,6 +758,7 @@ mod tests {
             "--team-server=http://127.0.0.1:8090",
             "--team-email",
             "a@example.test",
+            "--sign-ins=memory",
             "--display-scale=1",
             "--software-rendering",
         ]
@@ -755,6 +776,7 @@ mod tests {
             Some("http://127.0.0.1:8090")
         );
         assert_eq!(options.team_email.as_deref(), Some("a@example.test"));
+        assert_eq!(options.sign_ins.as_deref(), Some("memory"));
         assert_eq!(options.display_scale, Some(1.0));
         assert!(options.software_rendering);
         assert!(LaunchOptions::parse([OsString::from("--data-dir")]).is_err());

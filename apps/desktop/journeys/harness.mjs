@@ -139,6 +139,11 @@ export async function launchApp({ args = [], dataDir = tempDir('data') } = {}) {
   if (!args.some((arg) => arg.startsWith('--kicad-config-dir='))) {
     args = [...args, `--kicad-config-dir=${tempDir('kicad-config')}`];
   }
+  // Team sign-ins stay in the app's memory: journeys never read or write
+  // the system's credential store.
+  if (!args.some((arg) => arg.startsWith('--sign-ins='))) {
+    args = [...args, '--sign-ins=memory'];
+  }
   const browser = await remote({
     hostname: '127.0.0.1',
     port: driverPort,

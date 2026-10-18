@@ -7,18 +7,31 @@
 //! shows one team at a time through [`Teams::shown`]; anything that works
 //! on every team, such as keeping each team's KiCad libraries up to date,
 //! uses [`Teams::signed_in`].
+//!
+//! Each team's sign-in is kept between runs in a [`SignInStore`] (the
+//! operating system's credential store in the app), and each team's
+//! [`keeper`] carries it on at start and renews it while in use.
 
+mod keeper;
 mod saved;
+mod sign_ins;
+
+pub use sign_ins::{MemorySignIns, SignInStore, SignIns};
 
 use crate::team::TeamCatalog;
 use collaboration::ServerAddress;
-use desktop_contract::{SignInRequest, TeamSession, TeamStatus};
+use desktop_contract::{SignInRequest, SignInsKept, TeamSession, TeamStatus};
+use keeper::{Keeper, KeeperTask};
 use saved::{SavedList, SavedTeam};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub struct Teams {
     list_file: PathBuf,
+    sign_ins: SignIns,
+    /// Whether sign-ins outlive the app. Turns to "until closed" if the
+    /// store fails.
+    kept: Arc<Mutex<SignInsKept>>,
     /// From launch options: they fill in the sign-in form.
     suggested: SavedTeam,
     state: Mutex<TeamList>,
@@ -35,6 +48,7 @@ struct Team {
     /// Kept for as long as the team is in the list, so whatever follows the
     /// team (such as its KiCad libraries) keeps following the same one.
     catalog: Arc<TeamCatalog>,
+    keeper: Arc<Keeper>,
 }
 
 struct TeamList {
@@ -72,25 +86,34 @@ impl TeamList {
 }
 
 impl Teams {
-    /// Reads the list of teams from `list_file`. Nobody is signed in yet.
-    /// A suggested server or email (from launch options) fills in the
-    /// sign-in form.
+    /// Reads the list of teams from `list_file`, and carries on, in the
+    /// background, each team's sign-in kept in `sign_ins`. A suggested
+    /// server or email (from launch options) fills in the sign-in form.
     pub fn open(
         list_file: PathBuf,
+        sign_ins: SignIns,
         suggested_server: Option<String>,
         suggested_email: Option<String>,
     ) -> Self {
         let saved = saved::read(&list_file);
+        let kept = Arc::new(Mutex::new(sign_ins.kept.clone()));
         let teams = saved
             .teams
             .into_iter()
-            .map(|saved| Team {
-                saved,
-                catalog: Arc::new(TeamCatalog::new()),
+            .map(|saved| {
+                let catalog = Arc::new(TeamCatalog::new());
+                let keeper = keeper_for(&saved, &catalog, &sign_ins, &kept, true);
+                Team {
+                    saved,
+                    catalog,
+                    keeper,
+                }
             })
             .collect();
         Self {
             list_file,
+            sign_ins,
+            kept,
             suggested: SavedTeam {
                 server_url: suggested_server.unwrap_or_default(),
                 email: suggested_email.unwrap_or_default(),
@@ -106,8 +129,9 @@ impl Teams {
     }
 
     /// Signs in to the team at the request's server, adding it to the list
-    /// if it is new, and shows it. Other teams stay signed in. A failed
-    /// sign-in adds nothing; its problem, in plain words, is the error.
+    /// if it is new, and shows it. Other teams stay signed in. Its keeper
+    /// then keeps the sign-in for the next run. A failed sign-in adds
+    /// nothing; its problem, in plain words, is the error.
     pub fn sign_in(&self, request: SignInRequest) -> Result<(), String> {
         let _one_at_a_time = self
             .signing_in
@@ -120,10 +144,15 @@ impl Teams {
         let known = self
             .lock()
             .find(&server_url)
-            .map(|team| team.catalog.clone());
-        let catalog = known
-            .clone()
-            .unwrap_or_else(|| Arc::new(TeamCatalog::new()));
+            .map(|team| (team.catalog.clone(), team.keeper.clone()));
+        if let Some((_, keeper)) = &known {
+            // A password replaces any kept sign-in still being carried on.
+            keeper.signed_in();
+        }
+        let catalog = match &known {
+            Some((catalog, _)) => catalog.clone(),
+            None => Arc::new(TeamCatalog::new()),
+        };
         let status = catalog.sign_in(SignInRequest {
             server_url: server_url.clone(),
             ..request
@@ -134,39 +163,47 @@ impl Teams {
                 return self.failed(problem.unwrap_or_default());
             }
         };
-        let mut list = self.lock();
-        list.problem = None;
         let saved = SavedTeam {
             server_url: server_url.clone(),
             email,
         };
+        let mut list = self.lock();
+        list.problem = None;
         match list
             .teams
             .iter_mut()
             .find(|team| team.saved.server_url == server_url)
         {
             Some(team) => team.saved = saved,
-            None => list.teams.push(Team { saved, catalog }),
+            None => {
+                let keeper = keeper_for(&saved, &catalog, &self.sign_ins, &self.kept, false);
+                list.teams.push(Team {
+                    saved,
+                    catalog,
+                    keeper,
+                });
+            }
         }
         list.chosen = server_url;
         self.save(&list);
         Ok(())
     }
 
-    /// Signs out of one team. It stays in the list, so signing in again
-    /// needs only the password.
+    /// Signs out of one team and forgets its kept sign-in. It stays in the
+    /// list, so signing in again needs only the password.
     pub fn sign_out(&self, server_url: &str) {
-        let catalog = {
+        let keeper = {
             let mut list = self.lock();
             list.problem = None;
-            list.find(server_url).map(|team| team.catalog.clone())
+            list.find(server_url).map(|team| team.keeper.clone())
         };
-        if let Some(catalog) = catalog {
-            catalog.sign_out();
+        if let Some(keeper) = keeper {
+            self.store_result(keeper.sign_out());
         }
     }
 
-    /// Signs out of one team and takes it off the list.
+    /// Signs out of one team, forgets its kept sign-in, and takes it off
+    /// the list.
     pub fn remove(&self, server_url: &str) {
         let removed = {
             let mut list = self.lock();
@@ -182,7 +219,7 @@ impl Teams {
             removed
         };
         // Signed out outside the lock, so status polling never waits.
-        removed.catalog.sign_out();
+        self.store_result(removed.keeper.sign_out());
     }
 
     /// Shows the team at `server_url` in the catalog view. No sign-in is
@@ -238,12 +275,32 @@ impl Teams {
                 suggested.to_owned()
             }
         };
+        let problem = list
+            .problem
+            .clone()
+            .or_else(|| shown.and_then(|team| team.catalog.problem()));
         TeamStatus {
             server_url: pick(&self.suggested.server_url, saved.server_url),
             email: pick(&self.suggested.email, saved.email),
-            session: TeamSession::SignedOut {
-                problem: list.problem.clone(),
-            },
+            session: TeamSession::SignedOut { problem },
+        }
+    }
+
+    /// Whether sign-ins outlive the app, and if not, why.
+    pub fn kept(&self) -> SignInsKept {
+        self.kept.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// `Some` while the app is carrying on the kept sign-in of the team at
+    /// `server_url`: `None` inside during the first try, then why its
+    /// server could not be reached.
+    pub fn reaching(&self, server_url: &str) -> Option<Option<String>> {
+        self.lock().find(server_url)?.keeper.reaching()
+    }
+
+    fn store_result(&self, result: Result<(), String>) {
+        if let Err(problem) = result {
+            store_failed(&self.kept, problem);
         }
     }
 
@@ -263,102 +320,32 @@ impl Teams {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_failed_sign_in_adds_no_team_and_saves_no_password() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("team.json");
-        let teams = Teams::open(file.clone(), None, None);
-        let problem = teams
-            .sign_in(SignInRequest {
-                // Port 9 (discard) on loopback is closed on any normal machine.
-                server_url: "http://127.0.0.1:9".into(),
-                email: "a@example.test".into(),
-                password: "secret-password".into(),
-            })
-            .unwrap_err();
-        assert!(!problem.is_empty());
-        assert!(!file.exists(), "a failed sign-in saves nothing at all");
-        assert_eq!(
-            teams.shown_status().session,
-            TeamSession::SignedOut {
-                problem: Some(problem)
-            }
-        );
-        assert!(teams.signed_in().is_empty());
-        assert!(!teams.shown().is_signed_in());
-    }
-
-    #[test]
-    fn an_address_that_may_not_receive_a_password_is_refused_first() {
-        let dir = tempfile::tempdir().unwrap();
-        let teams = Teams::open(dir.path().join("team.json"), None, None);
-        let problem = teams
-            .sign_in(SignInRequest {
-                server_url: "http://team.example.com".into(),
-                email: "a@example.test".into(),
-                password: "secret-password".into(),
-            })
-            .unwrap_err();
-        assert!(
-            problem.starts_with("Addresses starting with http://"),
-            "{problem}"
-        );
-    }
-
-    #[test]
-    fn suggested_values_fill_in_the_sign_in_form() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("team.json");
-        saved::write(
-            &file,
-            &SavedList {
-                teams: vec![SavedTeam {
-                    server_url: "https://parts.example.com".into(),
-                    email: "a@example.test".into(),
-                }],
-                shown: "https://parts.example.com".into(),
-            },
-        )
-        .unwrap();
-        let status = Teams::open(file.clone(), None, None).shown_status();
-        assert_eq!(
-            (status.server_url.as_str(), status.email.as_str()),
-            ("https://parts.example.com", "a@example.test")
-        );
-        let status = Teams::open(file, Some("http://127.0.0.1:1".into()), None).shown_status();
-        assert_eq!(
-            (status.server_url.as_str(), status.email.as_str()),
-            ("http://127.0.0.1:1", "a@example.test")
-        );
-    }
-
-    #[test]
-    fn teams_in_the_list_can_be_shown_and_removed() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("team.json");
-        let team = |server_url: &str| SavedTeam {
-            server_url: server_url.into(),
-            email: "a@example.test".into(),
-        };
-        saved::write(
-            &file,
-            &SavedList {
-                teams: vec![team("https://a.example.com"), team("https://b.example.com")],
-                shown: "https://a.example.com".into(),
-            },
-        )
-        .unwrap();
-        let teams = Teams::open(file.clone(), None, None);
-        teams.show("https://b.example.com").unwrap();
-        assert_eq!(saved::read(&file).shown, "https://b.example.com");
-        assert!(teams.show("https://c.example.com").is_err());
-        teams.remove("https://a.example.com");
-        assert_eq!(saved::read(&file).teams, [team("https://b.example.com")]);
-        // Nobody is signed in, so the shown team is the chosen one.
-        assert_eq!(teams.shown_status().server_url, "https://b.example.com");
-    }
+fn keeper_for(
+    saved: &SavedTeam,
+    catalog: &Arc<TeamCatalog>,
+    sign_ins: &SignIns,
+    kept: &Arc<Mutex<SignInsKept>>,
+    look_for_kept: bool,
+) -> Arc<Keeper> {
+    let kept = kept.clone();
+    Arc::new(Keeper::start(
+        KeeperTask {
+            server_url: saved.server_url.clone(),
+            catalog: catalog.clone(),
+            store: sign_ins.store.clone(),
+            store_failed: Arc::new(move |problem| store_failed(&kept, problem)),
+        },
+        look_for_kept,
+    ))
 }
+
+/// The store failed: from now on, sign-ins last only until the app closes,
+/// and the app says why.
+fn store_failed(kept: &Mutex<SignInsKept>, problem: String) {
+    *kept.lock().unwrap_or_else(|e| e.into_inner()) = SignInsKept::UntilClosed {
+        reason: format!("the system's password store did not keep your sign-in ({problem})"),
+    };
+}
+
+#[cfg(test)]
+mod tests;

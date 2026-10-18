@@ -21,6 +21,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 catalog-browser = { path = "../../crates/catalog-browser" }
 desktop-contract = { path = "../../crates/desktop-contract" }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 kicad-integration = { path = "../../crates/kicad-integration" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -31,13 +31,51 @@ const POLL: Duration = Duration::from_millis(250);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
+/// The signed-in client, shared with the follower. Renewing the sign-in
+/// puts a client with the new token here; the follower takes it the next
+/// time it connects.
+type SharedClient = Arc<Mutex<PocketBaseClient>>;
+
 pub(super) struct Session {
-    pub(super) client: PocketBaseClient,
+    client: SharedClient,
     pub(super) name: String,
     pub(super) email: String,
     pub(super) can_edit: bool,
     pub(super) follower: Follower,
     pub(super) category_names: Arc<Mutex<Option<NamesRead>>>,
+}
+
+impl Session {
+    /// Starts following the team catalog as the signed-in `account` (the
+    /// `users` record), with `client`, which sends that account's token.
+    fn start(client: PocketBaseClient, account: &serde_json::Value) -> Self {
+        let text = |name: &str| account[name].as_str().unwrap_or_default().to_owned();
+        let name = Some(text("name"))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| text("email"));
+        let client = Arc::new(Mutex::new(client));
+        Self {
+            follower: Follower::start(client.clone()),
+            client,
+            name,
+            email: text("email"),
+            can_edit: account["can_edit_catalog"].as_bool().unwrap_or(false),
+            category_names: Arc::default(),
+        }
+    }
+
+    /// The signed-in client, with the newest token.
+    pub(super) fn client(&self) -> PocketBaseClient {
+        self.client
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Uses `client`, which sends a renewed token, from now on.
+    pub(super) fn renewed(&self, client: PocketBaseClient) {
+        *self.client.lock().unwrap_or_else(|e| e.into_inner()) = client;
+    }
 }
 
 /// The category names last read, and the position of the team catalog
@@ -59,7 +97,7 @@ pub(super) struct Follower {
 }
 
 impl Follower {
-    fn start(client: PocketBaseClient) -> Self {
+    fn start(client: SharedClient) -> Self {
         let live = Arc::new(Mutex::new(Live {
             updates: LiveUpdates::Connecting,
             replica: CatalogReplica::new(),
@@ -121,19 +159,19 @@ pub(super) fn sign_in(request: &SignInRequest) -> Result<Session, String> {
         .get(&format!("/api/collections/users/records/{id}"))
         .and_then(|reply| reply.json())
         .map_err(|error| error.to_string())?;
-    let text = |name: &str| account[name].as_str().unwrap_or_default().to_owned();
-    let name = Some(text("name"))
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| text("email"));
-    let session = Session {
-        follower: Follower::start(client.clone()),
-        client,
-        name,
-        email: text("email"),
-        can_edit: account["can_edit_catalog"].as_bool().unwrap_or(false),
-        category_names: Arc::default(),
-    };
-    Ok(session)
+    Ok(Session::start(client, &account))
+}
+
+/// Carries on a sign-in kept from an earlier run: renews `token` with the
+/// team server at `server_url`, then starts following. No password is
+/// needed. A token the server no longer accepts is
+/// [`CollabError::Unauthorized`]; a server that cannot be reached is
+/// [`CollabError::Transport`].
+pub(super) fn resume(server_url: &str, token: &str) -> Result<Session, CollabError> {
+    let (client, account) = PocketBaseClient::new(server_url)
+        .with_token(token)?
+        .refresh_auth("users")?;
+    Ok(Session::start(client, &account))
 }
 
 /// Follows new Changes until `stop` is set: subscribe, catch up, apply each
@@ -146,7 +184,7 @@ pub(super) fn sign_in(request: &SignInRequest) -> Result<Session, String> {
 /// once as a notification, and the replica ignores the second copy. If the
 /// server rejects the sign-in, it stops and asks the person to sign in
 /// again instead of retrying.
-fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBool) {
+fn follow_changes(shared: &Mutex<PocketBaseClient>, live: &Mutex<Live>, stop: &AtomicBool) {
     let set = |updates: LiveUpdates| {
         live.lock().unwrap_or_else(|e| e.into_inner()).updates = updates;
     };
@@ -167,6 +205,8 @@ fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBo
     let mut delay = RECONNECT_DELAY;
     while !stop.load(Ordering::SeqCst) {
         let went_live = std::cell::Cell::new(false);
+        // The newest client, in case the sign-in was renewed meanwhile.
+        let client = &shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let result = (|| -> Result<(), CollabError> {
             let mut connection = RealtimeConnection::connect(client, CONNECT_TIMEOUT)?;
             connection.subscribe(client, &[CHANGES_TOPIC, AUDIT_TOPIC])?;

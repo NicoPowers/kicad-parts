@@ -56,6 +56,26 @@ use std::time::Duration;
 
 use session::{Session, sign_in};
 
+/// What the status says when the team server no longer accepts a sign-in,
+/// for example after the password changed.
+pub const SIGN_IN_AGAIN: &str =
+    "The team server no longer accepts your sign-in. Enter your password to sign in again.";
+
+/// How carrying on a kept sign-in went.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Resumed {
+    /// Signed in again; the session sends `token`, a renewed one.
+    SignedIn { token: String },
+    /// A session was already running, such as from a password sign-in
+    /// that finished first; it was kept.
+    AlreadySignedIn,
+    /// The team server could not be reached, for the plain reason given.
+    /// The kept sign-in may still be good, so try again later.
+    Unreachable(String),
+    /// The team server no longer accepts the kept sign-in.
+    Rejected,
+}
+
 struct State {
     /// Why the last sign-in failed, if it did.
     problem: Option<String>,
@@ -200,7 +220,7 @@ impl TeamCatalog {
         };
         let (live, checkpoint, imports) = session.follower.snapshot();
         TeamStatus {
-            server_url: session.client.base_url().to_owned(),
+            server_url: session.client().base_url().to_owned(),
             email: session.email.clone(),
             session: TeamSession::SignedIn {
                 name: session.name.clone(),
@@ -211,6 +231,12 @@ impl TeamCatalog {
                 imports,
             },
         }
+    }
+
+    /// Why the last sign-in failed or ended, while signed out.
+    pub fn problem(&self) -> Option<String> {
+        let state = self.lock();
+        state.session.is_none().then(|| state.problem.clone())?
     }
 
     /// Whether a session with the team server is running.
@@ -251,6 +277,78 @@ impl TeamCatalog {
         self.status()
     }
 
+    /// Carries on a sign-in kept from an earlier run, with no password:
+    /// renews `token` with the team server at `server_url`, then follows
+    /// the team catalog as when signing in.
+    pub fn resume(&self, server_url: &str, token: &str) -> Resumed {
+        let session = match session::resume(server_url, token) {
+            Ok(session) => session,
+            Err(
+                CollabError::Unauthorized(_) | CollabError::Forbidden(_) | CollabError::Address(_),
+            ) => return Resumed::Rejected,
+            Err(CollabError::Transport(problem)) => {
+                return Resumed::Unreachable(problem.to_string());
+            }
+            Err(other) => return Resumed::Unreachable(other.to_string()),
+        };
+        let mut state = self.lock();
+        if state.session.is_some() {
+            // Never replaces a session: a password sign-in finished first.
+            drop(state);
+            drop(session);
+            return Resumed::AlreadySignedIn;
+        }
+        let token = session.client().token().unwrap_or_default().to_owned();
+        state.problem = None;
+        state.session = Some(session);
+        drop(state);
+        self.forget_known();
+        Resumed::SignedIn { token }
+    }
+
+    /// The token the session sends now, to keep for the next run; `None`
+    /// while signed out.
+    pub fn token(&self) -> Option<String> {
+        let state = self.lock();
+        let client = state.session.as_ref()?.client();
+        client.token().map(str::to_owned)
+    }
+
+    /// Renews the sign-in with the team server and returns the new token.
+    /// The session sends it from now on. A token the server no longer
+    /// accepts is [`CollabError::Unauthorized`].
+    pub fn renew(&self) -> Result<String, CollabError> {
+        let Some(client) = self.lock().session.as_ref().map(|session| session.client()) else {
+            return Err(CollabError::Unauthorized("signed out".into()));
+        };
+        let (renewed, _) = client.refresh_auth("users")?;
+        let token = renewed.token().unwrap_or_default().to_owned();
+        let state = self.lock();
+        // Only the session that was renewed takes the new client: a sign-in
+        // meanwhile has its own.
+        match state.session.as_ref() {
+            Some(session) if session.client().token() == client.token() => {
+                session.renewed(renewed);
+                Ok(token)
+            }
+            _ => Err(CollabError::Unauthorized(
+                "signed in again meanwhile".into(),
+            )),
+        }
+    }
+
+    /// Ends the session because the team server no longer accepts it. The
+    /// status then asks the person to sign in again.
+    pub fn sign_in_again(&self) {
+        self.forget_known();
+        let earlier = {
+            let mut state = self.lock();
+            state.problem = Some(SIGN_IN_AGAIN.into());
+            state.session.take()
+        };
+        drop(earlier);
+    }
+
     /// Every category's plain name, by code, for grouping the part list;
     /// empty while signed out. Read again only when the team catalog has
     /// moved on (a new Change or import), so searching makes no request.
@@ -263,7 +361,7 @@ impl TeamCatalog {
             };
             let (_, checkpoint, imports) = session.follower.snapshot();
             (
-                session.client.clone(),
+                session.client(),
                 session.category_names.clone(),
                 (checkpoint, imports),
             )
@@ -619,7 +717,7 @@ impl TeamCatalog {
         let who = format!(
             "{}
 {}",
-            session.client.base_url(),
+            session.client().base_url(),
             session.email
         );
         Some((who, checkpoint, imports))
@@ -1314,7 +1412,7 @@ impl TeamCatalog {
         self.lock()
             .session
             .as_ref()
-            .map(|session| session.client.clone())
+            .map(|session| session.client())
             .ok_or_else(|| "Sign in to the team catalog first.".to_owned())
     }
 

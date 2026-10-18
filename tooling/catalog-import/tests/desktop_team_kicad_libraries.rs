@@ -9,7 +9,7 @@
 use catalog::PartRevision;
 use catalog::pocketbase::{EditCommand, ImportCommand, read_back, submit_edit, submit_import};
 use catalog_browser::kicad_libraries::KicadLibraries;
-use catalog_browser::teams::Teams;
+use catalog_browser::teams::{MemorySignIns, SignIns, Teams};
 use catalog_import::services;
 use desktop_contract::{KicadLibrariesState, SignInRequest, TeamCode};
 use std::path::Path;
@@ -101,6 +101,7 @@ fn the_libraries_follow_the_team_catalog() {
     // A member who cannot edit sees who may choose the code, and cannot.
     let team = Arc::new(Teams::open(
         state.path().join("viewer.json"),
+        SignIns::kept_in(Arc::new(MemorySignIns::default())),
         Some(server.url().to_owned()),
         None,
     ));
@@ -127,6 +128,7 @@ fn the_libraries_follow_the_team_catalog() {
     // Someone who can edit chooses it.
     let team = Arc::new(Teams::open(
         state.path().join("team.json"),
+        SignIns::kept_in(Arc::new(MemorySignIns::default())),
         Some(server.url().to_owned()),
         None,
     ));

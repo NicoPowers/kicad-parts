@@ -384,6 +384,18 @@ pub enum LiveUpdates {
     },
 }
 
+/// Whether the app keeps each team's sign-in after it closes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SignInsKept {
+    /// In the operating system's credential store: a restart needs no
+    /// password.
+    AfterRestart,
+    /// Only until the app closes, for `reason`, a plain sentence. The app
+    /// asks for each password again after a restart.
+    UntilClosed { reason: String },
+}
+
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SignInRequest {
     pub server_url: String,
