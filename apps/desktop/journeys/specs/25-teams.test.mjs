@@ -294,8 +294,8 @@ describe('several teams at once', () => {
     await waitForText(browser, '#result-count', '178 matching parts');
     await setMenuOpen(true);
     await signInWithForm(acme, editor);
-    // The badge says a team needs an answer, with the problem look.
-    await waitForText(browser, BADGE, `Team catalog · ${editor.name} · needs an answer`, 30_000);
+    // The badge says a team needs a look, with the problem look.
+    await waitForText(browser, BADGE, `Team catalog · ${editor.name} · needs a look`, 30_000);
     assert.equal(
       await browser.execute(() => document.querySelector('.team-settings > summary').classList.contains('kicad-badge-problem')),
       true,

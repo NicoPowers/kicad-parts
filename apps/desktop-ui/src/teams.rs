@@ -653,17 +653,18 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
         TeamSession::SignedIn { name, .. } => Some((team, name)),
         _ => None,
     });
-    // Teams whose KiCad libraries wait for the person (kicad-parts-092b).
+    // Teams whose KiCad libraries wait for the person (kicad-parts-092b):
+    // for an answer, or for them to remove one of two servers.
     let waiting = status
         .teams
         .iter()
         .filter(|team| team.libraries_made_from.is_some())
         .count();
-    let needs_answer = |words: String| match waiting {
+    let needs_a_look = |words: String| match waiting {
         0 => words,
-        _ if status.teams.len() < 2 => format!("{words} · needs an answer"),
-        1 => format!("{words} · 1 team needs an answer"),
-        many => format!("{words} · {many} teams need an answer"),
+        _ if status.teams.len() < 2 => format!("{words} · needs a look"),
+        1 => format!("{words} · 1 team needs a look"),
+        many => format!("{words} · {many} teams need a look"),
     };
     let look = if offline + again + waiting > 0 {
         PROBLEM
@@ -687,7 +688,7 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
             None if again > 0 => "Team catalog: sign in again".to_owned(),
             None => "Team catalog: not signed in".to_owned(),
         };
-        return (needs_answer(words), look);
+        return (needs_a_look(words), look);
     }
     // Several teams: say whose parts are shown, then count each team once
     // by where it stands. Teams signed out on purpose are not counted.
@@ -706,7 +707,7 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
         (None, true) => "Team catalog: not signed in".to_owned(),
         (None, false) => format!("Teams · {}", counts.join(", ")),
     };
-    (needs_answer(words), look)
+    (needs_a_look(words), look)
 }
 
 /// Where one team stands, for the header badge. Each team has exactly one.
@@ -943,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn a_team_waiting_for_an_answer_shows_in_the_badge() {
+    fn a_team_whose_libraries_wait_shows_in_the_badge() {
         let mut ma = team("MA", signed_in(LiveUpdates::Live));
         ma.libraries_made_from = Some(LibrariesMadeFrom {
             code: "MA".into(),
@@ -952,16 +953,28 @@ mod tests {
         });
         assert_eq!(
             summary(&status(vec![ma.clone()])),
-            (
-                "Team catalog · Ada Editor · needs an answer".into(),
-                PROBLEM
-            )
+            ("Team catalog · Ada Editor · needs a look".into(), PROBLEM)
         );
         let ac = team("AC", signed_in(LiveUpdates::Live));
         assert_eq!(
-            summary(&status(vec![ma, ac])),
+            summary(&status(vec![ma.clone(), ac.clone()])),
             (
-                "MA · Ada Editor · 2 live · 1 team needs an answer".into(),
+                "MA · Ada Editor · 2 live · 1 team needs a look".into(),
+                PROBLEM
+            )
+        );
+        // Two servers claiming one team have no answer to give, but need a
+        // look all the same.
+        let mut claimed = ac;
+        claimed.libraries_made_from = Some(LibrariesMadeFrom {
+            code: "AC".into(),
+            server: "https://ma.example.com".into(),
+            in_your_teams: true,
+        });
+        assert_eq!(
+            summary(&status(vec![ma, claimed])),
+            (
+                "MA · Ada Editor · 2 live · 2 teams need a look".into(),
                 PROBLEM
             )
         );
