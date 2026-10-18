@@ -49,6 +49,10 @@ pub enum ConnectionProblem {
     /// The server answered the live-updates request with an error status,
     /// such as a proxy's `502 Bad Gateway`. Holds the status line.
     LiveUpdatesRefused(String),
+    /// The server ended the live-updates stream cleanly. PocketBase does
+    /// this to a stream with no events for 5 minutes, and some proxies
+    /// sooner, so it is normal: the follower reconnects quietly.
+    ClosedByServer,
     /// The connection worked, then broke.
     Lost(String),
 }
@@ -137,6 +141,10 @@ impl fmt::Display for ConnectionProblem {
             Self::LiveUpdatesRefused(status) => write!(
                 formatter,
                 "The team server could not start live updates (it answered {status}). The app tries again by itself. If this lasts, ask whoever runs the server to check it."
+            ),
+            Self::ClosedByServer => write!(
+                formatter,
+                "The team server closed the live-updates connection. The app reconnects by itself."
             ),
             Self::NoCertificateStore(detail) => write!(
                 formatter,

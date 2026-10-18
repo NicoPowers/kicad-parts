@@ -145,7 +145,7 @@ impl RealtimeConnection {
         let (sender, events) = mpsc::channel();
         let reader = std::thread::spawn(move || {
             let reason = match read_stream(stream, &sender) {
-                Ok(()) => ConnectionProblem::Lost("the server closed the stream".into()),
+                Ok(()) => ConnectionProblem::ClosedByServer,
                 Err(io) => ConnectionProblem::after_connecting(&io),
             };
             let _ = sender.send(Message::Closed(reason));
@@ -443,9 +443,17 @@ mod tests {
         assert_eq!(events[1].data["action"], "create");
     }
 
-    /// A plain HTTP server that sends `PB_CONNECT`, then nothing more:
-    /// a network that went away without closing the connection.
-    fn silent_after_connecting() -> PocketBaseClient {
+    /// What a fake server does after sending `PB_CONNECT`.
+    enum ThenItWill {
+        /// Say nothing more: a network that went away without a word.
+        StaySilent,
+        /// Close the stream, as PocketBase does with a quiet stream after
+        /// 5 minutes.
+        Close,
+    }
+
+    /// A plain HTTP server that sends `PB_CONNECT`, then does `then`.
+    fn after_connecting(then: ThenItWill) -> PocketBaseClient {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         std::thread::spawn(move || {
@@ -455,14 +463,32 @@ mod tests {
             let _ = connection.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\nevent:PB_CONNECT\ndata:{\"clientId\":\"x\"}\n\n",
             );
-            std::thread::sleep(Duration::from_secs(30));
+            match then {
+                ThenItWill::StaySilent => std::thread::sleep(Duration::from_secs(30)),
+                ThenItWill::Close => {
+                    // A clean close (FIN). Closing the socket at once could
+                    // send a reset instead, on Windows, which loses data.
+                    let _ = connection.shutdown(std::net::Shutdown::Write);
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+            }
         });
         PocketBaseClient::new(&url)
     }
 
     #[test]
+    fn a_stream_the_server_closes_says_so() {
+        let client = after_connecting(ThenItWill::Close);
+        let mut connection = RealtimeConnection::connect(&client, Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            connection.next_event(Duration::from_secs(5)),
+            Err(CollabError::Transport(ConnectionProblem::ClosedByServer))
+        );
+    }
+
+    #[test]
     fn a_stream_silent_for_too_long_counts_as_gone() {
-        let client = silent_after_connecting();
+        let client = after_connecting(ThenItWill::StaySilent);
         let mut connection = RealtimeConnection::connect_with_idle_limit(
             &client,
             Duration::from_secs(5),

@@ -40,7 +40,8 @@ use catalog::{
     ModelTarget, PartDetails, PartRevision, compare_details, compare_revisions,
 };
 use collaboration::{
-    CollabError, CorrelationId, PocketBaseClient, RealtimeConnection, ServerAddress,
+    CollabError, ConnectionProblem, CorrelationId, PocketBaseClient, RealtimeConnection,
+    ServerAddress,
 };
 use desktop_contract::{
     ArchiveNote, CadItemUse, ConflictRow, CsvChangeRow, CsvChanges, CsvRowForAnotherPart,
@@ -1877,7 +1878,10 @@ fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBo
             delay = RECONNECT_DELAY;
         }
         if let Err(error) = result {
-            match after_break(&error) {
+            match after_break(&error, went_live.get()) {
+                // Status stays Live: the catch-up after reconnecting brings
+                // anything saved meanwhile. A failed reconnect shows.
+                AfterBreak::ReconnectQuietly => {}
                 AfterBreak::SignInAgain => {
                     set(LiveUpdates::SignInAgain {
                         message: error.to_string(),
@@ -1900,14 +1904,24 @@ fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBo
 
 #[derive(Debug, PartialEq)]
 enum AfterBreak {
+    /// Say "Reconnecting" with the problem, and try again.
     Retry,
+    /// The server closed a live stream cleanly, as PocketBase does after
+    /// 5 quiet minutes (proxies such as Cloudflare after about 100 s).
+    /// That is normal, so reconnect without telling the person.
+    ReconnectQuietly,
     /// The token was rejected; retrying cannot help.
     SignInAgain,
 }
 
-fn after_break(error: &CollabError) -> AfterBreak {
+/// What to do after the stream broke with `error`. `went_live` says
+/// whether this try got as far as live updates.
+fn after_break(error: &CollabError, went_live: bool) -> AfterBreak {
     match error {
         CollabError::Unauthorized(_) | CollabError::Forbidden(_) => AfterBreak::SignInAgain,
+        CollabError::Transport(ConnectionProblem::ClosedByServer) if went_live => {
+            AfterBreak::ReconnectQuietly
+        }
         _ => AfterBreak::Retry,
     }
 }
@@ -3502,19 +3516,23 @@ mod tests {
     }
 
     #[test]
+    fn a_live_stream_the_server_closes_reconnects_quietly() {
+        let closed = CollabError::Transport(ConnectionProblem::ClosedByServer);
+        assert_eq!(after_break(&closed, true), AfterBreak::ReconnectQuietly);
+        // Closed before it went live: something is wrong, so it shows.
+        assert_eq!(after_break(&closed, false), AfterBreak::Retry);
+    }
+
+    #[test]
     fn a_rejected_sign_in_stops_retrying_and_other_breaks_back_off() {
         for rejected in [
             CollabError::Unauthorized("token".into()),
             CollabError::Forbidden("rules".into()),
         ] {
-            assert_eq!(after_break(&rejected), AfterBreak::SignInAgain);
+            assert_eq!(after_break(&rejected, true), AfterBreak::SignInAgain);
         }
-        assert_eq!(
-            after_break(&CollabError::Transport(
-                collaboration::ConnectionProblem::NotReachable("refused".into())
-            )),
-            AfterBreak::Retry
-        );
+        let refused = CollabError::Transport(ConnectionProblem::NotReachable("refused".into()));
+        assert_eq!(after_break(&refused, true), AfterBreak::Retry);
         let mut delay = RECONNECT_DELAY;
         let mut delays = Vec::new();
         for _ in 0..7 {
