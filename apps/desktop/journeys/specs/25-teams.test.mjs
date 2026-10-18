@@ -294,14 +294,18 @@ describe('several teams at once', () => {
     await waitForText(browser, '#result-count', '178 matching parts');
     await setMenuOpen(true);
     await signInWithForm(acme, editor);
-    await waitForLiveUpdates(browser);
+    // The badge says a team needs an answer, with the problem look.
+    await waitForText(browser, BADGE, `Team catalog · ${editor.name} · needs an answer`, 30_000);
+    assert.equal(
+      await browser.execute(() => document.querySelector('.team-settings > summary').classList.contains('kicad-badge-problem')),
+      true,
+    );
     await setMenuOpen(true);
     const question = '.team-question p';
     await waitForText(
       browser,
       question,
-      `The KiCad libraries for AC were made from https://old.example.com. Use them for ${acme.url} instead? Only do this if the team moved to a new address.`,
-      30_000,
+      `The KiCad libraries for AC come from https://old.example.com. Update them from ${acme.url} instead? Only do this if the team moved to this new address.`,
     );
     assert.equal(
       await browser.execute(() => document.querySelector('.team-question').getAttribute('aria-labelledby')),
@@ -325,7 +329,7 @@ describe('several teams at once', () => {
     await waitForText(
       browser,
       '.team-question .hint',
-      'The app does not update the KiCad libraries for AC until you choose the new address.',
+      'The app does not update the KiCad libraries for AC until you choose Use the new address.',
     );
     assert.equal(await browser.execute(() => document.activeElement?.textContent.trim()), 'Sign out');
     assert.equal(recorded().server, 'https://old.example.com');
@@ -338,6 +342,7 @@ describe('several teams at once', () => {
       timeoutMsg: 'the question stayed after it was answered',
     });
     assert.equal(recorded().server, acme.url);
+    await waitForText(browser, BADGE, `Team catalog · ${editor.name}`);
     await browser.waitUntil(() => fs.existsSync(path.join(folder, 'AC-Parts.kicad_dbl')), {
       timeout: 60_000,
       timeoutMsg: 'the libraries were never made from the new address',
