@@ -613,7 +613,7 @@ mod tests {
         );
         assert_eq!(
             other_server_words("MA", "https://a.example.com", "https://b.example.com", true),
-            "Two team servers say they are team MA: https://a.example.com and https://b.example.com. The app updates MA's libraries only from https://a.example.com. If the team moved, remove https://a.example.com from your teams."
+            "Two team servers say they are team MA: https://a.example.com and https://b.example.com. The app updates MA's libraries only from https://a.example.com. If the team moved, remove https://a.example.com from your teams. If it did not, remove https://b.example.com."
         );
     }
 }

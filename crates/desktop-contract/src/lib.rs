@@ -413,7 +413,7 @@ pub struct UseNewServerRequest {
 /// the app's refusal, so all three say the same.
 pub fn two_servers_claim_a_team(code: &str, old_server: &str, new_server: &str) -> String {
     format!(
-        "Two team servers say they are team {code}: {old_server} and {new_server}. The app updates {code}'s libraries only from {old_server}. If the team moved, remove {old_server} from your teams."
+        "Two team servers say they are team {code}: {old_server} and {new_server}. The app updates {code}'s libraries only from {old_server}. If the team moved, remove {old_server} from your teams. If it did not, remove {new_server}."
     )
 }
 
