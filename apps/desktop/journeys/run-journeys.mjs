@@ -11,6 +11,11 @@
 //                                   # approved screenshot, if every journey
 //                                   # passes; look at them before committing
 //
+// On Windows the tests run with Node.js 24.22.0 or newer: older ones
+// sometimes crash a test process at launch (journey-node.mjs). If the
+// Node.js running this script is older, the runner downloads 24.22.0 once
+// into target/journey-tools/node.
+//
 // By default tauri-driver, msedgedriver, the app and WebView2 run on a
 // hidden, run-scoped Win32 desktop (tooling/journey-desktop), so no window
 // appears or takes focus on the user's desktop.
@@ -42,6 +47,7 @@ import {
   visualProblem,
   visualResultsFile,
 } from './harness.mjs';
+import { NODE_CRASH_EXIT_CODE, journeyNode, specsKilledByNodeCrash } from './journey-node.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skipBuild = process.argv.includes('--skip-build');
@@ -145,6 +151,13 @@ const driverCache = path.join(repoRoot, 'target', 'journey-tools', 'msedgedriver
 fs.mkdirSync(driverCache, { recursive: true });
 const nativeDriver = await download(version, driverCache);
 console.log(`WebView2 ${version}; msedgedriver ${nativeDriver}`);
+// Some Node.js versions crash a test process now and then on Windows, so
+// the tests may run with another Node.js than this script (journey-node.mjs).
+const testNode = await journeyNode(path.join(repoRoot, 'target', 'journey-tools')).catch((error) => {
+  console.error(`could not get a Node.js to run the journeys with: ${error.message}`);
+  process.exit(1);
+});
+console.log(`tests run with ${testNode.why}`);
 
 const driverArgs = ['--port', String(driverPort), '--native-driver', nativeDriver];
 console.log(`mode: ${visible ? 'visible desktop' : 'hidden desktop (journey-desktop)'}`);
@@ -173,7 +186,7 @@ try {
     .sort()
     .map((name) => path.join(here, 'specs', name));
   const result = spawnSync(
-    process.execPath,
+    testNode.node,
     [
       '--test',
       '--test-concurrency=1',
@@ -190,11 +203,12 @@ try {
     },
   );
   status = result.status ?? 1;
+  explainNodeCrashes(path.join(outDir, 'junit.xml'), testNode);
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
   console.log(`journeys took ${seconds} s on the ${visible ? 'visible' : 'hidden'} desktop`);
   fs.appendFileSync(
     path.join(outDir, 'evidence.jsonl'),
-    `${JSON.stringify({ event: 'run', mode: visible ? 'visible' : 'hidden', seconds: Number(seconds) })}\n`,
+    `${JSON.stringify({ event: 'run', mode: visible ? 'visible' : 'hidden', seconds: Number(seconds), node: testNode.node })}\n`,
   );
 } finally {
   tauriDriver.kill();
@@ -214,6 +228,31 @@ console.log(`\nEvidence in ${outDir}`);
 console.log(`  junit.xml, evidence.jsonl, accessibility/*.json, ${shots.length} screenshots:`);
 for (const shot of shots) console.log(`    screenshots/${shot}`);
 process.exit(status);
+
+/**
+ * Says in plain words when a spec failed because its Node.js process
+ * crashed, not because of anything the journey checked. node --test only
+ * reports "test failed" for it, and tauri-driver may log "os error 10054"
+ * for the connection the process had just opened.
+ */
+function explainNodeCrashes(junitFile, testNode) {
+  if (!fs.existsSync(junitFile)) return;
+  const crashed = specsKilledByNodeCrash(fs.readFileSync(junitFile, 'utf8'));
+  const code = `0x${NODE_CRASH_EXIT_CODE.toString(16).toUpperCase()}`;
+  for (const spec of crashed) {
+    console.error(
+      `\n${spec}: its Node.js test process crashed with exit code ${code} and reported nothing. ` +
+        `The journey did not fail a check. The tests ran with ${testNode.why}. ` +
+        'Rerun it with JOURNEYS_ONLY. If it happens again, see mulch mx-625975.',
+    );
+  }
+  if (crashed.length > 0) {
+    fs.appendFileSync(
+      path.join(outDir, 'evidence.jsonl'),
+      `${JSON.stringify({ event: 'node-crash', specs: crashed, node: testNode.node })}\n`,
+    );
+  }
+}
 
 /**
  * Prints how each screenshot compared with its approved screenshot,
