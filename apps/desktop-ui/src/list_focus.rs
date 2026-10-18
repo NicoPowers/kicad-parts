@@ -2,17 +2,25 @@
 //! such as after a teammate saves.
 //!
 //! Sections and rows keep their elements across a new answer, so focus
-//! usually just stays. The browser drops focus in two cases: when it
-//! removes the focused row, because its part no longer matches, and when
-//! it moves the row, because its part now sorts elsewhere. Then focus goes
-//! back to the moved row, or to the row that took the removed row's place.
-//! It never falls to the top of the page.
+//! usually just stays. But the browser can drop focus to the page:
+//!
+//! - when it removes the focused row, section or "Show all" button;
+//! - when it moves the focused element. Leptos's keyed `For` moves every
+//!   item it jumps over, so a section that sorts higher after a save can
+//!   move the section holding focus, and a row that sorts elsewhere moves.
+//!
+//! After every change the list says what it now draws. If focus was
+//! dropped, it goes back to the same item, or to the item that took its
+//! place: the next row, the section header, the next section header, or
+//! the search box. It never falls to the top of the page. A short note
+//! tells screen reader users why focus moved.
 
 use crate::SEARCH_BOX;
-use crate::focus::{Scrolling, focus_found_later};
+use crate::focus::{Scrolling, focus_now};
 use crate::part_list::{RESULTS, section_id};
 use leptos::prelude::*;
 use leptos::web_sys::{Element, FocusEvent};
+use std::collections::BTreeMap;
 use wasm_bindgen::JsCast;
 
 /// What has keyboard focus in the part list.
@@ -20,6 +28,8 @@ use wasm_bindgen::JsCast;
 pub(crate) enum Focused {
     /// The row of part `ipn`, in the section of `category`.
     Row { category: String, ipn: String },
+    /// The "Show all" button at the end of the section of `category`.
+    ShowAll { category: String },
     /// The header button of the section of `category`.
     Section { category: String },
 }
@@ -27,9 +37,84 @@ pub(crate) enum Focused {
 impl Focused {
     fn category(&self) -> &str {
         match self {
-            Focused::Row { category, .. } | Focused::Section { category } => category,
+            Focused::Row { category, .. }
+            | Focused::ShowAll { category }
+            | Focused::Section { category } => category,
         }
     }
+}
+
+/// What one section draws, as far as focus is concerned.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DrawnSection {
+    /// The section's plain name, such as "Resistors".
+    pub(crate) name: String,
+    /// The IPNs of the rows drawn, in order; none while it is closed.
+    pub(crate) rows: Vec<String>,
+    /// Whether it ends with a "Show all" button.
+    pub(crate) show_all: bool,
+}
+
+/// Where focus goes after the list changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Restore {
+    To(Focused),
+    /// No section is left, so focus goes to the search box above the list.
+    SearchBox,
+}
+
+/// Where focus goes when the list changed while `focused` had it.
+/// `sections` are the category codes shown before and now, in order.
+/// `drawn` is what the focused item's section drew before and now.
+///
+/// Focus stays on `focused` while it is still drawn, even if it moved. A
+/// row that left gives focus to the row that took its place (see
+/// [`where_focus_goes`]), else to "Show all", else to its section header.
+/// A "Show all" that left gives focus to the last row. A section that left
+/// gives focus to the section that took its place, else to the search box.
+pub(crate) fn restore_target(
+    sections: (&[String], &[String]),
+    drawn: (&DrawnSection, &DrawnSection),
+    focused: &Focused,
+) -> Restore {
+    let (sections_before, sections_now) = sections;
+    let (drawn_before, drawn_now) = drawn;
+    let category = focused.category().to_owned();
+    if !sections_now.iter().any(|now| *now == category) {
+        return match where_focus_goes(sections_before, sections_now, &category) {
+            Some(category) => Restore::To(Focused::Section {
+                category: category.to_owned(),
+            }),
+            None => Restore::SearchBox,
+        };
+    }
+    let header = || Focused::Section {
+        category: category.clone(),
+    };
+    let target = match focused {
+        Focused::Section { .. } => header(),
+        Focused::Row { ipn, .. } => {
+            match where_focus_goes(&drawn_before.rows, &drawn_now.rows, ipn) {
+                Some(ipn) => Focused::Row {
+                    category: category.clone(),
+                    ipn: ipn.to_owned(),
+                },
+                None if drawn_now.show_all => Focused::ShowAll {
+                    category: category.clone(),
+                },
+                None => header(),
+            }
+        }
+        Focused::ShowAll { .. } if drawn_now.show_all => focused.clone(),
+        Focused::ShowAll { .. } => match drawn_now.rows.last() {
+            Some(ipn) => Focused::Row {
+                category: category.clone(),
+                ipn: ipn.clone(),
+            },
+            None => header(),
+        },
+    };
+    Restore::To(target)
 }
 
 /// Where focus goes when a list changed from `before` to `now` while
@@ -57,20 +142,44 @@ pub(crate) fn where_focus_goes<'a>(
     neighbour.or_else(|| now.first()).map(String::as_str)
 }
 
-/// Remembers what had focus in the part list, and puts focus back after
-/// the list changes, if the browser dropped it.
+/// The note for screen readers when focus moved from `from` to `to`
+/// because `from` left the list. `None` when focus stays on the same item,
+/// or when "Show all" went because more parts are shown.
+pub(crate) fn moved_note(from: &Focused, to: &Restore, section_name: &str) -> Option<String> {
+    if *to == Restore::To(from.clone()) {
+        return None;
+    }
+    match from {
+        Focused::Row { ipn, .. } => Some(format!("{ipn} left the list.")),
+        Focused::Section { .. } => Some(format!("{section_name} left the list.")),
+        Focused::ShowAll { .. } => None,
+    }
+}
+
+/// Remembers what had focus in the part list and what the list draws, and
+/// puts focus back after a change, if the browser dropped it.
 #[derive(Clone, Copy)]
 pub(crate) struct ListFocus {
     focused: StoredValue<Option<Focused>>,
+    /// The category codes of the sections shown, in order.
+    sections: StoredValue<Vec<String>>,
+    /// What each section drew last, by category code. A section that is
+    /// gone keeps its entry, so its name is known when it leaves.
+    drawn: StoredValue<BTreeMap<String, DrawnSection>>,
+    /// The note for screen readers, read out politely.
+    pub(crate) note: RwSignal<String>,
 }
 
 impl ListFocus {
-    /// Starts with nothing focused. A press of the mouse outside the list
-    /// forgets what had focus, so clicking in the details panel and then
-    /// a teammate's save never pulls focus back into the list.
+    /// Starts with nothing focused. When the person presses the mouse
+    /// outside the list, it forgets what had focus. So clicking in the
+    /// details panel and then a teammate's save never pulls focus back.
     pub(crate) fn new() -> Self {
         let focus = ListFocus {
             focused: StoredValue::new(None),
+            sections: StoredValue::new(Vec::new()),
+            drawn: StoredValue::new(BTreeMap::new()),
+            note: RwSignal::new(String::new()),
         };
         let listener = window_event_listener(leptos::ev::pointerdown, move |event| {
             let in_list = event
@@ -86,15 +195,16 @@ impl ListFocus {
         focus
     }
 
-    /// A row or section header took focus.
+    /// A row, section header or "Show all" took focus.
     pub(crate) fn took(&self, focused: Focused) {
         self.focused.set_value(Some(focused));
+        self.note.set(String::new());
     }
 
-    /// Focus left a row or section header. Focus that moves to an element
-    /// outside the list is forgotten. Focus that goes nowhere is kept,
-    /// because that is how the browser drops it from a row it removes or
-    /// moves.
+    /// Focus left an element in the list. When the person moves focus
+    /// outside the list, it forgets what had focus. Focus that goes nowhere
+    /// is kept, because that is how the browser drops it from an element
+    /// it removes or moves.
     pub(crate) fn left(&self, event: &FocusEvent) {
         let Some(to) = event
             .related_target()
@@ -107,64 +217,69 @@ impl ListFocus {
         }
     }
 
-    /// The rows drawn in the section of `category` changed from `before`
-    /// to `now` (part IPNs, in order).
-    pub(crate) fn rows_changed(&self, category: &str, before: &[String], now: &[String]) {
-        let Some(Focused::Row { category: had, ipn }) = self.focused.get_value() else {
-            return;
-        };
-        if had != category {
-            return;
-        }
-        let target = match where_focus_goes(before, now, &ipn) {
-            Some(ipn) => Focused::Row {
-                category: had,
-                ipn: ipn.to_owned(),
-            },
-            // The section is empty now: its header is next to where the
-            // rows were.
-            None => Focused::Section { category: had },
-        };
-        self.restore_later(target);
+    /// The sections shown are now `now` (category codes, in order).
+    pub(crate) fn sections_shown(&self, now: Vec<String>) {
+        let before = self.sections.get_value();
+        self.sections.set_value(now.clone());
+        self.check(&before, &now, None);
     }
 
-    /// The sections shown changed from `before` to `now` (category codes,
-    /// in order). A section that is gone takes its rows with it, so focus
-    /// goes to the section that took its place, or to the search box when
-    /// no section is left.
-    pub(crate) fn sections_changed(&self, before: &[String], now: &[String]) {
+    /// The section of `category` now draws `now`.
+    pub(crate) fn section_drawn(&self, category: &str, now: DrawnSection) {
+        let before = self
+            .drawn
+            .try_update_value(|drawn| drawn.insert(category.to_owned(), now))
+            .flatten()
+            .unwrap_or_default();
+        let sections = self.sections.get_value();
+        self.check(&sections, &sections, Some((category, before)));
+    }
+
+    /// Works out where focus goes after a change, and puts it there once
+    /// the list is drawn, if the browser dropped it. `changed` is the
+    /// section whose rows changed, with what it drew before.
+    fn check(
+        &self,
+        sections_before: &[String],
+        sections_now: &[String],
+        changed: Option<(&str, DrawnSection)>,
+    ) {
         let Some(focused) = self.focused.get_value() else {
             return;
         };
-        if now.iter().any(|category| category == focused.category()) {
-            return;
-        }
-        match where_focus_goes(before, now, focused.category()) {
-            Some(category) => self.restore_later(Focused::Section {
-                category: category.to_owned(),
-            }),
-            None => {
-                self.focused.set_value(None);
-                focus_found_later(
-                    || {
-                        focus_is_lost()
-                            .then(|| document().get_element_by_id(SEARCH_BOX))
-                            .flatten()
-                    },
-                    Scrolling::Keep,
-                );
-            }
-        }
-    }
-
-    /// Once the list is drawn, focuses `target`, but only if focus was
-    /// dropped; focus the person put somewhere else stays there.
-    fn restore_later(&self, target: Focused) {
-        self.focused.set_value(Some(target.clone()));
-        focus_found_later(
-            move || focus_is_lost().then(|| element_for(&target)).flatten(),
-            Scrolling::Keep,
+        let category = focused.category();
+        let drawn_now = self
+            .drawn
+            .with_value(|drawn| drawn.get(category).cloned())
+            .unwrap_or_default();
+        let drawn_before = match changed {
+            Some((changed, before)) if changed == category => before,
+            _ => drawn_now.clone(),
+        };
+        let target = restore_target(
+            (sections_before, sections_now),
+            (&drawn_before, &drawn_now),
+            &focused,
         );
+        let note = moved_note(&focused, &target, &drawn_now.name);
+        self.focused.set_value(match &target {
+            Restore::To(target) => Some(target.clone()),
+            Restore::SearchBox => None,
+        });
+        let note_signal = self.note;
+        request_animation_frame(move || {
+            if !focus_is_lost() {
+                return;
+            }
+            let Some(element) = element_for(&target) else {
+                return;
+            };
+            focus_now(&element, Scrolling::Keep);
+            // After focusing, because taking focus clears the note.
+            if let Some(note) = note {
+                note_signal.set(note);
+            }
+        });
     }
 }
 
@@ -180,14 +295,18 @@ fn focus_is_lost() -> bool {
     }
 }
 
-/// The element drawn for `focused`, if it is drawn.
-fn element_for(focused: &Focused) -> Option<Element> {
-    let selector = match focused {
-        Focused::Section { category } => format!(
+/// The element drawn for `target`, if it is drawn.
+fn element_for(target: &Restore) -> Option<Element> {
+    let selector = match target {
+        Restore::SearchBox => return document().get_element_by_id(SEARCH_BOX),
+        Restore::To(Focused::Section { category }) => format!(
             "{RESULTS} .section-toggle[aria-controls={}]",
             css_string(&section_id(category))
         ),
-        Focused::Row { category, ipn } => format!(
+        Restore::To(Focused::ShowAll { category }) => {
+            format!("#{} button.section-show-all", section_id(category))
+        }
+        Restore::To(Focused::Row { category, ipn }) => format!(
             "#{} button.result[data-ipn={}]",
             section_id(category),
             css_string(ipn)
@@ -221,6 +340,148 @@ mod tests {
 
     fn list(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    fn drawn(rows: &[&str], show_all: bool) -> DrawnSection {
+        DrawnSection {
+            name: "Resistors".to_owned(),
+            rows: list(rows),
+            show_all,
+        }
+    }
+
+    fn row(category: &str, ipn: &str) -> Focused {
+        Focused::Row {
+            category: category.to_owned(),
+            ipn: ipn.to_owned(),
+        }
+    }
+
+    fn header(category: &str) -> Focused {
+        Focused::Section {
+            category: category.to_owned(),
+        }
+    }
+
+    fn show_all(category: &str) -> Focused {
+        Focused::ShowAll {
+            category: category.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_row_whose_section_moved_up_keeps_focus() {
+        // A save gave a resistor a better match, so Resistors moved above
+        // Capacitors. The browser moved the focused row with its section.
+        let rows = drawn(&["RES-1", "RES-2"], false);
+        let target = restore_target(
+            (&list(&["cap", "res"]), &list(&["res", "cap"])),
+            (&rows, &rows),
+            &row("res", "RES-1"),
+        );
+        assert_eq!(target, Restore::To(row("res", "RES-1")));
+        // A header that moved keeps focus too.
+        let target = restore_target(
+            (&list(&["cap", "res"]), &list(&["res", "cap"])),
+            (&rows, &rows),
+            &header("res"),
+        );
+        assert_eq!(target, Restore::To(header("res")));
+    }
+
+    #[test]
+    fn a_row_that_left_gives_focus_to_the_next_row() {
+        let sections = list(&["res"]);
+        let target = restore_target(
+            (&sections, &sections),
+            (
+                &drawn(&["RES-1", "RES-2", "RES-3"], false),
+                &drawn(&["RES-1", "RES-3"], false),
+            ),
+            &row("res", "RES-2"),
+        );
+        assert_eq!(target, Restore::To(row("res", "RES-3")));
+    }
+
+    #[test]
+    fn the_last_row_leaving_gives_focus_to_show_all_or_else_the_header() {
+        let sections = list(&["res"]);
+        let target = restore_target(
+            (&sections, &sections),
+            (&drawn(&["RES-1"], true), &drawn(&[], true)),
+            &row("res", "RES-1"),
+        );
+        assert_eq!(target, Restore::To(show_all("res")));
+        let target = restore_target(
+            (&sections, &sections),
+            (&drawn(&["RES-1"], false), &drawn(&[], false)),
+            &row("res", "RES-1"),
+        );
+        assert_eq!(target, Restore::To(header("res")));
+    }
+
+    #[test]
+    fn show_all_that_left_gives_focus_to_the_last_row() {
+        // A save removed a match beyond the first 25: the rows drawn stay
+        // the same, but Show all is no longer needed.
+        let sections = list(&["res"]);
+        let target = restore_target(
+            (&sections, &sections),
+            (
+                &drawn(&["RES-1", "RES-2"], true),
+                &drawn(&["RES-1", "RES-2"], false),
+            ),
+            &show_all("res"),
+        );
+        assert_eq!(target, Restore::To(row("res", "RES-2")));
+        let still = drawn(&["RES-1"], true);
+        let target = restore_target((&sections, &sections), (&still, &still), &show_all("res"));
+        assert_eq!(target, Restore::To(show_all("res")));
+    }
+
+    #[test]
+    fn a_section_that_left_gives_focus_to_the_next_section_or_the_search_box() {
+        let rows = drawn(&["CAP-1"], false);
+        let target = restore_target(
+            (&list(&["cap", "res"]), &list(&["res"])),
+            (&rows, &rows),
+            &row("cap", "CAP-1"),
+        );
+        assert_eq!(target, Restore::To(header("res")));
+        let target = restore_target((&list(&["cap"]), &[]), (&rows, &rows), &row("cap", "CAP-1"));
+        assert_eq!(target, Restore::SearchBox);
+    }
+
+    #[test]
+    fn the_note_says_what_left_and_nothing_when_focus_stays() {
+        assert_eq!(
+            moved_note(
+                &row("res", "RES-1"),
+                &Restore::To(row("res", "RES-2")),
+                "Resistors"
+            ),
+            Some("RES-1 left the list.".to_owned())
+        );
+        assert_eq!(
+            moved_note(&header("res"), &Restore::To(header("cap")), "Resistors"),
+            Some("Resistors left the list.".to_owned())
+        );
+        assert_eq!(
+            moved_note(
+                &row("res", "RES-1"),
+                &Restore::To(row("res", "RES-1")),
+                "Resistors"
+            ),
+            None
+        );
+        assert_eq!(
+            moved_note(
+                &show_all("res"),
+                &Restore::To(row("res", "RES-1")),
+                "Resistors"
+            ),
+            None
+        );
     }
 
     #[test]

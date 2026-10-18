@@ -13,7 +13,7 @@
 //! position stay where the person left them (see list_focus).
 
 use crate::focus::{Scrolling, focus_found_later};
-use crate::list_focus::{Focused, ListFocus};
+use crate::list_focus::{DrawnSection, Focused, ListFocus};
 use crate::{Load, backend, grouped};
 use desktop_contract::{PartSummary, SearchResponse};
 use leptos::prelude::*;
@@ -525,8 +525,8 @@ pub(crate) fn ResultList(
         try_scroll();
     });
 
-    // The sections shown, by category code, in order. When the one holding
-    // focus goes, focus moves to the one that took its place.
+    // The sections shown, by category code, in order. ListFocus puts focus
+    // back when a section that left or moved took it with it.
     let shown_sections = Memo::new(move |_| {
         results.with(|results| match results {
             Load::Ready(searched) => searched
@@ -538,13 +538,7 @@ pub(crate) fn ResultList(
             _ => Vec::new(),
         })
     });
-    Effect::new(move |before: Option<Vec<String>>| {
-        let now = shown_sections.get();
-        if let Some(before) = before.filter(|before| *before != now) {
-            focus.sections_changed(&before, &now);
-        }
-        now
-    });
+    Effect::new(move |_| focus.sections_shown(shown_sections.get()));
 
     let choose = move |ipn: String| {
         adding.set(false);
@@ -559,6 +553,11 @@ pub(crate) fn ResultList(
                 Load::Failed(error) => format!("Search failed: {error}"),
                 Load::Ready(searched) => count_text(&searched.response),
             })}
+        </p>
+        // Says why focus moved, when a teammate's save took the focused
+        // part or section out of the list.
+        <p id="list-focus-note" class="visually-hidden" aria-live="polite">
+            {move || focus.note.get()}
         </p>
         <ul
             // RESULTS finds this list.
@@ -678,8 +677,7 @@ fn Section(
             })
         })
     });
-    // The rows drawn, by IPN. When the focused row leaves or moves, focus
-    // goes back to it or to the row that took its place.
+    // The rows drawn, by IPN.
     let drawn = Memo::new(move |_| {
         if is_open.get() {
             shown.with(|(rows, _)| row_ipns(rows))
@@ -687,20 +685,27 @@ fn Section(
             Vec::new()
         }
     });
-    {
-        let category = category.clone();
-        Effect::new(move |before: Option<Vec<String>>| {
-            let now = drawn.get();
-            if let Some(before) = before.filter(|before| *before != now) {
-                focus.rows_changed(&category, &before, &now);
-            }
-            now
-        });
-    }
     let id = section_id(&category);
     let name = move || {
         section.with(|section| section.as_ref().map(|s| s.name.clone()).unwrap_or_default())
     };
+    // What the section draws, for ListFocus: when the focused row or Show
+    // all leaves or moves, focus goes back to it or to what took its place.
+    {
+        let category = category.clone();
+        Effect::new(move |_| {
+            let show_all =
+                is_open.get() && shown.with(|(_, end)| matches!(end, SectionEnd::ShowAll(_)));
+            focus.section_drawn(
+                &category,
+                DrawnSection {
+                    name: name(),
+                    rows: drawn.get(),
+                    show_all,
+                },
+            );
+        });
+    }
     let total = move || section.with(|section| section.as_ref().map_or(0, |s| s.total));
     let show_all = {
         let category = category.clone();
@@ -750,6 +755,7 @@ fn Section(
                 {move || is_open.get().then(|| {
                     let show_all = show_all.clone();
                     let category = category.clone();
+                    let row_category = category.clone();
                     view! {
                         // One row per part, keyed by IPN. A part that
                         // changes updates its row in place, so a focused
@@ -763,7 +769,7 @@ fn Section(
                                     <PartRow
                                         ipn=ipn
                                         part=part
-                                        category=category.clone()
+                                        category=row_category.clone()
                                         selected=selected
                                         choose=choose
                                         focus=focus
@@ -780,6 +786,10 @@ fn Section(
                                         <button
                                             type="button"
                                             class="section-show-all"
+                                            on:focus={
+                                                let category = category.clone();
+                                                move |_| focus.took(Focused::ShowAll { category: category.clone() })
+                                            }
                                             on:click=move |_| show_all()
                                         >
                                             {format!("Show all {}", grouped(total))}
