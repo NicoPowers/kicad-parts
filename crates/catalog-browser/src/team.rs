@@ -815,7 +815,7 @@ impl TeamCatalog {
     /// The next free IPN after `ipn` was found taken: for its prefix, after
     /// every IPN the team catalog and the CSV catalog (`csv`) have, and
     /// `ipn` itself.
-    fn next_free_after(&self, ipn: &str, csv: &IpnsInCsv) -> String {
+    pub(crate) fn next_free_after(&self, ipn: &str, csv: &IpnsInCsv) -> String {
         let parts = self.current_parts();
         let taken = csv
             .ipns()
@@ -2184,16 +2184,28 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
             .filter_map(|revision| Some((imported(&revision.change)?, revision.snapshot.as_str())))
             .max_by_key(|(seq, _)| *seq),
     };
+    // Every import problem the part view shows, read in one request.
+    let problems = problems_of(
+        client,
+        &part.ipn,
+        &[
+            CSV_DETAILS_DIFFER,
+            CSV_CAD_DIFFERS,
+            CSV_CAD_ITEM_KEPT,
+            IPN_GIVEN_TO_ANOTHER_PART,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
     let mut runs = LatestRuns::new(client);
-    let csv_rows_for_other_parts = rows_for_other_parts(client, part, &mut runs)?;
-    // A CSV file whose row with this IPN is another part says nothing
-    // about this part, so its values are never offered for review.
+    let csv_rows_for_other_parts = rows_for_other_parts(&problems, &mut runs)?;
+    // A CSV file whose row with this IPN may be another part says nothing
+    // sure about this part, so its values are never offered for review.
     let other_part_files: BTreeSet<&str> = csv_rows_for_other_parts
         .iter()
         .map(|row| row.csv_file.as_str())
         .collect();
     let csv_changes = open_csv_changes(
-        client,
+        &problems,
         part,
         current_details,
         current_revision,
@@ -2368,29 +2380,25 @@ fn csv_file_of(path: &str) -> Option<&str> {
     path.strip_prefix("database/")?.strip_suffix(".csv")
 }
 
-/// The CSV rows with the part's IPN that are a different part
-/// ([`IPN_GIVEN_TO_ANOTHER_PART`]), as the latest import of their CSV file
-/// found them. A problem whose detail cannot be read is skipped, so the
-/// part still opens.
+/// The CSV rows with the part's IPN that may be a different part
+/// ([`IPN_GIVEN_TO_ANOTHER_PART`] among the part's `problems`), as the
+/// latest import of their CSV file found them, in file order. The next free
+/// IPN is left blank: only the desktop sees the CSV catalog folder, so
+/// `CatalogBrowser::team_part` fills it in. A problem whose detail cannot be
+/// read is skipped, so the part still opens.
 fn rows_for_other_parts(
-    client: &PocketBaseClient,
-    part: &StoredPart,
+    problems: &[StoredImportProblem],
     runs: &mut LatestRuns,
 ) -> Result<Vec<CsvRowForAnotherPart>, String> {
-    let problems = problems_of(client, &part.ipn, &[IPN_GIVEN_TO_ANOTHER_PART])
-        .map_err(|error| error.to_string())?;
     let mut rows = Vec::new();
-    for problem in &problems {
-        let Some(csv_file) = csv_file_of(&problem.path) else {
+    for problem in problems {
+        if problem.code != IPN_GIVEN_TO_ANOTHER_PART || csv_file_of(&problem.path).is_none() {
             continue;
-        };
+        }
         if !runs.found_now(problem)? {
             continue;
         }
         let Ok(detail) = serde_json::from_str::<serde_json::Value>(&problem.detail) else {
-            continue;
-        };
-        let Some(row_number) = detail["row_number"].as_u64() else {
             continue;
         };
         let mpns = detail["csv_manufacturer_parts"]
@@ -2403,12 +2411,12 @@ fn rows_for_other_parts(
             .map(str::to_owned)
             .collect();
         rows.push(CsvRowForAnotherPart {
-            csv_file: format!("{csv_file}.csv"),
-            row_number,
+            csv_file: problem.path.clone(),
             mpns,
+            next_free_ipn: String::new(),
         });
     }
-    rows.sort_by(|a, b| (&a.csv_file, a.row_number).cmp(&(&b.csv_file, b.row_number)));
+    rows.sort_by(|a, b| a.csv_file.cmp(&b.csv_file));
     Ok(rows)
 }
 
@@ -2425,13 +2433,13 @@ fn rows_for_other_parts(
 /// whether the CSV changed that field since then.
 ///
 /// Nothing is offered from a CSV file in `other_part_files` (such as
-/// `g-res.csv`): its row with this IPN is another part.
+/// `database/g-res.csv`): its row with this IPN may be another part.
 ///
 /// A recorded document that cannot be read is skipped, so the part still
 /// opens.
 #[allow(clippy::too_many_arguments)]
 fn open_csv_changes(
-    client: &PocketBaseClient,
+    problems: &[StoredImportProblem],
     part: &StoredPart,
     details: &PartDetails,
     revision: &PartRevision,
@@ -2442,13 +2450,6 @@ fn open_csv_changes(
     runs: &mut LatestRuns,
     other_part_files: &BTreeSet<&str>,
 ) -> Result<Vec<CsvChanges>, String> {
-    let fail = |error: CollabError| error.to_string();
-    let problems = problems_of(
-        client,
-        &part.ipn,
-        &[CSV_DETAILS_DIFFER, CSV_CAD_DIFFERS, CSV_CAD_ITEM_KEPT],
-    )
-    .map_err(fail)?;
     let last_seen = |cad: bool| -> Option<LastSeen> {
         let code = if cad {
             CSV_CAD_DIFFERS
@@ -2488,7 +2489,8 @@ fn open_csv_changes(
     };
     let seen = [last_seen(false), last_seen(true)];
     let mut open: Vec<(String, CsvChanges)> = Vec::new();
-    for problem in &problems {
+    for problem in problems {
+        // Only the problems a person can review have a CSV document.
         let Some(document) = recorded_csv_document(problem) else {
             continue;
         };
@@ -2512,7 +2514,7 @@ fn open_csv_changes(
         let Some(csv_file) = csv_file_of(&problem.path) else {
             continue;
         };
-        if other_part_files.contains(format!("{csv_file}.csv").as_str()) {
+        if other_part_files.contains(problem.path.as_str()) {
             continue;
         }
         if !runs.found_now(problem)? {

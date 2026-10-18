@@ -354,9 +354,13 @@ async fn team_sign_out(team: State<'_, Team>) -> Result<TeamStatus, String> {
 }
 
 #[tauri::command]
-async fn team_part(team: State<'_, Team>, ipn: String) -> Result<Option<TeamPart>, String> {
-    let team = team.inner().clone();
-    blocking(move || team.part(&ipn)).await?
+async fn team_part(
+    browser: State<'_, Browser>,
+    team: State<'_, Team>,
+    ipn: String,
+) -> Result<Option<TeamPart>, String> {
+    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    blocking(move || browser.team_part(&ipn, &team)).await?
 }
 
 #[tauri::command]

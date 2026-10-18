@@ -875,58 +875,149 @@ fn field_rows(fields: Vec<Field>) -> impl IntoView {
         .collect_view()
 }
 
-/// The notice for CSV rows with this part's IPN that are another part
-/// (kicad-parts-3b72): which rows, why they are not this part, and the one
-/// thing to do. Nothing when there are none.
+/// The notice for CSV rows with this part's IPN that may be another part
+/// (kicad-parts-3b72): which rows, why nothing shows they are this part, and
+/// what to do either way. Nothing when there are none.
 fn other_part_notice(rows: &[CsvRowForAnotherPart], part_mpns: &[String]) -> Option<AnyView> {
     if rows.is_empty() {
         return None;
     }
     let heading = if rows.len() == 1 {
-        "A CSV row has this IPN for another part"
+        "A CSV row has this part's IPN"
     } else {
-        "CSV rows have this IPN for other parts"
+        "CSV rows have this part's IPN"
     };
-    let lines = rows
+    let rows = rows
         .iter()
-        .map(|row| view! { <p>{other_part_text(row, part_mpns)}</p> })
+        .map(|row| {
+            let words = OtherPartWords::of(row, part_mpns);
+            view! {
+                <p>{pieces_view(words.row)}</p>
+                <p>{pieces_view(words.why)}</p>
+                <p>"Whoever looks after the CSV catalog fixes the row:"</p>
+                <ul>
+                    <li>{pieces_view(words.if_different)}</li>
+                    <li>{pieces_view(words.if_same)}</li>
+                </ul>
+            }
+        })
         .collect_view();
-    let ask = if rows.len() == 1 {
-        "The import did not change this part. Ask whoever looks after the CSV catalog to give that row another IPN."
-    } else {
-        "The import did not change this part. Ask whoever looks after the CSV catalog to give those rows other IPNs."
-    };
     Some(
         view! {
             <section class="csv-notice other-part" role="status" aria-labelledby="other-part-heading">
                 <h3 id="other-part-heading">{heading}</h3>
-                {lines}
-                <p>{ask}</p>
+                {rows}
             </section>
         }
         .into_any(),
     )
 }
 
-/// Why one CSV row with this part's IPN is another part: only a shared MPN
-/// would show they are the same (catalog_lib.js csvRowIsAnotherPart).
-fn other_part_text(row: &CsvRowForAnotherPart, part_mpns: &[String]) -> String {
-    let which = format!("Row {} of {}", row.row_number, row.csv_file);
-    match (row.mpns.as_slice(), part_mpns.is_empty()) {
-        ([], _) => {
-            format!("{which} has this part's IPN but no MPN, so nothing shows it is this part.")
+/// A piece of notice text. A name, such as an MPN, IPN or file, never
+/// breaks across lines, so `ERJ-3EKF1002V` is never split at its hyphen.
+#[derive(Clone, Debug, PartialEq)]
+enum Piece {
+    Words(String),
+    Name(String),
+}
+
+fn pieces_view(pieces: Vec<Piece>) -> impl IntoView {
+    pieces
+        .into_iter()
+        .map(|piece| match piece {
+            Piece::Words(text) => text.into_any(),
+            Piece::Name(text) => view! { <span class="nowrap">{text}</span> }.into_any(),
+        })
+        .collect_view()
+}
+
+/// What the notice says about one CSV row with this part's IPN. The row is
+/// named by its file and MPN, not its number: row numbers differ by one
+/// between the file and a spreadsheet. It never says the row is another
+/// part, because it may be this part with a differently written MPN
+/// (catalog_lib.js csvRowIsAnotherPart).
+struct OtherPartWords {
+    row: Vec<Piece>,
+    why: Vec<Piece>,
+    if_different: Vec<Piece>,
+    if_same: Vec<Piece>,
+}
+
+impl OtherPartWords {
+    fn of(row: &CsvRowForAnotherPart, part_mpns: &[String]) -> Self {
+        let words = |text: &str| Piece::Words(text.to_owned());
+        let name = |text: &str| Piece::Name(text.to_owned());
+        let mut about_row = vec![
+            words("In "),
+            name(&row.csv_file),
+            words(", the row with this part's IPN "),
+        ];
+        match row.mpns.as_slice() {
+            [] => about_row.push(words("has no MPN.")),
+            [mpn] => about_row.extend([words("has MPN "), name(mpn), words(".")]),
+            mpns => {
+                about_row.push(words("has MPNs "));
+                about_row.extend(listed(mpns));
+                about_row.push(words("."));
+            }
         }
-        (_, true) => format!(
-            "{which} has this part's IPN, but this part has no MPN, so nothing shows the row is this part."
-        ),
-        ([mpn], false) => {
-            format!("{which} has this part's IPN, but its MPN, {mpn}, is not one of this part's.")
+        let why = match part_mpns {
+            [] => vec![words(
+                "This part has no MPN, and the row differs from it, so nothing shows the row is this part. The import did not change this part.",
+            )],
+            mpns => {
+                let mut why = vec![words(if mpns.len() == 1 {
+                    "This part's MPN is "
+                } else {
+                    "This part's MPNs are "
+                })];
+                why.extend(listed(mpns));
+                why.push(words(
+                    ", so nothing shows the row is this part. The import did not change this part.",
+                ));
+                why
+            }
+        };
+        let if_different = if row.next_free_ipn.is_empty() {
+            vec![words(
+                "If the row is a different part, give it another IPN.",
+            )]
+        } else {
+            vec![
+                words("If the row is a different part, give it another IPN, such as "),
+                name(&row.next_free_ipn),
+                words(", the next free one."),
+            ]
+        };
+        let if_same = match part_mpns.first() {
+            None => vec![words(
+                "If it is this part, make the row match this part exactly, or remove the row.",
+            )],
+            Some(mpn) => vec![
+                words("If it is this part, put this part's MPN, "),
+                name(mpn),
+                words(", in the row, or remove the row."),
+            ],
+        };
+        Self {
+            row: about_row,
+            why,
+            if_different,
+            if_same,
         }
-        (mpns, false) => format!(
-            "{which} has this part's IPN, but its MPNs, {}, are not this part's.",
-            mpns.join(", ")
-        ),
     }
+}
+
+/// `names` as pieces, separated by commas.
+fn listed(names: &[String]) -> Vec<Piece> {
+    let mut pieces = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        if index > 0 {
+            pieces.push(Piece::Words(", ".to_owned()));
+        }
+        pieces.push(Piece::Name(name.clone()));
+    }
+    pieces
 }
 
 #[component]
@@ -2398,7 +2489,7 @@ fn ConflictView(
 
 #[cfg(test)]
 mod tests {
-    use super::{CsvRowForAnotherPart, machine_time, other_part_text};
+    use super::{CsvRowForAnotherPart, OtherPartWords, Piece, machine_time};
 
     #[test]
     fn save_times_get_a_machine_readable_form() {
@@ -2409,29 +2500,58 @@ mod tests {
         assert_eq!(machine_time("yesterday"), None);
     }
 
+    /// The text of `pieces`, and whether every name is kept on one line.
+    fn text(pieces: &[Piece]) -> String {
+        pieces
+            .iter()
+            .map(|piece| match piece {
+                Piece::Words(text) => text.clone(),
+                Piece::Name(text) => format!("[{text}]"),
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_csv_row_for_another_part_says_why_it_is_not_this_part() {
-        let row = |mpns: &[&str]| CsvRowForAnotherPart {
-            csv_file: "g-res.csv".into(),
-            row_number: 30,
+    fn a_csv_row_with_this_ipn_says_why_nothing_shows_it_is_this_part_and_both_ways_out() {
+        let row = |mpns: &[&str], next_free: &str| CsvRowForAnotherPart {
+            csv_file: "database/g-res.csv".into(),
             mpns: mpns.iter().map(|mpn| (*mpn).to_owned()).collect(),
+            next_free_ipn: next_free.into(),
         };
         let ours = ["AR0603-1K".to_owned()];
+        let words = OtherPartWords::of(&row(&["ERJ-3EKF1001V"], "RES-0003-0001"), &ours);
         assert_eq!(
-            other_part_text(&row(&["ERJ-3EKF1001V"]), &ours),
-            "Row 30 of g-res.csv has this part's IPN, but its MPN, ERJ-3EKF1001V, is not one of this part's."
+            text(&words.row),
+            "In [database/g-res.csv], the row with this part's IPN has MPN [ERJ-3EKF1001V]."
         );
         assert_eq!(
-            other_part_text(&row(&["A1", "B2"]), &ours),
-            "Row 30 of g-res.csv has this part's IPN, but its MPNs, A1, B2, are not this part's."
+            text(&words.why),
+            "This part's MPN is [AR0603-1K], so nothing shows the row is this part. The import did not change this part."
         );
         assert_eq!(
-            other_part_text(&row(&[]), &ours),
-            "Row 30 of g-res.csv has this part's IPN but no MPN, so nothing shows it is this part."
+            text(&words.if_different),
+            "If the row is a different part, give it another IPN, such as [RES-0003-0001], the next free one."
         );
         assert_eq!(
-            other_part_text(&row(&["ERJ-3EKF1001V"]), &[]),
-            "Row 30 of g-res.csv has this part's IPN, but this part has no MPN, so nothing shows the row is this part."
+            text(&words.if_same),
+            "If it is this part, put this part's MPN, [AR0603-1K], in the row, or remove the row."
         );
+
+        let words = OtherPartWords::of(&row(&["A1", "B2"], ""), &[]);
+        assert_eq!(
+            text(&words.row),
+            "In [database/g-res.csv], the row with this part's IPN has MPNs [A1], [B2]."
+        );
+        assert!(text(&words.why).starts_with("This part has no MPN, and the row differs from it"));
+        assert_eq!(
+            text(&words.if_different),
+            "If the row is a different part, give it another IPN."
+        );
+        assert_eq!(
+            text(&words.if_same),
+            "If it is this part, make the row match this part exactly, or remove the row."
+        );
+        let words = OtherPartWords::of(&row(&[], ""), &ours);
+        assert!(text(&words.row).ends_with("has no MPN."));
     }
 }

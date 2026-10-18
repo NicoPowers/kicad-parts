@@ -22,9 +22,11 @@ use catalog::pocketbase::{
 };
 use catalog::{CsvCatalog, DetailField, ManufacturerPart};
 use catalog_browser::team::TeamCatalog;
+use catalog_browser::{BrowserConfig, CatalogBrowser};
 use catalog_import::services;
 use collaboration::PocketBaseClient;
 use desktop_contract::{CsvRowForAnotherPart, SignInRequest};
+use kicad_integration::SearchLocations;
 use native_services::PocketBaseServer;
 use serde_json::Value;
 use std::fs;
@@ -150,6 +152,19 @@ impl Team {
 
     fn read(&self) -> CatalogReadback {
         read_back(&self.admin).unwrap()
+    }
+
+    /// The desktop's catalog browser over the copy, with its data in
+    /// `folder`.
+    fn browser(&self, folder: &Path) -> CatalogBrowser {
+        CatalogBrowser::open(BrowserConfig {
+            catalog_root: self.root().to_path_buf(),
+            cache_dir: folder.join("cache"),
+            settings_file: folder.join("settings.json"),
+            kicad_locations: SearchLocations::Standard,
+            kicad_config_dir: None,
+            kicad_documents_dir: None,
+        })
     }
 
     /// The desktop's team catalog, signed in as the editor, with its data
@@ -299,7 +314,7 @@ fn a_csv_row_that_gives_an_app_part_s_ipn_to_another_part_is_flagged_and_changes
     let stored = team.read();
 
     // The rows that name none of the part's MPNs, or where one side has no
-    // MPN, are other parts: each gets the new problem and nothing else.
+    // MPN, may be other parts: each gets the new problem and nothing else.
     for ipn in [UNRELATED, PART_HAS_NO_MPN, ROW_HAS_NO_MPN] {
         assert_eq!(codes_of(&stored, ipn), [IPN_GIVEN_TO_ANOTHER_PART], "{ipn}");
         assert_eq!(state_of(&stored, ipn), state_of(&before, ipn), "{ipn}");
@@ -308,7 +323,7 @@ fn a_csv_row_that_gives_an_app_part_s_ipn_to_another_part_is_flagged_and_changes
     assert_eq!(
         unrelated.message,
         format!(
-            "Row 30 of database/g-res.csv has the IPN {UNRELATED}, but the team catalog already gave it to a part added in the app: RES 1K 1% 1/10W 0603. The row's MPN, ERJ-3EKF1001V, is not that part's (AR0603-1K), so they are different parts. The import left that part as it is and kept the row here. Give this CSV row another IPN."
+            "In database/g-res.csv, the row with IPN {UNRELATED} has MPN ERJ-3EKF1001V. The team catalog already gave {UNRELATED} to a part added in the app: RES 1K 1% 1/10W 0603. That part's MPN is AR0603-1K, so nothing shows they are one part. The import left that part as it is and kept the row here. If the row is a different part, give it another IPN. If it is that part, put that part's MPN (AR0603-1K) in the row, or remove the row."
         )
     );
     // The problem keeps the whole row and both sides' MPNs.
@@ -323,15 +338,13 @@ fn a_csv_row_that_gives_an_app_part_s_ipn_to_another_part_is_flagged_and_changes
     );
     assert_eq!(detail["csv_manufacturer_parts"][0]["mpn"], "ERJ-3EKF1001V");
     assert_eq!(detail["part_manufacturer_parts"][0]["mpn"], "AR0603-1K");
-    assert!(
-        flagged(&stored, PART_HAS_NO_MPN)
-            .message
-            .contains("That part has no MPN, so nothing shows the row is that part."),
-    );
+    assert!(flagged(&stored, PART_HAS_NO_MPN).message.contains(
+        "That part has no MPN, and the row differs from it, so nothing shows they are one part."
+    ),);
     assert!(
         flagged(&stored, ROW_HAS_NO_MPN)
             .message
-            .contains("The row has no MPN, so nothing shows it is that part."),
+            .contains(&format!("the row with IPN {ROW_HAS_NO_MPN} has no MPN.")),
     );
 
     // A shared MPN, even only one of two and written in another case, is
@@ -353,18 +366,19 @@ fn a_csv_row_that_gives_an_app_part_s_ipn_to_another_part_is_flagged_and_changes
     }
     team.assert_nothing_lost("rows for other parts");
 
-    // The desktop shows each row on the part it is not, and offers none of
-    // its values for review. A part whose row shares an MPN shows the CSV's
-    // new values, as before.
+    // The desktop shows each row on the part it has the IPN of, with the
+    // next free IPN for it, and offers none of its values for review. A
+    // part whose row shares an MPN shows the CSV's new values, as before.
     let data = tempfile::tempdir().unwrap();
     let desktop = team.desktop(data.path());
-    let unrelated = desktop.part(UNRELATED).unwrap().unwrap();
+    let browser = team.browser(data.path());
+    let unrelated = browser.team_part(UNRELATED, &desktop).unwrap().unwrap();
     assert_eq!(
         unrelated.csv_rows_for_other_parts,
         [CsvRowForAnotherPart {
-            csv_file: "g-res.csv".into(),
-            row_number: 30,
+            csv_file: "database/g-res.csv".into(),
             mpns: vec!["ERJ-3EKF1001V".into()],
+            next_free_ipn: "RES-0106-0001".into(),
         }]
     );
     assert!(
@@ -388,8 +402,8 @@ fn a_csv_row_that_gives_an_app_part_s_ipn_to_another_part_is_flagged_and_changes
         "a second import changed something"
     );
 
-    // Given another IPN, the row becomes its own part, and the app's part
-    // has no problem any more.
+    // Given the next free IPN the app offered, the row becomes its own
+    // part, and the app's part has no problem any more.
     team.change_csv(
         &format!("\"{UNRELATED}\",\"ERJ-3EKF1001V\""),
         "\"RES-0106-0001\",\"ERJ-3EKF1001V\"",
@@ -540,4 +554,47 @@ fn add_part_refuses_an_ipn_that_a_csv_row_has_even_when_the_row_made_no_part() {
         "{message}"
     );
     assert_eq!(team.read().counts(), stored.counts());
+}
+
+#[test]
+fn an_exact_copy_of_an_app_part_is_that_part_and_a_placeholder_mpn_is_no_mpn() {
+    let team = Team::start();
+    // A part with no MPN, such as a test point, copied exactly into the
+    // CSV catalog: the same part details and the same symbol and footprint.
+    const COPY: &str = "RES-0108-0001";
+    team.add_in_app(COPY, "RES 1K 1% 1/10W 0603", &[]);
+    // Parts whose only MPN is a placeholder: no MPN matches another.
+    const PLACEHOLDER: &str = "RES-0109-0001";
+    team.add_in_app(PLACEHOLDER, "RES 9K1 1% 1/10W 0603", &["TBD"]);
+    let before = team.read();
+    let file = team.root().join(CSV);
+    let mut text = fs::read_to_string(&file).unwrap();
+    text.push_str(&format!(
+        "\"{COPY}\",\"\",\"\",\"RES 1K 1% 1/10W 0603\",\"1k\",\"g-res:R_US\",\"g-Resistor_SMD:R_0603_1608Metric\",\"1%\",\"\"\n"
+    ));
+    fs::write(&file, text).unwrap();
+    team.add_row(PLACEHOLDER, "n/a", "Acme Resistors", "RES 9K1 0.5% 0603");
+    team.import("copies");
+    let stored = team.read();
+
+    // The exact copy is the part: nothing is flagged, nothing changes.
+    assert_eq!(
+        codes_of(&stored, COPY),
+        ["part-last-saved-without-csv-source"]
+    );
+    assert_eq!(state_of(&stored, COPY), state_of(&before, COPY));
+    // TBD and n/a are no MPNs, so nothing shows the row is the part.
+    assert_eq!(codes_of(&stored, PLACEHOLDER), [IPN_GIVEN_TO_ANOTHER_PART]);
+    assert!(
+        flagged(&stored, PLACEHOLDER)
+            .message
+            .contains("That part has no MPN"),
+        "{}",
+        flagged(&stored, PLACEHOLDER).message
+    );
+    assert_eq!(
+        state_of(&stored, PLACEHOLDER),
+        state_of(&before, PLACEHOLDER)
+    );
+    team.assert_nothing_lost("an exact copy and a placeholder MPN");
 }

@@ -422,9 +422,9 @@ pub struct TeamPart {
     /// footprint.
     #[serde(default)]
     pub csv_changes: Vec<CsvChanges>,
-    /// CSV catalog rows with this part's IPN that are a different part, as
-    /// the latest import of their CSV file found them. The import left the
-    /// part as it is; each row needs another IPN.
+    /// CSV catalog rows with this part's IPN that may be a different part,
+    /// as the latest import of their CSV file found them. The import left
+    /// the part as it is.
     #[serde(default)]
     pub csv_rows_for_other_parts: Vec<CsvRowForAnotherPart>,
     /// Every category, by name, for the Category choice in Edit part.
@@ -443,17 +443,23 @@ pub struct TeamCategory {
     pub fields: Vec<String>,
 }
 
-/// A CSV catalog row with a part's IPN that is a different part: the part
-/// was added in this app, and the row names none of its MPNs
-/// (kicad-parts-3b72). Two parts got one IPN, so the row needs another one.
+/// A CSV catalog row with a part's IPN that may be a different part: the
+/// part was added in this app, and the row names none of its MPNs and is no
+/// exact copy of it (kicad-parts-3b72). Nothing shows they are one part, so
+/// the import left the part as it is. The row is named by its IPN and MPN,
+/// because row numbers differ by one between the file and a spreadsheet.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CsvRowForAnotherPart {
-    /// The CSV file, such as `g-res.csv`.
+    /// The CSV file, such as `database/g-res.csv`.
     pub csv_file: String,
-    /// The row's number in the file, counting from 1 after the header line.
-    pub row_number: u64,
-    /// The row's MPNs, such as `ERJ-3EKF1001V`; empty when it has none.
+    /// The row's MPNs as written, such as `ERJ-3EKF1001V`; empty when it
+    /// has none.
     pub mpns: Vec<String>,
+    /// The next free IPN to give the row if it is a different part, such as
+    /// `RES-0003-0001`, worked out by the desktop from the team catalog and
+    /// the CSV catalog folder when the part loads; empty when not known.
+    #[serde(default)]
+    pub next_free_ipn: String,
 }
 
 /// New CSV values the latest import found for a part that was edited in

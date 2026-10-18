@@ -1640,6 +1640,16 @@ a {
   margin: 0 0 0.5rem;
 }
 
+.csv-notice ul {
+  margin: 0 0 0.5rem;
+  padding-left: 1.2rem;
+}
+
+/* An MPN, IPN or file name stays on one line. */
+.nowrap {
+  white-space: nowrap;
+}
+
 .csv-review-form > p {
   margin: 0 0 0.6rem;
 }

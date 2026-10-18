@@ -4,7 +4,8 @@
 // it never gives that row's IPN to another part: it saves nothing and
 // offers the next free IPN. Then a CSV row gets the IPN of the part added
 // in the app, with another MPN. The import leaves the part as it is, and
-// the part says that the row is another part and needs another IPN.
+// the part says that nothing shows the row is this part, with what to do
+// either way.
 //
 // The app reads a copy of the CSV catalog, which the journey changes; the
 // repository is only read.
@@ -172,7 +173,7 @@ describe('team catalog: one IPN given to two parts', () => {
     await waitForText(browser, '#part-title', MPN);
   });
 
-  it('shows on the part that a CSV row has its IPN for another part, and changes nothing', async () => {
+  it('shows on the part that a CSV row has its IPN, both ways out, and changes nothing', async () => {
     assert.equal((await browser.$$(OTHER_PART)).length, 0, 'no notice before any CSV row has the IPN');
     const before = await textOf(browser, '.part-fields table');
     // Someone else gives the part's IPN to another resistor in the CSV
@@ -181,12 +182,27 @@ describe('team catalog: one IPN given to two parts', () => {
     const outcome = await server.reimport(copy);
     record({ event: 'reimport', outcome });
     assert.ok(['applied', 'nothing_changed'].includes(outcome), outcome);
-    await waitForText(browser, '#other-part-heading', 'A CSV row has this IPN for another part', 30_000);
-    assert.equal(
-      await textOf(browser, OTHER_PART),
-      'A CSV row has this IPN for another part' +
-        `Row 31 of g-res.csv has this part's IPN, but its MPN, ${OTHER_MPN}, is not one of this part's.` +
-        'The import did not change this part. Ask whoever looks after the CSV catalog to give that row another IPN.',
+    await waitForText(browser, '#other-part-heading', "A CSV row has this part's IPN", 30_000);
+    // The row is named by its file and MPN, never by a row number; the
+    // notice never says it is another part, and gives both ways out with
+    // the next free IPN.
+    assert.deepEqual(
+      await browser.execute(
+        (s) => [...document.querySelectorAll(`${s} p, ${s} li`)].map((e) => e.textContent.trim()),
+        OTHER_PART,
+      ),
+      [
+        `In database/g-res.csv, the row with this part's IPN has MPN ${OTHER_MPN}.`,
+        `This part's MPN is ${MPN}, so nothing shows the row is this part. The import did not change this part.`,
+        'Whoever looks after the CSV catalog fixes the row:',
+        'If the row is a different part, give it another IPN, such as RES-0003-0001, the next free one.',
+        `If it is this part, put this part's MPN, ${MPN}, in the row, or remove the row.`,
+      ],
+    );
+    // MPNs and IPNs never break across lines.
+    assert.deepEqual(
+      await browser.execute((s) => [...document.querySelectorAll(`${s} .nowrap`)].map((e) => e.textContent), OTHER_PART),
+      ['database/g-res.csv', OTHER_MPN, MPN, 'RES-0003-0001', MPN],
     );
     assert.equal(
       await browser.execute((s) => document.querySelector(s).getAttribute('role'), OTHER_PART),

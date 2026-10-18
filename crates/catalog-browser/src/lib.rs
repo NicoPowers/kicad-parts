@@ -371,7 +371,7 @@ impl CatalogBrowser {
     /// Every IPN of the CSV catalog this app loaded when it opened, read
     /// once. Only for showing parts with that same reading; a new part's IPN
     /// is checked against the folder as it is now (`csv_ipns`).
-    pub fn loaded_csv_ipns(&self) -> &BTreeSet<String> {
+    fn loaded_csv_ipns(&self) -> &BTreeSet<String> {
         self.loaded_csv_ipns.get_or_init(|| {
             self.catalog
                 .as_ref()
@@ -624,6 +624,30 @@ impl CatalogBrowser {
         let kicad_share = self.kicad_share();
         self.library_check
             .get(team, &self.config.catalog_root, kicad_share.as_deref())
+    }
+
+    /// The team catalog's part `ipn`, as [`TeamCatalog::part`] reads it,
+    /// with the next free IPN for each CSV row that may be another part:
+    /// only this app sees the CSV catalog folder, and the person needs a
+    /// number that clashes with nothing (kicad-parts-3b72). If the folder
+    /// cannot be read, the part still opens, without a suggestion.
+    pub fn team_part(
+        &self,
+        ipn: &str,
+        team: &TeamCatalog,
+    ) -> Result<Option<desktop_contract::TeamPart>, String> {
+        let Some(mut part) = team.part(ipn)? else {
+            return Ok(None);
+        };
+        if !part.csv_rows_for_other_parts.is_empty() {
+            if let Ok(csv) = self.csv_ipns.now() {
+                let next_free = team.next_free_after(&part.ipn, &csv);
+                for row in &mut part.csv_rows_for_other_parts {
+                    row.next_free_ipn.clone_from(&next_free);
+                }
+            }
+        }
+        Ok(Some(part))
     }
 
     /// Whether `ipn` can be a new part's IPN.
