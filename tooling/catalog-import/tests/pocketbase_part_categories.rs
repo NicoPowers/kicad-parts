@@ -544,15 +544,48 @@ fn a_csv_that_moves_a_row_to_another_file_changes_the_category_like_any_detail()
 }
 
 /// A route that saves a remembered match directly, as buggy server code
-/// might, for the Change and part the body names.
+/// might, for the Change and part the body names. With `newEdit`, it
+/// first saves what an edit route would: a new edit Change and the part's
+/// new details in the match's category. The match then names that Change.
 const DIRECT_SAVE_HOOK: &str = r#"
 routerAdd("POST", "/api/test/category-match", (e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
   const body = e.requestInfo().body;
   try {
     $app.runInTransaction((txApp) => {
-      const change = txApp.findRecordById("catalog_changes", body.change);
       const part = txApp.findFirstRecordByData("catalog_parts", "ipn", body.ipn);
+      let change = null;
+      if (body.newEdit) {
+        const last = txApp.findRecordsByFilter("catalog_changes", "seq > 0", "-seq", 1, 0)[0];
+        const correlation = "test-" + (last.getInt("seq") + 1);
+        change = new Record(txApp.findCollectionByNameOrId("catalog_changes"));
+        change.set("id", lib.deriveId("change", correlation));
+        change.set("seq", last.getInt("seq") + 1);
+        change.set("kind", "edit");
+        change.set("reason", "test");
+        change.set("correlation_id", correlation);
+        change.set("actor", "users:test");
+        change.set("actor_name", "Test");
+        change.set("sources", "{}");
+        change.set("summary", "{}");
+        txApp.save(change);
+        const current = txApp.findRecordById("catalog_part_details", part.getString("current_details"));
+        const snapshot = JSON.parse(current.getString("snapshot"));
+        snapshot.category = body.category;
+        const number = current.getInt("number") + 1;
+        const details = new Record(txApp.findCollectionByNameOrId("catalog_part_details"));
+        details.set("id", lib.deriveId("part-details", part.id + "\n" + number));
+        details.set("part", part.id);
+        details.set("number", number);
+        details.set("predecessor", current.id);
+        details.set("change", change.id);
+        details.set("snapshot", JSON.stringify(snapshot));
+        details.set("snapshot_sha256", $security.sha256(JSON.stringify(snapshot)));
+        details.set("source", "{}");
+        txApp.save(details);
+      } else {
+        change = txApp.findRecordById("catalog_changes", body.change);
+      }
       const match = new Record(txApp.findCollectionByNameOrId("catalog_category_matches"));
       match.set("id", body.id || lib.deriveId("category-match", change.id + "\n" + body.clue));
       match.set("category", lib.deriveId("category", body.category));
@@ -652,6 +685,15 @@ fn server_code_can_only_save_a_remembered_match_with_a_persons_category_change()
         late.body
     );
     assert_eq!(team.read(), stored, "nothing was written");
+    // A valid match is still accepted: the person's own confirmation, in
+    // the edit Change saved in the same transaction (here a supplier
+    // category, which only ever counts once a person confirms it).
+    let valid = save(serde_json::json!({ "ipn": OTHER, "newEdit": true }));
+    assert_eq!(valid.status, 200, "{}", valid.body);
+    assert_eq!(
+        team.read().category_matches.len(),
+        stored.category_matches.len() + 1
+    );
     team.server.stop();
 }
 
