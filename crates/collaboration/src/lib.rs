@@ -7,6 +7,8 @@
 //! - [`PocketBaseClient`] authenticates and calls the REST API.
 //! - [`ConnectionProblem`] says in plain words why the server could not be
 //!   reached.
+//! - [`ServerTrust`] is the one TLS setup for `https://` servers, and
+//!   [`ServerAddress`] holds the rules for the address typed at sign-in.
 //! - [`RealtimeConnection`] receives change notifications over PocketBase's
 //!   server-sent events.
 //! - [`Replica`] keeps a local copy consistent: it applies changes in
@@ -16,12 +18,15 @@
 //! The collections are deliberately generic and provisional; the catalog
 //! model (kicad-parts-fef6, kicad-parts-2254) will adopt these mechanics.
 
+mod address;
 mod client;
 mod connection;
 pub mod contract;
 mod realtime;
 mod replica;
+mod tls;
 
+pub use address::{AddressRefusal, ServerAddress};
 pub use client::{HttpReply, PocketBaseClient};
 pub use connection::ConnectionProblem;
 pub use contract::{
@@ -29,6 +34,7 @@ pub use contract::{
 };
 pub use realtime::{RealtimeConnection, RealtimeEvent};
 pub use replica::{ApplyResult, Replica, ReplicaRecord};
+pub use tls::ServerTrust;
 
 use std::fmt;
 

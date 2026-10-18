@@ -6,14 +6,30 @@ license.workspace = true
 rust-version.workspace = true
 description = "Client and contract for the PocketBase team backend: protected revisioned commands, realtime change notifications and checkpoint reconciliation. No Tauri."
 
+[features]
+# Lets tests trust a certificate authority they make, without touching the
+# operating system's certificate store. Never enabled in the app.
+test-trust = []
+
 [dependencies]
 getrandom = "0.3"
+# HTTPS for the REST and realtime clients (ADR 0017). ring, not aws-lc-rs,
+# so every platform builds without a C toolchain beyond the usual one.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Checks certificates with the operating system, so company root
+# certificates work on Windows, macOS and Linux.
+rustls-platform-verifier = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Plain ureq: its TLS comes from our own connector in tls.rs.
 ureq = { version = "2", default-features = false }
 
 [dev-dependencies]
+# Turns on test-trust for this crate's own tests.
+collaboration = { path = ".", features = ["test-trust"] }
 native-services = { path = "../../tooling/native-services" }
 # Reads a restored data.db before PocketBase starts on it.
 rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3.10"
+# Makes test certificate authorities and certificates at test time.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }

@@ -1,13 +1,14 @@
 //! PocketBase realtime notifications over server-sent events.
 //!
-//! The connection is a plain HTTP/1.1 stream on its own socket, read by a
+//! The connection is an HTTP/1.1 stream on its own socket, read by a
 //! background thread, so [`RealtimeConnection::disconnect`] can drop it at
-//! any moment, as a network failure would. It supports `http://` URLs; a
-//! deployed server behind TLS needs a TLS stream here (a follow-up for the
-//! deployment work).
+//! any moment, as a network failure would. An `https://` server gets TLS
+//! from the same setup as the REST client ([`ServerTrust`]).
 
+use crate::address::ServerAddress;
 use crate::client::PocketBaseClient;
 use crate::connection::ConnectionProblem;
+use crate::tls::ServerTrust;
 use crate::{CollabError, CollabResult};
 use serde_json::Value;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -30,9 +31,16 @@ enum Message {
     Closed(ConnectionProblem),
 }
 
+/// A plain or TLS stream, which the reader thread owns.
+trait Stream: Read + Write + Send {}
+
+impl<S: Read + Write + Send> Stream for S {}
+
 /// An open realtime stream.
 pub struct RealtimeConnection {
     client_id: String,
+    /// The TCP socket under the stream, kept to shut it down from here
+    /// while the reader thread is blocked reading.
     socket: TcpStream,
     events: Receiver<Message>,
     reader: Option<JoinHandle<()>>,
@@ -41,36 +49,49 @@ pub struct RealtimeConnection {
 
 impl RealtimeConnection {
     /// Opens `GET /api/realtime` and waits for PocketBase's `PB_CONNECT`
-    /// event, which carries this connection's client ID.
+    /// event, which carries this connection's client ID. An `https://`
+    /// server's certificate is checked against the operating system's.
     pub fn connect(base_url: &str, timeout: Duration) -> CollabResult<Self> {
-        let authority = base_url
-            .trim_end_matches('/')
-            .strip_prefix("http://")
-            .ok_or_else(|| {
-                CollabError::Protocol(format!(
-                    "realtime supports http:// URLs only, not `{base_url}`"
-                ))
-            })?;
-        let address = authority
-            .to_socket_addrs()
-            .map_err(connecting)?
-            .next()
-            .ok_or_else(|| {
-                CollabError::Transport(ConnectionProblem::NotReachable(format!(
-                    "`{authority}` has no address"
-                )))
-            })?;
-        let socket = TcpStream::connect_timeout(&address, timeout).map_err(connecting)?;
-        let mut writer = socket.try_clone().map_err(connecting)?;
-        write!(
-            writer,
-            "GET /api/realtime HTTP/1.1\r\nHost: {authority}\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n\r\n"
-        )
-        .map_err(connecting)?;
+        Self::connect_with_trust(base_url, timeout, &ServerTrust::system())
+    }
+
+    /// Like [`RealtimeConnection::connect`], but checks an `https://`
+    /// server's certificate with `trust`.
+    pub fn connect_with_trust(
+        base_url: &str,
+        timeout: Duration,
+        trust: &ServerTrust,
+    ) -> CollabResult<Self> {
+        let address = ServerAddress::from_url(base_url)
+            .map_err(|_| CollabError::Protocol(format!("`{base_url}` is not a team server URL")))?;
+        let socket = open_socket(&address, timeout)?;
+        // The handshake and the request get `timeout`; the stream itself
+        // is quiet between events, so its reads wait as long as it takes.
+        socket.set_read_timeout(Some(timeout)).map_err(connecting)?;
+        socket
+            .set_write_timeout(Some(timeout))
+            .map_err(connecting)?;
         let reader_socket = socket.try_clone().map_err(connecting)?;
+        let mut stream: Box<dyn Stream> = if address.is_secure() {
+            Box::new(
+                trust
+                    .secure(address.host(), reader_socket)
+                    .map_err(CollabError::Transport)?,
+            )
+        } else {
+            Box::new(reader_socket)
+        };
+        write!(
+            stream,
+            "GET /api/realtime HTTP/1.1\r\nHost: {}\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n\r\n",
+            address.authority()
+        )
+        .and_then(|()| stream.flush())
+        .map_err(connecting)?;
+        socket.set_read_timeout(None).map_err(connecting)?;
         let (sender, events) = mpsc::channel();
         let reader = std::thread::spawn(move || {
-            let reason = match read_stream(reader_socket, &sender) {
+            let reason = match read_stream(stream, &sender) {
                 Ok(()) => ConnectionProblem::Lost("the server closed the stream".into()),
                 Err(io) => ConnectionProblem::after_connecting(&io),
             };
@@ -174,8 +195,30 @@ fn connecting(error: io::Error) -> CollabError {
     CollabError::Transport(ConnectionProblem::while_connecting(&error))
 }
 
-fn read_stream(socket: TcpStream, sender: &mpsc::Sender<Message>) -> io::Result<()> {
-    let mut reader = BufReader::new(socket);
+/// Connects to the first of the host's addresses that answers. `localhost`
+/// often has two, `::1` and `127.0.0.1`, and a server may listen on one.
+fn open_socket(address: &ServerAddress, timeout: Duration) -> CollabResult<TcpStream> {
+    let host = address.host().trim_start_matches('[').trim_end_matches(']');
+    let mut last_error = None;
+    for ip in (host, address.port())
+        .to_socket_addrs()
+        .map_err(connecting)?
+    {
+        match TcpStream::connect_timeout(&ip, timeout) {
+            Ok(socket) => return Ok(socket),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(match last_error {
+        Some(error) => connecting(error),
+        None => CollabError::Transport(ConnectionProblem::NotReachable(format!(
+            "`{host}` has no address"
+        ))),
+    })
+}
+
+fn read_stream(stream: Box<dyn Stream>, sender: &mpsc::Sender<Message>) -> io::Result<()> {
+    let mut reader = BufReader::new(stream);
     let mut status = String::new();
     reader.read_line(&mut status)?;
     if !status.starts_with("HTTP/1.1 200") {
@@ -340,9 +383,9 @@ mod tests {
     }
 
     #[test]
-    fn only_http_urls_are_accepted() {
+    fn only_http_and_https_urls_are_accepted() {
         assert!(matches!(
-            RealtimeConnection::connect("https://example.invalid", Duration::from_secs(1)),
+            RealtimeConnection::connect("ws://127.0.0.1:9", Duration::from_secs(1)),
             Err(CollabError::Protocol(_))
         ));
     }

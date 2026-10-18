@@ -2,10 +2,12 @@
 
 use crate::connection::ConnectionProblem;
 use crate::contract::{ChangeEntry, CommandOutcome, CommandReply, EditRecord, RecordSnapshot};
+use crate::tls::ServerTrust;
 use crate::{CollabError, CollabResult};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::io::Read;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Records fetched per page when listing.
@@ -54,6 +56,7 @@ impl HttpReply {
 pub struct PocketBaseClient {
     base_url: String,
     agent: ureq::Agent,
+    trust: ServerTrust,
     token: Option<String>,
     auth_id: Option<String>,
 }
@@ -69,13 +72,29 @@ impl std::fmt::Debug for PocketBaseClient {
 }
 
 impl PocketBaseClient {
-    /// An anonymous client for `base_url`, e.g. `http://127.0.0.1:8090`.
+    /// An anonymous client for `base_url`, such as
+    /// `https://team.example.com` or `http://127.0.0.1:8090`. An
+    /// `https://` server's certificate is checked against the operating
+    /// system's.
     pub fn new(base_url: &str) -> Self {
+        Self::with_trust(base_url, ServerTrust::system())
+    }
+
+    /// Like [`PocketBaseClient::new`], but checks an `https://` server's
+    /// certificate with `trust`.
+    pub fn with_trust(base_url: &str, trust: ServerTrust) -> Self {
+        let base_url = base_url.trim_end_matches('/').to_owned();
+        // A redirect from https:// to http:// would send the password
+        // or token unencrypted, so an https:// client refuses one.
+        let secure = base_url.to_ascii_lowercase().starts_with("https://");
         Self {
-            base_url: base_url.trim_end_matches('/').to_owned(),
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(60))
+                .tls_connector(Arc::new(trust.clone()))
+                .https_only(secure)
                 .build(),
+            base_url,
+            trust,
             token: None,
             auth_id: None,
         }
@@ -83,6 +102,12 @@ impl PocketBaseClient {
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// How this client checks an `https://` server's certificate, for a
+    /// [`crate::RealtimeConnection`] to the same server.
+    pub fn trust(&self) -> &ServerTrust {
+        &self.trust
     }
 
     /// The auth token, if signed in.

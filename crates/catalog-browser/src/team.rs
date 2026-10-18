@@ -1851,7 +1851,11 @@ fn follow_changes(client: &PocketBaseClient, live: &Mutex<Live>, stop: &AtomicBo
     while !stop.load(Ordering::SeqCst) {
         let went_live = std::cell::Cell::new(false);
         let result = (|| -> Result<(), CollabError> {
-            let mut connection = RealtimeConnection::connect(client.base_url(), CONNECT_TIMEOUT)?;
+            let mut connection = RealtimeConnection::connect_with_trust(
+                client.base_url(),
+                CONNECT_TIMEOUT,
+                client.trust(),
+            )?;
             connection.subscribe(client, &[CHANGES_TOPIC, AUDIT_TOPIC])?;
             update_replica(&|replica| {
                 // A replica that has applied nothing yet starts from the

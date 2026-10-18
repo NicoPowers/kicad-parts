@@ -3,6 +3,8 @@
 //! Every network failure of the REST and realtime clients becomes one
 //! [`ConnectionProblem`] here, so the sign-in form, the live-updates line
 //! and the error messages all say the same thing for the same cause.
+//! Certificate problems come from rustls; the operating system finds them
+//! (see `tls.rs`).
 
 use std::error::Error;
 use std::fmt;
@@ -15,6 +17,22 @@ use std::io;
 /// The `String`s hold the technical detail, shown after the plain words.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionProblem {
+    /// The certificate does not lead to an authority this computer
+    /// trusts: self-made, or from a company authority not installed here.
+    CertificateNotTrusted,
+    /// The certificate is for another server name: a typo in the address,
+    /// or the server's IP address typed instead of its name.
+    CertificateForAnotherName,
+    CertificateExpired,
+    /// The certificate starts in the future, so this computer's clock is
+    /// probably wrong.
+    CertificateNotYetValid,
+    /// Any other TLS failure, such as an `https://` address for a server
+    /// that only speaks plain HTTP.
+    NotSecure(String),
+    /// The operating system's trusted certificates could not be read, so
+    /// no server can be checked.
+    NoCertificateStore(String),
     /// No server answered: a wrong address, the server is down, or no
     /// network.
     NotReachable(String),
@@ -46,6 +64,25 @@ impl ConnectionProblem {
         }
     }
 
+    /// The problem behind a failed TLS handshake.
+    pub(crate) fn from_tls(error: &rustls::Error) -> Self {
+        use rustls::CertificateError as Certificate;
+        let rustls::Error::InvalidCertificate(certificate) = error else {
+            return Self::NotSecure(error.to_string());
+        };
+        match certificate {
+            Certificate::UnknownIssuer => Self::CertificateNotTrusted,
+            Certificate::NotValidForName | Certificate::NotValidForNameContext { .. } => {
+                Self::CertificateForAnotherName
+            }
+            Certificate::Expired | Certificate::ExpiredContext { .. } => Self::CertificateExpired,
+            Certificate::NotValidYet | Certificate::NotValidYetContext { .. } => {
+                Self::CertificateNotYetValid
+            }
+            _ => Self::NotSecure(error.to_string()),
+        }
+    }
+
     /// The problem behind an I/O error while connecting.
     pub(crate) fn while_connecting(error: &io::Error) -> Self {
         problem_in_io(error).unwrap_or_else(|| Self::NotReachable(error.to_string()))
@@ -60,6 +97,30 @@ impl ConnectionProblem {
 impl fmt::Display for ConnectionProblem {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CertificateNotTrusted => write!(
+                formatter,
+                "The team server's certificate is not from an authority this computer trusts. Ask whoever runs the server to fix its certificate."
+            ),
+            Self::CertificateForAnotherName => write!(
+                formatter,
+                "The team server's certificate is for a different address. Check that you typed the address exactly as you were given it."
+            ),
+            Self::CertificateExpired => write!(
+                formatter,
+                "The team server's certificate has expired. Ask whoever runs the server to renew it."
+            ),
+            Self::CertificateNotYetValid => write!(
+                formatter,
+                "The team server's certificate is not valid yet. Check that this computer's date and time are right."
+            ),
+            Self::NotSecure(detail) => write!(
+                formatter,
+                "Could not make a secure connection to the team server. Ask whoever runs the server to check its HTTPS setup. (Details: {detail})"
+            ),
+            Self::NoCertificateStore(detail) => write!(
+                formatter,
+                "The app could not read this computer's trusted certificates, so it cannot check the team server. Ask your IT support for help. (Details: {detail})"
+            ),
             Self::NotReachable(detail) => write!(
                 formatter,
                 "Cannot reach the team server. Check the address and your network connection. (Details: {detail})"
@@ -92,13 +153,16 @@ fn problem_in_chain(error: &(dyn Error + 'static)) -> Option<ConnectionProblem> 
     None
 }
 
-/// A problem an I/O error names: a timeout, or a problem it carries.
-/// `io::Error::source` skips the error it wraps, so this looks inside
-/// with `get_ref` instead.
+/// A problem an I/O error names: a timeout, a TLS error from rustls, or
+/// a problem it carries. `io::Error::source` skips the error it wraps, so
+/// this looks inside with `get_ref` instead.
 fn problem_in_io(error: &io::Error) -> Option<ConnectionProblem> {
     if let Some(inner) = error.get_ref() {
         if let Some(problem) = inner.downcast_ref::<ConnectionProblem>() {
             return Some(problem.clone());
+        }
+        if let Some(tls) = inner.downcast_ref::<rustls::Error>() {
+            return Some(ConnectionProblem::from_tls(tls));
         }
     }
     // Windows reports a socket timeout as TimedOut, Linux and macOS as
@@ -161,6 +225,38 @@ mod tests {
         assert!(matches!(
             ConnectionProblem::after_connecting(&refused),
             ConnectionProblem::Lost(_)
+        ));
+    }
+
+    #[test]
+    fn certificate_errors_get_their_own_plain_reason() {
+        use rustls::CertificateError as Certificate;
+        let cases = [
+            (
+                Certificate::UnknownIssuer,
+                ConnectionProblem::CertificateNotTrusted,
+            ),
+            (
+                Certificate::NotValidForName,
+                ConnectionProblem::CertificateForAnotherName,
+            ),
+            (Certificate::Expired, ConnectionProblem::CertificateExpired),
+            (
+                Certificate::NotValidYet,
+                ConnectionProblem::CertificateNotYetValid,
+            ),
+        ];
+        for (certificate, expected) in cases {
+            // rustls hands TLS errors over inside an io::Error.
+            let io = io::Error::new(
+                io::ErrorKind::InvalidData,
+                rustls::Error::InvalidCertificate(certificate),
+            );
+            assert_eq!(ConnectionProblem::while_connecting(&io), expected);
+        }
+        assert!(matches!(
+            ConnectionProblem::from_tls(&rustls::Error::InvalidCertificate(Certificate::Revoked)),
+            ConnectionProblem::NotSecure(_)
         ));
     }
 
