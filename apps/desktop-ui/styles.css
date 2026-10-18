@@ -673,9 +673,14 @@ a {
   min-height: 14rem;
 }
 
-/* An alert, such as a missing library with both folders it looked in,
-   makes its section as tall as it needs instead of spilling out of it. */
-.preview:has(.problem:not(.quiet)) {
+/* Some content has a height of its own, so its section grows to hold it
+   instead of letting it spill over the section below. One is an alert, such
+   as a missing library with both folders it looked in. Another is the
+   drawing of an uploaded or chosen file, 15rem tall in Add part
+   (kicad-parts-da76). In a narrow window the 14rem section was shorter than
+   that drawing, so the symbol covered the Footprint heading. */
+.preview:has(.problem:not(.quiet)),
+.preview:has(.file-preview) {
   min-height: auto;
 }
 
