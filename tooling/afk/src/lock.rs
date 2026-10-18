@@ -23,6 +23,8 @@ pub struct ToolchainLock {
     pub npm: String,
     pub node_linux_x64_sha256: String,
     pub node_url: String,
+    pub node_windows_x64_sha256: String,
+    pub node_windows_x64_url: String,
     pub tauri_cli: String,
     pub tauri_cli_integrity: String,
     pub tauri_cli_sha512: String,
@@ -149,6 +151,10 @@ impl VersionsLock {
             (
                 "toolchain.node_linux_x64_sha256",
                 self.toolchain.node_linux_x64_sha256.as_str(),
+            ),
+            (
+                "toolchain.node_windows_x64_sha256",
+                self.toolchain.node_windows_x64_sha256.as_str(),
             ),
             (
                 "toolchain.go_linux_x64_sha256",
@@ -308,6 +314,15 @@ impl VersionsLock {
                 )));
             }
         }
+        // The Windows Node.js for desktop journeys has its own version,
+        // separate from the Linux lab's `node`, so its URL must name one
+        // release twice: /v<version>/node-v<version>-win-x64.zip.
+        if !is_node_windows_release_url(&self.toolchain.node_windows_x64_url) {
+            return Err(LabError(
+                "versions.lock `toolchain.node_windows_x64_url` is not one Node.js win-x64 release"
+                    .into(),
+            ));
+        }
         for (name, image) in [
             ("busybox", &self.images.busybox),
             ("rust", &self.images.rust),
@@ -349,6 +364,10 @@ impl VersionsLock {
             ("toolchain.node", self.toolchain.node.as_str()),
             ("toolchain.npm", self.toolchain.npm.as_str()),
             ("toolchain.node_url", self.toolchain.node_url.as_str()),
+            (
+                "toolchain.node_windows_x64_url",
+                self.toolchain.node_windows_x64_url.as_str(),
+            ),
             ("toolchain.tauri_cli", self.toolchain.tauri_cli.as_str()),
             (
                 "toolchain.tauri_cli_url",
@@ -484,6 +503,22 @@ pub fn validate_digest(value: &str, field: &str) -> LabResult<()> {
     validate_hex(digest, 64, field)
 }
 
+/// True for `https://nodejs.org/dist/v<v>/node-v<v>-win-x64.zip` with the
+/// same plain `<v>` (such as 24.22.0) in both places.
+fn is_node_windows_release_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://nodejs.org/dist/v") else {
+        return false;
+    };
+    let Some((version, file)) = rest.split_once('/') else {
+        return false;
+    };
+    let plain = version.split('.').count() == 3
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()));
+    plain && file == format!("node-v{version}-win-x64.zip")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,6 +631,20 @@ mod tests {
             .toolchain
             .go_windows_x64_url
             .replace("1.24.8", "1.24.7");
+        assert!(lock.validate().is_err());
+        // The Windows Node.js URL names one release twice, over HTTPS.
+        for url in [
+            "https://nodejs.org/dist/v24.22.0/node-v24.21.0-win-x64.zip",
+            "https://nodejs.org/dist/v24.22.0/node-v24.22.0-linux-x64.tar.xz",
+            "https://nodejs.org/dist/latest/node-vlatest-win-x64.zip",
+            "http://nodejs.org/dist/v24.22.0/node-v24.22.0-win-x64.zip",
+        ] {
+            let mut lock = load();
+            lock.toolchain.node_windows_x64_url = url.into();
+            assert!(lock.validate().is_err(), "{url} was accepted");
+        }
+        let mut lock = load();
+        lock.toolchain.node_windows_x64_sha256 = "short".into();
         assert!(lock.validate().is_err());
         let mut lock = load();
         lock.components.pocketbase.windows_amd64_sha256 = "short".into();

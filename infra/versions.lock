@@ -7,6 +7,11 @@ rust_toolchain_dir = "1.85.1-x86_64-unknown-linux-gnu"
 node = "24.18.0"
 node_linux_x64_sha256 = "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742"
 node_url = "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz"
+# Windows desktop journeys run their tests with this Node.js
+# (apps/desktop/journeys/journey-node.mjs). It must be 24.16.0 or newer:
+# older ones hit libuv #5106 and crash now and then on a TCP connect.
+node_windows_x64_sha256 = "f9683a19877e12a9b167305c8db71040d812876359de21f0d2e97c3f321f80c3"
+node_windows_x64_url = "https://nodejs.org/dist/v24.22.0/node-v24.22.0-win-x64.zip"
 tauri_cli = "2.11.4"
 tauri_cli_integrity = "sha512-R8xGtMpwyetawSqm9kYOuMmEqkhUbvcUy8n0aNXIxollKBLESUu5f4Fx+64hgASYm1H+jSWq6jCW6zqTnH6hqQ=="
 tauri_cli_sha512 = "47cc46b4ca70c9eb5ac12aa6f6460eb8c984aa48546ef714cbc9f468d5c8c689652812c4494bb97f8171fbae218004989b51fe8d25aaea3096eb3a939c7ea1a9"
