@@ -88,9 +88,19 @@ impl KicadLibraries {
         self.with_shown(TeamLibraries::folder)
     }
 
+    /// The status `work` gives for the shown team's libraries, with what
+    /// only the list of teams knows ([`Self::with_list`]). Every status the
+    /// KiCad settings panel gets comes through here or `set_code`.
+    fn shown_status(
+        &self,
+        work: impl FnOnce(&TeamLibraries) -> KicadLibrariesStatus,
+    ) -> KicadLibrariesStatus {
+        self.with_list(self.with_shown(work))
+    }
+
     /// The shown team's libraries, as the KiCad settings panel shows them.
     pub fn status(&self) -> KicadLibrariesStatus {
-        self.with_list(self.with_shown(TeamLibraries::status))
+        self.shown_status(TeamLibraries::status)
     }
 
     /// Whether `server` is in the person's list of teams.
@@ -174,12 +184,12 @@ impl KicadLibraries {
 
     /// Asks for an update of the shown team's libraries now.
     pub fn update_now(&self) -> KicadLibrariesStatus {
-        self.with_shown(TeamLibraries::update_now)
+        self.shown_status(TeamLibraries::update_now)
     }
 
     /// The person copied the shown team's setup text for `kind`.
     pub fn copied(&self, kind: &str) -> KicadLibrariesStatus {
-        self.with_shown(|libraries| libraries.copied(kind))
+        self.shown_status(|libraries| libraries.copied(kind))
     }
 
     /// What choosing `code` for the shown team would do.
@@ -190,6 +200,7 @@ impl KicadLibraries {
     /// Chooses the shown team's code on its team server, once.
     pub fn set_code(&self, code: &str) -> Result<KicadLibrariesStatus, String> {
         self.with_shown(|libraries| libraries.set_code(code))
+            .map(|status| self.with_list(status))
     }
 }
 

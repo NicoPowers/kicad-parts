@@ -389,7 +389,8 @@ fn a_second_server_claiming_a_team_cannot_write_its_libraries_until_confirmed() 
     // Asking for an update changes nothing: the claimer is shown, so
     // Update now is for it.
     assert_eq!(teams.status().shown, claimer.url);
-    libraries.update_now();
+    // The status Update now gives says so too, as every panel status does.
+    assert_eq!(libraries.update_now().state, both_listed);
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(state_of(&claimer), Some(both_listed));
     let unchanged = || {
