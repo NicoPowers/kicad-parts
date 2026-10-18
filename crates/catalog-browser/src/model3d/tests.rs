@@ -503,3 +503,31 @@ fn kicad_cli_complaints_name_the_file_they_are_about() {
         Path::new("C:/m/bad.step")
     ));
 }
+
+#[test]
+fn the_board_alone_is_named_when_no_3d_model_is_drawn() {
+    let footprint = b"(footprint \"F\" (model \"a.step\") (model \"b.step\"))";
+    let blocks = model_blocks(footprint).unwrap();
+    let with = |models: [ModelUse; 2]| -> Vec<(ModelBlock, ModelUse)> {
+        blocks.iter().cloned().zip(models).collect()
+    };
+    assert_eq!(
+        board_only_note(&[], &[]),
+        Some(
+            "The footprint has no 3D model, so only the board with its pads, silkscreen and mask is shown."
+        )
+    );
+    assert_eq!(
+        board_only_note(&blocks, &with([ModelUse::Leave, ModelUse::Leave])),
+        Some(
+            "No 3D model can be shown, so only the board with its pads, silkscreen and mask is shown."
+        )
+    );
+    // One model drawn, or one embedded, is enough.
+    let one = with([ModelUse::Leave, ModelUse::File(PathBuf::from("a.step"))]);
+    assert_eq!(board_only_note(&blocks, &one), None);
+    assert_eq!(
+        board_only_note(&blocks, &with([ModelUse::Keep, ModelUse::Leave])),
+        None
+    );
+}

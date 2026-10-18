@@ -208,6 +208,17 @@ impl NotShown {
     }
 }
 
+/// The footprint file a 3D view is made from.
+struct FootprintFor3d {
+    bytes: Vec<u8>,
+    /// Its name, which names the board file.
+    name: String,
+    /// What the board's outline goes around.
+    board_box: [f64; 4],
+    /// Its 3D model links.
+    blocks: Vec<ModelBlock>,
+}
+
 /// What one link resolves to.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Resolved {
@@ -489,58 +500,104 @@ impl CatalogBrowser {
         team: &TeamCatalog,
     ) -> Footprint3dView {
         let mut view = Footprint3dView::default();
-        let install = {
-            let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
-            match &kicad.discovery {
-                Discovery::Ready(install) => install.clone(),
-                _ => {
-                    view.problem = Some(
-                        "3D views are made by KiCad 10's kicad-cli, which is not available.".into(),
-                    );
-                    return view;
-                }
-            }
-        };
-        let Some(mut bytes) = self.previews.footprint_source(&request.key) else {
-            view.problem = Some(
-                "The footprint file is no longer in the app's cache. Close the close-up and open it again."
-                    .into(),
-            );
-            return view;
-        };
-        let Some(drawing) = crate::drawing::footprint_drawing(&bytes) else {
-            view.problem = Some("The footprint file cannot be read.".into());
-            return view;
-        };
+        if let Err(problem) = self.make_footprint_3d(request, team, &mut view) {
+            view.problem = Some(problem);
+        }
+        view
+    }
+
+    /// The steps of [`Self::footprint_3d`], in order: find kicad-cli, read
+    /// the footprint, gather the model files the request brings, find each
+    /// link's file, build the board and export it. An error is a problem
+    /// that stops the view before kicad-cli runs.
+    fn make_footprint_3d(
+        &self,
+        request: &Footprint3dRequest,
+        team: &TeamCatalog,
+        view: &mut Footprint3dView,
+    ) -> Result<(), String> {
+        let install = self.kicad_for_3d()?;
+        let mut footprint = self.footprint_for_3d(&request.key)?;
+        let supplies = self.supplies(&install, request, team, &mut footprint, &mut view.notes);
+        let places = self.model_places();
+        let mut uses = Vec::new();
+        for block in &footprint.blocks {
+            let resolved = resolve(&block.link, block.hidden, &places, &supplies);
+            let (model, shown) = link_view(block, &resolved, &supplies);
+            view.models.push(shown);
+            uses.push((block.clone(), model));
+        }
+        let board = one_footprint_board(&footprint.bytes, &uses, footprint.board_box)
+            .map_err(|error| format!("The footprint file cannot be read: {error}."))?;
+        self.export_board(&install, &footprint.name, &board, request, &mut uses, view);
+        if let Some(note) = board_only_note(&footprint.blocks, &uses) {
+            view.notes.insert(0, note.into());
+        }
+        Ok(())
+    }
+
+    /// The KiCad install whose kicad-cli makes 3D views.
+    fn kicad_for_3d(&self) -> Result<KicadInstall, String> {
+        let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
+        match &kicad.discovery {
+            Discovery::Ready(install) => Ok(install.clone()),
+            _ => Err("3D views are made by KiCad 10's kicad-cli, which is not available.".into()),
+        }
+    }
+
+    /// The footprint file the close-up shows, from the preview cache.
+    fn footprint_for_3d(&self, key: &str) -> Result<FootprintFor3d, String> {
+        let bytes = self.previews.footprint_source(key).ok_or_else(|| {
+            "The footprint file is no longer in the app's cache. Close the close-up and open it again."
+                .to_owned()
+        })?;
+        let drawing = crate::drawing::footprint_drawing(&bytes)
+            .ok_or_else(|| "The footprint file cannot be read.".to_owned())?;
         let name = catalog::cad_file::read_footprint_file(&bytes)
             .map(|footprint| footprint.name)
             .unwrap_or_else(|_| "footprint".into());
+        let blocks = model_blocks(&bytes)
+            .map_err(|error| format!("The footprint file cannot be read: {error}."))?;
+        Ok(FootprintFor3d {
+            board_box: crate::drawing::board_box(&drawing),
+            bytes,
+            name,
+            blocks,
+        })
+    }
+
+    /// The model files the request brings: a download's own model, files
+    /// chosen with the footprint, and the Catalog's stored models. A
+    /// download's footprint with no model link gets one, as saving does.
+    fn supplies(
+        &self,
+        install: &KicadInstall,
+        request: &Footprint3dRequest,
+        team: &TeamCatalog,
+        footprint: &mut FootprintFor3d,
+        notes: &mut Vec<String>,
+    ) -> Supplies {
         let mut supplies = Supplies {
             only_chosen: request.from_download,
             ..Supplies::default()
         };
-        let mut blocks = match model_blocks(&bytes) {
-            Ok(blocks) => blocks,
-            Err(error) => {
-                view.problem = Some(format!("The footprint file cannot be read: {error}."));
-                return view;
-            }
-        };
         if let Some(file) = &request.download_model {
             // As saving links it: the link named like the file, or the
             // first one, or a new link when there is none.
-            let chosen = self.chosen(&install, file, None);
-            let link = blocks
+            let chosen = self.chosen(install, file, None);
+            let link = footprint
+                .blocks
                 .iter()
                 .find(|block| last_part(&block.link).eq_ignore_ascii_case(&file.file_name))
-                .or(blocks.first())
+                .or(footprint.blocks.first())
                 .map(|block| block.link.clone());
             if link.is_none() {
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                bytes = catalog::download::link_model(&text, &file.file_name, &file.file_name)
-                    .into_bytes();
-                blocks = model_blocks(&bytes).unwrap_or_default();
-                view.notes.push(format!(
+                let text = String::from_utf8_lossy(&footprint.bytes).into_owned();
+                footprint.bytes =
+                    catalog::download::link_model(&text, &file.file_name, &file.file_name)
+                        .into_bytes();
+                footprint.blocks = model_blocks(&footprint.bytes).unwrap_or_default();
+                notes.push(format!(
                     "The footprint has no 3D model link. Saving links it to the download's 3D model {}.",
                     file.file_name
                 ));
@@ -555,7 +612,7 @@ impl CatalogBrowser {
                 .installed
                 .as_ref()
                 .and_then(|installed| installed.link.clone());
-            supplies.chosen.push(self.chosen(&install, file, link));
+            supplies.chosen.push(self.chosen(install, file, link));
         }
         if let Some(stored) = &request.stored {
             match team.footprint_models(stored) {
@@ -563,112 +620,96 @@ impl CatalogBrowser {
                     for (link, model) in models {
                         supplies
                             .stored
-                            .push(self.stored_copy(&install, team, link, model));
+                            .push(self.stored_copy(install, team, link, model));
                     }
                 }
-                Err(error) => view.notes.push(format!(
+                Err(error) => notes.push(format!(
                     "The Catalog's stored 3D models could not be checked ({}), so the models below come from your libraries.",
                     team_words(&error)
                 )),
             }
         }
+        supplies
+    }
 
-        let places = self.model_places();
-        let mut uses = Vec::new();
-        let mut files = Vec::new();
-        for block in &blocks {
-            let resolved = resolve(&block.link, block.hidden, &places, &supplies);
-            let (model, shown) = link_view(block, &resolved, &supplies);
-            view.models.push(shown);
-            if let ModelUse::File(path) = &model {
-                files.push(path.clone());
-            }
-            uses.push((block.clone(), model));
-        }
-        let board = match one_footprint_board(&bytes, &uses, crate::drawing::board_box(&drawing)) {
-            Ok(board) => board,
-            Err(error) => {
-                view.problem = Some(format!("The footprint file cannot be read: {error}."));
-                return view;
-            }
-        };
+    /// Exports the board as GLB and puts it, or why there is none, in
+    /// `view`. A model kicad-cli could not load is then not drawn.
+    fn export_board(
+        &self,
+        install: &KicadInstall,
+        name: &str,
+        board: &[u8],
+        request: &Footprint3dRequest,
+        uses: &mut [(ModelBlock, ModelUse)],
+        view: &mut Footprint3dView,
+    ) {
+        let files: Vec<PathBuf> = uses
+            .iter()
+            .filter_map(|(_, model)| match model {
+                ModelUse::File(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
         let export = BoardExport {
-            name: &name,
-            board: &board,
+            name,
+            board,
             models: &files,
         };
-        match self
-            .previews
-            .board_glb(&install, &export, request.selection)
-        {
-            Ok(glb) => {
-                // A model kicad-cli could not load is not drawn.
-                for ((_, model), shown) in uses.iter_mut().zip(&mut view.models) {
-                    let ModelUse::File(path) = model else {
-                        continue;
-                    };
-                    if cli_could_not_read(&glb.messages, path) {
-                        let why = NotShown::CliUnreadable(path.clone());
-                        shown.source = None;
-                        shown.catalog_key = None;
-                        shown.problem = Some(why.words());
-                        *model = ModelUse::Leave;
-                    }
-                }
-                let unadded: Vec<&str> = glb
-                    .messages
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| CLI_COMPLAINTS.iter().any(|known| line.contains(known)))
-                    .collect();
-                if !unadded.is_empty() {
-                    view.notes.push(format!(
-                        "kicad-cli could not draw every 3D model: {}",
-                        unadded.join(" ")
-                    ));
-                }
-                if glb.size > MAX_GLB_BYTES {
-                    view.problem = Some(format!(
-                        "The 3D view is {} MB, more than the {} MB the app can show. The 2D view still works.",
-                        glb.size.div_ceil(1024 * 1024),
-                        MAX_GLB_BYTES / (1024 * 1024)
-                    ));
-                } else {
-                    view.glb = Some(GlbReady {
-                        key: glb.key,
-                        size: glb.size,
-                        from_cache: glb.cache == CacheOutcome::Hit,
-                    });
-                }
-            }
+        let glb = match self.previews.board_glb(install, &export, request.selection) {
+            Ok(glb) => glb,
             Err(PreviewError::Replaced) => {
                 view.problem = Some(
                     "A newer request replaced this 3D view. Turn 3D on again to make it.".into(),
                 );
+                return;
             }
             Err(PreviewError::ExportFailed { cli_message, .. }) => {
                 view.problem = Some("kicad-cli could not make the 3D view.".into());
                 view.cli_message = Some(cli_message);
+                return;
             }
             Err(error) => {
                 view.problem = Some(format!("The 3D view could not be made: {error}"));
+                return;
+            }
+        };
+        for ((_, model), shown) in uses.iter_mut().zip(&mut view.models) {
+            let ModelUse::File(path) = model else {
+                continue;
+            };
+            if cli_could_not_read(&glb.messages, path) {
+                let why = NotShown::CliUnreadable(path.clone());
+                shown.source = None;
+                shown.catalog_key = None;
+                shown.problem = Some(why.words());
+                *model = ModelUse::Leave;
             }
         }
-        let drawn = uses.iter().any(|(_, model)| *model != ModelUse::Leave);
-        if blocks.is_empty() {
-            view.notes.insert(
-                0,
-                "The footprint has no 3D model, so only the board with its pads, silkscreen and mask is shown."
-                    .into(),
-            );
-        } else if !drawn {
-            view.notes.insert(
-                0,
-                "No 3D model can be shown, so only the board with its pads, silkscreen and mask is shown."
-                    .into(),
-            );
+        let unadded: Vec<&str> = glb
+            .messages
+            .lines()
+            .map(str::trim)
+            .filter(|line| CLI_COMPLAINTS.iter().any(|known| line.contains(known)))
+            .collect();
+        if !unadded.is_empty() {
+            view.notes.push(format!(
+                "kicad-cli could not draw every 3D model: {}",
+                unadded.join(" ")
+            ));
         }
-        view
+        if glb.size > MAX_GLB_BYTES {
+            view.problem = Some(format!(
+                "The 3D view is {} MB, more than the {} MB the app can show. The 2D view still works.",
+                glb.size.div_ceil(1024 * 1024),
+                MAX_GLB_BYTES / (1024 * 1024)
+            ));
+        } else {
+            view.glb = Some(GlbReady {
+                key: glb.key,
+                size: glb.size,
+                from_cache: glb.cache == CacheOutcome::Hit,
+            });
+        }
     }
 
     /// The GLB of a 3D view [`Self::footprint_3d`] made, by its key; `None`
@@ -856,6 +897,19 @@ fn link_view(
         }
     }
     (model, shown)
+}
+
+/// The note that only the board is shown, when no 3D model is drawn.
+fn board_only_note(blocks: &[ModelBlock], uses: &[(ModelBlock, ModelUse)]) -> Option<&'static str> {
+    if blocks.is_empty() {
+        return Some(
+            "The footprint has no 3D model, so only the board with its pads, silkscreen and mask is shown.",
+        );
+    }
+    let drawn = uses.iter().any(|(_, model)| *model != ModelUse::Leave);
+    (!drawn).then_some(
+        "No 3D model can be shown, so only the board with its pads, silkscreen and mask is shown.",
+    )
 }
 
 fn team_words(error: &crate::team::TeamCadError) -> String {
