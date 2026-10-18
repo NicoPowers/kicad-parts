@@ -236,7 +236,7 @@ describe('team catalog: Add part in real workflows', () => {
     });
     record({ event: 'add-part-960', layout });
     fs.mkdirSync(screenshotsDir, { recursive: true });
-    await capture(browser, path.join(screenshotsDir, '13-add-part-960-for-review.png'));
+    await capture(browser, path.join(screenshotsDir, '95-add-part-960-for-review.png'));
     assert.deepEqual(layout, { pageScrollsSideways: false, formScrollsSideways: false, offRight: [], previewsSpillOver: [] });
     await assertAccessible(browser, '13-add-part-960');
     await browser.setWindowSize(outer.width, outer.height);

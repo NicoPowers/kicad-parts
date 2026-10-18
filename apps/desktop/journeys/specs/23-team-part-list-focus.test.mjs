@@ -199,8 +199,8 @@ describe('team catalog: the part list stays put when a teammate saves', () => {
     // The drawings finish before the screenshot.
     await waitForPreviewImages(browser, SYMBOL);
     await waitForPreviewImages(browser, FOOTPRINT);
-    await assertAccessible(browser, '93-part-list-teammate-saved');
-    await screenshot(browser, '93-part-list-teammate-saved');
+    await assertAccessible(browser, '94-part-list-teammate-saved');
+    await screenshot(browser, '94-part-list-teammate-saved');
   });
 
   it('moves focus to the next row when the focused part leaves the search', async () => {

@@ -120,7 +120,7 @@ describe("team part 3D view: the Catalog's stored 3D model", () => {
       `the model's own mesh is drawn: ${shown.meshNames}`,
     );
     // For people to look at: the model over its silkscreen; not compared.
-    await capture(browser, path.join(screenshotsDir, '21-team-footprint-3d-drawn.png'), ['.model-path-text']);
+    await capture(browser, path.join(screenshotsDir, '96-team-footprint-3d-drawn.png'), ['.model-path-text']);
     // The SOT-23-5 turns around its centre, and the view can't be lost.
     await checkSteady3d(browser, `${CLOSE_UP} .viewer-3d`, async () => (await browser.$(`${CLOSE_UP} .viewer-3d-reset`)).click());
     await browser.keys('Escape');

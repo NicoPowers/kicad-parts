@@ -43,6 +43,7 @@ import {
   outDir,
   repoRoot,
   runTempRoot,
+  screenshotsDir,
   stagedBaselinesDir,
   visualProblem,
   visualResultsFile,
@@ -267,6 +268,41 @@ function explainNodeCrashes(junitFile, testNode) {
  * took also fails: "not used" if every journey passed, "not reached" if
  * one failed first.
  */
+/**
+ * Says which screenshots share a number. Every file written to
+ * screenshots/, compared or not, takes its own number: the next one free
+ * in one sequence. One exception: "<name>-drawn", the 3D view as drawn
+ * next to the compared screenshot <name>, shares that screenshot's number.
+ * `names` are file names without ".png", from this run and baselines/.
+ */
+function numberClashes(names) {
+  const all = new Set(names);
+  const byNumber = new Map();
+  for (const name of all) {
+    const number = /^(\d+)-/.exec(name)?.[1];
+    if (number === undefined) continue;
+    const owner = name.endsWith('-drawn') && all.has(name.slice(0, -'-drawn'.length)) ? name.slice(0, -'-drawn'.length) : name;
+    byNumber.set(number, new Set([...(byNumber.get(number) ?? []), owner]));
+  }
+  return [...byNumber]
+    .filter(([, owners]) => owners.size > 1)
+    .map(
+      ([number, owners]) =>
+        `These screenshots share the number ${number}: ${[...owners].sort().join(', ')}. ` +
+        'Give each one its own number, the next one free.',
+    );
+}
+
+/** The names, without ".png", of the screenshots in `dir`. */
+function pngNames(dir) {
+  return fs.existsSync(dir)
+    ? fs
+        .readdirSync(dir)
+        .filter((file) => file.endsWith('.png'))
+        .map((file) => file.slice(0, -'.png'.length))
+    : [];
+}
+
 function reportVisualResults(everyJourneyPassed) {
   const results = fs.existsSync(visualResultsFile)
     ? fs
@@ -285,7 +321,7 @@ function reportVisualResults(everyJourneyPassed) {
           .filter((file) => file.endsWith('.png') && !taken.has(file.slice(0, -4)))
           .sort();
 
-  const problems = [];
+  const problems = numberClashes([...pngNames(screenshotsDir), ...pngNames(baselinesDir)]);
   const accepted = [];
   const deleted = [];
   if (updateBaselines) {
