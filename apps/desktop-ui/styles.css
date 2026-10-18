@@ -1331,6 +1331,18 @@ a {
   gap: 0.5rem;
 }
 
+/* Remove asks once, in place of the row's buttons. */
+.team-confirm {
+  padding: 0.5rem 0.75rem;
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn-line);
+  border-radius: 6px;
+}
+
+.kicad-settings-body .team-confirm p {
+  margin: 0 0 0.5rem;
+}
+
 /* With teams listed above it, the sign-in form starts under a line. */
 .team-list ~ .team-sign-in {
   padding-top: 0.75rem;

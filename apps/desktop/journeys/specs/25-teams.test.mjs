@@ -22,6 +22,7 @@ import {
   startTeamServer,
   teamSignIn,
   textOf,
+  waitForLibraryCheck,
   waitForLiveUpdates,
   waitForPreview,
   waitForText,
@@ -135,7 +136,8 @@ describe('several teams at once', () => {
       'Add a team puts the cursor in the address',
     );
     await signInWithForm(beta, beta.accounts[0]);
-    await waitForText(browser, BADGE, 'Teams · 2 signed in');
+    // The badge says whose parts are shown, and counts each team once.
+    await waitForText(browser, BADGE, `BE · ${beta.accounts[0].name} · 2 live`);
     await waitForLiveUpdates(browser);
     await setMenuOpen(true);
     await browser.waitUntil(async () => (await rowText('BE')) !== null, { timeout: 20_000 });
@@ -165,7 +167,7 @@ describe('several teams at once', () => {
     // The part list reloads for acme; the switcher keeps the focus.
     await waitForValue('47R');
     assert.equal(await browser.execute(() => document.activeElement?.id), 'team-shown');
-    assert.equal(await textOf(browser, BADGE), 'Teams · 2 signed in');
+    assert.equal(await textOf(browser, BADGE), `AC · ${editor.name} · 2 live`);
     await waitForPreview(browser, SYMBOL);
     await waitForPreview(browser, FOOTPRINT);
     await assertAccessible(browser, '32-teams-switched');
@@ -174,7 +176,7 @@ describe('several teams at once', () => {
 
   it('marks a team offline when its server stops, and keeps the other working', async () => {
     await beta.stop();
-    await waitForText(browser, BADGE, 'Teams · 2 signed in · 1 offline', 30_000);
+    await waitForText(browser, BADGE, `AC · ${editor.name} · 1 live, 1 offline`, 30_000);
     // Acme, shown, keeps working.
     await selectResult(browser, MPN);
     await waitForValue('47R');
@@ -208,7 +210,35 @@ describe('several teams at once', () => {
     });
     // Beta, offline, keeps its session.
     assert.match(await rowText('BE'), /^Offline/);
+    // Remove asks once, in plain words, with the keyboard on Cancel.
     await clickInRow('BE', 'Remove');
+    await waitForText(
+      browser,
+      '#team-remove-question',
+      "Remove BE from your teams? You'll need the address, email and password to add it again.",
+    );
+    assert.equal(await browser.execute(() => document.activeElement?.id), 'team-remove-cancel');
+    // Behind the menu, the part panel now shows beta, offline: let it settle.
+    await waitForLibraryCheck(browser);
+    await waitForPreview(browser, SYMBOL);
+    await waitForPreview(browser, FOOTPRINT);
+    await assertAccessible(browser, '35-teams-remove-question');
+    await screenshot(browser, '35-teams-remove-question', {
+      blankOut: [...ADDRESSES, '.team-row:nth-child(2) .team-state'],
+    });
+    // Cancel keeps it; asking again and choosing Remove, from the keyboard,
+    // removes it. (Taking a screenshot moves the focus away.)
+    await browser.execute(() => document.getElementById('team-remove-cancel').focus());
+    await browser.keys('Enter');
+    assert.match(await rowText('BE'), /^Offline/);
+    await clickInRow('BE', 'Remove');
+    await browser.waitUntil(async () => (await browser.execute(() => document.activeElement?.id)) === 'team-remove-cancel', {
+      timeout: 5_000,
+      timeoutMsg: `the question never took the focus: ${await browser.execute(() => `${document.activeElement?.outerHTML?.slice(0, 120)} question=${Boolean(document.querySelector('#team-remove-question'))}`)}`,
+    });
+    await browser.keys(['Shift', 'Tab']);
+    assert.equal(await browser.execute(() => document.activeElement?.id), 'team-remove-confirm');
+    await browser.keys('Enter');
     await browser.waitUntil(async () => (await rowText('BE')) === null, { timeout: 10_000 });
     await waitForText(browser, BADGE, 'Team catalog: not signed in');
     // Sign in again needs only the password: the address and email are filled in.

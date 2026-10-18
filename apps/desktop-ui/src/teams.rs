@@ -16,6 +16,9 @@ const READY: &str = "kicad-badge kicad-badge-ready";
 const OFF: &str = "kicad-badge team-badge-off";
 const PROBLEM: &str = "kicad-badge kicad-badge-problem";
 
+/// The ID of Cancel in the question before removing a team.
+const REMOVE_CANCEL: &str = "team-remove-cancel";
+
 /// The ID of the sign-in form's password box.
 const PASSWORD: &str = "team-password";
 
@@ -124,15 +127,19 @@ pub fn TeamsMenu(
     let problem = Memo::new(move |_| {
         teams.with(|status| status.as_ref().and_then(|status| status.problem.clone()))
     });
-    let rows = move || {
+    // The team asking whether to remove it, by server address.
+    let removing = RwSignal::new(None::<String>);
+    let servers = Memo::new(move |_| {
         teams.with(|status| {
-            status
-                .iter()
-                .flat_map(|status| status.teams.iter().cloned())
-                .map(|team| team_row(team, act, sign_in_again))
-                .collect_view()
+            status.as_ref().map_or_else(Vec::new, |status| {
+                status
+                    .teams
+                    .iter()
+                    .map(|team| team.server_url.clone())
+                    .collect::<Vec<_>>()
+            })
         })
-    };
+    });
     let loaded = Memo::new(move |_| badge.with(Option::is_some));
     let look = move || badge.with(|badge| badge.as_ref().map(|badge| badge.1).unwrap_or_default());
     let words = move || {
@@ -150,7 +157,13 @@ pub fn TeamsMenu(
                 <div class="kicad-settings-body team-settings-body">
                     <Show when=move || has_teams.get()>
                         <h2 class="teams-heading" id="teams-heading">"Your teams"</h2>
-                        <ul class="team-list" aria-labelledby="teams-heading">{rows}</ul>
+                        <ul class="team-list" aria-labelledby="teams-heading">
+                            <For
+                                each=move || servers.get()
+                                key=|server| server.clone()
+                                children=move |server| team_row(server, teams, removing, act, sign_in_again)
+                            />
+                        </ul>
                     </Show>
                     {move || until_closed.get().map(|text| view! { <p class="hint" id="sign-ins-until-closed">{text}</p> })}
                     <Show
@@ -239,42 +252,129 @@ pub fn TeamsMenu(
 }
 
 /// One team's row in the Teams menu: its name, where it stands, and what
-/// the person can do.
+/// the person can do. It stays in place while the team's status changes,
+/// so the focus stays on its buttons. Remove asks once, in place.
 fn team_row(
-    team: TeamStatus,
-    act: impl Fn(Action, String) + Copy + 'static,
-    sign_in_again: impl Fn(TeamStatus) + Copy + 'static,
+    server: String,
+    teams: Memo<Option<TeamsStatus>>,
+    removing: RwSignal<Option<String>>,
+    act: impl Fn(Action, String) + Copy + Send + Sync + 'static,
+    sign_in_again: impl Fn(TeamStatus) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
-    let server = team.server_url.clone();
-    let can_sign_out = has_session(&team);
-    let needs_password = matches!(team.session, TeamSession::SignedOut { .. });
-    let again = team.clone();
-    let (sign_out_server, remove_server) = (server.clone(), server);
-    let label = team.label();
-    let address = (label != address_of(&team.server_url)).then(|| team.server_url.clone());
+    let this = server.clone();
+    let team = Memo::new(move |_| {
+        teams.with(|status| {
+            status
+                .as_ref()
+                .and_then(|status| status.teams.iter().find(|team| team.server_url == this))
+                .cloned()
+        })
+    });
+    let label = move || team.with(|team| team.as_ref().map(TeamStatus::label).unwrap_or_default());
+    let address = move || {
+        team.with(|team| {
+            let team = team.as_ref()?;
+            (team.label() != address_of(&team.server_url)).then(|| team.server_url.clone())
+        })
+    };
+    let words = move || team.with(|team| team.as_ref().map(state_words).unwrap_or_default());
+    let note = move || team.with(|team| team.as_ref().and_then(|team| team.note.clone()));
+    let can_sign_out = move || team.with(|team| team.as_ref().is_some_and(has_session));
+    let needs_password = move || {
+        team.with(|team| {
+            team.as_ref()
+                .is_some_and(|team| matches!(team.session, TeamSession::SignedOut { .. }))
+        })
+    };
+    let asking = {
+        let server = server.clone();
+        Memo::new(move |_| removing.with(|removing| removing.as_deref() == Some(server.as_str())))
+    };
+    let (sign_out_server, remove_server, ask_server) = (server.clone(), server.clone(), server);
     view! {
         <li class="team-row">
             <p class="team-name">
                 <strong>{label}</strong>
-                {address.map(|address| view! { <span class="team-server">{address}</span> })}
+                {move || address().map(|address| view! { <span class="team-server">{address}</span> })}
             </p>
-            <p class="team-state">{state_words(&team)}</p>
-            {team.note.clone().map(|note| view! { <p class="team-state hint">{note}</p> })}
-            <div class="team-actions">
-                {needs_password.then(|| view! {
-                    <button type="button" on:click=move |_| sign_in_again(again.clone())>
-                        "Sign in"
-                    </button>
-                })}
-                {can_sign_out.then(|| view! {
-                    <button type="button" on:click=move |_| act(Action::SignOut, sign_out_server.clone())>
-                        "Sign out"
-                    </button>
-                })}
-                <button type="button" on:click=move |_| act(Action::Remove, remove_server.clone())>
-                    "Remove"
-                </button>
-            </div>
+            <p class="team-state">{words}</p>
+            {move || note().map(|note| view! { <p class="team-state hint">{note}</p> })}
+            <Show
+                when=move || asking.get()
+                fallback=move || {
+                    let (sign_out_server, ask_server) = (sign_out_server.clone(), ask_server.clone());
+                    view! {
+                        <div class="team-actions">
+                            {move || needs_password().then(|| view! {
+                                <button
+                                    type="button"
+                                    on:click=move |_| {
+                                        if let Some(team) = team.get_untracked() {
+                                            sign_in_again(team);
+                                        }
+                                    }
+                                >
+                                    "Sign in"
+                                </button>
+                            })}
+                            {
+                                let sign_out_server = sign_out_server.clone();
+                                move || {
+                                    let server = sign_out_server.clone();
+                                    can_sign_out().then(|| view! {
+                                        <button type="button" on:click=move |_| act(Action::SignOut, server.clone())>
+                                            "Sign out"
+                                        </button>
+                                    })
+                                }
+                            }
+                            <button
+                                type="button"
+                                on:click={
+                                    let server = ask_server.clone();
+                                    move |_| {
+                                        removing.set(Some(server.clone()));
+                                        focus_later(REMOVE_CANCEL);
+                                    }
+                                }
+                            >
+                                "Remove"
+                            </button>
+                        </div>
+                    }
+                }
+            >
+                <div class="team-confirm" role="group" aria-labelledby="team-remove-question">
+                    <p id="team-remove-question">
+                        {move || format!(
+                            "Remove {} from your teams? You'll need the address, email and password to add it again.",
+                            label()
+                        )}
+                    </p>
+                    <div class="team-actions">
+                        <button
+                            type="button"
+                            id="team-remove-confirm"
+                            on:click={
+                                let server = remove_server.clone();
+                                move |_| {
+                                    removing.set(None);
+                                    act(Action::Remove, server.clone());
+                                }
+                            }
+                        >
+                            "Remove"
+                        </button>
+                        <button
+                            type="button"
+                            id=REMOVE_CANCEL
+                            on:click=move |_| removing.set(None)
+                        >
+                            "Cancel"
+                        </button>
+                    </div>
+                </div>
+            </Show>
         </li>
     }
 }
@@ -365,91 +465,92 @@ fn address_of(server_url: &str) -> &str {
         .map_or(server_url, |(_, rest)| rest)
 }
 
-/// Whether the team needs the person: offline, or asking for a password
-/// after the server stopped accepting its sign-in.
-fn is_offline(team: &TeamStatus) -> bool {
-    matches!(
-        team.session,
-        TeamSession::Reaching { problem: Some(_) }
-            | TeamSession::SignedIn {
-                live: LiveUpdates::Reconnecting { .. },
-                ..
-            }
-    )
-}
-
-fn must_sign_in_again(team: &TeamStatus) -> bool {
-    matches!(
-        team.session,
-        TeamSession::SignedOut { problem: Some(_) }
-            | TeamSession::SignedIn {
-                live: LiveUpdates::SignInAgain { .. },
-                ..
-            }
-    )
-}
-
 /// The header badge: its words and its look.
 pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
-    let signed_in: Vec<&TeamStatus> = status.teams.iter().filter(|t| has_session(t)).collect();
-    let offline = status.teams.iter().filter(|t| is_offline(t)).count();
-    let again = status
-        .teams
-        .iter()
-        .filter(|t| must_sign_in_again(t))
-        .count();
-    let connecting = status.teams.iter().any(|team| {
-        matches!(
-            team.session,
-            TeamSession::Reaching { problem: None }
-                | TeamSession::SignedIn {
-                    live: LiveUpdates::Connecting,
-                    ..
-                }
-        )
+    let count = |standing: Standing| {
+        status
+            .teams
+            .iter()
+            .filter(|team| standing_of(team) == standing)
+            .count()
+    };
+    let (live, connecting, offline, again) = (
+        count(Standing::Live),
+        count(Standing::Connecting),
+        count(Standing::Offline),
+        count(Standing::SignInAgain),
+    );
+    let shown = status.shown_team().and_then(|team| match &team.session {
+        TeamSession::SignedIn { name, .. } => Some((team, name)),
+        _ => None,
     });
-    let mut notes = Vec::new();
-    if again > 0 {
-        notes.push(format!("{again} to sign in again"));
-    }
-    if offline > 0 && status.teams.len() == 1 {
-        // With one team there is nothing to count.
-        notes.push("offline".to_owned());
-    } else if offline > 0 {
-        notes.push(format!("{offline} offline"));
-    }
-    let look = if !notes.is_empty() {
+    let look = if offline + again > 0 {
         PROBLEM
-    } else if connecting || signed_in.is_empty() {
+    } else if connecting > 0 || shown.is_none() {
         OFF
     } else {
         READY
     };
-    let words = match signed_in[..] {
-        [] if connecting && notes.is_empty() => "Team catalog: connecting…".to_owned(),
-        [] if again > 0 && offline == 0 => "Team catalog: sign in again".to_owned(),
-        [] if offline > 0 => "Team catalog: offline".to_owned(),
-        [] => "Team catalog: not signed in".to_owned(),
-        [only] => {
-            let TeamSession::SignedIn { name, .. } = &only.session else {
-                unreachable!("has_session")
-            };
-            if must_sign_in_again(only) && status.teams.len() == 1 {
+    if status.teams.len() < 2 {
+        // One team reads as it always did.
+        let words = match shown {
+            Some((team, _)) if standing_of(team) == Standing::SignInAgain => {
                 "Team catalog: sign in again".to_owned()
-            } else {
-                with_notes(format!("Team catalog · {name}"), &notes)
             }
-        }
-        _ => with_notes(format!("Teams · {} signed in", signed_in.len()), &notes),
+            Some((team, name)) if standing_of(team) == Standing::Offline => {
+                format!("Team catalog · {name} · offline")
+            }
+            Some((_, name)) => format!("Team catalog · {name}"),
+            None if connecting > 0 => "Team catalog: connecting…".to_owned(),
+            None if offline > 0 => "Team catalog: offline".to_owned(),
+            None if again > 0 => "Team catalog: sign in again".to_owned(),
+            None => "Team catalog: not signed in".to_owned(),
+        };
+        return (words, look);
+    }
+    // Several teams: say whose parts are shown, then count each team once
+    // by where it stands. Teams signed out on purpose are not counted.
+    let counts: Vec<String> = [
+        (live, "live"),
+        (connecting, "connecting"),
+        (offline, "offline"),
+        (again, "to sign in again"),
+    ]
+    .into_iter()
+    .filter(|(number, _)| *number > 0)
+    .map(|(number, words)| format!("{number} {words}"))
+    .collect();
+    let words = match (shown, counts.is_empty()) {
+        (Some((team, name)), _) => format!("{} · {name} · {}", team.label(), counts.join(", ")),
+        (None, true) => "Team catalog: not signed in".to_owned(),
+        (None, false) => format!("Teams · {}", counts.join(", ")),
     };
     (words, look)
 }
 
-fn with_notes(words: String, notes: &[String]) -> String {
-    if notes.is_empty() {
-        words
-    } else {
-        format!("{words} · {}", notes.join(", "))
+/// Where one team stands, for the header badge. Each team has exactly one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Standing {
+    Live,
+    Connecting,
+    Offline,
+    SignInAgain,
+    /// Signed out on purpose: needs nothing.
+    SignedOut,
+}
+
+fn standing_of(team: &TeamStatus) -> Standing {
+    match &team.session {
+        TeamSession::SignedIn { live, .. } => match live {
+            LiveUpdates::Live => Standing::Live,
+            LiveUpdates::Connecting => Standing::Connecting,
+            LiveUpdates::Reconnecting { .. } => Standing::Offline,
+            LiveUpdates::SignInAgain { .. } => Standing::SignInAgain,
+        },
+        TeamSession::Reaching { problem: None } => Standing::Connecting,
+        TeamSession::Reaching { problem: Some(_) } => Standing::Offline,
+        TeamSession::SignedOut { problem: Some(_) } => Standing::SignInAgain,
+        TeamSession::SignedOut { problem: None } => Standing::SignedOut,
     }
 }
 
@@ -576,14 +677,25 @@ mod tests {
     }
 
     #[test]
-    fn several_teams_say_how_many_are_signed_in_and_which_need_the_person() {
+    fn several_teams_say_whose_parts_are_shown_and_count_each_team_once() {
         let ma = team("MA", signed_in(LiveUpdates::Live));
         let ac = team("AC", signed_in(LiveUpdates::Live));
         assert_eq!(
             summary(&status(vec![ma.clone(), ac.clone()])),
-            ("Teams · 2 signed in".into(), READY)
+            ("MA · Ada Editor · 2 live".into(), READY)
         );
-        let offline = team(
+        let offline_be = team(
+            "BE",
+            signed_in(LiveUpdates::Reconnecting {
+                message: "refused".into(),
+            }),
+        );
+        // An offline team with its session is counted once: offline.
+        assert_eq!(
+            summary(&status(vec![ma.clone(), offline_be.clone()])),
+            ("MA · Ada Editor · 1 live, 1 offline".into(), PROBLEM)
+        );
+        let reaching = team(
             "BE",
             TeamSession::Reaching {
                 problem: Some("refused".into()),
@@ -596,17 +708,37 @@ mod tests {
             },
         );
         assert_eq!(
-            summary(&status(vec![ma.clone(), ac, offline.clone(), again])),
+            summary(&status(vec![ma.clone(), ac, reaching.clone(), again])),
             (
-                "Teams · 2 signed in · 1 to sign in again, 1 offline".into(),
+                "MA · Ada Editor · 2 live, 1 offline, 1 to sign in again".into(),
                 PROBLEM
             )
         );
-        // A team signed out on purpose needs nothing.
+        // With one team signed in, the code still says whose parts these
+        // are; a team signed out on purpose is not counted.
         let out = team("DE", TeamSession::SignedOut { problem: None });
         assert_eq!(
-            summary(&status(vec![ma.clone(), out])),
-            ("Team catalog · Ada Editor".into(), READY)
+            summary(&status(vec![ma.clone(), out.clone()])),
+            ("MA · Ada Editor · 1 live".into(), READY)
+        );
+        // No team shown.
+        assert_eq!(
+            summary(&status(vec![out.clone(), reaching])),
+            ("Teams · 1 offline".into(), PROBLEM)
+        );
+        assert_eq!(
+            summary(&status(vec![out.clone(), out])),
+            ("Team catalog: not signed in".into(), OFF)
+        );
+    }
+
+    #[test]
+    fn one_team_without_a_session_says_where_it_stands() {
+        let offline = team(
+            "BE",
+            TeamSession::Reaching {
+                problem: Some("refused".into()),
+            },
         );
         assert_eq!(
             summary(&status(vec![offline])),
