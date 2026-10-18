@@ -30,7 +30,6 @@
 
 use crate::CatalogBrowser;
 use crate::libraries::sources::{is_link, path_variables};
-use crate::pick::starts_as_model;
 use crate::team::{StoredModelError, TeamCatalog};
 use base64::Engine;
 use catalog::cad_file::{is_catalog_model_key, is_model_file_name, is_plain_name};
@@ -416,6 +415,29 @@ pub(crate) fn checked_model(path: &Path) -> Result<PathBuf, NotShown> {
         return Err(NotShown::NotModel(path.to_path_buf()));
     }
     Ok(real)
+}
+
+/// Whether `bytes` start as the 3D model their file `name` says: STEP with
+/// `ISO-10303-21;`, VRML with `#VRML` (each after an optional BOM and
+/// white space), and the gzipped .stpz and .wrz with gzip's mark.
+pub(crate) fn starts_as_model(name: &str, bytes: &[u8]) -> bool {
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+    let text = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let start = text
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(text.len());
+    let text = &text[start..];
+    match extension.as_str() {
+        "step" | "stp" => text.starts_with(b"ISO-10303-21;"),
+        "wrl" => text.starts_with(b"#VRML"),
+        "stpz" | "wrz" => bytes.starts_with(&[0x1f, 0x8b]),
+        _ => false,
+    }
 }
 
 /// `path` without the `\\?\` that `canonicalize` adds on Windows, which

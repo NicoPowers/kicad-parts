@@ -22,6 +22,7 @@ use crate::libraries::read::{
     Links, MAX_FOOTPRINT_FILE_BYTES, MAX_SYMBOL_FILE_BYTES, read_limited,
 };
 use crate::libraries::sources::{Format, Source, path_variables};
+use crate::model3d::{NotShown, checked_model, starts_as_model};
 use crate::team::TeamCatalog;
 use catalog::CadItemKind;
 use catalog::cad_file::{is_model_file_name, is_plain_name, read_footprint_file, symbol_upload};
@@ -540,23 +541,11 @@ impl CatalogBrowser {
 
 /// The bytes of the 3D model file at `path`, only when it really is one.
 /// The path, or a folder on it, may be a link (a library cloned with
-/// links, say): the real file must then also be named as a 3D model, and
-/// its content must start as one, so a key or other file behind a model's
-/// name is never copied to the team server.
+/// links, say), so [`checked_model`] checks the real file, as the 3D view
+/// does. A key or other file behind a model's name is then never copied
+/// to the team server. The error is a clause that follows a colon.
 fn read_model(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    let shown = |path: &std::path::Path| {
-        path.file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
-    let real = std::fs::canonicalize(path)
-        .map_err(|error| format!("{} could not be read: {error}.", shown(path)))?;
-    let real_name = shown(&real);
-    if !is_model_file_name(&real_name) {
-        return Err(format!(
-            "it leads to the file {real_name}, which is not a 3D model file."
-        ));
-    }
+    let real = checked_model(path).map_err(|why| as_clause(&why.words()))?;
     let bytes = read_limited(&real, MAX_MODEL_BYTES, Links::Follow).map_err(|why| {
         if why.contains("larger than") {
             format!("{why} One save can send at most 24 MB.")
@@ -564,34 +553,24 @@ fn read_model(path: &std::path::Path) -> Result<Vec<u8>, String> {
             why
         }
     })?;
+    // The file may have changed since its first bytes were checked, and
+    // these bytes are what the team server stores.
+    let real_name = real
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
     if !starts_as_model(&real_name, &bytes) {
-        return Err(format!(
-            "the file {real_name} does not hold a 3D model of its kind."
-        ));
+        return Err(as_clause(&NotShown::NotModel(real).words()));
     }
     Ok(bytes)
 }
 
-/// Whether `bytes` start as the 3D model their file `name` says: STEP with
-/// `ISO-10303-21;`, VRML with `#VRML` (each after an optional BOM and
-/// white space), and the gzipped .stpz and .wrz with gzip's mark.
-pub(crate) fn starts_as_model(name: &str, bytes: &[u8]) -> bool {
-    let extension = std::path::Path::new(name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_lowercase)
-        .unwrap_or_default();
-    let text = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-    let start = text
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(text.len());
-    let text = &text[start..];
-    match extension.as_str() {
-        "step" | "stp" => text.starts_with(b"ISO-10303-21;"),
-        "wrl" => text.starts_with(b"#VRML"),
-        "stpz" | "wrz" => bytes.starts_with(&[0x1f, 0x8b]),
-        _ => false,
+/// `sentence` with a small first letter, to follow a colon.
+fn as_clause(sentence: &str) -> String {
+    let mut chars = sentence.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -619,6 +598,11 @@ mod tests {
         let refused = read_model(&key).unwrap_err();
         assert!(refused.contains("does not hold a 3D model"), "{refused}");
         assert!(read_model(&write("id.wrz", b"not gzip")).is_err());
+        // The same checks and words as the 3D view's, as a clause.
+        assert_eq!(
+            read_model(&dir.path().join("gone.step")).unwrap_err(),
+            "the file is missing."
+        );
     }
 
     /// A folder junction (Windows makes one without special rights) to a
