@@ -7,17 +7,18 @@
 //! archived, never deleted: the current revision is the newest one that is
 //! not archived. When the CSV has new values for a part that an import did
 //! not apply, because the part was edited in this app, a notice offers to
-//! review them field by field.
+//! review them field by field. When a CSV row has the part's IPN but is a
+//! different part, a notice says so, and that the row needs another IPN.
 
 use crate::backend;
 use crate::edit_cad::CadFields;
 use crate::focus::focus_later;
 use crate::viewer::{CloseUp, CloseUpDialog, Picture};
 use desktop_contract::{
-    CsvChangeRow, CsvChanges, DetailChange, Field, FileKind, HistoryEntry, LiveUpdates,
-    ManufacturerPart, OlderUse, PreviewKind, PreviewOutcome, PublishResult, SignInRequest,
-    TeamArchiveRequest, TeamCategory, TeamConflict, TeamCsvReviewRequest, TeamEditRequest,
-    TeamFile, TeamPart, TeamSession, TeamStatus,
+    CsvChangeRow, CsvChanges, CsvRowForAnotherPart, DetailChange, Field, FileKind, HistoryEntry,
+    LiveUpdates, ManufacturerPart, OlderUse, PreviewKind, PreviewOutcome, PublishResult,
+    SignInRequest, TeamArchiveRequest, TeamCategory, TeamConflict, TeamCsvReviewRequest,
+    TeamEditRequest, TeamFile, TeamPart, TeamSession, TeamStatus,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -874,6 +875,60 @@ fn field_rows(fields: Vec<Field>) -> impl IntoView {
         .collect_view()
 }
 
+/// The notice for CSV rows with this part's IPN that are another part
+/// (kicad-parts-3b72): which rows, why they are not this part, and the one
+/// thing to do. Nothing when there are none.
+fn other_part_notice(rows: &[CsvRowForAnotherPart], part_mpns: &[String]) -> Option<AnyView> {
+    if rows.is_empty() {
+        return None;
+    }
+    let heading = if rows.len() == 1 {
+        "A CSV row has this IPN for another part"
+    } else {
+        "CSV rows have this IPN for other parts"
+    };
+    let lines = rows
+        .iter()
+        .map(|row| view! { <p>{other_part_text(row, part_mpns)}</p> })
+        .collect_view();
+    let ask = if rows.len() == 1 {
+        "The import did not change this part. Ask whoever looks after the CSV catalog to give that row another IPN."
+    } else {
+        "The import did not change this part. Ask whoever looks after the CSV catalog to give those rows other IPNs."
+    };
+    Some(
+        view! {
+            <section class="csv-notice other-part" role="status" aria-labelledby="other-part-heading">
+                <h3 id="other-part-heading">{heading}</h3>
+                {lines}
+                <p>{ask}</p>
+            </section>
+        }
+        .into_any(),
+    )
+}
+
+/// Why one CSV row with this part's IPN is another part: only a shared MPN
+/// would show they are the same (catalog_lib.js csvRowIsAnotherPart).
+fn other_part_text(row: &CsvRowForAnotherPart, part_mpns: &[String]) -> String {
+    let which = format!("Row {} of {}", row.row_number, row.csv_file);
+    match (row.mpns.as_slice(), part_mpns.is_empty()) {
+        ([], _) => {
+            format!("{which} has this part's IPN but no MPN, so nothing shows it is this part.")
+        }
+        (_, true) => format!(
+            "{which} has this part's IPN, but this part has no MPN, so nothing shows the row is this part."
+        ),
+        ([mpn], false) => {
+            format!("{which} has this part's IPN, but its MPN, {mpn}, is not one of this part's.")
+        }
+        (mpns, false) => format!(
+            "{which} has this part's IPN, but its MPNs, {}, are not this part's.",
+            mpns.join(", ")
+        ),
+    }
+}
+
 #[component]
 fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> impl IntoView {
     move || {
@@ -922,7 +977,15 @@ fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                 </section>
             }
         });
+        let part_mpns: Vec<String> = details
+            .manufacturer_parts
+            .iter()
+            .map(|made| made.mpn.clone())
+            .filter(|mpn| !mpn.trim().is_empty())
+            .collect();
+        let other_part_notice = other_part_notice(&team_part.csv_rows_for_other_parts, &part_mpns);
         view! {
+            {other_part_notice}
             {csv_notice}
             <div class="team-toolbar">
                 <h3 id="fields-heading" tabindex="-1">{format!("Part details ({count})")}</h3>
@@ -2335,7 +2398,7 @@ fn ConflictView(
 
 #[cfg(test)]
 mod tests {
-    use super::machine_time;
+    use super::{CsvRowForAnotherPart, machine_time, other_part_text};
 
     #[test]
     fn save_times_get_a_machine_readable_form() {
@@ -2344,5 +2407,31 @@ mod tests {
             Some("2026-10-09T18:02Z")
         );
         assert_eq!(machine_time("yesterday"), None);
+    }
+
+    #[test]
+    fn a_csv_row_for_another_part_says_why_it_is_not_this_part() {
+        let row = |mpns: &[&str]| CsvRowForAnotherPart {
+            csv_file: "g-res.csv".into(),
+            row_number: 30,
+            mpns: mpns.iter().map(|mpn| (*mpn).to_owned()).collect(),
+        };
+        let ours = ["AR0603-1K".to_owned()];
+        assert_eq!(
+            other_part_text(&row(&["ERJ-3EKF1001V"]), &ours),
+            "Row 30 of g-res.csv has this part's IPN, but its MPN, ERJ-3EKF1001V, is not one of this part's."
+        );
+        assert_eq!(
+            other_part_text(&row(&["A1", "B2"]), &ours),
+            "Row 30 of g-res.csv has this part's IPN, but its MPNs, A1, B2, are not this part's."
+        );
+        assert_eq!(
+            other_part_text(&row(&[]), &ours),
+            "Row 30 of g-res.csv has this part's IPN but no MPN, so nothing shows it is this part."
+        );
+        assert_eq!(
+            other_part_text(&row(&["ERJ-3EKF1001V"]), &[]),
+            "Row 30 of g-res.csv has this part's IPN, but this part has no MPN, so nothing shows the row is this part."
+        );
     }
 }

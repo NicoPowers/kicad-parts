@@ -422,6 +422,11 @@ pub struct TeamPart {
     /// footprint.
     #[serde(default)]
     pub csv_changes: Vec<CsvChanges>,
+    /// CSV catalog rows with this part's IPN that are a different part, as
+    /// the latest import of their CSV file found them. The import left the
+    /// part as it is; each row needs another IPN.
+    #[serde(default)]
+    pub csv_rows_for_other_parts: Vec<CsvRowForAnotherPart>,
     /// Every category, by name, for the Category choice in Edit part.
     #[serde(default)]
     pub categories: Vec<TeamCategory>,
@@ -436,6 +441,19 @@ pub struct TeamCategory {
     pub name: String,
     /// The fields a part in it has, in order.
     pub fields: Vec<String>,
+}
+
+/// A CSV catalog row with a part's IPN that is a different part: the part
+/// was added in this app, and the row names none of its MPNs
+/// (kicad-parts-3b72). Two parts got one IPN, so the row needs another one.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CsvRowForAnotherPart {
+    /// The CSV file, such as `g-res.csv`.
+    pub csv_file: String,
+    /// The row's number in the file, counting from 1 after the header line.
+    pub row_number: u64,
+    /// The row's MPNs, such as `ERJ-3EKF1001V`; empty when it has none.
+    pub mpns: Vec<String>,
 }
 
 /// New CSV values the latest import found for a part that was edited in

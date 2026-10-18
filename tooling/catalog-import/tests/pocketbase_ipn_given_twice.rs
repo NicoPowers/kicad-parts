@@ -21,8 +21,10 @@ use catalog::pocketbase::{
     submit_import,
 };
 use catalog::{CsvCatalog, DetailField, ManufacturerPart};
+use catalog_browser::team::TeamCatalog;
 use catalog_import::services;
 use collaboration::PocketBaseClient;
+use desktop_contract::{CsvRowForAnotherPart, SignInRequest};
 use native_services::PocketBaseServer;
 use serde_json::Value;
 use std::fs;
@@ -44,9 +46,12 @@ const PART_HAS_NO_MPN: &str = "RES-0104-0001";
 const ROW_HAS_NO_MPN: &str = "RES-0105-0001";
 
 struct Team {
-    _server: PocketBaseServer,
+    server: PocketBaseServer,
     admin: PocketBaseClient,
     editor: PocketBaseClient,
+    /// The editor's email and password, to sign in to the desktop's team
+    /// catalog.
+    editor_login: (String, String),
     /// The copy of the CSV catalog the imports read, under `target/`.
     copy: tempfile::TempDir,
     _state: tempfile::TempDir,
@@ -70,9 +75,10 @@ impl Team {
             .authenticate("users", &member.email, &member.password)
             .unwrap();
         let team = Self {
-            _server: server,
+            server,
             admin,
             editor,
+            editor_login: (member.email.clone(), member.password.clone()),
             copy,
             _state: state,
         };
@@ -144,6 +150,21 @@ impl Team {
 
     fn read(&self) -> CatalogReadback {
         read_back(&self.admin).unwrap()
+    }
+
+    /// The desktop's team catalog, signed in as the editor, with its data
+    /// in `folder`.
+    fn desktop(&self, folder: &Path) -> TeamCatalog {
+        let url = self.server.url().to_owned();
+        let team = TeamCatalog::open(folder.join("team.json"), None, None);
+        let (email, password) = self.editor_login.clone();
+        let status = team.sign_in(SignInRequest {
+            server_url: url,
+            email,
+            password,
+        });
+        assert!(status.session.is_signed_in(), "{status:?}");
+        team
     }
 
     /// The zero-loss report of the copy against the team catalog: every
@@ -332,6 +353,34 @@ fn a_csv_row_that_gives_an_app_part_s_ipn_to_another_part_is_flagged_and_changes
     }
     team.assert_nothing_lost("rows for other parts");
 
+    // The desktop shows each row on the part it is not, and offers none of
+    // its values for review. A part whose row shares an MPN shows the CSV's
+    // new values, as before.
+    let data = tempfile::tempdir().unwrap();
+    let desktop = team.desktop(data.path());
+    let unrelated = desktop.part(UNRELATED).unwrap().unwrap();
+    assert_eq!(
+        unrelated.csv_rows_for_other_parts,
+        [CsvRowForAnotherPart {
+            csv_file: "g-res.csv".into(),
+            row_number: 30,
+            mpns: vec!["ERJ-3EKF1001V".into()],
+        }]
+    );
+    assert!(
+        unrelated.csv_changes.is_empty(),
+        "{:?}",
+        unrelated.csv_changes
+    );
+    let no_mpn = desktop.part(ROW_HAS_NO_MPN).unwrap().unwrap();
+    assert_eq!(
+        no_mpn.csv_rows_for_other_parts[0].mpns,
+        Vec::<String>::new()
+    );
+    let same = desktop.part(SAME_MPN).unwrap().unwrap();
+    assert!(same.csv_rows_for_other_parts.is_empty());
+    assert_eq!(same.csv_changes.len(), 1, "{:?}", same.csv_changes);
+
     // Importing the same files again finds the same problems and adds
     // nothing.
     assert!(
@@ -353,6 +402,8 @@ fn a_csv_row_that_gives_an_app_part_s_ipn_to_another_part_is_flagged_and_changes
     let stored = team.read();
     assert_eq!(codes_of(&stored, UNRELATED), Vec::<String>::new());
     assert_eq!(state_of(&stored, UNRELATED), state_of(&before, UNRELATED));
+    let unrelated = desktop.part(UNRELATED).unwrap().unwrap();
+    assert!(unrelated.csv_rows_for_other_parts.is_empty());
     let renumbered = stored.part("RES-0106-0001").unwrap();
     let details = stored.part_details(&renumbered.current_details).unwrap();
     assert!(

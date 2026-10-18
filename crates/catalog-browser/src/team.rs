@@ -24,13 +24,14 @@ use catalog::pocketbase::UploadRole;
 use catalog::pocketbase::{
     ArchiveCommand, ArchiveOutcome, CSV_CAD_DIFFERS, CSV_CAD_ITEM_KEPT, CSV_DETAILS_DIFFER,
     CadUpload, ConflictingRecord, CreateCommand, CreateOutcome, CsvReviewCommand, CsvReviewOutcome,
-    EDIT_BODY_LIMIT, EditCommand, MANUFACTURER_PARTS_FIELD, PublishOutcome, PublishReply,
-    StoredArchiveEntry, StoredBlob, StoredCadItemRevision, StoredChange, StoredCsvReview,
-    StoredPart, StoredPartRevision, archive_entries_of, archived_numbers, cad_item_revisions_by_id,
-    cad_item_revisions_in_changes, changes_by_id, csv_reviews_of, current_categories,
-    fields_for_category, has_cad_item, latest_import_run, part_by_ipn, part_details_of,
-    part_revisions, problems_of, recorded_csv_document, remembered_matches, submit_archive,
-    submit_create, submit_csv_review, submit_edit,
+    EDIT_BODY_LIMIT, EditCommand, IPN_GIVEN_TO_ANOTHER_PART, MANUFACTURER_PARTS_FIELD,
+    PublishOutcome, PublishReply, StoredArchiveEntry, StoredBlob, StoredCadItemRevision,
+    StoredChange, StoredCsvReview, StoredImportProblem, StoredPart, StoredPartRevision,
+    archive_entries_of, archived_numbers, cad_item_revisions_by_id, cad_item_revisions_in_changes,
+    changes_by_id, csv_reviews_of, current_categories, fields_for_category, has_cad_item,
+    latest_import_run, part_by_ipn, part_details_of, part_revisions, problems_of,
+    recorded_csv_document, remembered_matches, submit_archive, submit_create, submit_csv_review,
+    submit_edit,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
@@ -40,12 +41,12 @@ use catalog::{
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
 use desktop_contract::{
-    ArchiveNote, CadItemUse, ConflictRow, CsvChangeRow, CsvChanges, CurrentDetails,
-    CurrentRevision, DetailChange, Field, FileKind, HistoryEntry, LiveUpdates, ManufacturerPart,
-    OlderUse, PreviewKind, PublishResult, RevisionStatus, SignInRequest, StoredFootprint,
-    TeamArchiveRequest, TeamCategory, TeamConflict, TeamCsvReviewRequest, TeamEditRequest,
-    TeamFile, TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamNewPartRequest, TeamPart,
-    TeamSession, TeamStatus,
+    ArchiveNote, CadItemUse, ConflictRow, CsvChangeRow, CsvChanges, CsvRowForAnotherPart,
+    CurrentDetails, CurrentRevision, DetailChange, Field, FileKind, HistoryEntry, LiveUpdates,
+    ManufacturerPart, OlderUse, PreviewKind, PublishResult, RevisionStatus, SignInRequest,
+    StoredFootprint, TeamArchiveRequest, TeamCategory, TeamConflict, TeamCsvReviewRequest,
+    TeamEditRequest, TeamFile, TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamNewPartRequest,
+    TeamPart, TeamSession, TeamStatus,
 };
 use kicad_integration::library_file::{
     footprint_says_excluded_from_bom, symbol_entries_say_not_in_bom,
@@ -2185,6 +2186,14 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
             .filter_map(|revision| Some((imported(&revision.change)?, revision.snapshot.as_str())))
             .max_by_key(|(seq, _)| *seq),
     };
+    let mut runs = LatestRuns::new(client);
+    let csv_rows_for_other_parts = rows_for_other_parts(client, part, &mut runs)?;
+    // A CSV file whose row with this IPN is another part says nothing
+    // about this part, so its values are never offered for review.
+    let other_part_files: BTreeSet<&str> = csv_rows_for_other_parts
+        .iter()
+        .map(|row| row.csv_file.as_str())
+        .collect();
     let csv_changes = open_csv_changes(
         client,
         part,
@@ -2194,6 +2203,8 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
         &last_imported,
         &names,
         describe,
+        &mut runs,
+        &other_part_files,
     )?;
     let archived = archived_numbers(&archive_entries.iter().collect::<Vec<_>>());
     let view = TeamPart {
@@ -2213,6 +2224,7 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
             .collect(),
         history: entries.into_values().rev().collect(),
         csv_changes,
+        csv_rows_for_other_parts,
         categories: categories
             .iter()
             .map(|category| TeamCategory {
@@ -2317,6 +2329,91 @@ struct LastSeen {
     document: Option<String>,
 }
 
+/// Which import problems the latest import run of their CSV file found, so
+/// what the CSV says now. Problems that only older runs found stay recorded
+/// for the zero-loss report, but the CSV has moved on since. Each CSV
+/// file's latest run is read once.
+struct LatestRuns<'c> {
+    client: &'c PocketBaseClient,
+    /// The problem IDs each CSV file's latest run found, such as `g-res`.
+    found: BTreeMap<String, Vec<String>>,
+}
+
+impl<'c> LatestRuns<'c> {
+    fn new(client: &'c PocketBaseClient) -> Self {
+        Self {
+            client,
+            found: BTreeMap::new(),
+        }
+    }
+
+    /// Whether the latest run of the CSV file `problem` is about found it.
+    fn found_now(&mut self, problem: &StoredImportProblem) -> Result<bool, String> {
+        let Some(csv_file) = csv_file_of(&problem.path) else {
+            return Ok(false);
+        };
+        if !self.found.contains_key(csv_file) {
+            let found = latest_import_run(self.client, csv_file)
+                .map_err(|error| error.to_string())?
+                .and_then(|entry| entry.import_run())
+                .map(|run| run.problems)
+                .unwrap_or_default();
+            self.found.insert(csv_file.to_owned(), found);
+        }
+        Ok(self.found[csv_file].contains(&problem.id))
+    }
+}
+
+/// The CSV file a repository path names, such as `g-res` for
+/// `database/g-res.csv`.
+fn csv_file_of(path: &str) -> Option<&str> {
+    path.strip_prefix("database/")?.strip_suffix(".csv")
+}
+
+/// The CSV rows with the part's IPN that are a different part
+/// ([`IPN_GIVEN_TO_ANOTHER_PART`]), as the latest import of their CSV file
+/// found them. A problem whose detail cannot be read is skipped, so the
+/// part still opens.
+fn rows_for_other_parts(
+    client: &PocketBaseClient,
+    part: &StoredPart,
+    runs: &mut LatestRuns,
+) -> Result<Vec<CsvRowForAnotherPart>, String> {
+    let problems = problems_of(client, &part.ipn, &[IPN_GIVEN_TO_ANOTHER_PART])
+        .map_err(|error| error.to_string())?;
+    let mut rows = Vec::new();
+    for problem in &problems {
+        let Some(csv_file) = csv_file_of(&problem.path) else {
+            continue;
+        };
+        if !runs.found_now(problem)? {
+            continue;
+        }
+        let Ok(detail) = serde_json::from_str::<serde_json::Value>(&problem.detail) else {
+            continue;
+        };
+        let Some(row_number) = detail["row_number"].as_u64() else {
+            continue;
+        };
+        let mpns = detail["csv_manufacturer_parts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|made| made["mpn"].as_str())
+            .map(str::trim)
+            .filter(|mpn| !mpn.is_empty())
+            .map(str::to_owned)
+            .collect();
+        rows.push(CsvRowForAnotherPart {
+            csv_file: format!("{csv_file}.csv"),
+            row_number,
+            mpns,
+        });
+    }
+    rows.sort_by(|a, b| (&a.csv_file, a.row_number).cmp(&(&b.csv_file, b.row_number)));
+    Ok(rows)
+}
+
 /// The new CSV values nobody has reviewed yet: each [`CSV_DETAILS_DIFFER`]
 /// or [`CSV_CAD_DIFFERS`] import problem of the part that the latest import
 /// run of its CSV file found, unless a review already covers what the CSV
@@ -2328,6 +2425,9 @@ struct LastSeen {
 /// covered is left out, because only the part was edited in this app. The
 /// problem itself stays recorded for the zero-loss report. Each row says
 /// whether the CSV changed that field since then.
+///
+/// Nothing is offered from a CSV file in `other_part_files` (such as
+/// `g-res.csv`): its row with this IPN is another part.
 ///
 /// A recorded document that cannot be read is skipped, so the part still
 /// opens.
@@ -2341,6 +2441,8 @@ fn open_csv_changes(
     last_imported: &LastImported,
     names: &CategoryNames,
     describe: impl Fn(&CadReference) -> String,
+    runs: &mut LatestRuns,
+    other_part_files: &BTreeSet<&str>,
 ) -> Result<Vec<CsvChanges>, String> {
     let fail = |error: CollabError| error.to_string();
     let problems = problems_of(
@@ -2387,7 +2489,6 @@ fn open_csv_changes(
         }
     };
     let seen = [last_seen(false), last_seen(true)];
-    let mut runs: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut open: Vec<(String, CsvChanges)> = Vec::new();
     for problem in &problems {
         let Some(document) = recorded_csv_document(problem) else {
@@ -2410,22 +2511,13 @@ fn open_csv_changes(
         {
             continue;
         }
-        let Some(csv_file) = problem
-            .path
-            .strip_prefix("database/")
-            .and_then(|name| name.strip_suffix(".csv"))
-        else {
+        let Some(csv_file) = csv_file_of(&problem.path) else {
             continue;
         };
-        if !runs.contains_key(csv_file) {
-            let found = latest_import_run(client, csv_file)
-                .map_err(fail)?
-                .and_then(|entry| entry.import_run())
-                .map(|run| run.problems)
-                .unwrap_or_default();
-            runs.insert(csv_file.to_owned(), found);
+        if other_part_files.contains(format!("{csv_file}.csv").as_str()) {
+            continue;
         }
-        if !runs[csv_file].contains(&problem.id) {
+        if !runs.found_now(problem)? {
             continue;
         }
         let mut rows = if kept_cad_item {
