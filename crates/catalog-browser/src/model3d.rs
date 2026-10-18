@@ -123,6 +123,9 @@ pub(crate) enum NotShown {
     /// A network or system path that no path variable of the person's
     /// gave.
     NetworkPath,
+    /// The path goes through a link that leads to a network or system
+    /// path, or through too many links.
+    LinkedAway(PathBuf),
     /// A download's link to something other than its own 3D model.
     OutsideDownload,
     Missing(PathBuf),
@@ -169,6 +172,9 @@ impl NotShown {
                 "${KIPRJMOD} means a KiCad project's folder, which a library footprint doesn't have."
                     .into()
             }
+            Self::LinkedAway(_) => {
+                "Its path goes through a link to a network or system path, or through too many links, so the app doesn't open it.".into()
+            }
             Self::NetworkPath => {
                 "It names a network or system path, which the app opens only through a path variable you set in KiCad's path settings.".into()
             }
@@ -199,6 +205,7 @@ impl NotShown {
         match self {
             Self::Missing(path)
             | Self::Linked(path)
+            | Self::LinkedAway(path)
             | Self::NotModel(path)
             | Self::CliUnreadable(path)
             | Self::LeadsElsewhere { path, .. }
@@ -442,12 +449,14 @@ fn last_part(link: &str) -> &str {
 
 /// The real path of the 3D model file at `path`, once its real name and
 /// first bytes show a 3D model. A link on the way may lead elsewhere, so
-/// the real file is what is checked and drawn.
+/// the real file is what is checked and drawn. Every link on the way must
+/// stay on this computer's drives first (see [`links_stay_on_drives`]).
 pub(crate) fn checked_model(path: &Path) -> Result<PathBuf, NotShown> {
     let unreadable = |why: std::io::Error| NotShown::Unreadable {
         path: path.to_path_buf(),
         why: why.to_string(),
     };
+    links_stay_on_drives(path)?;
     match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => return Err(NotShown::Missing(path.to_path_buf())),
@@ -475,6 +484,75 @@ pub(crate) fn checked_model(path: &Path) -> Result<PathBuf, NotShown> {
         return Err(NotShown::NotModel(path.to_path_buf()));
     }
     Ok(real)
+}
+
+/// How many links a path may go through, one after another.
+const MOST_LINKS: usize = 8;
+
+/// Checks, before anything follows a link, that every symbolic link on
+/// `path` leads to a drive of this computer (ADR 0013). A library could
+/// hold `C:\libs\x.step` as a link to `\\host\share\x.step`, and
+/// Windows follows such links by default, sending the person's sign-in.
+///
+/// It reads each part of the path without following it. For a link, it
+/// reads where the link leads, and checks that place the same way. Past
+/// [`MOST_LINKS`] links, or a loop, it refuses.
+///
+/// A junction (a Windows folder link) can only lead to a local drive, so
+/// it needs no check, but Rust reports it as a link too and it is checked
+/// the same way. OneDrive's online-only files are not links (mx-c2c503).
+fn links_stay_on_drives(path: &Path) -> Result<(), NotShown> {
+    walk_links(path, |part| {
+        // A part that can't be read is no link; the caller then says the
+        // file is missing or unreadable.
+        match fs::symlink_metadata(part) {
+            Ok(metadata) if metadata.file_type().is_symlink() => fs::read_link(part).map(Some),
+            _ => Ok(None),
+        }
+    })
+}
+
+/// [`links_stay_on_drives`], with `link_at` saying where the link at a
+/// path leads, or `None` when it is no link. Tests pass their own.
+fn walk_links(
+    path: &Path,
+    link_at: impl Fn(&Path) -> std::io::Result<Option<PathBuf>>,
+) -> Result<(), NotShown> {
+    let refused = || NotShown::LinkedAway(path.to_path_buf());
+    let unreadable = |why: std::io::Error| NotShown::Unreadable {
+        path: path.to_path_buf(),
+        why: why.to_string(),
+    };
+    let mut next = Some(std::path::absolute(path).map_err(unreadable)?);
+    let mut links = 0;
+    while let Some(current) = next.take() {
+        let parts: Vec<_> = current.components().collect();
+        let mut walked = PathBuf::new();
+        for (at, part) in parts.iter().enumerate() {
+            walked.push(part);
+            if !matches!(part, std::path::Component::Normal(_)) {
+                continue;
+            }
+            let Some(target) = link_at(&walked).map_err(unreadable)? else {
+                continue;
+            };
+            links += 1;
+            if links > MOST_LINKS {
+                return Err(refused());
+            }
+            let folder = walked.parent().unwrap_or(Path::new(""));
+            let target = std::path::absolute(folder.join(target)).map_err(unreadable)?;
+            if !on_a_drive(&target) {
+                return Err(refused());
+            }
+            // The rest of the path, through where the link leads.
+            let mut rest = target;
+            rest.extend(&parts[at + 1..]);
+            next = Some(rest);
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Whether `error` says the path is not a valid name, as `\C:\x.step` is

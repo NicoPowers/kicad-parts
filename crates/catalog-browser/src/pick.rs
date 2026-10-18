@@ -544,7 +544,7 @@ fn model_path(
 /// links, say), so [`checked_model`] checks the real file, as the 3D view
 /// does. A key or other file behind a model's name is then never copied
 /// to the team server. The error is a clause that follows a colon.
-fn read_model(path: &std::path::Path) -> Result<Vec<u8>, String> {
+pub(crate) fn read_model(path: &std::path::Path) -> Result<Vec<u8>, String> {
     let real = checked_model(path).map_err(|why| as_clause(&why.words()))?;
     let bytes = read_limited(&real, MAX_MODEL_BYTES, Links::Follow).map_err(|why| {
         if why.contains("larger than") {

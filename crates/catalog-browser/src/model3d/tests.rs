@@ -594,3 +594,152 @@ fn a_downloads_model_is_linked_as_saving_links_it() {
         ]
     );
 }
+
+/// A symbolic link in a library that leads to a network share is refused
+/// before anything follows it (ADR 0013). Links that stay on this
+/// computer still work, and a loop of links is refused.
+#[cfg(windows)]
+#[test]
+fn a_link_to_a_network_share_is_never_followed() {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+    let dir = tempfile::tempdir().unwrap();
+    let models = dir.path().join("X.3dshapes");
+    fs::create_dir(&models).unwrap();
+    // host.invalid never resolves, so a broken rule can't reach a real
+    // computer.
+    let to_share = models.join("to-share.step");
+    if symlink_file(r"\\host.invalid\share\x.step", &to_share).is_err() {
+        eprintln!(
+            "skipped: this computer can't make symbolic links without Developer Mode or admin rights"
+        );
+        return;
+    }
+    assert_eq!(
+        checked_model(&to_share),
+        Err(NotShown::LinkedAway(to_share.clone()))
+    );
+    // A folder link to a share, and a relative link that leads to it.
+    let share_folder = dir.path().join("share-folder");
+    symlink_dir(r"\\host.invalid\share", &share_folder).unwrap();
+    let through_folder = share_folder.join("x.step");
+    assert_eq!(
+        checked_model(&through_folder),
+        Err(NotShown::LinkedAway(through_folder.clone()))
+    );
+    let relative = models.join("relative.step");
+    symlink_file(r"..\share-folder\x.step", &relative).unwrap();
+    assert_eq!(
+        checked_model(&relative),
+        Err(NotShown::LinkedAway(relative.clone()))
+    );
+    // Copying a model refuses it the same way.
+    let refused = crate::pick::read_model(&to_share).unwrap_err();
+    assert!(refused.contains("link to a network"), "{refused}");
+    // A link that stays on this computer leads to the model, even through
+    // a second link.
+    let model = dir.path().join("real.step");
+    fs::write(&model, STEP).unwrap();
+    let first = models.join("first.step");
+    let second = models.join("second.step");
+    symlink_file(&model, &first).unwrap();
+    symlink_file(&first, &second).unwrap();
+    assert_eq!(
+        checked_model(&second),
+        Ok(plain_path(fs::canonicalize(&model).unwrap()))
+    );
+    // Two links that lead to each other.
+    let a = models.join("a.step");
+    let b = models.join("b.step");
+    symlink_file(&b, &a).unwrap();
+    symlink_file(&a, &b).unwrap();
+    assert_eq!(checked_model(&a), Err(NotShown::LinkedAway(a.clone())));
+}
+
+/// The link walk on its own, with links made up in a table, so it runs
+/// on any computer. Each link is checked before the path goes on.
+#[cfg(windows)]
+#[test]
+fn every_link_on_a_path_must_lead_to_a_drive() {
+    let links: BTreeMap<PathBuf, PathBuf> = [
+        (
+            r"C:\libs\X.3dshapes\share.step",
+            r"\\host.invalid\share\x.step",
+        ),
+        (r"C:\libs\Away", r"\\host.invalid\share"),
+        (r"C:\libs\Pipe", r"\\.\pipe"),
+        // Relative to the link's own folder, C:\libs.
+        (r"C:\libs\Relative.step", r"Away\x.step"),
+        (r"C:\libs\Local.step", r"D:\models\x.step"),
+        (r"C:\libs\Hop.step", r"Local.step"),
+        (r"D:\models\x.step", r"\\host.invalid\share\y.step"),
+        (r"C:\libs\Loop1.step", r"C:\libs\Loop2.step"),
+        (r"C:\libs\Loop2.step", r"C:\libs\Loop1.step"),
+        (r"C:\libs\Fine.step", r"E:\models\fine.step"),
+        (r"C:\libs\Junction", r"\\?\E:\models"),
+    ]
+    .into_iter()
+    .map(|(link, target)| (PathBuf::from(link), PathBuf::from(target)))
+    .collect();
+    let walk = |path: &str| walk_links(Path::new(path), |part| Ok(links.get(part).cloned()));
+    let away = |path: &str| Err(NotShown::LinkedAway(PathBuf::from(path)));
+    assert_eq!(
+        walk(r"C:\libs\X.3dshapes\share.step"),
+        away(r"C:\libs\X.3dshapes\share.step")
+    );
+    assert_eq!(walk(r"C:\libs\Away\x.step"), away(r"C:\libs\Away\x.step"));
+    assert_eq!(walk(r"C:\libs\Pipe\x.step"), away(r"C:\libs\Pipe\x.step"));
+    assert_eq!(
+        walk(r"C:\libs\Relative.step"),
+        away(r"C:\libs\Relative.step")
+    );
+    // A link to a local file that is itself a link to a share.
+    assert_eq!(walk(r"C:\libs\Hop.step"), away(r"C:\libs\Hop.step"));
+    assert_eq!(walk(r"C:\libs\Loop1.step"), away(r"C:\libs\Loop1.step"));
+    // Links that stay on drives, and a path with no link.
+    assert_eq!(walk(r"C:\libs\Fine.step"), Ok(()));
+    assert_eq!(walk(r"C:\libs\Junction\x.step"), Ok(()));
+    assert_eq!(walk(r"C:\libs\Plain\x.step"), Ok(()));
+}
+
+/// A junction, which Windows makes without special rights, is followed
+/// when it stays on a drive, and too many of them are refused.
+#[cfg(windows)]
+#[test]
+fn junctions_on_a_drive_are_followed_and_loops_are_refused() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let dir = tempfile::tempdir().unwrap();
+    let junction = |link: &Path, target: &Path| {
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .is_ok_and(|output| output.status.success())
+    };
+    let real = dir.path().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("x.step"), STEP).unwrap();
+    if !junction(&dir.path().join("j1"), &real) {
+        eprintln!("skipped: junctions cannot be made here");
+        return;
+    }
+    assert!(junction(&dir.path().join("j2"), &dir.path().join("j1")));
+    assert_eq!(
+        checked_model(&dir.path().join("j2").join("x.step")),
+        Ok(plain_path(fs::canonicalize(real.join("x.step")).unwrap()))
+    );
+    // Ten junctions, each to the one before: more than MOST_LINKS.
+    let mut last = real.clone();
+    for i in 0..10 {
+        let next = dir.path().join(format!("deep{i}"));
+        assert!(junction(&next, &last));
+        last = next;
+    }
+    let deep = last.join("x.step");
+    assert_eq!(
+        checked_model(&deep),
+        Err(NotShown::LinkedAway(deep.clone()))
+    );
+}
