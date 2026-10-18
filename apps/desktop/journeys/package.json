@@ -4,7 +4,8 @@
   "type": "module",
   "description": "Native WebView2 journeys for the KiCad Parts desktop app (tauri-driver + msedgedriver).",
   "scripts": {
-    "journeys": "node run-journeys.mjs"
+    "journeys": "node run-journeys.mjs",
+    "camera-tests": "node run-camera-tests.mjs"
   },
   "engines": {
     "node": ">=24"
