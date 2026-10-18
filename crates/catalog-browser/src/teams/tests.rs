@@ -533,3 +533,52 @@ fn a_sign_out_the_store_cannot_forget_is_still_never_carried_on() {
     teams.sign_in(request(&server)).unwrap();
     assert!(!saved::read(&file).teams[0].signed_out);
 }
+
+#[test]
+fn a_wrong_password_leaves_a_signed_in_team_signed_in() {
+    let server = FakeServer::start();
+    let store = store();
+    let dir = tempfile::tempdir().unwrap();
+    let teams = Teams::open(dir.path().join("team.json"), kept_in(&store), None, None);
+    teams.sign_in(request(&server)).unwrap();
+    wait_until("the sign-in to be kept", || {
+        kept_token(&store, &server).is_some()
+    });
+    let catalog = teams.shown();
+    let (session, token) = catalog.session_token().unwrap();
+    // "Add a team" with the same address and a mistyped password.
+    let wrong = SignInRequest {
+        password: "wrong".into(),
+        ..request(&server)
+    };
+    assert_eq!(
+        teams.sign_in(wrong).unwrap_err(),
+        "The email or password is not right."
+    );
+    assert_eq!(catalog.session_token(), Some((session, token.clone())));
+    assert!(is_signed_in(&teams, &server));
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(kept_token(&store, &server), Some(token));
+}
+
+#[test]
+fn sessions_made_in_the_same_second_are_told_apart() {
+    let server = FakeServer::start();
+    let catalog = TeamCatalog::new();
+    let sign_in = || {
+        catalog.try_sign_in(request(&server)).unwrap();
+        catalog.session_token().unwrap()
+    };
+    // PocketBase tokens made in the same second are the same text; try
+    // until two are, in case a second ends between them.
+    let (first, second) = (0..5)
+        .map(|_| (sign_in(), sign_in()))
+        .find(|((_, a), (_, b))| a == b)
+        .expect("two sign-ins in the same second");
+    assert_ne!(first.0, second.0, "each session has its own number");
+    // A judgement about the first session does nothing to the second.
+    assert!(!catalog.sign_in_again(Some(first.0)));
+    assert_eq!(catalog.session_number(), Some(second.0));
+    assert!(catalog.sign_in_again(Some(second.0)));
+    assert_eq!(catalog.session_number(), None);
+}

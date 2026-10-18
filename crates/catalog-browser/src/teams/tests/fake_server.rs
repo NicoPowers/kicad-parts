@@ -192,16 +192,20 @@ fn account() -> serde_json::Value {
 
 /// A new token that looks like PocketBase's: a JWT whose `exp` the app
 /// reads to plan renewals.
+///
+/// Like PocketBase 0.38's, it holds only the account and an expiry in whole
+/// seconds, so two tokens made in the same second are the same text.
 fn issue(state: &State) -> String {
-    let number = state.issued.fetch_add(1, Ordering::SeqCst);
+    state.issued.fetch_add(1, Ordering::SeqCst);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let exp = now + state.lifetime.load(Ordering::SeqCst);
-    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(format!(r#"{{"id":"u1","exp":{exp},"n":{number}}}"#));
-    let token = format!("eyJhbGciOiJIUzI1NiJ9.{claims}.fake-signature-{number}");
+    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(
+        r#"{{"collectionId":"_pb_users_auth_","exp":{exp},"id":"u1","refreshable":true,"type":"auth"}}"#
+    ));
+    let token = format!("eyJhbGciOiJIUzI1NiJ9.{claims}.fake-signature-{exp}");
     state.tokens.lock().unwrap().insert(token.clone());
     token
 }

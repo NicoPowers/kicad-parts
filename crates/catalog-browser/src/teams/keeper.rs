@@ -67,9 +67,9 @@ struct Shared {
 }
 
 /// The sign-in a rejection is about.
-enum Judged<'a> {
-    /// The session that sends this token.
-    Session(&'a str),
+enum Judged {
+    /// The session with this number (see `TeamCatalog::session_number`).
+    Session(u64),
     /// The kept sign-in, while no session runs yet.
     Kept,
 }
@@ -151,26 +151,30 @@ impl Shared {
     /// The server no longer accepts the `judged` sign-in: forget it, and
     /// ask for this team's password again. Does nothing if, by now, that
     /// sign-in is gone.
-    fn rejected(&self, judged: Judged<'_>, changes_at: u64) {
+    fn rejected(&self, judged: Judged, changes_at: u64) {
         let _turn = self.turn();
         if !self.still_current(changes_at) {
             return;
         }
-        let token = match judged {
-            Judged::Session(token) => Some(token),
+        let session = match judged {
+            Judged::Session(number) => Some(number),
             Judged::Kept => None,
         };
-        if self.task.catalog.sign_in_again(token) {
+        if self.task.catalog.sign_in_again(session) {
             *self.reaching() = None;
             self.store_result(self.task.store.forget(&self.task.server_url));
         }
     }
 
-    /// Keeps `token`, the session's token, unless that changed meanwhile.
-    /// Says whether it did.
-    fn keep(&self, token: &str) -> bool {
+    /// Keeps `token`, the token of session `session`, unless that changed
+    /// meanwhile. Says whether it did.
+    fn keep(&self, session: u64, token: &str) -> bool {
         let _turn = self.turn();
-        if self.stop.load(Ordering::SeqCst) || self.task.catalog.token().as_deref() != Some(token) {
+        let current = self.task.catalog.session_token();
+        let same = current
+            .as_ref()
+            .is_some_and(|(number, now)| *number == session && now == token);
+        if self.stop.load(Ordering::SeqCst) || !same {
             return false;
         }
         self.store_result(self.task.store.keep(&self.task.server_url, token));
@@ -194,7 +198,9 @@ fn keep(shared: &Shared, look_for_kept: bool) {
     }
     let mut retry = FIRST_RETRY;
     let mut try_at = Instant::now();
-    let mut kept: Option<String> = None;
+    // The session and token last kept: tokens alone cannot tell two
+    // sessions apart.
+    let mut kept: Option<(u64, String)> = None;
     // Wall-clock time, so a computer that slept still renews on waking:
     // an Instant stands still during sleep on macOS and Linux.
     let mut renew_at = SystemTime::now();
@@ -208,16 +214,16 @@ fn keep(shared: &Shared, look_for_kept: bool) {
             if Instant::now() >= try_at {
                 let changes_at = shared.changes();
                 match task.catalog.resume(&task.server_url, &token) {
-                    Resumed::SignedIn { token: carried_on } => {
+                    Resumed::SignedIn { session } => {
                         to_carry_on = None;
                         let _turn = shared.turn();
                         *shared.reaching() = None;
                         if !shared.still_current(changes_at)
-                            && task.catalog.token() == Some(carried_on)
+                            && task.catalog.session_number() == Some(session)
                         {
                             // The person signed out while this ran: do not
                             // bring the session back. A password sign-in
-                            // has its own token and stays.
+                            // has its own session and stays.
                             task.catalog.sign_out();
                         }
                     }
@@ -238,23 +244,26 @@ fn keep(shared: &Shared, look_for_kept: bool) {
             continue;
         }
         let changes_at = shared.changes();
-        let token = task.catalog.token();
-        match (task.catalog.status().session, token) {
+        // The session first, then its status: a later session can only
+        // make the judgement about this one moot, never wrong.
+        let current = task.catalog.session_token();
+        match (task.catalog.status().session, current) {
             (
                 TeamSession::SignedIn {
                     live: LiveUpdates::SignInAgain { .. },
                     ..
                 },
-                Some(token),
+                Some((session, _)),
             ) => {
                 kept = None;
-                shared.rejected(Judged::Session(&token), changes_at);
+                shared.rejected(Judged::Session(session), changes_at);
             }
-            (TeamSession::SignedIn { .. }, Some(token)) => {
-                if kept.as_ref() != Some(&token) {
-                    if shared.keep(&token) {
+            (TeamSession::SignedIn { .. }, Some((session, token))) => {
+                let now = Some((session, token.clone()));
+                if kept != now {
+                    if shared.keep(session, &token) {
                         renew_at = SystemTime::now() + renewal_delay(&token, SystemTime::now());
-                        kept = Some(token);
+                        kept = now;
                     }
                 } else if SystemTime::now() >= renew_at {
                     match task.catalog.renew() {
@@ -262,7 +271,7 @@ fn keep(shared: &Shared, look_for_kept: bool) {
                         Renewed::Token(_) | Renewed::SessionChanged => {}
                         Renewed::Rejected => {
                             kept = None;
-                            shared.rejected(Judged::Session(&token), changes_at);
+                            shared.rejected(Judged::Session(session), changes_at);
                         }
                         Renewed::Failed(_) => renew_at = SystemTime::now() + RENEW_RETRY,
                     }

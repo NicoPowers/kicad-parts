@@ -157,17 +157,17 @@ impl Teams {
             Some((catalog, _)) => catalog.clone(),
             None => Arc::new(TeamCatalog::new()),
         };
-        let status = catalog.sign_in(SignInRequest {
+        // A failure leaves the team as it was: a running session keeps
+        // running, and a kept sign-in still being carried on stays, since
+        // only the password was wrong.
+        if let Err(problem) = catalog.try_sign_in(SignInRequest {
             server_url: server_url.clone(),
             ..request
-        });
-        let email = match status.session {
-            TeamSession::SignedIn { email, .. } => email,
-            TeamSession::SignedOut { problem } | TeamSession::Reaching { problem } => {
-                // A kept sign-in still being carried on stays: it may be
-                // good, and only the password was wrong.
-                return self.failed(problem.unwrap_or_default());
-            }
+        }) {
+            return self.failed(problem);
+        }
+        let TeamSession::SignedIn { email, .. } = catalog.status().session else {
+            return self.failed("The sign-in ended at once. Try again.".into());
         };
         if let Some((_, keeper)) = &known {
             // The password replaces any kept sign-in still being carried on.

@@ -79,8 +79,8 @@ pub enum Renewed {
 /// How carrying on a kept sign-in went.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Resumed {
-    /// Signed in again; the session sends `token`, a renewed one.
-    SignedIn { token: String },
+    /// Signed in again, as the session with this number.
+    SignedIn { session: u64 },
     /// A session was already running, such as from a password sign-in
     /// that finished first; it was kept.
     AlreadySignedIn,
@@ -95,6 +95,11 @@ struct State {
     /// Why the last sign-in failed, if it did.
     problem: Option<String>,
     session: Option<Session>,
+    /// The number of the session, which grows each time one starts. It
+    /// tells sessions apart where tokens cannot: PocketBase tokens hold
+    /// only the account and an expiry in whole seconds, so two made in
+    /// the same second are the same text.
+    number: u64,
 }
 
 /// One team's catalog: the session with one team server, if signed in,
@@ -217,6 +222,7 @@ impl TeamCatalog {
             state: Mutex::new(State {
                 problem: None,
                 session: None,
+                number: 0,
             }),
             known: Mutex::new(KnownRevisions::default()),
             code: Mutex::new(String::new()),
@@ -281,26 +287,51 @@ impl TeamCatalog {
         self.lock().session.is_some()
     }
 
-    /// Signs in and starts following changes. A failure is reported in the
-    /// returned status, not as an error.
+    /// Signs in and starts following changes, as [`Self::try_sign_in`]
+    /// does, and returns the status. A failure is reported in the status,
+    /// not as an error: while signed out, as its problem.
     pub fn sign_in(&self, request: SignInRequest) -> TeamStatus {
-        let outcome = sign_in(&request);
-        self.forget_known();
+        let _ = self.try_sign_in(request);
+        self.status()
+    }
+
+    /// Signs in and starts following changes. A running session is
+    /// replaced only once the new sign-in works, so a mistyped password
+    /// never ends a working session. The error is the problem, in plain
+    /// words.
+    pub fn try_sign_in(&self, request: SignInRequest) -> Result<(), String> {
+        let session = match sign_in(&request) {
+            Ok(session) => session,
+            Err(problem) => {
+                self.lock().problem = Some(problem.clone());
+                return Err(problem);
+            }
+        };
         let earlier = {
             let mut state = self.lock();
-            let earlier = state.session.take();
-            match outcome {
-                Ok(session) => {
-                    state.problem = None;
-                    state.session = Some(session);
-                }
-                Err(problem) => state.problem = Some(problem),
-            }
-            earlier
+            state.problem = None;
+            state.number += 1;
+            state.session.replace(session)
         };
         // Ended outside the lock, so status polling never waits for it.
         drop(earlier);
-        self.status()
+        self.forget_known();
+        Ok(())
+    }
+
+    /// The running session's number and the token it sends now, read
+    /// together; `None` while signed out.
+    pub fn session_token(&self) -> Option<(u64, String)> {
+        let state = self.lock();
+        let session = state.session.as_ref()?;
+        Some((state.number, session.client().token()?.to_owned()))
+    }
+
+    /// The number of the running session, which tells it apart from any
+    /// earlier or later one; `None` while signed out.
+    pub fn session_number(&self) -> Option<u64> {
+        let state = self.lock();
+        state.session.is_some().then_some(state.number)
     }
 
     pub fn sign_out(&self) -> TeamStatus {
@@ -335,12 +366,13 @@ impl TeamCatalog {
             drop(session);
             return Resumed::AlreadySignedIn;
         }
-        let token = session.client().token().unwrap_or_default().to_owned();
         state.problem = None;
+        state.number += 1;
         state.session = Some(session);
+        let number = state.number;
         drop(state);
         self.forget_known();
-        Resumed::SignedIn { token }
+        Resumed::SignedIn { session: number }
     }
 
     /// The token the session sends now, to keep for the next run; `None`
@@ -356,16 +388,16 @@ impl TeamCatalog {
     /// request ran, the answer is [`Renewed::SessionChanged`], whatever
     /// the server said.
     pub fn renew(&self) -> Renewed {
-        let Some(client) = self.lock().session.as_ref().map(|session| session.client()) else {
-            return Renewed::SessionChanged;
+        let (client, number) = {
+            let state = self.lock();
+            let Some(session) = state.session.as_ref() else {
+                return Renewed::SessionChanged;
+            };
+            (session.client(), state.number)
         };
         let answer = client.refresh_auth("users");
         let state = self.lock();
-        let Some(session) = state
-            .session
-            .as_ref()
-            .filter(|session| session.client().token() == client.token())
-        else {
+        let Some(session) = state.session.as_ref().filter(|_| state.number == number) else {
             return Renewed::SessionChanged;
         };
         match answer {
@@ -381,22 +413,14 @@ impl TeamCatalog {
 
     /// Ends the session because the team server no longer accepts its
     /// sign-in, and asks the person to sign in again. It acts only on the
-    /// sign-in that was judged: the session whose token is `judged`, or,
-    /// with `None`, a kept sign-in not carried on yet, while no session
-    /// runs. Says whether it acted.
-    pub fn sign_in_again(&self, judged: Option<&str>) -> bool {
+    /// sign-in that was judged: the session numbered `judged` (see
+    /// [`Self::session_number`]), or, with `None`, a kept sign-in not
+    /// carried on yet, while no session runs. Says whether it acted.
+    pub fn sign_in_again(&self, judged: Option<u64>) -> bool {
         let earlier = {
             let mut state = self.lock();
-            let token = state
-                .session
-                .as_ref()
-                .map(|session| session.client().token().map(str::to_owned));
-            let same = match (judged, token) {
-                (None, None) => true,
-                (Some(judged), Some(Some(token))) => judged == token,
-                _ => false,
-            };
-            if !same {
+            let running = state.session.is_some().then_some(state.number);
+            if running != judged {
                 return false;
             }
             state.problem = Some(SIGN_IN_AGAIN.into());
