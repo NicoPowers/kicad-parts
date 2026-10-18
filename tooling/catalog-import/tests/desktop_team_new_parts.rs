@@ -529,7 +529,7 @@ fn add_part_never_gives_out_an_ipn_a_csv_row_took_since_the_app_opened() {
     );
     assert_eq!(next_free, "CAP-0005-0001");
     assert!(!yours);
-    assert!(team.current_values().get("CAP-0004-0001").is_none());
+    assert!(!team.current_values().contains_key("CAP-0004-0001"));
 
     // Add part opened again offers the IPN after the row's.
     assert_eq!(next_ipn(&read()), "CAP-0005-0001");
