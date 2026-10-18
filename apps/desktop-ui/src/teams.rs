@@ -445,7 +445,7 @@ fn new_server_question(
         if not_now.get() {
             // Asked once; the answer stays one button away.
             let text = format!(
-                "The KiCad libraries for {label} stay as they were made from {made_from}, and are not updated."
+                "The app does not update the KiCad libraries for {label} until you choose the new address."
             );
             return Some(
                 view! {
@@ -460,15 +460,22 @@ fn new_server_question(
                 .into_any(),
             );
         }
-        let text = format!(
-            "The KiCad libraries for {label} were made from {made_from}. Use them for {server} instead? Only do this if the team moved to a new address."
+        // The new address has its own element, so a journey can blank out
+        // its port, which changes from run to run.
+        let (text, new_server) = (
+            format!("The KiCad libraries for {label} were made from {made_from}. Use them for "),
+            server.clone(),
         );
         let (labelled_by, question_id) = (question_id.clone(), question_id.clone());
         let (row_id, use_new_server) = (row_id.clone(), use_new_server.clone());
         Some(
             view! {
                 <div class="team-confirm team-question" role="group" aria-labelledby=labelled_by>
-                    <p id=question_id>{text}</p>
+                    <p id=question_id>
+                        {text}
+                        <span class="team-question-server">{new_server}</span>
+                        " instead? Only do this if the team moved to a new address."
+                    </p>
                     {move || problem.get().map(|message| view! { <p class="problem" role="alert">{message}</p> })}
                     <div class="team-actions">
                         <button type="button" class="team-use-new-server" on:click=use_new_server>

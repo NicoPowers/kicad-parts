@@ -4,11 +4,15 @@
 // keyboard with no sign-in. When one server stops, that team shows its
 // last-known parts marked offline while the other keeps working. Signing
 // out and removing touch one team only. Without a credential store, the
-// Teams menu says once why the app will ask again after a restart.
+// Teams menu says once why the app will ask again after a restart. KiCad
+// libraries made from another server address wait until the person, asked
+// on the team's row, says the team moved (kicad-parts-092b).
 // Sign-ins stay in the app's memory (--sign-ins), never the person's
 // credential store.
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import {
   FOOTPRINT,
@@ -21,6 +25,7 @@ import {
   selectResult,
   startTeamServer,
   teamSignIn,
+  tempDir,
   textOf,
   waitForLibraryCheck,
   waitForLiveUpdates,
@@ -265,5 +270,78 @@ describe('several teams at once', () => {
     assert.equal(await textOf(browser, '.team-sign-in .hint'), 'The app never saves your password.');
     await assertAccessible(browser, '34-teams-until-closed');
     await screenshot(browser, '34-teams-until-closed', { blankOut: ['#team-server'] });
+  });
+
+  it('asks on the team row before its KiCad libraries take a new server address', async () => {
+    // AC's libraries are on this computer already, made when the team
+    // was at another address.
+    const token = await teamSignIn(acme.url, editor);
+    const settings = await (await fetch(`${acme.url}/api/team`, { headers: { Authorization: token } })).json();
+    const dataDir = tempDir('data');
+    const folder = path.join(dataDir, 'kicad-libraries', 'AC');
+    const stateFile = path.join(folder, '.kicad-parts.json');
+    const recorded = () => JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({ team_id: settings.id, server: 'https://old.example.com', code: 'AC', updated_at_ms: 1 }),
+    );
+    await browser.deleteSession();
+    ({ browser } = await launchApp({
+      dataDir,
+      args: [`--team-server=${acme.url}`, `--team-email=${editor.email}`],
+    }));
+    await waitForText(browser, '#result-count', '178 matching parts');
+    await setMenuOpen(true);
+    await signInWithForm(acme, editor);
+    await waitForLiveUpdates(browser);
+    await setMenuOpen(true);
+    const question = '.team-question p';
+    await waitForText(
+      browser,
+      question,
+      `The KiCad libraries for AC were made from https://old.example.com. Use them for ${acme.url} instead? Only do this if the team moved to a new address.`,
+      30_000,
+    );
+    assert.equal(
+      await browser.execute(() => document.querySelector('.team-question').getAttribute('aria-labelledby')),
+      await browser.execute(() => document.querySelector('.team-question p').id),
+      'the question names its group',
+    );
+    // Nothing was written from the new address.
+    assert.equal(recorded().server, 'https://old.example.com');
+    assert.deepEqual(fs.readdirSync(folder), ['.kicad-parts.json']);
+    await waitForLibraryCheck(browser);
+    await assertAccessible(browser, '36-teams-libraries-new-address');
+    await screenshot(browser, '36-teams-libraries-new-address', {
+      blankOut: [...ADDRESSES, '.team-question-server'],
+    });
+    // Not now, from the keyboard: the libraries stay as they are, and the
+    // answer stays one button away.
+    await browser.execute(() => document.querySelector('.team-use-new-server').focus());
+    await browser.keys('Tab');
+    assert.equal(await browser.execute(() => document.activeElement?.textContent.trim()), 'Not now');
+    await browser.keys('Enter');
+    await waitForText(
+      browser,
+      '.team-question .hint',
+      'The app does not update the KiCad libraries for AC until you choose the new address.',
+    );
+    assert.equal(await browser.execute(() => document.activeElement?.textContent.trim()), 'Sign out');
+    assert.equal(recorded().server, 'https://old.example.com');
+    // Use the new address, from the keyboard: the folder records it, and
+    // the libraries are made from it.
+    await browser.execute(() => document.querySelector('.team-use-new-server').focus());
+    await browser.keys('Enter');
+    await browser.waitUntil(async () => (await browser.execute(() => document.querySelector('.team-question'))) === null, {
+      timeout: 10_000,
+      timeoutMsg: 'the question stayed after it was answered',
+    });
+    assert.equal(recorded().server, acme.url);
+    await browser.waitUntil(() => fs.existsSync(path.join(folder, 'AC-Parts.kicad_dbl')), {
+      timeout: 60_000,
+      timeoutMsg: 'the libraries were never made from the new address',
+    });
+    await setMenuOpen(false);
   });
 });
