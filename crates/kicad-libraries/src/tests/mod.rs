@@ -2,6 +2,7 @@
 
 mod layout;
 mod safety;
+mod servers;
 
 use crate::{Naming, Team};
 use catalog::pocketbase::{

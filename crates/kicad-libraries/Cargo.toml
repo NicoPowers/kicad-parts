@@ -8,6 +8,9 @@ description = "Makes KiCad libraries from the team catalog: a database library w
 
 [dependencies]
 catalog = { path = "../catalog" }
+# Compares a folder's recorded team server with the signed-in one, the
+# way sign-in writes addresses (kicad-parts-092b).
+collaboration = { path = "../collaboration" }
 kicad-integration = { path = "../kicad-integration" }
 # KiCad reads the database library through the SQLite3 ODBC driver; this
 # writes it. Already in Cargo.lock for the tests of other crates.

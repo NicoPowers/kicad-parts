@@ -77,7 +77,7 @@ fn groups(folder: &Path) -> Vec<String> {
 
 /// Every library file under `folder`, by path relative to it with `/`:
 /// the state and lock files, which say when and who, are left out.
-fn files(folder: &Path) -> BTreeMap<String, Vec<u8>> {
+pub(super) fn files(folder: &Path) -> BTreeMap<String, Vec<u8>> {
     fn walk(base: &Path, folder: &Path, found: &mut BTreeMap<String, Vec<u8>>) {
         for entry in fs::read_dir(folder).unwrap() {
             let path = entry.unwrap().path();

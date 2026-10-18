@@ -39,7 +39,7 @@ pub use files::LOCK_FILE;
 pub use names::{file_stem, revision_name, windows_refuses};
 pub use plan::{ARCHIVED_GROUP, NEWEST_SYMBOL_VERSION, Naming, OLDER_GROUP, team_code_problem};
 pub use setup::{Library, LibraryKind};
-pub use team::{FolderState, STATE_FILE, Team, read_state, team_folder, team_folders};
+pub use team::{FolderState, STATE_FILE, Team, read_state, same_server, team_folder, team_folders};
 
 use catalog::pocketbase::{CatalogReadback, StoredBlob};
 use catalog::sha256_hex;
@@ -107,6 +107,18 @@ pub enum UpdateError {
         /// This team's server, where a superuser can change its code.
         server: String,
     },
+    /// The team's folder was made from another team server, so it was not
+    /// changed. It stays that way until the person confirms that the team
+    /// moved ([`use_new_server`]): another server could claim the team's
+    /// ID and change its parts.
+    OtherServer {
+        folder: PathBuf,
+        code: String,
+        /// The server the folder records.
+        recorded_server: String,
+        /// The server the update came from.
+        server: String,
+    },
     /// The folder's path has a character the SQLite3 ODBC driver's
     /// connection string cannot hold.
     Folder(PathBuf),
@@ -152,6 +164,14 @@ impl UpdateError {
             } => format!(
                 "Two teams on this computer use the code {code}, and KiCad can't hold both. The folder {} holds the {code} libraries of the team on {other_server}, so it was not changed. To fix this, a superuser of {server} changes this team's code before any board uses it. Then sign in again.",
                 folder.display()
+            ),
+            Self::OtherServer {
+                code,
+                recorded_server,
+                server,
+                ..
+            } => format!(
+                "The KiCad libraries for {code} were made from {recorded_server}, so they were not changed from {server}. If the team moved to the new address, choose Use the new address in the Teams menu."
             ),
             Self::Folder(folder) => format!(
                 "The folder {} has a ; or a brace in its path, which the SQLite3 ODBC driver cannot read. Use a data folder without them.",
@@ -220,16 +240,26 @@ pub fn update(
     if !folder_is_usable(folder) {
         return Err(UpdateError::Folder(folder.to_path_buf()));
     }
-    let other_team = |state: FolderState| UpdateError::OtherTeam {
-        folder: folder.to_path_buf(),
-        code: naming.code().to_owned(),
-        other_server: state.server,
-        server: team.server.clone(),
+    let refused = |state: FolderState, refusal: team::Refusal| match refusal {
+        team::Refusal::OtherTeam => UpdateError::OtherTeam {
+            folder: folder.to_path_buf(),
+            code: naming.code().to_owned(),
+            other_server: state.server,
+            server: team.server.clone(),
+        },
+        team::Refusal::OtherServer => UpdateError::OtherServer {
+            folder: folder.to_path_buf(),
+            code: naming.code().to_owned(),
+            recorded_server: state.server,
+            server: team.server.clone(),
+        },
     };
-    // Checked before the lock too, so another team's folder does not even
-    // get a lock file.
-    if let Some(state) = read_state(folder).filter(|state| state.team_id != team.id) {
-        return Err(other_team(state));
+    // Checked before the lock too, so a refused folder does not even get a
+    // lock file.
+    if let Some(state) = read_state(folder) {
+        if let Some(refusal) = state.refusal(team) {
+            return Err(refused(state, refusal));
+        }
     }
     std::fs::create_dir_all(folder)
         .map_err(|error| UpdateError::Io(folder.to_path_buf(), error))?;
@@ -237,11 +267,16 @@ pub fn update(
         .map_err(|error| UpdateError::Io(folder.join(LOCK_FILE), error))?
         .ok_or(UpdateError::Busy)?;
     let mut state = match read_state(folder) {
-        Some(state) if state.team_id != team.id => return Err(other_team(state)),
-        Some(state) => state,
+        Some(state) => match state.refusal(team) {
+            Some(refusal) => return Err(refused(state, refusal)),
+            None => state,
+        },
         None => FolderState::default(),
     };
     state.team_id.clone_from(&team.id);
+    // Records the server in a folder made before servers were recorded
+    // (see `FolderState::refusal`), and writes an older address the way
+    // sign-in writes it now.
     state.server.clone_from(&team.server);
     state.code = naming.code().to_owned();
     team::write_state(folder, &state)?;
@@ -327,6 +362,33 @@ pub fn update(
         }
     }
     Ok(outcome)
+}
+
+/// The person confirmed that `team` moved to `team.server`: its folder
+/// records the new server and takes updates from it again. A folder of
+/// another team is refused, as in [`update`]. A folder that records
+/// nothing yet is left alone; the next update records the server.
+pub fn use_new_server(root: &Path, team: &Team) -> Result<(), UpdateError> {
+    let folder = &team_folder(root, team.naming.code());
+    let Some(mut state) = read_state(folder) else {
+        return Ok(());
+    };
+    let _lock = FolderLock::take(folder)
+        .map_err(|error| UpdateError::Io(folder.join(LOCK_FILE), error))?
+        .ok_or(UpdateError::Busy)?;
+    if let Some(latest) = read_state(folder) {
+        state = latest;
+    }
+    if state.team_id != team.id {
+        return Err(UpdateError::OtherTeam {
+            folder: folder.to_path_buf(),
+            code: team.naming.code().to_owned(),
+            other_server: state.server,
+            server: team.server.clone(),
+        });
+    }
+    state.server.clone_from(&team.server);
+    team::write_state(folder, &state)
 }
 
 /// The files in the `symbols` and `footprints` folders that `plan` does

@@ -2521,6 +2521,7 @@ name = "kicad-libraries"
 version = "0.1.0"
 dependencies = [
  "catalog",
+ "collaboration",
  "kicad-integration",
  "rusqlite",
  "serde_json",

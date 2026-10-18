@@ -1,10 +1,17 @@
 //! Each team's libraries live in a folder of their own,
-//! `kicad-libraries/<CODE>/`, which records the team it belongs to. A
-//! person may work for several teams, each on its own team server; an
-//! update writes only the signed-in team's folder and never one that
-//! belongs to another team.
+//! `kicad-libraries/<CODE>/`, which records the team it belongs to and
+//! the team server it was made from. A person may work for several teams,
+//! each on its own team server; an update writes only the signed-in team's
+//! folder and never one that belongs to another team.
+//!
+//! The team's ID alone is not enough: every member of a team knows it, so
+//! any server the person signs in to could claim it. So a folder takes
+//! writes only from the server it records (kicad-parts-092b). If the team
+//! really moved, the person says so once, and the folder records the new
+//! address.
 
 use crate::plan::Naming;
+use collaboration::ServerAddress;
 use std::path::{Path, PathBuf};
 
 /// The file in a team's folder that says which team it belongs to and
@@ -17,7 +24,9 @@ pub struct Team {
     /// The ID of the team settings record on its server, which stays the
     /// same when the server's address changes.
     pub id: String,
-    /// The server's address, to name it to people.
+    /// The server's address, as sign-in writes it
+    /// (`ServerAddress::for_sign_in(..).url()`). The folder takes writes
+    /// only from the server it records.
     pub server: String,
     pub naming: Naming,
 }
@@ -26,6 +35,8 @@ pub struct Team {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FolderState {
     pub team_id: String,
+    /// The team server the libraries were made from. Blank in a folder
+    /// made before addresses were recorded.
     pub server: String,
     pub code: String,
     /// When the last update finished (milliseconds since 1970, UTC).
@@ -35,7 +46,33 @@ pub struct FolderState {
     pub layout_changed_at_ms: Option<u64>,
 }
 
+/// Why a folder refuses an update for a team.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Refusal {
+    /// The folder belongs to another team.
+    OtherTeam,
+    /// The folder belongs to the team, but was made from another server.
+    /// It waits until the person says the team moved.
+    OtherServer,
+}
+
 impl FolderState {
+    /// Why this folder must not take an update for `team`, if it must not.
+    ///
+    /// A folder with no recorded server, made before servers were
+    /// recorded, takes the update and records the server then. That trusts
+    /// the first server that claims the team's ID, once: the same trust
+    /// every update gave before, and from then on only that server writes.
+    pub(crate) fn refusal(&self, team: &Team) -> Option<Refusal> {
+        if self.team_id != team.id {
+            Some(Refusal::OtherTeam)
+        } else if !self.server.is_empty() && !same_server(&self.server, &team.server) {
+            Some(Refusal::OtherServer)
+        } else {
+            None
+        }
+    }
+
     fn to_json(&self) -> String {
         let state = serde_json::json!({
             "team_id": self.team_id,
@@ -93,4 +130,17 @@ pub fn team_folders(root: &Path) -> Vec<(PathBuf, FolderState)> {
 /// any: KiCad would refuse two libraries with the same nickname.
 pub fn code_used_by_other_team(root: &Path, code: &str, team_id: &str) -> Option<FolderState> {
     read_state(&team_folder(root, code)).filter(|state| state.team_id != team_id)
+}
+
+/// Whether `recorded`, a folder's team server, is the server at `server`.
+/// Folders made before sign-in wrote every address one way may hold one
+/// with capitals or the usual port, such as `https://Parts.example.com:443`,
+/// so both are compared as sign-in writes them now.
+pub fn same_server(recorded: &str, server: &str) -> bool {
+    let as_sign_in_writes = |address: &str| {
+        ServerAddress::for_sign_in(address)
+            .map(|address| address.url())
+            .unwrap_or_else(|_| address.to_owned())
+    };
+    as_sign_in_writes(recorded) == as_sign_in_writes(server)
 }
