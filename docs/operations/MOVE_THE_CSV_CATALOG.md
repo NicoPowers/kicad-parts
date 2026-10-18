@@ -68,11 +68,11 @@ While your team moves from the CSV catalog to a team catalog, people can add par
 
 The app only sees the CSV files in your own folder. It cannot see a row that is still on someone else's computer, not yet pushed or pulled.
 
-If two parts get one IPN anyway, the import finds it. A CSV row is a different part when its IPN belongs to a part added in the app and the row names none of that part's MPNs. A row with no MPN counts as a different part too, because nothing shows it is the same part. The import then:
+If two parts get one IPN anyway, the import finds it. A CSV row is a different part when its IPN belongs to a part added in the app and the row names none of that part's MPNs. When the row or the part has no MPN, the row counts as a different part too, because nothing shows they are the same part. Then:
 
-- leaves the app's part exactly as it is;
-- records the import problem `ipn-given-to-another-part`, which keeps the whole row and says which part has the IPN;
-- shows "A CSV row has this IPN for another part" on that part in the app.
+- the import leaves the app's part exactly as it is;
+- the import records the import problem `ipn-given-to-another-part`, which keeps the whole row and says which part has the IPN;
+- the app shows "A CSV row has this IPN for another part" on that part.
 
 No CSV review can take such a row. **Give the CSV row another IPN**, commit, and import again. If the row and the part really are one part, give them the same MPN instead.
 

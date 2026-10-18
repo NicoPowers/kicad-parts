@@ -779,10 +779,6 @@ impl TeamCatalog {
             Some(format!(
                 "A part in this category has an IPN starting with {prefix}-."
             ))
-        } else if let Some(file) = csv.file_of(ipn) {
-            Some(format!(
-                "{ipn} is already in {file}. An IPN is never reused."
-            ))
         } else if self
             .current_parts()
             .iter()
@@ -790,6 +786,11 @@ impl TeamCatalog {
         {
             Some(format!(
                 "{ipn} is already in the Catalog. An IPN is never reused."
+            ))
+        } else if let Some(file) = csv.file_of(ipn) {
+            // A CSV row the team catalog has not imported yet.
+            Some(format!(
+                "{ipn} is already in {file}. An IPN is never reused."
             ))
         } else {
             None
