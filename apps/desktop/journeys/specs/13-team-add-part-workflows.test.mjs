@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import {
+  FOOTPRINT,
   SYMBOL,
   assertAccessible,
   capture,
@@ -22,6 +23,7 @@ import {
   textOf,
   waitForLibraries,
   waitForLiveUpdates,
+  waitForPreviewImages,
   waitForText,
 } from '../harness.mjs';
 
@@ -201,6 +203,11 @@ describe('team catalog: Add part in real workflows', () => {
   it('fits a 960 px window with long file and symbol names', async () => {
     await (await browser.$('#add-files')).addValue(download(files));
     await waitForText(browser, '#add-guess', /^Best guess: Capacitors/);
+    // Check the layout people see once kicad-cli has drawn both files. The
+    // drawings are the tallest part of the left column. Before they arrive,
+    // a section's size says nothing about whether they fit (kicad-parts-da76).
+    await waitForPreviewImages(browser, SYMBOL);
+    await waitForPreviewImages(browser, FOOTPRINT);
     const outer = await browser.getWindowSize();
     const inner = await browser.execute(() => window.innerWidth);
     await browser.setWindowSize(960 + (outer.width - inner), outer.height);
@@ -215,16 +222,22 @@ describe('team catalog: Add part in real workflows', () => {
         .filter((el) => el.offsetParent !== null)
         .filter((el) => el.getBoundingClientRect().right > window.innerWidth + 1)
         .map((el) => el.id || el.textContent.trim());
+      // A drawing taller than its section spills over the next one: the
+      // symbol over the Footprint heading, the footprint over the form.
+      const previewsSpillOver = [...document.querySelectorAll('.part-previews .preview')]
+        .filter((section) => section.scrollHeight > section.clientHeight + 1)
+        .map((section) => section.getAttribute('aria-labelledby'));
       return {
         pageScrollsSideways: wide(document.scrollingElement),
         formScrollsSideways: wide(form),
         offRight,
+        previewsSpillOver,
       };
     });
     record({ event: 'add-part-960', layout });
     fs.mkdirSync(screenshotsDir, { recursive: true });
     await capture(browser, path.join(screenshotsDir, '13-add-part-960-for-review.png'));
-    assert.deepEqual(layout, { pageScrollsSideways: false, formScrollsSideways: false, offRight: [] });
+    assert.deepEqual(layout, { pageScrollsSideways: false, formScrollsSideways: false, offRight: [], previewsSpillOver: [] });
     await assertAccessible(browser, '13-add-part-960');
     await browser.setWindowSize(outer.width, outer.height);
     await browser.waitUntil(async () => (await browser.execute(() => window.innerWidth)) === 1280, {
