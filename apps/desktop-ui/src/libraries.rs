@@ -10,7 +10,7 @@
 //! Edit part and Add part (kicad-parts-bc6f) open it with [`BrowseFor`]:
 //! one role, the current item selected, and a callback for the choice.
 
-use crate::team::focus_later;
+use crate::focus::focus_later;
 use crate::{Load, PreviewSection, backend, cad_reference, counted, grouped, into_load};
 use desktop_contract::{
     LibrariesView, LibraryCheckView, LibraryEntry, LibraryFilters, LibraryGroup, LibraryItemDetail,

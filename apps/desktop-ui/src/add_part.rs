@@ -22,8 +22,9 @@ use crate::cad_choice::{
     ChooseButton, CopyModels, Drawing, LibrariesOpener, LibrarySelect, draw_item, pick_problems,
     use_words,
 };
+use crate::focus::focus_later;
 use crate::libraries::BrowseFor;
-use crate::team::{FilePreview, MAX_FILE_BYTES, RetrySlot, base64, focus_later, shown};
+use crate::team::{FilePreview, MAX_FILE_BYTES, RetrySlot, base64, shown};
 use desktop_contract::{
     DownloadedFile, Field, FileKind, FilePreviewRequest, LibraryGroup, LibraryKey,
     ManufacturerPart, PickUse, PreviewKind, PreviewRequest, PublishResult, TeamDownload,

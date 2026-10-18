@@ -5,7 +5,7 @@
 //! the Catalog yet can start Add part (kicad-parts-37a7).
 
 use crate::cad_reference;
-use crate::team::focus_later;
+use crate::focus::focus_later;
 use desktop_contract::{LibraryCheckGroup, LibraryCheckItem, LibraryCheckView, TeamLibraryChoice};
 use leptos::prelude::*;
 

@@ -8,8 +8,11 @@
 //! back to the moved row, or to the row that took the removed row's place.
 //! It never falls to the top of the page.
 
+use crate::SEARCH_BOX;
+use crate::focus::{Scrolling, focus_found_later};
+use crate::part_list::{RESULTS, section_id};
 use leptos::prelude::*;
-use leptos::web_sys::{Element, FocusEvent, HtmlElement};
+use leptos::web_sys::{Element, FocusEvent};
 use wasm_bindgen::JsCast;
 
 /// What has keyboard focus in the part list.
@@ -73,7 +76,7 @@ impl ListFocus {
             let in_list = event
                 .target()
                 .and_then(|target| target.dyn_into::<Element>().ok())
-                .and_then(|element| element.closest(".results").ok().flatten())
+                .and_then(|element| element.closest(RESULTS).ok().flatten())
                 .is_some();
             if !in_list {
                 focus.focused.set_value(None);
@@ -99,7 +102,7 @@ impl ListFocus {
         else {
             return;
         };
-        if to.closest(".results").ok().flatten().is_none() {
+        if to.closest(RESULTS).ok().flatten().is_none() {
             self.focused.set_value(None);
         }
     }
@@ -142,11 +145,14 @@ impl ListFocus {
             }),
             None => {
                 self.focused.set_value(None);
-                request_animation_frame(|| {
-                    if focus_is_lost() {
-                        focus_quietly(element_by_selector("#part-search"));
-                    }
-                });
+                focus_found_later(
+                    || {
+                        focus_is_lost()
+                            .then(|| document().get_element_by_id(SEARCH_BOX))
+                            .flatten()
+                    },
+                    Scrolling::Keep,
+                );
             }
         }
     }
@@ -155,11 +161,10 @@ impl ListFocus {
     /// dropped; focus the person put somewhere else stays there.
     fn restore_later(&self, target: Focused) {
         self.focused.set_value(Some(target.clone()));
-        request_animation_frame(move || {
-            if focus_is_lost() {
-                focus_quietly(element_for(&target));
-            }
-        });
+        focus_found_later(
+            move || focus_is_lost().then(|| element_for(&target)).flatten(),
+            Scrolling::Keep,
+        );
     }
 }
 
@@ -177,46 +182,37 @@ fn focus_is_lost() -> bool {
 
 /// The element drawn for `focused`, if it is drawn.
 fn element_for(focused: &Focused) -> Option<Element> {
-    match focused {
-        Focused::Section { category } => element_by_selector(&format!(
-            ".results .section-toggle[aria-controls=\"{}\"]",
-            crate::part_list::section_id(category)
-        )),
-        Focused::Row { category, ipn } => {
-            let list = document().get_element_by_id(&crate::part_list::section_id(category))?;
-            // Each <li> holds one row button. The IPN is compared as data,
-            // not put in a selector, so no IPN can break the selector.
-            let mut item = list.first_element_child();
-            while let Some(li) = item {
-                if let Some(row) = li.first_element_child() {
-                    if row.get_attribute("data-ipn").as_deref() == Some(ipn.as_str()) {
-                        return Some(row);
-                    }
-                }
-                item = li.next_element_sibling();
-            }
-            None
-        }
-    }
-}
-
-fn element_by_selector(selector: &str) -> Option<Element> {
-    document().query_selector(selector).ok().flatten()
-}
-
-/// Focuses `element` without scrolling, so the list stays where the person
-/// left it.
-fn focus_quietly(element: Option<Element>) {
-    let Some(element) = element.and_then(|element| element.dyn_into::<HtmlElement>().ok()) else {
-        return;
+    let selector = match focused {
+        Focused::Section { category } => format!(
+            "{RESULTS} .section-toggle[aria-controls={}]",
+            css_string(&section_id(category))
+        ),
+        Focused::Row { category, ipn } => format!(
+            "#{} button.result[data-ipn={}]",
+            section_id(category),
+            css_string(ipn)
+        ),
     };
-    let options = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&options, &"preventScroll".into(), &true.into());
-    if let Ok(focus) = js_sys::Reflect::get(&element, &"focus".into()) {
-        if let Some(focus) = focus.dyn_ref::<js_sys::Function>() {
-            let _ = focus.call1(&element, &options);
+    document().query_selector(&selector).ok().flatten()
+}
+
+/// `text` as a quoted CSS string, so any IPN is safe in a selector.
+fn css_string(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for c in text.chars() {
+        match c {
+            '"' | '\\' => {
+                quoted.push('\\');
+                quoted.push(c);
+            }
+            // Control characters are written as hex escapes, ended by a space.
+            c if c.is_control() => quoted.push_str(&format!("\\{:x} ", u32::from(c))),
+            c => quoted.push(c),
         }
     }
+    quoted.push('"');
+    quoted
 }
 
 #[cfg(test)]
@@ -225,6 +221,13 @@ mod tests {
 
     fn list(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn any_ipn_is_quoted_safely_for_a_selector() {
+        assert_eq!(css_string("RES-0000-1000"), "\"RES-0000-1000\"");
+        assert_eq!(css_string(r#"A"B\C"#), r#""A\"B\\C""#);
+        assert_eq!(css_string("A\nB"), r#""A\a B""#);
     }
 
     #[test]

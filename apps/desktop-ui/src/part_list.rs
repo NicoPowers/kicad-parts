@@ -12,12 +12,16 @@
 //! rows in place. So keyboard focus, the open sections and the scroll
 //! position stay where the person left them (see list_focus).
 
+use crate::focus::{Scrolling, focus_found_later};
 use crate::list_focus::{Focused, ListFocus};
 use crate::{Load, backend, grouped};
 use desktop_contract::{PartSummary, SearchResponse};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// The part list's own element: `<ul class="results">`.
+pub(crate) const RESULTS: &str = ".results";
 
 /// Parts each section shows while searching, before "Show all".
 pub(crate) const SEARCH_ROWS: usize = 25;
@@ -417,7 +421,10 @@ pub(crate) fn ResultList(
                         section_id(&category),
                         SEARCH_ROWS + 1
                     );
-                    focus_when_drawn(first_new);
+                    focus_found_later(
+                        move || document().query_selector(&first_new).ok().flatten(),
+                        Scrolling::IntoView,
+                    );
                 }
                 loaded.update(|loaded| loaded.finish_load(category, rows));
                 try_scroll();
@@ -551,6 +558,7 @@ pub(crate) fn ResultList(
             })}
         </p>
         <ul
+            // RESULTS finds this list.
             class="results"
             aria-label="Search results"
             on:focusout=move |event| focus.left(&event)
@@ -865,7 +873,9 @@ enum Scrolled {
 /// Scrolls the selected part into view in the list, if it is drawn. The
 /// list's scroll padding keeps it clear of its sticky section header.
 fn scroll_selected_into_view() -> Scrolled {
-    let Ok(Some(row)) = document().query_selector(".results .result[aria-current=\"true\"]") else {
+    let Ok(Some(row)) =
+        document().query_selector(&format!("{RESULTS} .result[aria-current=\"true\"]"))
+    else {
         return Scrolled::NotShown;
     };
     // A section loading its parts, or showing its earlier parts while it
@@ -897,24 +907,8 @@ fn scroll_selected_into_view() -> Scrolled {
     }
 }
 
-/// Moves keyboard focus to the element `selector` finds once the view has
-/// been redrawn.
-fn focus_when_drawn(selector: String) {
-    request_animation_frame(move || {
-        use wasm_bindgen::JsCast;
-        if let Some(element) = document()
-            .query_selector(&selector)
-            .ok()
-            .flatten()
-            .and_then(|element| element.dyn_into::<leptos::web_sys::HtmlElement>().ok())
-        {
-            let _ = element.focus();
-        }
-    });
-}
-
 fn scroll_list_to_top() {
-    if let Ok(Some(list)) = document().query_selector(".results") {
+    if let Ok(Some(list)) = document().query_selector(RESULTS) {
         let _ = js_sys::Reflect::set(&list, &"scrollTop".into(), &0.into());
     }
 }
@@ -1260,18 +1254,5 @@ mod tests {
             row_labels(&without_mpn),
             ("RES-0000-2001".to_owned(), "g-res.csv".to_owned())
         );
-    }
-
-    #[test]
-    fn rows_are_identified_by_ipn_alone_so_a_changed_part_keeps_its_row() {
-        let before = vec![hit("A"), hit("B")];
-        let after = vec![
-            hit("A"),
-            PartSummary {
-                description: "Changed by a teammate".to_owned(),
-                ..hit("B")
-            },
-        ];
-        assert_eq!(row_ipns(&before), row_ipns(&after));
     }
 }

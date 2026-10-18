@@ -7,6 +7,7 @@ mod add_part;
 mod backend;
 mod cad_choice;
 mod edit_cad;
+mod focus;
 mod kicad_libraries;
 mod libraries;
 mod library_check;
@@ -21,6 +22,7 @@ use desktop_contract::{
     PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet, TeamPart,
     TeamSession, TeamStatus, unit_label,
 };
+use focus::focus_later;
 use kicad_libraries::KicadLibrariesSection;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -28,8 +30,11 @@ use libraries::{BrowseFor, BrowserActions, LibrariesDialog};
 use library_check::{LibraryCheckLine, LibraryCheckPanel};
 use part_list::{ResultList, SEARCH_ROWS, Searched};
 use std::time::Duration;
-use team::{Notice, TeamBadge, TeamColumn, TeamUi, focus_later};
+use team::{Notice, TeamBadge, TeamColumn, TeamUi};
 use viewer::{CloseUp, CloseUpDialog, Picture, Viewer};
+
+/// The ID of the search box above the part list.
+pub(crate) const SEARCH_BOX: &str = "part-search";
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(120);
 /// How often the UI asks whether the team catalog has new Changes. The app
@@ -282,7 +287,7 @@ fn App() -> impl IntoView {
             <main class="workspace">
                 <section class="search-pane" aria-label="Part search" data-library-check=check_state>
                     <div class="search-head">
-                        <label class="search-label" for="part-search">
+                        <label class="search-label" for=SEARCH_BOX>
                             "Search parts"
                         </label>
                         {move || can_add.get().then(|| view! {
@@ -300,7 +305,7 @@ fn App() -> impl IntoView {
                         })}
                     </div>
                     <input
-                        id="part-search"
+                        id=SEARCH_BOX
                         class="search-input"
                         type="search"
                         autocomplete="off"
@@ -319,7 +324,7 @@ fn App() -> impl IntoView {
                                 class="link-button"
                                 on:click=move |_| {
                                     uses.set(None);
-                                    team::focus_later("part-search");
+                                    focus_later(SEARCH_BOX);
                                 }
                             >
                                 "Show all parts"
@@ -359,7 +364,7 @@ fn App() -> impl IntoView {
                         show_parts: Callback::new(move |reference: String| {
                             query.set(String::new());
                             uses.set(Some(reference));
-                            team::focus_later("part-search");
+                            focus_later(SEARCH_BOX);
                         }),
                         open_part: Callback::new(move |ipn: String| {
                             checking.set(false);

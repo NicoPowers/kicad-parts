@@ -11,6 +11,7 @@
 
 use crate::backend;
 use crate::edit_cad::CadFields;
+use crate::focus::focus_later;
 use crate::viewer::{CloseUp, CloseUpDialog, Picture};
 use desktop_contract::{
     CsvChangeRow, CsvChanges, DetailChange, Field, FileKind, HistoryEntry, LiveUpdates,
@@ -2216,21 +2217,6 @@ fn kind_words(cad: bool) -> &'static str {
     } else {
         "part details"
     }
-}
-
-/// Moves keyboard focus to the element with `id` once the view has been
-/// redrawn.
-pub(crate) fn focus_later(id: &str) {
-    let id = id.to_owned();
-    request_animation_frame(move || {
-        use wasm_bindgen::JsCast;
-        if let Some(element) = document()
-            .get_element_by_id(&id)
-            .and_then(|element| element.dyn_into::<leptos::web_sys::HtmlElement>().ok())
-        {
-            let _ = element.focus();
-        }
-    });
 }
 
 fn save_archive(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamArchiveRequest) {

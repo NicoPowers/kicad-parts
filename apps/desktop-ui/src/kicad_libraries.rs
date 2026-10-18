@@ -423,7 +423,7 @@ fn TeamCodeChoice(status: RwSignal<Option<KicadLibrariesStatus>>) -> impl IntoVi
                     None => {
                         problem.set(None);
                         confirming.set(Some((code, found.warning)));
-                        crate::team::focus_later("team-code-confirm");
+                        crate::focus::focus_later("team-code-confirm");
                     }
                 },
                 Err(why) => problem.set(Some(why)),

@@ -705,7 +705,7 @@ fn RowView(
             0 | 1 => format!("edit-cad-{index}-choose"),
             at => format!("edit-cad-{index}-{at}-choose"),
         };
-        crate::team::focus_later(&next);
+        crate::focus::focus_later(&next);
     };
     let file_input = {
         let ipn = ipn.clone();
