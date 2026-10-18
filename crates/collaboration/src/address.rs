@@ -109,10 +109,14 @@ impl ServerAddress {
             Some(_) => return Err(AddressRefusal::UnknownScheme),
             None => !is_loopback(&host),
         };
+        // One server, one address: the host without capitals, and no port
+        // when it is the scheme's usual one. So https://Parts.example.com
+        // and https://parts.example.com:443 are the same team.
+        let usual_port = if secure { 443 } else { 80 };
         let address = Self {
             secure,
-            host,
-            port,
+            host: host.to_ascii_lowercase(),
+            port: port.filter(|port| *port != usual_port),
             path,
         };
         address.may_receive_password()?;
@@ -297,10 +301,36 @@ mod tests {
                 "https://team.example.com:8443",
             ),
             ("https://127.0.0.1:8090", "https://127.0.0.1:8090"),
-            ("https://[2001:db8::1]:443", "https://[2001:db8::1]:443"),
+            ("https://[2001:db8::1]:8443", "https://[2001:db8::1]:8443"),
         ] {
             assert_eq!(sign_in_url(typed).as_deref(), Ok(url), "{typed}");
         }
+    }
+
+    #[test]
+    fn one_server_typed_two_ways_is_one_address() {
+        for (typed, url) in [
+            ("https://Parts.Example.com", "https://parts.example.com"),
+            ("https://parts.example.com:443", "https://parts.example.com"),
+            (
+                "HTTPS://PARTS.example.com:443/Acme/",
+                "https://parts.example.com/Acme",
+            ),
+            ("https://[2001:DB8::1]:443", "https://[2001:db8::1]"),
+            ("http://LocalHost:80", "http://localhost"),
+            ("http://127.0.0.1:80/acme", "http://127.0.0.1/acme"),
+        ] {
+            assert_eq!(sign_in_url(typed).as_deref(), Ok(url), "{typed}");
+        }
+        // A port that is not the scheme's usual one stays.
+        assert_eq!(
+            sign_in_url("https://parts.example.com:80").as_deref(),
+            Ok("https://parts.example.com:80")
+        );
+        assert_eq!(
+            sign_in_url("http://localhost:443").as_deref(),
+            Ok("http://localhost:443")
+        );
     }
 
     #[test]
@@ -335,7 +365,7 @@ mod tests {
             "http://127.0.0.1:8090",
             "http://127.1.2.3:8090",
             "http://localhost:8090",
-            "http://LocalHost",
+            "http://localhost",
             "http://[::1]:8090",
         ] {
             assert_eq!(sign_in_url(typed).as_deref(), Ok(typed), "{typed}");
