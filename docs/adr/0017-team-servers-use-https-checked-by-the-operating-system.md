@@ -23,5 +23,6 @@ Plain `http://` stays for a server on this computer only, such as a local test s
 - Tests never change the operating system's certificate store. The `test-trust` feature adds a certificate authority made at test time (`crates/collaboration/tests/https.rs`). The app never turns it on.
 - A reverse proxy in front of PocketBase must pass `/api/realtime` through without buffering, or live updates arrive late.
 - A live-updates stream silent for 6 minutes counts as gone, and the app reconnects and catches up. PocketBase closes an idle stream after 5 minutes, so a longer silence means the network went away.
+- ADR 0018 keeps each team's renewable sign-in in the system's password store, so the session no longer lives in memory only. A kept token is never sent over plain `http://` to another computer either.
 
 Mulch records: mx-b959cf (supersedes mx-8ffc3d), mx-5a94dc, mx-a42231.

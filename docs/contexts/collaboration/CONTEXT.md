@@ -32,6 +32,14 @@ _Avoid_: read-only user, guest
 
 ### The team
 
+**Team server**:
+The PocketBase server one team shares. A person may work for several teams, one server each, and stays signed in to all of them at once. The catalog view shows one team at a time.
+_Avoid_: backend, instance, workspace, account
+
+**Sign-in**:
+What lets a person use a team server without typing the password each time. The app keeps it in the computer's password store, never the password itself. Signing out forgets it.
+_Avoid_: session, token, credentials, login
+
 **Team code**:
 Two or three capital letters or digits, such as `MA`, that name a team's KiCad libraries: `MA-Parts`, `MA-Resistor_SMD`. It belongs to the team, not to a person, so every member gets the same names. Boards save those names, so the code is chosen once and never changes. Until roles exist, any member who can edit the Catalog chooses it.
 _Avoid_: prefix, team ID, client code

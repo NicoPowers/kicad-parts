@@ -88,7 +88,10 @@ The app never changes a team code, because boards save the library names it make
 
 ## How signing in works
 
-- The app saves only the server address and your email (in `team.json` in its settings folder). It never saves your password or the sign-in session; after a restart you sign in again.
+- You can be signed in to several team servers at once, one per client. Open the team menu at the top right and choose **Add a team** to sign in to another; the first stays signed in. With two or more teams signed in, the **Team** list beside the menu chooses which team's parts you see, at once and with no sign-in. Each team's KiCad libraries stay up to date at the same time, each in its own folder.
+- The app saves each team's server address and your email there (in `team.json` in its settings folder). It never saves your password. It keeps each team's renewable sign-in in your system's password store: Windows Credential Manager, the macOS Keychain, or GNOME Keyring or KWallet on Linux. So after a restart you are still signed in to every team. **Sign out** forgets that team's sign-in; **Remove** also takes the team off the list.
+- If a team server cannot be reached, its team shows as offline and the app keeps trying; the other teams carry on. If the server no longer accepts your sign-in, for example after your password changed, only that team asks for your password again.
+- On a computer with no password store the app can use, you stay signed in only until the app closes, and the team menu says so.
 - To sign in to a team server on the internet, type its `https://` address, such as `https://team.example.com`. If you leave out `https://`, the app adds it.
 - Several team servers can share one name, each under its own path, such as `https://parts.example.com/acme`. The proxy in front of them takes the path off before passing each request on. A name for each client, such as `https://acme.parts.example.com`, works too. Type the address only: a link to the admin page (`/_/`) or to `/api/...` is refused.
 - A plain `http://` address works only for a server on this computer (`localhost`, `127.0.0.1` or `[::1]`), such as the one this guide starts. Any other `http://` address is refused, because it would send your password unencrypted. An address on this computer without `http://` or `https://` gets `http://`.
