@@ -92,7 +92,11 @@
 //! uses a symbol, footprint or 3D model whose CSV file changed while its
 //! current revision was made in the app
 //! (`csv-cad-differs-from-edited-cad-item`, one per symbol or footprint):
-//! an import never replaces that. Its other columns are checked as usual. A CSV review (someone taking some of the
+//! an import never replaces that. Its other columns are checked as usual.
+//! A row whose IPN belongs to a part added in the app, but that names none
+//! of its MPNs, is a different part (`ipn-given-to-another-part`): that
+//! problem keeps the whole row and its substitutes.csv rows, and the run
+//! does not list the part. A CSV review (someone taking some of the
 //! CSV's values, or keeping theirs) does not change this: while the row
 //! still differs, each import records the problem again, and the review only
 //! stops the app from asking about the same CSV values twice.
@@ -110,8 +114,8 @@ use catalog::csv_import::{
     SubstitutesCsvColumn, parse_csv, route_column, route_substitutes_csv_column,
 };
 use catalog::pocketbase::{
-    CatalogReadback, ImportRun, StoredAuditEntry, StoredImportProblem, StoredPartDetails,
-    StoredPartRevision,
+    CatalogReadback, IPN_GIVEN_TO_ANOTHER_PART, ImportRun, StoredAuditEntry, StoredImportProblem,
+    StoredPartDetails, StoredPartRevision,
 };
 use catalog::{
     CadItemDetails, CadItemId, CadItemRevisionId, CadReference, CadReferenceRole,
@@ -528,6 +532,9 @@ impl<'a> Reporter<'a> {
         let mut cad_scope: BTreeMap<String, PartRevision> = BTreeMap::new();
         let mut kept_by_problem: BTreeMap<String, Value> = BTreeMap::new();
         let mut part_rows = BTreeSet::new();
+        // IPNs whose row is a different part from the one added in the app
+        // with that IPN, kept whole by an import problem.
+        let mut rows_for_other_parts = BTreeSet::new();
         let mut rows_with_main_part: BTreeMap<String, bool> = BTreeMap::new();
 
         for (index, row) in document.rows.iter().enumerate() {
@@ -557,6 +564,35 @@ impl<'a> Reporter<'a> {
                     }
                     fields.account(row_number, &ipn, column, IMPORT_PROBLEM, value, stored);
                 }
+                continue;
+            }
+
+            // A row for a different part that got the same IPN as a part
+            // added in the app: the team server kept the row whole and
+            // changed nothing (kicad-parts-3b72). Its substitutes.csv rows
+            // are in the same problem.
+            if let Some((problem, detail)) = self.find_problem(|problem, detail| {
+                problem.code == IPN_GIVEN_TO_ANOTHER_PART
+                    && problem.subject == ipn
+                    && problem.path == source_path
+                    && detail["row_number"].as_u64() == Some(row_number as u64)
+                    && detail["raw_record"].as_str() == Some(raw.as_str())
+            }) {
+                explained.insert(problem.id.clone());
+                self.use_for_row(problem);
+                // The problem holds the row's exact bytes, checked above.
+                for (column, value) in headers.iter().zip(row) {
+                    fields.account(
+                        row_number,
+                        &ipn,
+                        column,
+                        IMPORT_PROBLEM,
+                        value,
+                        Some(value.clone()),
+                    );
+                }
+                kept_by_problem.insert(ipn.clone(), detail);
+                rows_for_other_parts.insert(ipn.clone());
                 continue;
             }
 
@@ -838,7 +874,11 @@ impl<'a> Reporter<'a> {
             .cloned()
             .collect();
         let category_account = self.check_category(&table, &part_detail_columns);
-        let removed_parts = self.removed_parts(&source_path, &part_rows, &mut explained);
+        // A row for another part still has the IPN, so the part an earlier
+        // run listed under it is not gone from the file.
+        let ipns_with_rows: BTreeSet<String> =
+            part_rows.union(&rows_for_other_parts).cloned().collect();
+        let removed_parts = self.removed_parts(&source_path, &ipns_with_rows, &mut explained);
         if csv.rebuilt_byte_sha256 != document.byte_sha256 {
             self.problem(format!(
                 "{source_path} as the team catalog recorded it is not the file in the CSV catalog fixture (SHA-256 {} instead of {})",
@@ -1492,12 +1532,12 @@ impl<'a> Reporter<'a> {
     }
 
     /// Parts that an earlier import run made from `path`, but that no row of
-    /// it makes now. Each must be kept by a `part-not-in-csv-file` import
-    /// problem; nothing is ever deleted.
+    /// it has now (`ipns_with_rows` are the IPNs it has). Each must be kept
+    /// by a `part-not-in-csv-file` import problem; nothing is ever deleted.
     fn removed_parts(
         &mut self,
         path: &str,
-        part_rows: &BTreeSet<String>,
+        ipns_with_rows: &BTreeSet<String>,
         explained: &mut BTreeSet<String>,
     ) -> Vec<String> {
         let readback = self.readback;
@@ -1507,7 +1547,7 @@ impl<'a> Reporter<'a> {
             .filter(|entry| entry.action == CSV_IMPORT_ACTION && entry.csv_file == self.csv_file)
             .filter_map(StoredAuditEntry::import_run)
             .flat_map(|run| run.parts.into_iter().map(|part| part.ipn))
-            .filter(|ipn| !part_rows.contains(ipn))
+            .filter(|ipn| !ipns_with_rows.contains(ipn))
             .collect();
         let mut removed = Vec::new();
         for ipn in earlier {

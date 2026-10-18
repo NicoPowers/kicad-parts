@@ -1490,6 +1490,16 @@ pub const CSV_CAD_DIFFERS: &str = "csv-cad-differs-from-edited-revision";
 /// CSV file is not stored, so a review can only keep the part as it is.
 pub use crate::csv_import::CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM as CSV_CAD_ITEM_KEPT;
 
+/// A CSV row whose IPN belongs to a part added in the app, but that names
+/// none of that part's MPNs: a different part that got the same IPN
+/// (kicad-parts-3b72). The team server records it instead of taking the row
+/// as new values (catalog_lib.js `csvRowIsAnotherPart`), so it is never
+/// reviewed: the row needs another IPN. Its detail keeps the row whole
+/// (`path`, `row_number`, `raw_record`, `substitutes_csv_rows`) and both
+/// sides' manufacturer parts (`csv_manufacturer_parts`,
+/// `part_manufacturer_parts`).
+pub const IPN_GIVEN_TO_ANOTHER_PART: &str = "ipn-given-to-another-part";
+
 /// The field name that takes the CSV's whole list of manufacturer parts.
 pub const MANUFACTURER_PARTS_FIELD: &str = "Manufacturer parts";
 
@@ -2339,7 +2349,9 @@ pub struct ImportRun {
     /// row, so the header followed by the rows is the file, byte for byte.
     pub files: Vec<SourceFile>,
     /// Every part a row of the CSV file made, in row order, with the
-    /// numbers of its current revision and details just after the run.
+    /// numbers of its current revision and details just after the run. A
+    /// row for another part ([`IPN_GIVEN_TO_ANOTHER_PART`]) is not listed:
+    /// it made nothing, and its import problem keeps it.
     pub parts: Vec<ImportedPart>,
     /// The IDs of every import problem the run found, new or already
     /// stored. Problems are shared by content, so only these explain the

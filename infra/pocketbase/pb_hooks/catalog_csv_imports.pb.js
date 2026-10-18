@@ -104,6 +104,12 @@
 // - an import never brings an archived design back: CAD whose content
 //   matches an archived revision of the part adds nothing, and an import
 //   problem (csv-cad-matches-archived-revision) keeps the row, on every run;
+// - a row whose IPN belongs to a part added in the app, but that names none
+//   of that part's MPNs, is a different part that got the same IPN
+//   (kicad-parts-3b72, catalog_lib.js csvRowIsAnotherPart). It is never
+//   taken as new values for that part: an ipn-given-to-another-part import
+//   problem keeps the row, which a CSV review cannot take, and the run does
+//   not list the part among its parts;
 // - a part whose details and CAD are both unchanged stays as it is. If its
 //   source row changed anyway (for example its supplier data), or the part
 //   was last saved in the app (added or edited), so there is no CSV row to compare with, an
@@ -1063,6 +1069,50 @@ routerAdd(
         const detailsSavedBy = savedBy(currentDetails);
         const revisionSavedBy = savedBy(currentRevision);
 
+        // A row for a different part that got the same IPN as a part added
+        // in the app (catalog_lib.js csvRowIsAnotherPart). Its values are
+        // never new values for that part, so nothing below may see it: the
+        // problem keeps the row whole, and a CSV review cannot take it.
+        const firstChange = byId("catalog_changes", stored.getString("first_change"));
+        const storedDetails = JSON.parse(currentDetails.getString("snapshot"));
+        if (
+          lib.csvRowIsAnotherPart(
+            firstChange ? firstChange.getString("kind") : "",
+            storedDetails.manufacturer_parts,
+            part.details.parsed.manufacturer_parts,
+          )
+        ) {
+          const description = (storedDetails.fields || []).find((field) => field.name === "Description");
+          serverProblems.push(
+            problem(
+              lib.IPN_GIVEN_TO_ANOTHER_PART,
+              part.ipn,
+              row.path || "",
+              location,
+              lib.anotherPartMessage(
+                { rowNumber: row.row_number, path: row.path, manufacturerParts: part.details.parsed.manufacturer_parts },
+                part.ipn,
+                {
+                  description: description ? description.value : "",
+                  manufacturerParts: storedDetails.manufacturer_parts,
+                },
+              ),
+              JSON.stringify({
+                path: row.path,
+                row_number: row.row_number,
+                raw_record: row.raw_record,
+                substitutes_csv_rows: substitutesCsvRows(row),
+                csv_manufacturer_parts: part.details.parsed.manufacturer_parts,
+                part_manufacturer_parts: storedDetails.manufacturer_parts,
+              }),
+            ),
+          );
+          // The run does not list it among its parts: this CSV file did
+          // not make the part and leaves nothing of it.
+          part.anotherPart = true;
+          continue;
+        }
+
         if (sameDetails && sameRevision) {
           unchangedParts++;
           // The row the part was last saved from: the source of whichever of
@@ -1406,7 +1456,11 @@ routerAdd(
               }
               return file;
             }),
-            parts: parts.map((part) => ({ ipn: part.ipn, revision: part.revisionAfter, details: part.detailsAfter })),
+            // A row for another part (ipn-given-to-another-part) made
+            // nothing, so it is not listed; its import problem keeps it.
+            parts: parts
+              .filter((part) => !part.anotherPart)
+              .map((part) => ({ ipn: part.ipn, revision: part.revisionAfter, details: part.detailsAfter })),
             // Parts earlier runs made that no row makes now.
             removed_parts: removedParts,
             // Problems are shared by content, so a report may count only the

@@ -3052,6 +3052,75 @@ function publishArchive(e) {
   return e.json(reply.status, reply.body);
 }
 
+// ---- A CSV row for another part (kicad-parts-3b72) ----------------------------
+//
+// While a team moves from the CSV catalog to the app, both can give out new
+// IPNs. So one IPN can reach two different parts: a part someone added in
+// the app, and a CSV row someone else wrote without seeing it. An import
+// must never take such a row as new values for the app's part. If it did, a
+// CSV review could turn that part into a different one.
+//
+// The rule: a CSV row is another part when the part with its IPN was added
+// in the app (its first Change is a create) and the row names none of that
+// part's MPNs. Only a shared MPN shows that the two describe one part:
+// - one shared MPN is enough, even if the other MPNs differ. One MPN is one
+//   physical part, and the other differences go to a CSV review as usual;
+// - when the row or the part has no MPN at all, nothing shows they are one
+//   part, so the row counts as another part. Taking it would be a guess,
+//   and a wrong guess overwrites a part; a wrong flag only asks a person.
+// A part an import made is never "another part": its IPN came from the CSV
+// catalog, which is where the row is.
+//
+// MPNs compare without regard to case or the spaces around them, as Add
+// part's MPN check does (crates/catalog-browser same_mpn).
+
+// The import problem code of such a row. The row is kept whole in the
+// problem, and the part is left as it is.
+const IPN_GIVEN_TO_ANOTHER_PART = "ipn-given-to-another-part";
+
+// The MPNs of a list of manufacturer parts, as written, without blanks.
+function mpnsOf(manufacturerParts) {
+  return (Array.isArray(manufacturerParts) ? manufacturerParts : [])
+    .map((part) => (part && typeof part.mpn === "string" ? trimSpace(part.mpn) : ""))
+    .filter((mpn) => mpn !== "");
+}
+
+// Whether a CSV row with `rowManufacturerParts` is a different part from the
+// stored part with its IPN, whose first Change is of `firstChangeKind` and
+// whose current manufacturer parts are `partManufacturerParts`. See above.
+function csvRowIsAnotherPart(firstChangeKind, partManufacturerParts, rowManufacturerParts) {
+  if (firstChangeKind !== CHANGE_KINDS.create) {
+    return false;
+  }
+  const partMpns = mpnsOf(partManufacturerParts).map((mpn) => mpn.toUpperCase());
+  return !mpnsOf(rowManufacturerParts).some((mpn) => partMpns.indexOf(mpn.toUpperCase()) >= 0);
+}
+
+// The plain message of an IPN_GIVEN_TO_ANOTHER_PART problem: which row,
+// which part has the IPN in the team catalog, why they are not one part,
+// and the one thing to do.
+function anotherPartMessage(row, ipn, part) {
+  const named = part.description ? `: ${part.description}` : "";
+  const list = (mpns) => mpns.join(", ");
+  const rowMpns = mpnsOf(row.manufacturerParts);
+  const partMpns = mpnsOf(part.manufacturerParts);
+  let why;
+  if (rowMpns.length > 0 && partMpns.length > 0) {
+    const theRow = rowMpns.length === 1 ? `The row's MPN, ${rowMpns[0]}, is` : `The row's MPNs, ${list(rowMpns)}, are`;
+    why = `${theRow} not that part's (${list(partMpns)}), so they are different parts.`;
+  } else if (partMpns.length > 0) {
+    why = "The row has no MPN, so nothing shows it is that part.";
+  } else if (rowMpns.length > 0) {
+    why = "That part has no MPN, so nothing shows the row is that part.";
+  } else {
+    why = "Neither has an MPN, so nothing shows the row is that part.";
+  }
+  return (
+    `Row ${row.rowNumber} of ${row.path} has the IPN ${ipn}, but the team catalog already gave it to a part added in the app${named}. ` +
+    `${why} The import left that part as it is and kept the row here. Give this CSV row another IPN.`
+  );
+}
+
 // ---- Reviewing CSV changes that were not applied ------------------------------
 //
 // POST /api/catalog/csv-reviews (see catalog_csv_reviews.pb.js): a person
@@ -3537,6 +3606,9 @@ module.exports = {
   symbolSaysNotInBom: symbolSaysNotInBom,
   footprintExcludedFromBom: footprintExcludedFromBom,
   CSV_REVIEW_KINDS: CSV_REVIEW_KINDS,
+  IPN_GIVEN_TO_ANOTHER_PART: IPN_GIVEN_TO_ANOTHER_PART,
+  csvRowIsAnotherPart: csvRowIsAnotherPart,
+  anotherPartMessage: anotherPartMessage,
   recordedCsvDocument: recordedCsvDocument,
   archiveState: archiveState,
   newestRevision: newestRevision,
