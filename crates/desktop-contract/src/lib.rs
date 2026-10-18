@@ -346,6 +346,10 @@ pub struct TeamsStatus {
     pub form_email: String,
     /// Why the last sign-in from the form failed, if it did.
     pub problem: Option<String>,
+    /// Something to say once in the Teams menu, in a plain sentence, such
+    /// as a removed team's sign-in the password store could not remove.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 impl TeamsStatus {

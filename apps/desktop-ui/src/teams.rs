@@ -127,6 +127,9 @@ pub fn TeamsMenu(
     let problem = Memo::new(move |_| {
         teams.with(|status| status.as_ref().and_then(|status| status.problem.clone()))
     });
+    let note = Memo::new(move |_| {
+        teams.with(|status| status.as_ref().and_then(|status| status.note.clone()))
+    });
     // The team asking whether to remove it, by server address.
     let removing = RwSignal::new(None::<String>);
     let servers = Memo::new(move |_| {
@@ -166,6 +169,7 @@ pub fn TeamsMenu(
                         </ul>
                     </Show>
                     {move || until_closed.get().map(|text| view! { <p class="hint" id="sign-ins-until-closed">{text}</p> })}
+                    {move || note.get().map(|text| view! { <p class="hint" id="teams-note" role="status">{text}</p> })}
                     <Show
                         when=move || show_form.get()
                         fallback=move || view! {
@@ -636,6 +640,7 @@ mod tests {
             form_server: String::new(),
             form_email: String::new(),
             problem: None,
+            note: None,
         }
     }
 

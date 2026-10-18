@@ -582,3 +582,116 @@ fn sessions_made_in_the_same_second_are_told_apart() {
     assert!(catalog.sign_in_again(Some(second.0)));
     assert_eq!(catalog.session_number(), None);
 }
+
+#[test]
+fn a_removed_team_whose_sign_in_lingers_is_said_once() {
+    let server = FakeServer::start();
+    let store = Arc::new(UnforgettingStore::default());
+    let dir = tempfile::tempdir().unwrap();
+    let teams = Teams::open(
+        dir.path().join("team.json"),
+        SignIns::kept_in(store.clone()),
+        None,
+        None,
+    );
+    teams.sign_in(request(&server)).unwrap();
+    teams.remove(&server.url);
+    let note = teams.status().note.unwrap_or_default();
+    assert!(
+        note.starts_with(&format!(
+            "Your sign-in for {} could not be removed",
+            server.url
+        )) && note.contains("the keyring is locked"),
+        "{note}"
+    );
+    assert!(teams.status().teams.is_empty());
+    // The next action clears it.
+    teams.sign_in(request(&server)).unwrap();
+    assert_eq!(teams.status().note, None);
+}
+
+/// A store whose forgetting waits, like a keyring asking to be unlocked.
+#[derive(Default)]
+struct SlowStore {
+    tokens: MemorySignIns,
+    hold: Mutex<bool>,
+    released: std::sync::Condvar,
+    waiting: std::sync::atomic::AtomicU64,
+}
+
+impl SlowStore {
+    fn hold(&self) {
+        *self.hold.lock().unwrap() = true;
+    }
+
+    fn release(&self) {
+        *self.hold.lock().unwrap() = false;
+        self.released.notify_all();
+    }
+
+    fn waiting(&self) -> u64 {
+        self.waiting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl SignInStore for SlowStore {
+    fn read(&self, server_url: &str) -> Result<Option<String>, String> {
+        self.tokens.read(server_url)
+    }
+    fn keep(&self, server_url: &str, token: &str) -> Result<(), String> {
+        self.tokens.keep(server_url, token)
+    }
+    fn forget(&self, server_url: &str) -> Result<(), String> {
+        let mut hold = self.hold.lock().unwrap();
+        self.waiting
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        while *hold {
+            hold = self.released.wait(hold).unwrap();
+        }
+        self.waiting
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        drop(hold);
+        self.tokens.forget(server_url)
+    }
+}
+
+#[test]
+fn adding_a_team_back_waits_until_its_removal_forgot_the_old_sign_in() {
+    let server = FakeServer::start();
+    let store = Arc::new(SlowStore::default());
+    let dir = tempfile::tempdir().unwrap();
+    let teams = Arc::new(Teams::open(
+        dir.path().join("team.json"),
+        SignIns::kept_in(store.clone()),
+        None,
+        None,
+    ));
+    teams.sign_in(request(&server)).unwrap();
+    wait_until("the sign-in to be kept", || {
+        store.read(&server.url).unwrap().is_some()
+    });
+    store.hold();
+    let remover = {
+        let (teams, url) = (teams.clone(), server.url.clone());
+        std::thread::spawn(move || teams.remove(&url))
+    };
+    wait_until("the removal to wait on the store", || store.waiting() == 1);
+    let adder = {
+        let (teams, request) = (teams.clone(), request(&server));
+        std::thread::spawn(move || teams.sign_in(request))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!adder.is_finished(), "adding it back waits for the removal");
+    store.release();
+    remover.join().unwrap();
+    adder.join().unwrap().unwrap();
+    wait_until("the new sign-in to be kept", || {
+        store.read(&server.url).unwrap().is_some()
+    });
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(
+        store.read(&server.url).unwrap().is_some(),
+        "never forgotten"
+    );
+    assert!(is_signed_in(&teams, &server));
+}

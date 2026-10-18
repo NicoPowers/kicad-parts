@@ -35,9 +35,10 @@ pub struct Teams {
     /// From launch options: they fill in the sign-in form.
     suggested: SavedTeam,
     state: Mutex<TeamList>,
-    /// Sign-ins run one at a time, so two sign-ins to the same new server
-    /// cannot both add it.
-    signing_in: Mutex<()>,
+    /// Sign-ins and removals run one at a time, so two sign-ins to the same
+    /// new server cannot both add it, and adding a team back waits until
+    /// its removal has forgotten the old sign-in.
+    one_at_a_time: Mutex<()>,
     /// What the catalog view shows while no team is signed in.
     nobody: Arc<TeamCatalog>,
 }
@@ -60,6 +61,9 @@ struct TeamList {
     chosen: String,
     /// Why the last sign-in failed, for the sign-in form.
     problem: Option<String>,
+    /// Something to say once in the Teams menu, such as a removed team's
+    /// sign-in the store could not forget. The next action clears it.
+    note: Option<String>,
 }
 
 impl TeamList {
@@ -130,8 +134,9 @@ impl Teams {
                 teams,
                 chosen: saved.shown,
                 problem: None,
+                note: None,
             }),
-            signing_in: Mutex::new(()),
+            one_at_a_time: Mutex::new(()),
             nobody: Arc::new(TeamCatalog::new()),
         }
     }
@@ -141,10 +146,8 @@ impl Teams {
     /// then keeps the sign-in for the next run. A failed sign-in adds
     /// nothing; its problem, in plain words, is the error.
     pub fn sign_in(&self, request: SignInRequest) -> Result<(), String> {
-        let _one_at_a_time = self
-            .signing_in
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _one_at_a_time = self.one_at_a_time();
+        self.lock().note = None;
         let server_url = match ServerAddress::for_sign_in(&request.server_url) {
             Ok(address) => address.url(),
             Err(refusal) => return self.failed(refusal.to_string()),
@@ -213,6 +216,7 @@ impl Teams {
         let keeper = {
             let mut list = self.lock();
             list.problem = None;
+            list.note = None;
             let Some(team) = list
                 .teams
                 .iter_mut()
@@ -243,24 +247,28 @@ impl Teams {
     /// Signs out of one team, forgets its kept sign-in, and takes it off
     /// the list.
     pub fn remove(&self, server_url: &str) {
-        let removed = {
-            let mut list = self.lock();
-            let Some(index) = list
-                .teams
-                .iter()
-                .position(|team| team.saved.server_url == server_url)
-            else {
-                return;
-            };
-            let removed = list.teams.remove(index);
-            self.save(&list);
-            removed
+        // The sign-in is forgotten while the team is still in the list,
+        // and no sign-in runs meanwhile. So adding the team back, even
+        // while the store is slow (such as a keyring asking to be
+        // unlocked), waits until the old sign-in is gone: the old one can
+        // never be forgotten in place of the new one.
+        let _one_at_a_time = self.one_at_a_time();
+        let Some(keeper) = self.lock().find(server_url).map(|team| team.keeper.clone()) else {
+            return;
         };
-        // Signed out outside the lock, so status polling never waits. A
-        // sign-in the store could not forget is harmless: the team is off
-        // the list, so it is never carried on, and adding the team again
-        // replaces it.
-        let _ = removed.keeper.sign_out();
+        // Outside the list's lock, so status polling never waits.
+        let forgotten = keeper.sign_out();
+        let mut list = self.lock();
+        list.teams
+            .retain(|team| team.saved.server_url != server_url);
+        // A sign-in the store could not forget is never used: the team is
+        // off the list. The person is told once, to delete it themselves.
+        list.note = forgotten.err().map(|problem| {
+            format!(
+                "Your sign-in for {server_url} could not be removed from the system's password store ({problem}). The app will not use it. You can delete it there yourself."
+            )
+        });
+        self.save(&list);
     }
 
     /// Shows the team at `server_url` in the catalog view. No sign-in is
@@ -365,6 +373,7 @@ impl Teams {
             form_server: pick(&self.suggested.server_url, form.server_url),
             form_email: pick(&self.suggested.email, form.email),
             problem: list.problem.clone(),
+            note: list.note.clone(),
         }
     }
 
@@ -378,6 +387,12 @@ impl Teams {
     /// server could not be reached.
     pub fn reaching(&self, server_url: &str) -> Option<Option<String>> {
         self.lock().find(server_url)?.keeper.reaching()
+    }
+
+    fn one_at_a_time(&self) -> MutexGuard<'_, ()> {
+        self.one_at_a_time
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     fn failed(&self, problem: String) -> Result<(), String> {
