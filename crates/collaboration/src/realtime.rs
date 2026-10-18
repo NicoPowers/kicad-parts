@@ -9,12 +9,20 @@ use crate::address::ServerAddress;
 use crate::client::PocketBaseClient;
 use crate::connection::ConnectionProblem;
 use crate::{CollabError, CollabResult};
+use rustls::{ClientConnection, StreamOwned};
 use serde_json::Value;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+/// How long the stream may stay silent before the app counts it as gone.
+/// PocketBase closes a stream that has had no events for 5 minutes, so a
+/// longer silence means the network went away without a word, as after
+/// sleep or a Wi-Fi change. The reader then stops, and the follower
+/// reconnects and catches up.
+const IDLE_LIMIT: Duration = Duration::from_secs(6 * 60);
 
 /// One server-sent event.
 #[derive(Clone, Debug, PartialEq)]
@@ -31,15 +39,51 @@ enum Message {
 }
 
 /// A plain or TLS stream, which the reader thread owns.
-trait Stream: Read + Write + Send {}
+enum Stream {
+    Plain(TcpStream),
+    Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+}
 
-impl<S: Read + Write + Send> Stream for S {}
+impl Stream {
+    /// The socket under the stream, where its read timeout is set.
+    fn socket(&self) -> &TcpStream {
+        match self {
+            Self::Plain(socket) => socket,
+            Self::Tls(stream) => stream.get_ref(),
+        }
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(socket) => socket.read(buffer),
+            Self::Tls(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(socket) => socket.write(buffer),
+            Self::Tls(stream) => stream.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(socket) => socket.flush(),
+            Self::Tls(stream) => stream.flush(),
+        }
+    }
+}
 
 /// An open realtime stream.
 pub struct RealtimeConnection {
     client_id: String,
-    /// The TCP socket under the stream, kept to shut it down from here
-    /// while the reader thread is blocked reading.
+    /// The TCP socket the stream's socket was cloned from, kept to shut
+    /// it down from here while the reader thread is blocked reading.
     socket: TcpStream,
     events: Receiver<Message>,
     reader: Option<JoinHandle<()>>,
@@ -52,26 +96,40 @@ impl RealtimeConnection {
     /// client ID. An `https://` server's certificate is checked the way
     /// `client` checks it.
     pub fn connect(client: &PocketBaseClient, timeout: Duration) -> CollabResult<Self> {
+        Self::connect_with_idle_limit(client, timeout, IDLE_LIMIT)
+    }
+
+    fn connect_with_idle_limit(
+        client: &PocketBaseClient,
+        timeout: Duration,
+        idle_limit: Duration,
+    ) -> CollabResult<Self> {
         let base_url = client.base_url();
         let trust = client.trust();
         let address = ServerAddress::from_url(base_url)
             .map_err(|_| CollabError::Protocol(format!("`{base_url}` is not a team server URL")))?;
+        // On Windows, shutting down a cloned socket did not always wake a
+        // read blocked on the original, so the reader gets the clone and
+        // `disconnect` shuts down the original. A clone keeps its own
+        // timeouts there, so they are set on the reader's socket.
         let socket = open_socket(&address, timeout)?;
-        // The handshake and the request get `timeout`; the stream itself
-        // is quiet between events, so its reads wait as long as it takes.
-        socket.set_read_timeout(Some(timeout)).map_err(connecting)?;
-        socket
+        let reader_socket = socket.try_clone().map_err(connecting)?;
+        // The handshake and the request get `timeout`. The stream is quiet
+        // between events, so its reads get `idle_limit` (set below).
+        reader_socket
+            .set_read_timeout(Some(timeout))
+            .map_err(connecting)?;
+        reader_socket
             .set_write_timeout(Some(timeout))
             .map_err(connecting)?;
-        let reader_socket = socket.try_clone().map_err(connecting)?;
-        let mut stream: Box<dyn Stream> = if address.is_secure() {
-            Box::new(
+        let mut stream = if address.is_secure() {
+            Stream::Tls(Box::new(
                 trust
                     .secure(address.host(), reader_socket)
                     .map_err(CollabError::Transport)?,
-            )
+            ))
         } else {
-            Box::new(reader_socket)
+            Stream::Plain(reader_socket)
         };
         write!(
             stream,
@@ -81,7 +139,10 @@ impl RealtimeConnection {
         )
         .and_then(|()| stream.flush())
         .map_err(connecting)?;
-        socket.set_read_timeout(None).map_err(connecting)?;
+        stream
+            .socket()
+            .set_read_timeout(Some(idle_limit))
+            .map_err(connecting)?;
         let (sender, events) = mpsc::channel();
         let reader = std::thread::spawn(move || {
             let reason = match read_stream(stream, &sender) {
@@ -210,7 +271,7 @@ fn open_socket(address: &ServerAddress, timeout: Duration) -> CollabResult<TcpSt
     })
 }
 
-fn read_stream(stream: Box<dyn Stream>, sender: &mpsc::Sender<Message>) -> io::Result<()> {
+fn read_stream(stream: Stream, sender: &mpsc::Sender<Message>) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut status = String::new();
     reader.read_line(&mut status)?;
@@ -373,6 +434,41 @@ mod tests {
         assert_eq!(events[0].data["clientId"], "x");
         assert_eq!(events[1].topic, "collab_changes");
         assert_eq!(events[1].data["action"], "create");
+    }
+
+    /// A plain HTTP server that sends `PB_CONNECT`, then nothing more:
+    /// a network that went away without closing the connection.
+    fn silent_after_connecting() -> PocketBaseClient {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = connection.read(&mut request);
+            let _ = connection.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\nevent:PB_CONNECT\ndata:{\"clientId\":\"x\"}\n\n",
+            );
+            std::thread::sleep(Duration::from_secs(30));
+        });
+        PocketBaseClient::new(&url)
+    }
+
+    #[test]
+    fn a_stream_silent_for_too_long_counts_as_gone() {
+        let client = silent_after_connecting();
+        let mut connection = RealtimeConnection::connect_with_idle_limit(
+            &client,
+            Duration::from_secs(5),
+            Duration::from_millis(500),
+        )
+        .unwrap();
+        assert_eq!(connection.client_id(), "x");
+        let started = Instant::now();
+        assert_eq!(
+            connection.next_event(Duration::from_secs(10)),
+            Err(CollabError::Transport(ConnectionProblem::TimedOut))
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

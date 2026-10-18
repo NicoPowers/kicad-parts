@@ -337,6 +337,14 @@ fn a_trusted_certificate_works_for_rest_and_realtime() {
             .to_string()
             .starts_with("Could not make a secure connection")
     );
+    let client = PocketBaseClient::with_trust(&wrong_scheme, trust.clone());
+    assert!(
+        matches!(
+            RealtimeConnection::connect(&client, WAIT).err(),
+            Some(CollabError::Transport(ConnectionProblem::NotSecure(_)))
+        ),
+        "realtime"
+    );
 }
 
 #[test]

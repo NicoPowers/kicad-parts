@@ -14,6 +14,14 @@ use std::time::Duration;
 /// Records fetched per page when listing.
 const PAGE_SIZE: usize = 200;
 
+/// How long a whole request may take. Uploads of large CAD files need
+/// time, so this is generous.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long connecting may take. A wrong address or a server that is
+/// down fails sign-in after this, not after the whole request timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// One HTTP exchange: the status and the body as text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpReply {
@@ -84,13 +92,18 @@ impl PocketBaseClient {
     /// Like [`PocketBaseClient::new`], but checks an `https://` server's
     /// certificate with `trust`.
     pub fn with_trust(base_url: &str, trust: ServerTrust) -> Self {
+        Self::with_timeout(base_url, trust, REQUEST_TIMEOUT)
+    }
+
+    fn with_timeout(base_url: &str, trust: ServerTrust, timeout: Duration) -> Self {
         let base_url = base_url.trim_end_matches('/').to_owned();
         // A redirect from https:// to http:// would send the password
         // or token unencrypted, so an https:// client refuses one.
         let secure = base_url.to_ascii_lowercase().starts_with("https://");
         Self {
             agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(60))
+                .timeout(timeout)
+                .timeout_connect(CONNECT_TIMEOUT.min(timeout))
                 .tls_connector(Arc::new(trust.clone()))
                 .https_only(secure)
                 .build(),
@@ -515,6 +528,25 @@ mod tests {
             PocketBaseClient::new("http://127.0.0.1:9").authenticate("users", "a", "b"),
             Err(CollabError::Transport(_))
         ));
+    }
+
+    #[test]
+    fn a_server_that_never_answers_times_out() {
+        // Accepts connections, never says a word, not even a TLS hello.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = silent.local_addr().unwrap().port();
+        for scheme in ["http", "https"] {
+            let client = PocketBaseClient::with_timeout(
+                &format!("{scheme}://localhost:{port}"),
+                ServerTrust::system(),
+                Duration::from_secs(1),
+            );
+            assert_eq!(
+                client.get("/api/health"),
+                Err(CollabError::Transport(ConnectionProblem::TimedOut)),
+                "{scheme}"
+            );
+        }
     }
 
     #[test]
