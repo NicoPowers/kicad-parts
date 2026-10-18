@@ -33,7 +33,8 @@
 //!   dashboard. A transaction saves at most one Change, and every new
 //!   record names the Change saved in the same transaction. A part's
 //!   current details or revision move only to what that Change saved:
-//!   new details, a new revision, or an archive entry.
+//!   new details, a new revision, or an archive entry. And saving any of
+//!   those moves the part, as [`CatalogReplica::apply`] does.
 //! - Step 3 lists the Changes after step 2 ends, so it includes every
 //!   Change whose work step 2 saw. If one were missing,
 //!   [`CatalogReplica::apply`] would refuse the gap, and the sign-in would
