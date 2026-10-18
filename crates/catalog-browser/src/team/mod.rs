@@ -254,6 +254,7 @@ impl TeamCatalog {
                 email: String::new(),
                 code: self.code(),
                 note: None,
+                libraries_made_from: None,
                 session: TeamSession::SignedOut {
                     problem: state.problem.clone(),
                 },
@@ -265,6 +266,7 @@ impl TeamCatalog {
             email: session.email.clone(),
             code: self.code(),
             note: None,
+            libraries_made_from: None,
             session: TeamSession::SignedIn {
                 name: session.name.clone(),
                 email: session.email.clone(),

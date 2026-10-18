@@ -5,6 +5,10 @@
 //! tried again after a while. When another team's libraries on this
 //! computer use the team's code, nothing is tried again until the sign-in
 //! or the code changes: KiCad cannot hold both, and there is no override.
+//! When the team's folder was made from another team server, nothing is
+//! written until the person says the team moved
+//! ([`TeamLibraries::use_new_server`]), because another server could claim
+//! the team's ID (kicad-parts-092b).
 //!
 //! The libraries are named with the team's code, which the team server
 //! keeps: no libraries are made until someone who can edit chooses it.
@@ -61,6 +65,9 @@ pub(super) struct Shared {
     /// Set when the team's settings must be read again, such as after
     /// choosing its code.
     reread: AtomicBool,
+    /// Set when the person said the team moved to its new server: the
+    /// folder takes updates from it now.
+    moved: AtomicBool,
     stop: AtomicBool,
 }
 
@@ -264,6 +271,46 @@ impl TeamLibraries {
         }
         Ok(self.status())
     }
+
+    /// The server the team's libraries were made from, while it is not
+    /// the team's server and the person has not said the team moved.
+    pub fn made_from_other_server(&self) -> Option<String> {
+        match &self.shared.lock().state {
+            KicadLibrariesState::OtherServer {
+                recorded_server, ..
+            } => Some(recorded_server.clone()),
+            _ => None,
+        }
+    }
+
+    /// The person said the team moved to its server: the folder records
+    /// it and takes updates from it from now on. Does nothing unless the
+    /// libraries are waiting for that answer.
+    pub fn use_new_server(&self) -> Result<(), String> {
+        let (settings, server) = {
+            let known = self.shared.lock();
+            match (&known.state, &known.team) {
+                (KicadLibrariesState::OtherServer { server, .. }, Some(settings)) => {
+                    (settings.clone(), server.clone())
+                }
+                _ => return Ok(()),
+            }
+        };
+        let naming = Naming::new(&settings.code)?;
+        let folder = team_folder(&self.root, naming.code());
+        let team = Team {
+            id: settings.id,
+            server,
+            naming,
+        };
+        kicad_libraries::use_new_server(&self.root, &team)
+            .map_err(|error| error.message(&folder))?;
+        self.shared.moved.store(true, Ordering::SeqCst);
+        // The thread updates on its next look; until then, the question
+        // is answered.
+        self.shared.set(KicadLibrariesState::Updating);
+        Ok(())
+    }
 }
 
 impl Drop for TeamLibraries {
@@ -278,6 +325,7 @@ impl Shared {
             state: Mutex::new(Known::signed_out()),
             asked: AtomicBool::new(false),
             reread: AtomicBool::new(false),
+            moved: AtomicBool::new(false),
             stop: AtomicBool::new(false),
         }
     }
@@ -416,6 +464,11 @@ fn follow(root: &Path, team: &TeamCatalog, shared: &Shared) {
             }
         };
         let position = (format!("{who}\n{}", settings.code), *checkpoint);
+        if shared.moved.swap(false, Ordering::SeqCst) {
+            // Updates from this server again, at once.
+            schedule.stuck = None;
+            schedule.done = None;
+        }
         // An "Update now" that cannot run is dropped, not kept for later.
         let asked = shared.asked.swap(false, Ordering::SeqCst);
         if !schedule.due(&position, asked, Instant::now()) {
@@ -465,6 +518,20 @@ fn follow(root: &Path, team: &TeamCatalog, shared: &Shared) {
                     server,
                 };
             }
+            Err(Stopped::OtherServer {
+                code,
+                recorded_server,
+                server,
+            }) => {
+                // Asks the person once, and waits for the answer.
+                schedule.retry = None;
+                schedule.stuck = Some(position.0);
+                known.state = KicadLibrariesState::OtherServer {
+                    code,
+                    recorded_server,
+                    server,
+                };
+            }
             Err(Stopped::Failed(reason)) => {
                 schedule.retry = Some(Instant::now() + RETRY);
                 known.state = KicadLibrariesState::Failed {
@@ -484,6 +551,12 @@ enum Stopped {
     CodeTaken {
         code: String,
         other_server: String,
+        server: String,
+    },
+    /// The team's libraries were made from another team server.
+    OtherServer {
+        code: String,
+        recorded_server: String,
         server: String,
     },
     /// Anything else, in plain sentences.
@@ -512,6 +585,16 @@ fn update_once(
         } => Stopped::CodeTaken {
             code,
             other_server,
+            server,
+        },
+        UpdateError::OtherServer {
+            code,
+            recorded_server,
+            server,
+            ..
+        } => Stopped::OtherServer {
+            code,
+            recorded_server,
             server,
         },
         other => Stopped::Failed(other.message(&team_folder(root, target.naming.code()))),

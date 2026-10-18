@@ -185,6 +185,22 @@ pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> 
                 </p>
             }
             .into_any(),
+            KicadLibrariesState::OtherServer {
+                code,
+                recorded_server,
+                server,
+            } => view! {
+                <p
+                    class="kicad-libraries-status kicad-libraries-failed"
+                    role="status"
+                    data-state="other-server"
+                >
+                    {format!(
+                        "The {code} libraries here were made from {recorded_server}, so the app does not update them from {server}. If the team moved to the new address, choose Use the new address for {code} in the Teams menu."
+                    )}
+                </p>
+            }
+            .into_any(),
             KicadLibrariesState::Failed { at_ms, reason } => view! {
                 <p
                     class="kicad-libraries-status kicad-libraries-failed"
@@ -210,6 +226,7 @@ pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> 
                     KicadLibrariesState::SignedOut
                         | KicadLibrariesState::NeedsCode
                         | KicadLibrariesState::CodeTaken { .. }
+                        | KicadLibrariesState::OtherServer { .. }
                 )
             })
         })

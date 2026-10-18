@@ -13,7 +13,7 @@ pub use team::{QUIET, RETRY, TeamLibraries};
 
 use crate::team::TeamCatalog;
 use crate::teams::Teams;
-use desktop_contract::{KicadLibrariesStatus, TeamCodeCheck};
+use desktop_contract::{KicadLibrariesStatus, TeamCodeCheck, TeamsStatus};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -89,16 +89,39 @@ impl KicadLibraries {
         self.with_shown(TeamLibraries::status)
     }
 
-    /// The status of the libraries of the team at `server_url`, if it is in
-    /// the list.
-    pub fn status_of(&self, server_url: &str) -> Option<KicadLibrariesStatus> {
-        let libraries = self
-            .shared
+    /// The libraries of the team at `server_url`, if it is in the list.
+    fn of(&self, server_url: &str) -> Option<Arc<TeamLibraries>> {
+        self.shared
             .lock()
             .iter()
             .find(|(server, _)| server == server_url)
-            .map(|(_, libraries)| libraries.clone())?;
-        Some(libraries.status())
+            .map(|(_, libraries)| libraries.clone())
+    }
+
+    /// The status of the libraries of the team at `server_url`, if it is in
+    /// the list.
+    pub fn status_of(&self, server_url: &str) -> Option<KicadLibrariesStatus> {
+        Some(self.of(server_url)?.status())
+    }
+
+    /// Notes, on each team in `status`, whether its libraries were made
+    /// from another server and wait for the person's answer, so the Teams
+    /// menu can ask on that team's row.
+    pub fn note_other_servers(&self, status: &mut TeamsStatus) {
+        for team in &mut status.teams {
+            team.libraries_made_from = self
+                .of(&team.server_url)
+                .and_then(|libraries| libraries.made_from_other_server());
+        }
+    }
+
+    /// The person said the team at `server_url` moved there: its libraries
+    /// take updates from it from now on.
+    pub fn use_new_server(&self, server_url: &str) -> Result<(), String> {
+        match self.of(server_url) {
+            Some(libraries) => libraries.use_new_server(),
+            None => Ok(()),
+        }
     }
 
     /// Asks for an update of the shown team's libraries now.

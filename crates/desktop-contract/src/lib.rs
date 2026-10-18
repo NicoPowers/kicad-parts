@@ -53,6 +53,7 @@ pub mod command {
     pub const KICAD_LIBRARIES_COPIED: &str = "kicad_libraries_copied";
     pub const TEAM_CODE_CHECK: &str = "team_code_check";
     pub const TEAM_CODE_SET: &str = "team_code_set";
+    pub const KICAD_LIBRARIES_USE_NEW_SERVER: &str = "kicad_libraries_use_new_server";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -376,6 +377,11 @@ pub struct TeamStatus {
     /// sentence, such as a sign-in the password store could not remove.
     #[serde(default)]
     pub note: Option<String>,
+    /// The team server the team's KiCad libraries were made from, when it
+    /// is not this one. The app stops updating them until the person says
+    /// the team moved here (kicad-parts-092b).
+    #[serde(default)]
+    pub libraries_made_from: Option<String>,
 }
 
 impl TeamStatus {
@@ -1594,6 +1600,16 @@ pub enum KicadLibrariesState {
         /// code.
         server: String,
     },
+    /// The team's libraries were made from another team server. Nothing is
+    /// written until the person says, in the Teams menu, that the team
+    /// moved to this server: another server could claim the team's ID.
+    OtherServer {
+        code: String,
+        /// The server the libraries were made from.
+        recorded_server: String,
+        /// The signed-in team's server.
+        server: String,
+    },
     Failed {
         at_ms: u64,
         /// A plain sentence, such as which file KiCad holds open.
@@ -1692,6 +1708,7 @@ mod tests {
             email: "a@example.test".into(),
             code: String::new(),
             note: None,
+            libraries_made_from: None,
             session: TeamSession::SignedOut { problem: None },
         };
         assert_eq!(team.label(), "parts.example.com/acme");

@@ -344,10 +344,21 @@ async fn footprint_glb(
         .ok_or_else(|| "The 3D view is no longer in the app's cache. Turn 3D on again.".to_owned())
 }
 
+/// Every team in the list, each with whether its KiCad libraries wait
+/// for the person to confirm a new server address.
+fn teams_status(teams: &Teams, libraries: &KicadLibraries) -> TeamsStatus {
+    let mut status = teams.status();
+    libraries.note_other_servers(&mut status);
+    status
+}
+
 #[tauri::command]
-async fn team_status(team: State<'_, Team>) -> Result<TeamsStatus, String> {
-    let teams = team.inner().clone();
-    blocking(move || teams.status()).await
+async fn team_status(
+    team: State<'_, Team>,
+    libraries: State<'_, Libraries>,
+) -> Result<TeamsStatus, String> {
+    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
+    blocking(move || teams_status(&teams, &libraries)).await
 }
 
 /// Signs in to one team, adding it to the list; other teams stay signed
@@ -355,43 +366,56 @@ async fn team_status(team: State<'_, Team>) -> Result<TeamsStatus, String> {
 #[tauri::command]
 async fn team_sign_in(
     team: State<'_, Team>,
+    libraries: State<'_, Libraries>,
     request: SignInRequest,
 ) -> Result<TeamsStatus, String> {
-    let teams = team.inner().clone();
+    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
     blocking(move || {
         let _ = teams.sign_in(request);
-        teams.status()
+        teams_status(&teams, &libraries)
     })
     .await
 }
 
 #[tauri::command]
-async fn team_sign_out(team: State<'_, Team>, server_url: String) -> Result<TeamsStatus, String> {
-    let teams = team.inner().clone();
+async fn team_sign_out(
+    team: State<'_, Team>,
+    libraries: State<'_, Libraries>,
+    server_url: String,
+) -> Result<TeamsStatus, String> {
+    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
     blocking(move || {
         teams.sign_out(&server_url);
-        teams.status()
+        teams_status(&teams, &libraries)
     })
     .await
 }
 
 #[tauri::command]
-async fn team_remove(team: State<'_, Team>, server_url: String) -> Result<TeamsStatus, String> {
-    let teams = team.inner().clone();
+async fn team_remove(
+    team: State<'_, Team>,
+    libraries: State<'_, Libraries>,
+    server_url: String,
+) -> Result<TeamsStatus, String> {
+    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
     blocking(move || {
         teams.remove(&server_url);
-        teams.status()
+        teams_status(&teams, &libraries)
     })
     .await
 }
 
 /// Shows another team in the catalog view; no sign-in is needed.
 #[tauri::command]
-async fn team_show(team: State<'_, Team>, server_url: String) -> Result<TeamsStatus, String> {
-    let teams = team.inner().clone();
+async fn team_show(
+    team: State<'_, Team>,
+    libraries: State<'_, Libraries>,
+    server_url: String,
+) -> Result<TeamsStatus, String> {
+    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
     blocking(move || {
         teams.show(&server_url)?;
-        Ok(teams.status())
+        Ok(teams_status(&teams, &libraries))
     })
     .await?
 }
@@ -610,6 +634,22 @@ async fn team_code_set(
     blocking(move || libraries.set_code(&code)).await?
 }
 
+/// The person said the team at `server_url` moved there, so its KiCad
+/// libraries, made from its old address, take updates from it again.
+#[tauri::command]
+async fn kicad_libraries_use_new_server(
+    team: State<'_, Team>,
+    libraries: State<'_, Libraries>,
+    server_url: String,
+) -> Result<TeamsStatus, String> {
+    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
+    blocking(move || {
+        libraries.use_new_server(&server_url)?;
+        Ok(teams_status(&teams, &libraries))
+    })
+    .await?
+}
+
 /// Shows the KiCad libraries folder in the system's file manager.
 #[tauri::command]
 async fn kicad_libraries_open_folder(libraries: State<'_, Libraries>) -> Result<(), String> {
@@ -760,6 +800,7 @@ fn main() {
             kicad_libraries_copied,
             team_code_check,
             team_code_set,
+            kicad_libraries_use_new_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -892,6 +933,7 @@ mod tests {
             command::KICAD_LIBRARIES_COPIED,
             command::TEAM_CODE_CHECK,
             command::TEAM_CODE_SET,
+            command::KICAD_LIBRARIES_USE_NEW_SERVER,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

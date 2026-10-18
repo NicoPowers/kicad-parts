@@ -3,9 +3,12 @@
 //! Remove, and a form that adds a team or signs in again. With two or more
 //! teams signed in, a switcher beside it chooses the team the catalog view
 //! shows; switching needs no sign-in.
+//!
+//! A team whose KiCad libraries were made from another server address asks,
+//! on its row, whether the team moved (kicad-parts-092b).
 
 use crate::backend;
-use crate::focus::focus_later;
+use crate::focus::{Scrolling, focus_found_later, focus_later};
 use desktop_contract::{
     LiveUpdates, SignInRequest, SignInsKept, TeamSession, TeamStatus, TeamsStatus,
 };
@@ -164,7 +167,7 @@ pub fn TeamsMenu(
                             <For
                                 each=move || servers.get()
                                 key=|server| server.clone()
-                                children=move |server| team_row(server, teams, removing, act, sign_in_again)
+                                children=move |server| team_row(server, teams, set_teams, removing, act, sign_in_again)
                             />
                         </ul>
                     </Show>
@@ -261,6 +264,7 @@ pub fn TeamsMenu(
 fn team_row(
     server: String,
     teams: Memo<Option<TeamsStatus>>,
+    set_teams: RwSignal<Option<TeamsStatus>>,
     removing: RwSignal<Option<String>>,
     act: impl Fn(Action, String) + Copy + Send + Sync + 'static,
     sign_in_again: impl Fn(TeamStatus) + Copy + Send + Sync + 'static,
@@ -294,15 +298,18 @@ fn team_row(
         let server = server.clone();
         Memo::new(move |_| removing.with(|removing| removing.as_deref() == Some(server.as_str())))
     };
+    let row_id = format!("team-row-{}", id_part(&server));
+    let question = new_server_question(server.clone(), row_id.clone(), team, set_teams);
     let (sign_out_server, remove_server, ask_server) = (server.clone(), server.clone(), server);
     view! {
-        <li class="team-row">
+        <li class="team-row" id=row_id>
             <p class="team-name">
                 <strong>{label}</strong>
                 {move || address().map(|address| view! { <span class="team-server">{address}</span> })}
             </p>
             <p class="team-state">{words}</p>
             {move || note().map(|note| view! { <p class="team-state hint">{note}</p> })}
+            {question}
             <Show
                 when=move || asking.get()
                 fallback=move || {
@@ -381,6 +388,115 @@ fn team_row(
             </Show>
         </li>
     }
+}
+
+/// The question on a team's row when its KiCad libraries were made from
+/// another server address. Another server could claim the team, so the
+/// app writes them only once the person says the team moved. "Not now"
+/// leaves them as they are, and keeps the answer one button away.
+fn new_server_question(
+    server: String,
+    row_id: String,
+    team: Memo<Option<TeamStatus>>,
+    set_teams: RwSignal<Option<TeamsStatus>>,
+) -> impl IntoView {
+    // Only the question's own words redraw it, so the focus stays on its
+    // buttons while the rest of the team's status changes.
+    let asked = Memo::new(move |_| {
+        team.with(|team| {
+            let team = team.as_ref()?;
+            let made_from = team.libraries_made_from.clone()?;
+            Some((team.label(), made_from))
+        })
+    });
+    let not_now = RwSignal::new(false);
+    let problem = RwSignal::new(None::<String>);
+    let question_id = format!("{row_id}-libraries-question");
+    // After an answer, the keyboard goes on to the row's first button.
+    let focus_row = move |row_id: String| {
+        focus_found_later(
+            move || {
+                document()
+                    .query_selector(&format!("#{row_id} .team-actions button"))
+                    .ok()
+                    .flatten()
+            },
+            Scrolling::IntoView,
+        );
+    };
+    let use_new_server = {
+        let (server, row_id) = (server.clone(), row_id.clone());
+        move |_| {
+            let (server, row_id) = (server.clone(), row_id.clone());
+            spawn_local(async move {
+                match backend::kicad_libraries_use_new_server(&server).await {
+                    Ok(status) => {
+                        problem.set(None);
+                        set_teams.set(Some(status));
+                        focus_row(row_id);
+                    }
+                    Err(message) => problem.set(Some(message)),
+                }
+            });
+        }
+    };
+    move || {
+        let (label, made_from) = asked.get()?;
+        if not_now.get() {
+            // Asked once; the answer stays one button away.
+            let text = format!(
+                "The KiCad libraries for {label} stay as they were made from {made_from}, and are not updated."
+            );
+            return Some(
+                view! {
+                    <div class="team-question">
+                        <p class="team-state hint">{text}</p>
+                        <button type="button" class="team-use-new-server" on:click=use_new_server.clone()>
+                            "Use the new address"
+                        </button>
+                        {move || problem.get().map(|message| view! { <p class="problem" role="alert">{message}</p> })}
+                    </div>
+                }
+                .into_any(),
+            );
+        }
+        let text = format!(
+            "The KiCad libraries for {label} were made from {made_from}. Use them for {server} instead? Only do this if the team moved to a new address."
+        );
+        let (labelled_by, question_id) = (question_id.clone(), question_id.clone());
+        let (row_id, use_new_server) = (row_id.clone(), use_new_server.clone());
+        Some(
+            view! {
+                <div class="team-confirm team-question" role="group" aria-labelledby=labelled_by>
+                    <p id=question_id>{text}</p>
+                    {move || problem.get().map(|message| view! { <p class="problem" role="alert">{message}</p> })}
+                    <div class="team-actions">
+                        <button type="button" class="team-use-new-server" on:click=use_new_server>
+                            "Use the new address"
+                        </button>
+                        <button
+                            type="button"
+                            on:click=move |_| {
+                                not_now.set(true);
+                                focus_row(row_id.clone());
+                            }
+                        >
+                            "Not now"
+                        </button>
+                    </div>
+                </div>
+            }
+            .into_any(),
+        )
+    }
+}
+
+/// `text` with every character but letters and digits as `-`, for use in
+/// an element ID.
+fn id_part(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect()
 }
 
 /// Chooses the team the catalog view shows, when two or more teams are
@@ -615,6 +731,7 @@ mod tests {
             code: code.into(),
             session,
             note: None,
+            libraries_made_from: None,
         }
     }
 
@@ -753,6 +870,14 @@ mod tests {
         assert_eq!(
             summary(&status(vec![connecting])),
             ("Team catalog: connecting…".into(), OFF)
+        );
+    }
+
+    #[test]
+    fn a_row_id_holds_only_letters_digits_and_dashes() {
+        assert_eq!(
+            id_part("https://parts.example.com:8443/acme"),
+            "https---parts-example-com-8443-acme"
         );
     }
 

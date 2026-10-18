@@ -5,7 +5,8 @@
 //! are kept up to date, each in its own folder. A restart carries on both
 //! sign-ins from the kept tokens, with no password; a rejected token asks
 //! only that team to sign in again; and a stopped server leaves the other
-//! team working.
+//! team working. A second server that claims a team's ID cannot write that
+//! team's libraries until the person says the team moved (kicad-parts-092b).
 //!
 //! The kept tokens live in a store in memory, never the system's
 //! credential store.
@@ -78,6 +79,31 @@ impl Client {
             email: EMAIL.into(),
             password: self.ada.password.clone(),
         }
+    }
+
+    /// Makes this server report the team settings record `id` with `code`,
+    /// as a server claiming another team would. Only a superuser can.
+    fn claim_team(&self, id: &str, code: &str) {
+        let settings = self
+            .admin
+            .list_records::<serde_json::Value>("team_settings", "", "")
+            .unwrap();
+        for record in settings {
+            let own = record["id"].as_str().unwrap();
+            self.admin
+                .delete(&format!("/api/collections/team_settings/records/{own}"))
+                .unwrap()
+                .success()
+                .unwrap();
+        }
+        self.admin
+            .post_json(
+                "/api/collections/team_settings/records",
+                &serde_json::json!({ "id": id, "code": code }),
+            )
+            .unwrap()
+            .success()
+            .unwrap();
     }
 
     /// A new password ends every earlier sign-in.
@@ -307,6 +333,90 @@ fn two_teams_are_followed_side_by_side_and_stay_signed_in() {
     wait_until("acme to follow a change while beta is offline", || {
         value_of(&catalog_of(&teams, &acme)).as_deref() == Some("47.0")
     });
+    drop(teams);
+    clear_read_only(&folder);
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// A team's KiCad libraries take updates only from the server they were
+/// made from (kicad-parts-092b). Every member knows the team's settings
+/// ID, so a second server can claim it; that server writes nothing until
+/// the person says the team moved there.
+#[test]
+fn a_second_server_claiming_a_team_cannot_write_its_libraries_until_confirmed() {
+    let root = services::repository_root();
+    let acme = Client::start(&root, "AC");
+    // Another server, with a team code of its own for now.
+    let claimer = Client::start(&root, "CL");
+    let config = tempfile::tempdir().unwrap();
+    let folder = root
+        .join("target")
+        .join("kicad-libraries-tests")
+        .join("desktop-teams-claimed");
+    clear_read_only(&folder);
+    let _ = std::fs::remove_dir_all(&folder);
+    let teams = Arc::new(Teams::open(
+        config.path().join("team.json"),
+        SignIns::kept_in(Arc::new(MemorySignIns::default())),
+        None,
+        None,
+    ));
+    let libraries = KicadLibraries::start(folder.clone(), teams.clone());
+    let state_of = |client: &Client| libraries.status_of(&client.url).map(|status| status.state);
+    teams.sign_in(acme.sign_in()).unwrap();
+    wait_until("acme's libraries", || {
+        matches!(state_of(&acme), Some(KicadLibrariesState::UpToDate { .. }))
+    });
+    let recorded = kicad_libraries::read_state(&folder.join("AC")).unwrap();
+    assert_eq!(recorded.server, acme.url);
+
+    // The second server now claims acme's team: same ID, same code.
+    claimer.claim_team(&recorded.team_id, "AC");
+    teams.sign_in(claimer.sign_in()).unwrap();
+    let asking = KicadLibrariesState::OtherServer {
+        code: "AC".into(),
+        recorded_server: acme.url.clone(),
+        server: claimer.url.clone(),
+    };
+    wait_until("the claimer's libraries to wait for the person", || {
+        state_of(&claimer) == Some(asking.clone())
+    });
+    // Asking for an update changes nothing: the claimer is shown, so
+    // Update now is for it.
+    assert_eq!(teams.status().shown, claimer.url);
+    libraries.update_now();
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(state_of(&claimer), Some(asking));
+    assert_eq!(
+        kicad_libraries::read_state(&folder.join("AC")).unwrap(),
+        recorded,
+        "the folder was not written"
+    );
+    // The Teams menu asks on the claimer's row only.
+    let mut status = teams.status();
+    libraries.note_other_servers(&mut status);
+    assert_eq!(
+        team(&status.teams, &claimer).libraries_made_from.as_deref(),
+        Some(acme.url.as_str())
+    );
+    assert_eq!(team(&status.teams, &acme).libraries_made_from, None);
+
+    // The person says the team moved: the folder records the new server,
+    // and the new server's update runs.
+    libraries.use_new_server(&claimer.url).unwrap();
+    wait_until("the libraries to update from the new server", || {
+        matches!(
+            state_of(&claimer),
+            Some(KicadLibrariesState::UpToDate { .. })
+        )
+    });
+    assert_eq!(
+        kicad_libraries::read_state(&folder.join("AC"))
+            .unwrap()
+            .server,
+        claimer.url
+    );
+    drop(libraries);
     drop(teams);
     clear_read_only(&folder);
     let _ = std::fs::remove_dir_all(&folder);

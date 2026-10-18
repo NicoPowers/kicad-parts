@@ -1331,7 +1331,8 @@ a {
   gap: 0.5rem;
 }
 
-/* Remove asks once, in place of the row's buttons. */
+/* Remove asks once, in place of the row's buttons. A question about the
+   team's KiCad libraries looks the same, above them. */
 .team-confirm {
   padding: 0.5rem 0.75rem;
   background: var(--warn-soft);
@@ -1341,6 +1342,10 @@ a {
 
 .kicad-settings-body .team-confirm p {
   margin: 0 0 0.5rem;
+}
+
+.team-question {
+  margin-bottom: 0.5rem;
 }
 
 /* With teams listed above it, the sign-in form starts under a line. */
