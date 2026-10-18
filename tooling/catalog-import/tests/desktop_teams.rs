@@ -18,8 +18,8 @@ use catalog_browser::teams::{MemorySignIns, SignInStore, SignIns, Teams};
 use catalog_import::services;
 use collaboration::PocketBaseClient;
 use desktop_contract::{
-    KicadLibrariesState, LiveUpdates, PublishResult, SignInRequest, TeamEditRequest, TeamSession,
-    TeamStatus,
+    KicadLibrariesState, LibrariesMadeFrom, LiveUpdates, PublishResult, SignInRequest,
+    TeamEditRequest, TeamSession, TeamStatus, UseNewServerRequest, two_servers_claim_a_team,
 };
 use native_services::PocketBaseServer;
 use std::path::Path;
@@ -341,7 +341,9 @@ fn two_teams_are_followed_side_by_side_and_stay_signed_in() {
 /// A team's KiCad libraries take updates only from the server they were
 /// made from (kicad-parts-092b). Every member knows the team's settings
 /// ID, so a second server can claim it; that server writes nothing until
-/// the person says the team moved there.
+/// the person says the team moved there. While both servers are in the
+/// person's teams, no answer is taken, so the libraries cannot flip back
+/// and forth.
 #[test]
 fn a_second_server_claiming_a_team_cannot_write_its_libraries_until_confirmed() {
     let root = services::repository_root();
@@ -373,43 +375,100 @@ fn a_second_server_claiming_a_team_cannot_write_its_libraries_until_confirmed() 
     // The second server now claims acme's team: same ID, same code.
     claimer.claim_team(&recorded.team_id, "AC");
     teams.sign_in(claimer.sign_in()).unwrap();
-    let asking = KicadLibrariesState::OtherServer {
+    // Both servers are in the person's teams, so two servers say they are
+    // AC. The app keeps acme's libraries as they are.
+    let both_listed = KicadLibrariesState::OtherServer {
         code: "AC".into(),
         recorded_server: acme.url.clone(),
         server: claimer.url.clone(),
+        recorded_server_in_your_teams: true,
     };
-    wait_until("the claimer's libraries to wait for the person", || {
-        state_of(&claimer) == Some(asking.clone())
+    wait_until("the claimer's libraries to wait", || {
+        state_of(&claimer) == Some(both_listed.clone())
     });
     // Asking for an update changes nothing: the claimer is shown, so
     // Update now is for it.
     assert_eq!(teams.status().shown, claimer.url);
     libraries.update_now();
     std::thread::sleep(Duration::from_secs(1));
-    assert_eq!(state_of(&claimer), Some(asking));
+    assert_eq!(state_of(&claimer), Some(both_listed));
+    let unchanged = || {
+        assert_eq!(
+            kicad_libraries::read_state(&folder.join("AC")).unwrap(),
+            recorded,
+            "the folder was not written"
+        );
+    };
+    unchanged();
+    // The claimer's row says two servers claim AC, and offers no answer;
+    // an answer sent anyway is refused.
+    let made_from = |client: &Client| {
+        let mut status = teams.status();
+        libraries.note_other_servers(&mut status);
+        team(&status.teams, client).libraries_made_from.clone()
+    };
     assert_eq!(
-        kicad_libraries::read_state(&folder.join("AC")).unwrap(),
-        recorded,
-        "the folder was not written"
+        made_from(&claimer),
+        Some(LibrariesMadeFrom {
+            code: "AC".into(),
+            server: acme.url.clone(),
+            in_your_teams: true,
+        })
     );
-    // The Teams menu asks on the claimer's row only.
-    let mut status = teams.status();
-    libraries.note_other_servers(&mut status);
+    assert_eq!(made_from(&acme), None);
+    let answer = |client: &Client, from: &Client| UseNewServerRequest {
+        server_url: client.url.clone(),
+        code: "AC".into(),
+        made_from: from.url.clone(),
+    };
     assert_eq!(
-        team(&status.teams, &claimer).libraries_made_from.as_deref(),
-        Some(acme.url.as_str())
+        libraries.use_new_server(&answer(&claimer, &acme)),
+        Err(two_servers_claim_a_team("AC", &acme.url, &claimer.url))
     );
-    assert_eq!(team(&status.teams, &acme).libraries_made_from, None);
+    unchanged();
 
+    // The team moved: the person removes acme. Now the claimer's row asks.
+    teams.remove(&acme.url);
+    assert_eq!(
+        made_from(&claimer).map(|made| made.in_your_teams),
+        Some(false)
+    );
+    // An answer to a question that changed meanwhile is refused.
+    let out_of_date = UseNewServerRequest {
+        made_from: "https://elsewhere.example.com".into(),
+        ..answer(&claimer, &acme)
+    };
+    assert_eq!(
+        libraries.use_new_server(&out_of_date),
+        Err("The KiCad libraries for AC changed meanwhile, so your answer was not saved. Read the question again.".into())
+    );
+    unchanged();
     // The person says the team moved: the folder records the new server,
     // and the new server's update runs.
-    libraries.use_new_server(&claimer.url).unwrap();
+    libraries.use_new_server(&answer(&claimer, &acme)).unwrap();
     wait_until("the libraries to update from the new server", || {
         matches!(
             state_of(&claimer),
             Some(KicadLibrariesState::UpToDate { .. })
         )
     });
+    assert_eq!(
+        kicad_libraries::read_state(&folder.join("AC"))
+            .unwrap()
+            .server,
+        claimer.url
+    );
+
+    // Adding acme back cannot hand the libraries back with one click:
+    // two servers say they are AC again, and the claimer keeps them.
+    teams.sign_in(acme.sign_in()).unwrap();
+    wait_until("acme's libraries to wait", || {
+        made_from(&acme).is_some_and(|made| made.in_your_teams)
+    });
+    assert_eq!(
+        libraries.use_new_server(&answer(&acme, &claimer)),
+        Err(two_servers_claim_a_team("AC", &claimer.url, &acme.url))
+    );
     assert_eq!(
         kicad_libraries::read_state(&folder.join("AC"))
             .unwrap()

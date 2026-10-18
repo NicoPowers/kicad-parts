@@ -16,7 +16,7 @@ use desktop_contract::{
     PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCodeCheck,
     TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
     TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
-    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus,
+    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus, UseNewServerRequest,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -634,17 +634,17 @@ async fn team_code_set(
     blocking(move || libraries.set_code(&code)).await?
 }
 
-/// The person said the team at `server_url` moved there, so its KiCad
-/// libraries, made from its old address, take updates from it again.
+/// The person said a team moved to its server, so its KiCad libraries,
+/// made from its old address, take updates from it again.
 #[tauri::command]
 async fn kicad_libraries_use_new_server(
     team: State<'_, Team>,
     libraries: State<'_, Libraries>,
-    server_url: String,
+    request: UseNewServerRequest,
 ) -> Result<TeamsStatus, String> {
     let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
     blocking(move || {
-        libraries.use_new_server(&server_url)?;
+        libraries.use_new_server(&request)?;
         Ok(teams_status(&teams, &libraries))
     })
     .await?

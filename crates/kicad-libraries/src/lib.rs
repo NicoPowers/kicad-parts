@@ -96,6 +96,9 @@ pub enum UpdateError {
     Denied(PathBuf),
     /// Another update of the same folder is running.
     Busy,
+    /// An update of the folder ran for longer than [`use_new_server`]
+    /// waits, so the person's answer was not saved.
+    AnswerNotSaved,
     /// The folder for the team's code belongs to another team, so it was
     /// not changed. It stays that way until this team's code changes: KiCad
     /// cannot hold two libraries with one name.
@@ -156,6 +159,7 @@ impl UpdateError {
                 name(file)
             ),
             Self::Busy => "Another update of these libraries is running, from this app or another one. The next update tries again.".to_owned(),
+            Self::AnswerNotSaved => "The libraries are being updated, so your answer was not saved. Try again in a moment.".to_owned(),
             Self::OtherTeam {
                 folder,
                 code,
@@ -170,8 +174,10 @@ impl UpdateError {
                 recorded_server,
                 server,
                 ..
+            // The KiCad settings panel says the same (kicad_libraries.rs in
+            // the desktop UI).
             } => format!(
-                "The KiCad libraries for {code} were made from {recorded_server}, so they were not changed from {server}. If the team moved to the new address, choose Use the new address in the Teams menu."
+                "The KiCad libraries for {code} come from {recorded_server}, so the app does not update them from {server}. If the team moved to {server}, choose Use the new address on {code}'s row in the Teams menu."
             ),
             Self::Folder(folder) => format!(
                 "The folder {} has a ; or a brace in its path, which the SQLite3 ODBC driver cannot read. Use a data folder without them.",
@@ -364,26 +370,52 @@ pub fn update(
     Ok(outcome)
 }
 
-/// The person confirmed that `team` moved to `team.server`: its folder
-/// records the new server and takes updates from it again. A folder of
-/// another team is refused, as in [`update`]. A folder that records
-/// nothing yet is left alone; the next update records the server.
-pub fn use_new_server(root: &Path, team: &Team) -> Result<(), UpdateError> {
+/// How long [`use_new_server`] waits for an update of the folder to end.
+const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The person confirmed that `team` moved from `made_from`, the server
+/// they were shown, to `team.server`: its folder records the new server
+/// and takes updates from it again.
+///
+/// A folder of another team is refused, as in [`update`]. So is a folder
+/// that no longer records `made_from`, because the person answered a
+/// question that is out of date; [`UpdateError::OtherServer`] names the
+/// server it records now. A folder that records nothing yet is left alone:
+/// the next update records the server.
+pub fn use_new_server(root: &Path, team: &Team, made_from: &str) -> Result<(), UpdateError> {
     let folder = &team_folder(root, team.naming.code());
+    if read_state(folder).is_none() {
+        return Ok(());
+    }
+    // An update from the old server may hold the folder for a moment.
+    let waited_since = std::time::Instant::now();
+    let _lock = loop {
+        match FolderLock::take(folder)
+            .map_err(|error| UpdateError::Io(folder.join(LOCK_FILE), error))?
+        {
+            Some(lock) => break lock,
+            None if waited_since.elapsed() < ANSWER_WAIT => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            None => return Err(UpdateError::AnswerNotSaved),
+        }
+    };
     let Some(mut state) = read_state(folder) else {
         return Ok(());
     };
-    let _lock = FolderLock::take(folder)
-        .map_err(|error| UpdateError::Io(folder.join(LOCK_FILE), error))?
-        .ok_or(UpdateError::Busy)?;
-    if let Some(latest) = read_state(folder) {
-        state = latest;
-    }
     if state.team_id != team.id {
         return Err(UpdateError::OtherTeam {
             folder: folder.to_path_buf(),
             code: team.naming.code().to_owned(),
             other_server: state.server,
+            server: team.server.clone(),
+        });
+    }
+    if !same_server(&state.server, made_from) {
+        return Err(UpdateError::OtherServer {
+            folder: folder.to_path_buf(),
+            code: team.naming.code().to_owned(),
+            recorded_server: state.server,
             server: team.server.clone(),
         });
     }

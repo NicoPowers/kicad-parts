@@ -4,8 +4,13 @@
 
 use super::layout::files;
 use super::{resistors, team, test_folder};
+use crate::files::FolderLock;
 use crate::{STATE_FILE, Team, UpdateError, read_state, same_server, update, use_new_server};
 use std::path::Path;
+use std::time::Duration;
+
+/// The server `team()` writes from.
+const OLD: &str = "http://127.0.0.1:8090";
 
 /// The team `team()` at another server, as if it moved, or as if another
 /// server claimed its ID.
@@ -56,13 +61,13 @@ fn another_server_cannot_write_until_the_person_says_the_team_moved() {
     match run_for(&root, &moved) {
         Err(error @ UpdateError::OtherServer { .. }) => assert_eq!(
             error.to_string(),
-            "The KiCad libraries for MA were made from http://127.0.0.1:8090, so they were not changed from https://new.example.com. If the team moved to the new address, choose Use the new address in the Teams menu."
+            "The KiCad libraries for MA come from http://127.0.0.1:8090, so the app does not update them from https://new.example.com. If the team moved to https://new.example.com, choose Use the new address on MA's row in the Teams menu."
         ),
         other => panic!("expected the other server to be refused: {other:?}"),
     }
     assert_eq!(files(&root.join("MA")), before, "nothing was written");
     // The person confirms: the folder records the new server.
-    use_new_server(&root, &moved).unwrap();
+    use_new_server(&root, &moved, OLD).unwrap();
     assert_eq!(recorded_server(&root), "https://new.example.com");
     run_for(&root, &moved).unwrap();
     // And the old server no longer writes.
@@ -81,13 +86,13 @@ fn confirming_a_new_server_never_takes_another_teams_folder() {
         ..at("https://new.example.com")
     };
     assert!(matches!(
-        use_new_server(&root, &claimed),
+        use_new_server(&root, &claimed, OLD),
         Err(UpdateError::OtherTeam { .. })
     ));
     assert_eq!(recorded_server(&root), "http://127.0.0.1:8090");
     // A team with no folder yet has nothing to confirm.
     let empty = test_folder("server-no-folder");
-    use_new_server(&empty, &team()).unwrap();
+    use_new_server(&empty, &team(), OLD).unwrap();
     assert!(!empty.join("MA").exists());
 }
 
@@ -110,4 +115,41 @@ fn an_address_written_the_older_way_names_the_same_server() {
     .unwrap();
     run_for(&root, &at("https://parts.example.com")).unwrap();
     assert_eq!(recorded_server(&root), "https://parts.example.com");
+}
+
+#[test]
+fn an_answer_to_a_question_that_is_out_of_date_is_refused() {
+    let root = test_folder("server-out-of-date");
+    run_for(&root, &team()).unwrap();
+    // The person saw "made from https://older.example.com", but the folder
+    // records another server by the time they answer.
+    match use_new_server(
+        &root,
+        &at("https://new.example.com"),
+        "https://older.example.com",
+    ) {
+        Err(UpdateError::OtherServer {
+            recorded_server, ..
+        }) => assert_eq!(recorded_server, OLD),
+        other => panic!("expected the answer to be refused: {other:?}"),
+    }
+    assert_eq!(recorded_server(&root), OLD);
+}
+
+#[test]
+fn an_answer_waits_for_an_update_that_holds_the_folder() {
+    let root = test_folder("server-answer-waits");
+    run_for(&root, &team()).unwrap();
+    let held = FolderLock::take(&root.join("MA")).unwrap().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(held);
+    });
+    use_new_server(&root, &at("https://new.example.com"), OLD).unwrap();
+    release.join().unwrap();
+    assert_eq!(recorded_server(&root), "https://new.example.com");
+    assert_eq!(
+        UpdateError::AnswerNotSaved.to_string(),
+        "The libraries are being updated, so your answer was not saved. Try again in a moment."
+    );
 }

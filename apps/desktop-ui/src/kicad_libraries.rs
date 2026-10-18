@@ -6,6 +6,7 @@
 use crate::backend;
 use desktop_contract::{
     KicadLibrariesState, KicadLibrariesStatus, KicadLibrary, OdbcDriver, TeamCode,
+    two_servers_claim_a_team,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -189,15 +190,14 @@ pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> 
                 code,
                 recorded_server,
                 server,
+                recorded_server_in_your_teams,
             } => view! {
                 <p
                     class="kicad-libraries-status kicad-libraries-failed"
                     role="status"
                     data-state="other-server"
                 >
-                    {format!(
-                        "The {code} libraries here were made from {recorded_server}, so the app does not update them from {server}. If the team moved to the new address, choose Use the new address for {code} in the Teams menu."
-                    )}
+                    {other_server_words(&code, &recorded_server, &server, recorded_server_in_your_teams)}
                 </p>
             }
             .into_any(),
@@ -574,5 +574,46 @@ fn TeamCodeChoice(status: RwSignal<Option<KicadLibrariesStatus>>) -> impl IntoVi
             }
             .into_any(),
         }
+    }
+}
+
+/// What the panel says while the team's libraries come from another
+/// server (kicad-parts-092b). It names the Teams menu's button exactly, as
+/// the app's own refusal does (`UpdateError::OtherServer`).
+fn other_server_words(
+    code: &str,
+    recorded_server: &str,
+    server: &str,
+    recorded_server_in_your_teams: bool,
+) -> String {
+    if recorded_server_in_your_teams {
+        two_servers_claim_a_team(code, recorded_server, server)
+    } else {
+        format!(
+            "The KiCad libraries for {code} come from {recorded_server}, so the app does not update them from {server}. If the team moved to {server}, choose Use the new address on {code}'s row in the Teams menu."
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn libraries_from_another_server_name_the_button_to_choose() {
+        assert_eq!(
+            other_server_words(
+                "MA",
+                "http://127.0.0.1:8090",
+                "https://new.example.com",
+                false
+            ),
+            // The same words as UpdateError::OtherServer in kicad-libraries.
+            "The KiCad libraries for MA come from http://127.0.0.1:8090, so the app does not update them from https://new.example.com. If the team moved to https://new.example.com, choose Use the new address on MA's row in the Teams menu."
+        );
+        assert_eq!(
+            other_server_words("MA", "https://a.example.com", "https://b.example.com", true),
+            "Two team servers say they are team MA: https://a.example.com and https://b.example.com. The app updates MA's libraries only from https://a.example.com. If the team moved, remove https://a.example.com from your teams."
+        );
     }
 }

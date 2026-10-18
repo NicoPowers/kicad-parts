@@ -180,12 +180,19 @@ pub async fn team_show(server_url: &str) -> Result<TeamsStatus, String> {
     call(command::TEAM_SHOW, &ServerArgs { server_url }).await
 }
 
-/// The person said the team at `server_url` moved there, so its KiCad
-/// libraries take updates from it.
-pub async fn kicad_libraries_use_new_server(server_url: &str) -> Result<TeamsStatus, String> {
+#[derive(Serialize)]
+struct UseNewServerArgs {
+    request: desktop_contract::UseNewServerRequest,
+}
+
+/// The person said a team moved to its server, so its KiCad libraries
+/// take updates from it.
+pub async fn kicad_libraries_use_new_server(
+    request: desktop_contract::UseNewServerRequest,
+) -> Result<TeamsStatus, String> {
     call(
         command::KICAD_LIBRARIES_USE_NEW_SERVER,
-        &ServerArgs { server_url },
+        &UseNewServerArgs { request },
     )
     .await
 }

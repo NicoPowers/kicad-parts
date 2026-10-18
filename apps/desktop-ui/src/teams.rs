@@ -10,7 +10,8 @@
 use crate::backend;
 use crate::focus::{Scrolling, focus_found_later, focus_later};
 use desktop_contract::{
-    LiveUpdates, SignInRequest, SignInsKept, TeamSession, TeamStatus, TeamsStatus,
+    LibrariesMadeFrom, LiveUpdates, SignInRequest, SignInsKept, TeamSession, TeamStatus,
+    TeamsStatus, UseNewServerRequest, two_servers_claim_a_team,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -390,10 +391,14 @@ fn team_row(
     }
 }
 
-/// The question on a team's row when its KiCad libraries were made from
-/// another server address. Another server could claim the team, so the
-/// app writes them only once the person says the team moved. "Not now"
-/// leaves them as they are, and keeps the answer one button away.
+/// What a team's row says when its KiCad libraries come from another
+/// server address. Another server could claim the team, so the app writes
+/// them only once the person says the team moved.
+///
+/// While that other server is in the person's teams too, two servers say
+/// they are the team: the row says so and offers no answer, so one click
+/// can't hand the libraries back and forth. Otherwise it asks once. "Not
+/// now" leaves them as they are, and keeps the answer one button away.
 fn new_server_question(
     server: String,
     row_id: String,
@@ -404,9 +409,8 @@ fn new_server_question(
     // buttons while the rest of the team's status changes.
     let asked = Memo::new(move |_| {
         team.with(|team| {
-            let team = team.as_ref()?;
-            let made_from = team.libraries_made_from.clone()?;
-            Some((team.label(), made_from))
+            team.as_ref()
+                .and_then(|team| team.libraries_made_from.clone())
         })
     });
     let not_now = RwSignal::new(false);
@@ -424,12 +428,19 @@ fn new_server_question(
             Scrolling::IntoView,
         );
     };
+    // Sends what the question showed, so an answer to a question that
+    // changed meanwhile is refused.
     let use_new_server = {
         let (server, row_id) = (server.clone(), row_id.clone());
-        move |_| {
-            let (server, row_id) = (server.clone(), row_id.clone());
+        move |made: LibrariesMadeFrom| {
+            let request = UseNewServerRequest {
+                server_url: server.clone(),
+                code: made.code,
+                made_from: made.server,
+            };
+            let row_id = row_id.clone();
             spawn_local(async move {
-                match backend::kicad_libraries_use_new_server(&server).await {
+                match backend::kicad_libraries_use_new_server(request).await {
                     Ok(status) => {
                         problem.set(None);
                         set_teams.set(Some(status));
@@ -440,21 +451,42 @@ fn new_server_question(
             });
         }
     };
+    let problem_view = move || {
+        problem
+            .get()
+            .map(|message| view! { <p class="problem" role="alert">{message}</p> })
+    };
     move || {
-        let (label, made_from) = asked.get()?;
+        let made = asked.get()?;
+        let code = made.code.clone();
+        if made.in_your_teams {
+            let text = two_servers_claim_a_team(&code, &made.server, &server);
+            return Some(
+                view! {
+                    <div class="team-confirm team-question">
+                        <p class="team-two-servers">{text}</p>
+                    </div>
+                }
+                .into_any(),
+            );
+        }
+        let answer = {
+            let (use_new_server, made) = (use_new_server.clone(), made.clone());
+            move |_| use_new_server(made.clone())
+        };
         if not_now.get() {
             // Asked once; the answer stays one button away.
             let text = format!(
-                "The app does not update the KiCad libraries for {label} until you choose the new address."
+                "The app does not update the KiCad libraries for {code} until you choose Use the new address."
             );
             return Some(
                 view! {
                     <div class="team-question">
                         <p class="team-state hint">{text}</p>
-                        <button type="button" class="team-use-new-server" on:click=use_new_server.clone()>
+                        <button type="button" class="team-use-new-server" on:click=answer>
                             "Use the new address"
                         </button>
-                        {move || problem.get().map(|message| view! { <p class="problem" role="alert">{message}</p> })}
+                        {problem_view}
                     </div>
                 }
                 .into_any(),
@@ -463,22 +495,25 @@ fn new_server_question(
         // The new address has its own element, so a journey can blank out
         // its port, which changes from run to run.
         let (text, new_server) = (
-            format!("The KiCad libraries for {label} were made from {made_from}. Use them for "),
+            format!(
+                "The KiCad libraries for {code} come from {}. Update them from ",
+                made.server
+            ),
             server.clone(),
         );
         let (labelled_by, question_id) = (question_id.clone(), question_id.clone());
-        let (row_id, use_new_server) = (row_id.clone(), use_new_server.clone());
+        let row_id = row_id.clone();
         Some(
             view! {
                 <div class="team-confirm team-question" role="group" aria-labelledby=labelled_by>
                     <p id=question_id>
                         {text}
                         <span class="team-question-server">{new_server}</span>
-                        " instead? Only do this if the team moved to a new address."
+                        " instead? Only do this if the team moved to this new address."
                     </p>
-                    {move || problem.get().map(|message| view! { <p class="problem" role="alert">{message}</p> })}
+                    {problem_view}
                     <div class="team-actions">
-                        <button type="button" class="team-use-new-server" on:click=use_new_server>
+                        <button type="button" class="team-use-new-server" on:click=answer>
                             "Use the new address"
                         </button>
                         <button
@@ -498,11 +533,18 @@ fn new_server_question(
     }
 }
 
-/// `text` with every character but letters and digits as `-`, for use in
-/// an element ID.
+/// `text` as letters, digits and `_`, for use in an element ID. Every
+/// other character, `_` too, becomes `_` and its code in hexadecimal, such
+/// as `_3a_` for `:`. So two different addresses never give the same ID.
 fn id_part(text: &str) -> String {
     text.chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_string()
+            } else {
+                format!("_{:x}_", u32::from(ch))
+            }
+        })
         .collect()
 }
 
@@ -611,7 +653,19 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
         TeamSession::SignedIn { name, .. } => Some((team, name)),
         _ => None,
     });
-    let look = if offline + again > 0 {
+    // Teams whose KiCad libraries wait for the person (kicad-parts-092b).
+    let waiting = status
+        .teams
+        .iter()
+        .filter(|team| team.libraries_made_from.is_some())
+        .count();
+    let needs_answer = |words: String| match waiting {
+        0 => words,
+        _ if status.teams.len() < 2 => format!("{words} · needs an answer"),
+        1 => format!("{words} · 1 team needs an answer"),
+        many => format!("{words} · {many} teams need an answer"),
+    };
+    let look = if offline + again + waiting > 0 {
         PROBLEM
     } else if connecting > 0 || shown.is_none() {
         OFF
@@ -633,7 +687,7 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
             None if again > 0 => "Team catalog: sign in again".to_owned(),
             None => "Team catalog: not signed in".to_owned(),
         };
-        return (words, look);
+        return (needs_answer(words), look);
     }
     // Several teams: say whose parts are shown, then count each team once
     // by where it stands. Teams signed out on purpose are not counted.
@@ -652,7 +706,7 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
         (None, true) => "Team catalog: not signed in".to_owned(),
         (None, false) => format!("Teams · {}", counts.join(", ")),
     };
-    (words, look)
+    (needs_answer(words), look)
 }
 
 /// Where one team stands, for the header badge. Each team has exactly one.
@@ -881,10 +935,35 @@ mod tests {
     }
 
     #[test]
-    fn a_row_id_holds_only_letters_digits_and_dashes() {
+    fn row_ids_never_clash_for_different_addresses() {
+        assert_eq!(id_part("https://a.b:1"), "https_3a__2f__2f_a_2e_b_3a_1");
+        // Addresses that differ only in their punctuation get different IDs.
+        assert_ne!(id_part("https://a-b.c"), id_part("https://a.b-c"));
+        assert_ne!(id_part("https://a_b"), id_part("https://a-b"));
+    }
+
+    #[test]
+    fn a_team_waiting_for_an_answer_shows_in_the_badge() {
+        let mut ma = team("MA", signed_in(LiveUpdates::Live));
+        ma.libraries_made_from = Some(LibrariesMadeFrom {
+            code: "MA".into(),
+            server: "https://old.example.com".into(),
+            in_your_teams: false,
+        });
         assert_eq!(
-            id_part("https://parts.example.com:8443/acme"),
-            "https---parts-example-com-8443-acme"
+            summary(&status(vec![ma.clone()])),
+            (
+                "Team catalog · Ada Editor · needs an answer".into(),
+                PROBLEM
+            )
+        );
+        let ac = team("AC", signed_in(LiveUpdates::Live));
+        assert_eq!(
+            summary(&status(vec![ma, ac])),
+            (
+                "MA · Ada Editor · 2 live · 1 team needs an answer".into(),
+                PROBLEM
+            )
         );
     }
 

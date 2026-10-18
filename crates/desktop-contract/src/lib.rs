@@ -377,11 +377,44 @@ pub struct TeamStatus {
     /// sentence, such as a sign-in the password store could not remove.
     #[serde(default)]
     pub note: Option<String>,
-    /// The team server the team's KiCad libraries were made from, when it
-    /// is not this one. The app stops updating them until the person says
-    /// the team moved here (kicad-parts-092b).
+    /// Set when the team's KiCad libraries come from another team server.
+    /// The app stops updating them until the person says the team moved
+    /// here (kicad-parts-092b).
     #[serde(default)]
-    pub libraries_made_from: Option<String>,
+    pub libraries_made_from: Option<LibrariesMadeFrom>,
+}
+
+/// Where a team's KiCad libraries come from, when it is not the team's
+/// server.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibrariesMadeFrom {
+    pub code: String,
+    /// The server the libraries come from.
+    pub server: String,
+    /// That server is in the person's teams too, so two servers say they
+    /// are this team. The app keeps updating from `server`, and offers the
+    /// new one only once `server` is removed from the person's teams.
+    pub in_your_teams: bool,
+}
+
+/// The person's answer on a team's row: the team at `server_url` moved
+/// there from `made_from`. `code` and `made_from` are what the question
+/// showed, so an answer to a question that changed meanwhile is refused.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UseNewServerRequest {
+    pub server_url: String,
+    pub code: String,
+    pub made_from: String,
+}
+
+/// What the app says when two team servers in the person's teams both say
+/// they are the team with `code`: the libraries keep coming from
+/// `old_server`. Shared by the Teams menu, the KiCad settings panel and
+/// the app's refusal, so all three say the same.
+pub fn two_servers_claim_a_team(code: &str, old_server: &str, new_server: &str) -> String {
+    format!(
+        "Two team servers say they are team {code}: {old_server} and {new_server}. The app updates {code}'s libraries only from {old_server}. If the team moved, remove {old_server} from your teams."
+    )
 }
 
 impl TeamStatus {
@@ -1609,6 +1642,10 @@ pub enum KicadLibrariesState {
         recorded_server: String,
         /// The signed-in team's server.
         server: String,
+        /// `recorded_server` is in the person's teams too: the person must
+        /// remove it before the app offers the new server.
+        #[serde(default)]
+        recorded_server_in_your_teams: bool,
     },
     Failed {
         at_ms: u64,

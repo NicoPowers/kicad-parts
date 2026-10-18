@@ -272,25 +272,45 @@ impl TeamLibraries {
         Ok(self.status())
     }
 
-    /// The server the team's libraries were made from, while it is not
-    /// the team's server and the person has not said the team moved.
-    pub fn made_from_other_server(&self) -> Option<String> {
+    /// The team's code and the server its libraries come from, while it is
+    /// not the team's server and the person has not said the team moved.
+    pub fn made_from_other_server(&self) -> Option<(String, String)> {
         match &self.shared.lock().state {
             KicadLibrariesState::OtherServer {
-                recorded_server, ..
-            } => Some(recorded_server.clone()),
+                code,
+                recorded_server,
+                ..
+            } => Some((code.clone(), recorded_server.clone())),
             _ => None,
         }
     }
 
-    /// The person said the team moved to its server: the folder records
-    /// it and takes updates from it from now on. Does nothing unless the
-    /// libraries are waiting for that answer.
-    pub fn use_new_server(&self) -> Result<(), String> {
+    /// The person said the team with `code` moved to its server from
+    /// `made_from`, as the question showed them: the folder records the
+    /// new server and takes updates from it from now on. Does nothing
+    /// unless the libraries wait for that answer, and refuses an answer to
+    /// a question that changed meanwhile.
+    pub fn use_new_server(&self, code: &str, made_from: &str) -> Result<(), String> {
+        let out_of_date = || {
+            format!(
+                "The KiCad libraries for {code} changed meanwhile, so your answer was not saved. Read the question again."
+            )
+        };
         let (settings, server) = {
             let known = self.shared.lock();
             match (&known.state, &known.team) {
-                (KicadLibrariesState::OtherServer { server, .. }, Some(settings)) => {
+                (
+                    KicadLibrariesState::OtherServer {
+                        code: asked_code,
+                        recorded_server,
+                        server,
+                        ..
+                    },
+                    Some(settings),
+                ) => {
+                    if asked_code != code || recorded_server != made_from {
+                        return Err(out_of_date());
+                    }
                     (settings.clone(), server.clone())
                 }
                 _ => return Ok(()),
@@ -303,8 +323,13 @@ impl TeamLibraries {
             server,
             naming,
         };
-        kicad_libraries::use_new_server(&self.root, &team)
-            .map_err(|error| error.message(&folder))?;
+        kicad_libraries::use_new_server(&self.root, &team, made_from).map_err(|error| {
+            match error {
+                // The folder records another server now.
+                UpdateError::OtherServer { .. } => out_of_date(),
+                other => other.message(&folder),
+            }
+        })?;
         self.shared.moved.store(true, Ordering::SeqCst);
         // The thread updates on its next look; until then, the question
         // is answered.
@@ -530,6 +555,8 @@ fn follow(root: &Path, team: &TeamCatalog, shared: &Shared) {
                     code,
                     recorded_server,
                     server,
+                    // Only the list of teams knows; see KicadLibraries.
+                    recorded_server_in_your_teams: false,
                 };
             }
             Err(Stopped::Failed(reason)) => {

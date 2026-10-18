@@ -13,7 +13,11 @@ pub use team::{QUIET, RETRY, TeamLibraries};
 
 use crate::team::TeamCatalog;
 use crate::teams::Teams;
-use desktop_contract::{KicadLibrariesStatus, TeamCodeCheck, TeamsStatus};
+use desktop_contract::{
+    KicadLibrariesState, KicadLibrariesStatus, LibrariesMadeFrom, TeamCodeCheck, TeamsStatus,
+    UseNewServerRequest, two_servers_claim_a_team,
+};
+use kicad_libraries::same_server;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -86,7 +90,29 @@ impl KicadLibraries {
 
     /// The shown team's libraries, as the KiCad settings panel shows them.
     pub fn status(&self) -> KicadLibrariesStatus {
-        self.with_shown(TeamLibraries::status)
+        self.with_list(self.with_shown(TeamLibraries::status))
+    }
+
+    /// Whether `server` is in the person's list of teams.
+    fn in_your_teams(&self, server: &str) -> bool {
+        self.teams
+            .every()
+            .iter()
+            .any(|(listed, _)| same_server(listed, server))
+    }
+
+    /// `status` with what only the list of teams knows: whether the server
+    /// the libraries come from is in the person's teams too.
+    fn with_list(&self, mut status: KicadLibrariesStatus) -> KicadLibrariesStatus {
+        if let KicadLibrariesState::OtherServer {
+            recorded_server,
+            recorded_server_in_your_teams,
+            ..
+        } = &mut status.state
+        {
+            *recorded_server_in_your_teams = self.in_your_teams(recorded_server);
+        }
+        status
     }
 
     /// The libraries of the team at `server_url`, if it is in the list.
@@ -101,25 +127,47 @@ impl KicadLibraries {
     /// The status of the libraries of the team at `server_url`, if it is in
     /// the list.
     pub fn status_of(&self, server_url: &str) -> Option<KicadLibrariesStatus> {
-        Some(self.of(server_url)?.status())
+        Some(self.with_list(self.of(server_url)?.status()))
     }
 
-    /// Notes, on each team in `status`, whether its libraries were made
-    /// from another server and wait for the person's answer, so the Teams
-    /// menu can ask on that team's row.
+    /// Notes, on each team in `status`, whether its libraries come from
+    /// another server and wait for the person, so the Teams menu can say
+    /// so on that team's row.
     pub fn note_other_servers(&self, status: &mut TeamsStatus) {
+        let listed: Vec<String> = status
+            .teams
+            .iter()
+            .map(|team| team.server_url.clone())
+            .collect();
         for team in &mut status.teams {
             team.libraries_made_from = self
                 .of(&team.server_url)
-                .and_then(|libraries| libraries.made_from_other_server());
+                .and_then(|libraries| libraries.made_from_other_server())
+                .map(|(code, server)| LibrariesMadeFrom {
+                    in_your_teams: listed.iter().any(|listed| same_server(listed, &server)),
+                    code,
+                    server,
+                });
         }
     }
 
-    /// The person said the team at `server_url` moved there: its libraries
-    /// take updates from it from now on.
-    pub fn use_new_server(&self, server_url: &str) -> Result<(), String> {
-        match self.of(server_url) {
-            Some(libraries) => libraries.use_new_server(),
+    /// The person said the team at `request.server_url` moved there: its
+    /// libraries take updates from it from now on.
+    ///
+    /// Refused while the server they come from is in the person's teams
+    /// too. Two servers then say they are one team, and one click must not
+    /// hand the libraries from one to the other and back. The person first
+    /// removes the server the team left.
+    pub fn use_new_server(&self, request: &UseNewServerRequest) -> Result<(), String> {
+        if self.in_your_teams(&request.made_from) {
+            return Err(two_servers_claim_a_team(
+                &request.code,
+                &request.made_from,
+                &request.server_url,
+            ));
+        }
+        match self.of(&request.server_url) {
+            Some(libraries) => libraries.use_new_server(&request.code, &request.made_from),
             None => Ok(()),
         }
     }
