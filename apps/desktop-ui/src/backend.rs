@@ -7,7 +7,7 @@ use desktop_contract::{
     SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
     TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest,
     TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick,
-    TeamPickRequest, TeamSameMpn, TeamStatus, command,
+    TeamPickRequest, TeamSameMpn, TeamsStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -118,7 +118,7 @@ struct CsvReviewArgs {
     request: TeamCsvReviewRequest,
 }
 
-pub async fn team_status() -> Result<TeamStatus, String> {
+pub async fn team_status() -> Result<TeamsStatus, String> {
     call(command::TEAM_STATUS, &NoArgs {}).await
 }
 
@@ -156,12 +156,28 @@ pub async fn team_code_set(code: &str) -> Result<KicadLibrariesStatus, String> {
     call(command::TEAM_CODE_SET, &CodeArgs { code }).await
 }
 
-pub async fn team_sign_in(request: SignInRequest) -> Result<TeamStatus, String> {
+pub async fn team_sign_in(request: SignInRequest) -> Result<TeamsStatus, String> {
     call(command::TEAM_SIGN_IN, &SignInArgs { request }).await
 }
 
-pub async fn team_sign_out() -> Result<TeamStatus, String> {
-    call(command::TEAM_SIGN_OUT, &NoArgs {}).await
+/// One team, by its server address. Tauri takes argument names in camel
+/// case.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerArgs<'a> {
+    server_url: &'a str,
+}
+
+pub async fn team_sign_out(server_url: &str) -> Result<TeamsStatus, String> {
+    call(command::TEAM_SIGN_OUT, &ServerArgs { server_url }).await
+}
+
+pub async fn team_remove(server_url: &str) -> Result<TeamsStatus, String> {
+    call(command::TEAM_REMOVE, &ServerArgs { server_url }).await
+}
+
+pub async fn team_show(server_url: &str) -> Result<TeamsStatus, String> {
+    call(command::TEAM_SHOW, &ServerArgs { server_url }).await
 }
 
 pub async fn team_part(ipn: &str) -> Result<Option<TeamPart>, String> {

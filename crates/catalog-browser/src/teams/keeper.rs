@@ -227,7 +227,7 @@ fn keep(shared: &Shared, look_for_kept: bool) {
                     }
                 }
             }
-            TeamSession::SignedOut { .. } => kept = None,
+            TeamSession::SignedOut { .. } | TeamSession::Reaching { .. } => kept = None,
         }
         std::thread::sleep(TICK);
     }

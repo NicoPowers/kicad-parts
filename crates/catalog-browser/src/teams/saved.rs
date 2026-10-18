@@ -14,6 +14,10 @@ pub(super) struct SavedTeam {
     pub(super) server_url: String,
     #[serde(default)]
     pub(super) email: String,
+    /// The team's code, such as `MA`, once known. It names the team before
+    /// its server is reached.
+    #[serde(default)]
+    pub(super) code: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,10 +102,12 @@ mod tests {
                 SavedTeam {
                     server_url: "https://parts.example.com/acme".into(),
                     email: "a@example.test".into(),
+                    code: "AC".into(),
                 },
                 SavedTeam {
                     server_url: "https://beta.example.com".into(),
                     email: "a@example.test".into(),
+                    code: String::new(),
                 },
             ],
             shown: "https://beta.example.com".into(),

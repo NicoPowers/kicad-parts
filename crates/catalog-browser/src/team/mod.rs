@@ -231,6 +231,7 @@ impl TeamCatalog {
             return TeamStatus {
                 server_url: String::new(),
                 email: String::new(),
+                code: self.code(),
                 session: TeamSession::SignedOut {
                     problem: state.problem.clone(),
                 },
@@ -240,6 +241,7 @@ impl TeamCatalog {
         TeamStatus {
             server_url: session.client().base_url().to_owned(),
             email: session.email.clone(),
+            code: self.code(),
             session: TeamSession::SignedIn {
                 name: session.name.clone(),
                 email: session.email.clone(),

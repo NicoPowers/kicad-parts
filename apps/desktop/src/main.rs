@@ -16,7 +16,7 @@ use desktop_contract::{
     PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCodeCheck,
     TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
     TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
-    TeamPick, TeamPickRequest, TeamSameMpn, TeamStatus,
+    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -345,31 +345,55 @@ async fn footprint_glb(
 }
 
 #[tauri::command]
-async fn team_status(team: State<'_, Team>) -> Result<TeamStatus, String> {
+async fn team_status(team: State<'_, Team>) -> Result<TeamsStatus, String> {
     let teams = team.inner().clone();
-    blocking(move || teams.shown_status()).await
+    blocking(move || teams.status()).await
 }
 
+/// Signs in to one team, adding it to the list; other teams stay signed
+/// in. A failure is said in the status, where the sign-in form shows it.
 #[tauri::command]
-async fn team_sign_in(team: State<'_, Team>, request: SignInRequest) -> Result<TeamStatus, String> {
+async fn team_sign_in(
+    team: State<'_, Team>,
+    request: SignInRequest,
+) -> Result<TeamsStatus, String> {
     let teams = team.inner().clone();
     blocking(move || {
-        // A failure is said in the status, as the sign-in form shows it.
         let _ = teams.sign_in(request);
-        teams.shown_status()
+        teams.status()
     })
     .await
 }
 
 #[tauri::command]
-async fn team_sign_out(team: State<'_, Team>) -> Result<TeamStatus, String> {
+async fn team_sign_out(team: State<'_, Team>, server_url: String) -> Result<TeamsStatus, String> {
     let teams = team.inner().clone();
     blocking(move || {
-        let shown = teams.shown_status();
-        teams.sign_out(&shown.server_url);
-        teams.shown_status()
+        teams.sign_out(&server_url);
+        teams.status()
     })
     .await
+}
+
+#[tauri::command]
+async fn team_remove(team: State<'_, Team>, server_url: String) -> Result<TeamsStatus, String> {
+    let teams = team.inner().clone();
+    blocking(move || {
+        teams.remove(&server_url);
+        teams.status()
+    })
+    .await
+}
+
+/// Shows another team in the catalog view; no sign-in is needed.
+#[tauri::command]
+async fn team_show(team: State<'_, Team>, server_url: String) -> Result<TeamsStatus, String> {
+    let teams = team.inner().clone();
+    blocking(move || {
+        teams.show(&server_url)?;
+        Ok(teams.status())
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -710,6 +734,8 @@ fn main() {
             team_status,
             team_sign_in,
             team_sign_out,
+            team_remove,
+            team_show,
             team_part,
             team_edit,
             team_pick,
@@ -840,6 +866,8 @@ mod tests {
             command::TEAM_STATUS,
             command::TEAM_SIGN_IN,
             command::TEAM_SIGN_OUT,
+            command::TEAM_REMOVE,
+            command::TEAM_SHOW,
             command::TEAM_PART,
             command::TEAM_EDIT,
             command::TEAM_ARCHIVE,

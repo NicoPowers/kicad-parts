@@ -69,12 +69,9 @@ fn a_failed_sign_in_adds_no_team_and_saves_no_password() {
         .unwrap_err();
     assert!(!problem.is_empty());
     assert!(!file.exists(), "a failed sign-in saves nothing at all");
-    assert_eq!(
-        teams.shown_status().session,
-        TeamSession::SignedOut {
-            problem: Some(problem)
-        }
-    );
+    let status = teams.status();
+    assert_eq!(status.problem, Some(problem));
+    assert!(status.teams.is_empty() && status.shown.is_empty());
     assert!(teams.signed_in().is_empty());
     assert!(!teams.shown().is_signed_in());
 }
@@ -106,20 +103,25 @@ fn suggested_values_fill_in_the_sign_in_form() {
             teams: vec![SavedTeam {
                 server_url: "https://parts.example.com".into(),
                 email: "a@example.test".into(),
+                code: "PE".into(),
             }],
             shown: "https://parts.example.com".into(),
         },
     )
     .unwrap();
-    let status = Teams::open(file.clone(), memory(), None, None).shown_status();
+    let status = Teams::open(file.clone(), memory(), None, None).status();
     assert_eq!(
-        (status.server_url.as_str(), status.email.as_str()),
+        (status.form_server.as_str(), status.form_email.as_str()),
         ("https://parts.example.com", "a@example.test")
     );
+    // Nothing is kept for it, so it needs signing in; its saved code
+    // names it.
+    assert_eq!(status.teams[0].label(), "PE");
+    assert!(status.shown.is_empty(), "no team is signed in");
     let suggested = Some("http://127.0.0.1:1".into());
-    let status = Teams::open(file, memory(), suggested, None).shown_status();
+    let status = Teams::open(file, memory(), suggested, None).status();
     assert_eq!(
-        (status.server_url.as_str(), status.email.as_str()),
+        (status.form_server.as_str(), status.form_email.as_str()),
         ("http://127.0.0.1:1", "a@example.test")
     );
 }
@@ -159,7 +161,7 @@ fn a_restart_carries_on_every_kept_sign_in_without_a_password() {
         teams.sign_in(request(&beta)).unwrap();
         // Signing in to beta kept acme signed in, and shows beta.
         assert!(is_signed_in(&teams, &acme) && is_signed_in(&teams, &beta));
-        assert_eq!(teams.shown_status().server_url, beta.url);
+        assert_eq!(teams.status().shown, beta.url);
         wait_until("both sign-ins to be kept", || {
             kept_token(&store, &acme).is_some() && kept_token(&store, &beta).is_some()
         });
@@ -171,11 +173,7 @@ fn a_restart_carries_on_every_kept_sign_in_without_a_password() {
     });
     assert_eq!((acme.password_sign_ins(), beta.password_sign_ins()), (1, 1));
     assert!(acme.refreshes() >= 1 && beta.refreshes() >= 1);
-    assert_eq!(
-        teams.shown_status().server_url,
-        beta.url,
-        "beta is still shown"
-    );
+    assert_eq!(teams.status().shown, beta.url, "beta is still shown");
     // The renewed tokens are kept for the next start.
     wait_until("the renewed tokens to be kept", || {
         kept_token(&store, &acme) == teams.signed_in()[0].1.token()
@@ -221,7 +219,7 @@ fn signing_out_and_removing_touch_one_team_only() {
     assert!(kept_token(&store, &beta).is_some());
     assert!(!is_signed_in(&teams, &acme) && is_signed_in(&teams, &beta));
     assert_eq!(saved::read(&file).teams.len(), 2);
-    assert_eq!(teams.shown_status().server_url, beta.url);
+    assert_eq!(teams.status().shown, beta.url);
     // Its keeper never brings the forgotten sign-in back.
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(kept_token(&store, &acme), None);
@@ -260,12 +258,18 @@ fn a_rejected_sign_in_asks_only_that_team_again() {
     teams.show(&acme.url).unwrap();
     // Acme is not signed in, so the catalog view shows beta; the sign-in
     // form asks for acme's password.
-    assert_eq!(teams.shown_status().server_url, beta.url);
+    assert_eq!(teams.status().shown, beta.url);
     let acme_problem = teams
         .lock()
         .find(&acme.url)
         .and_then(|team| team.catalog.problem());
     assert_eq!(acme_problem.as_deref(), Some(SIGN_IN_AGAIN));
+    assert_eq!(
+        teams.status().teams[0].session,
+        TeamSession::SignedOut {
+            problem: Some(SIGN_IN_AGAIN.into())
+        }
+    );
     // Signing in again works as usual.
     teams.sign_in(request(&acme)).unwrap();
     assert!(is_signed_in(&teams, &acme));
@@ -291,6 +295,14 @@ fn a_server_that_cannot_be_reached_is_tried_again_while_others_work() {
     wait_until("acme to be offline", || {
         matches!(teams.reaching(&acme.url), Some(Some(_)))
     });
+    let acme_status = teams.status().teams[0].clone();
+    assert!(
+        matches!(
+            acme_status.session,
+            TeamSession::Reaching { problem: Some(_) }
+        ),
+        "{acme_status:?}"
+    );
     // The kept sign-in stays, for when the server is back.
     assert!(kept_token(&store, &acme).is_some());
     acme.set_down(false);

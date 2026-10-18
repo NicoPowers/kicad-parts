@@ -20,7 +20,7 @@ pub use sign_ins::{MemorySignIns, SignInStore, SignIns};
 
 use crate::team::TeamCatalog;
 use collaboration::ServerAddress;
-use desktop_contract::{SignInRequest, SignInsKept, TeamSession, TeamStatus};
+use desktop_contract::{SignInRequest, SignInsKept, TeamSession, TeamsStatus};
 use keeper::{Keeper, KeeperTask};
 use saved::{SavedList, SavedTeam};
 use std::path::PathBuf;
@@ -117,6 +117,7 @@ impl Teams {
             suggested: SavedTeam {
                 server_url: suggested_server.unwrap_or_default(),
                 email: suggested_email.unwrap_or_default(),
+                code: String::new(),
             },
             state: Mutex::new(TeamList {
                 teams,
@@ -159,13 +160,14 @@ impl Teams {
         });
         let email = match status.session {
             TeamSession::SignedIn { email, .. } => email,
-            TeamSession::SignedOut { problem } => {
+            TeamSession::SignedOut { problem } | TeamSession::Reaching { problem } => {
                 return self.failed(problem.unwrap_or_default());
             }
         };
         let saved = SavedTeam {
             server_url: server_url.clone(),
             email,
+            code: catalog.code(),
         };
         let mut list = self.lock();
         list.problem = None;
@@ -264,20 +266,51 @@ impl Teams {
             .collect()
     }
 
-    /// The shown team's status. While no team is signed in, the server
-    /// address and email fill in the sign-in form: suggested ones first,
-    /// then the shown team's.
-    pub fn shown_status(&self) -> TeamStatus {
-        let list = self.lock();
-        let shown = list.shown();
-        if let Some(team) = shown.filter(|team| team.catalog.is_signed_in()) {
-            return TeamStatus {
-                server_url: team.saved.server_url.clone(),
-                email: team.saved.email.clone(),
-                ..team.catalog.status()
-            };
+    /// Every team in the list and how it is doing, which team the catalog
+    /// view shows, and what the sign-in form starts with.
+    pub fn status(&self) -> TeamsStatus {
+        let mut list = self.lock();
+        let mut learned_a_code = false;
+        let teams = list
+            .teams
+            .iter_mut()
+            .map(|team| {
+                let mut status = team.catalog.status();
+                if !status.code.is_empty() && status.code != team.saved.code {
+                    // Saved, so the team has its name at the next start,
+                    // even before its server is reached.
+                    team.saved.code.clone_from(&status.code);
+                    learned_a_code = true;
+                }
+                status.code.clone_from(&team.saved.code);
+                status.server_url.clone_from(&team.saved.server_url);
+                status.email.clone_from(&team.saved.email);
+                if !team.catalog.is_signed_in() {
+                    if let Some(problem) = team.keeper.reaching() {
+                        status.session = TeamSession::Reaching { problem };
+                    }
+                }
+                status
+            })
+            .collect();
+        if learned_a_code {
+            self.save(&list);
         }
-        let saved = shown.map(|team| team.saved.clone()).unwrap_or_default();
+        let signed_in = |team: &&Team| team.catalog.is_signed_in();
+        let shown = list
+            .shown()
+            .filter(signed_in)
+            .map(|team| team.saved.server_url.clone())
+            .unwrap_or_default();
+        // The form offers the chosen team if it needs signing in, else the
+        // first team that does.
+        let needs_signing_in = |team: &&Team| !signed_in(team);
+        let form = list
+            .find(&list.chosen)
+            .filter(needs_signing_in)
+            .or_else(|| list.teams.iter().find(needs_signing_in))
+            .map(|team| team.saved.clone())
+            .unwrap_or_default();
         let pick = |suggested: &str, saved: String| {
             if suggested.is_empty() {
                 saved
@@ -285,14 +318,13 @@ impl Teams {
                 suggested.to_owned()
             }
         };
-        let problem = list
-            .problem
-            .clone()
-            .or_else(|| shown.and_then(|team| team.catalog.problem()));
-        TeamStatus {
-            server_url: pick(&self.suggested.server_url, saved.server_url),
-            email: pick(&self.suggested.email, saved.email),
-            session: TeamSession::SignedOut { problem },
+        TeamsStatus {
+            teams,
+            shown,
+            kept: self.kept(),
+            form_server: pick(&self.suggested.server_url, form.server_url),
+            form_email: pick(&self.suggested.email, form.email),
+            problem: list.problem.clone(),
         }
     }
 

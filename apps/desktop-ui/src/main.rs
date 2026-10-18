@@ -14,13 +14,14 @@ mod library_check;
 mod list_focus;
 mod part_list;
 mod team;
+mod teams;
 mod viewer;
 
 use add_part::AddPartView;
 use desktop_contract::{
     AppStatus, KicadStatus, LibraryCheckView, ManufacturerPart, PartDetail, PreviewKind,
     PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet, TeamPart,
-    TeamSession, TeamStatus, unit_label,
+    TeamSession, TeamStatus, TeamsStatus, unit_label,
 };
 use focus::focus_later;
 use kicad_libraries::KicadLibrariesSection;
@@ -30,7 +31,8 @@ use libraries::{BrowseFor, BrowserActions, LibrariesDialog};
 use library_check::{LibraryCheckLine, LibraryCheckPanel};
 use part_list::{ResultList, SEARCH_ROWS, Searched};
 use std::time::Duration;
-use team::{Notice, TeamBadge, TeamColumn, TeamUi};
+use team::{Notice, TeamColumn, TeamUi};
+use teams::{TeamSwitcher, TeamsMenu};
 use viewer::{CloseUp, CloseUpDialog, Picture, Viewer};
 
 /// The ID of the search box above the part list.
@@ -79,7 +81,15 @@ fn App() -> impl IntoView {
         status.set(loaded);
     });
 
-    let team = RwSignal::new(None::<TeamStatus>);
+    // Every team in the person's list, and the one the catalog view shows.
+    let teams = RwSignal::new(None::<TeamsStatus>);
+    let team = Memo::new(move |_| {
+        teams.with(|status| {
+            status
+                .as_ref()
+                .and_then(|status| status.shown_team().cloned())
+        })
+    });
     // True while the Add part form is open in the part panel.
     let adding = RwSignal::new(false);
     let can_add = Memo::new(move |_| {
@@ -113,18 +123,20 @@ fn App() -> impl IntoView {
         }
     });
     let team_changes = Memo::new(move |_| {
-        team.with(
-            |status| match status.as_ref().map(|status| &status.session) {
-                Some(TeamSession::SignedIn { checkpoint, .. }) => Some(*checkpoint),
-                _ => None,
-            },
-        )
+        team.with(|status| match status {
+            Some(TeamStatus {
+                server_url,
+                session: TeamSession::SignedIn { checkpoint, .. },
+                ..
+            }) => Some(position_number(server_url, *checkpoint)),
+            _ => None,
+        })
     });
     let refresh_team = move || {
         spawn_local(async move {
             if let Ok(latest) = backend::team_status().await {
-                if team.with_untracked(|known| known.as_ref() != Some(&latest)) {
-                    team.set(Some(latest));
+                if teams.with_untracked(|known| known.as_ref() != Some(&latest)) {
+                    teams.set(Some(latest));
                 }
             }
         });
@@ -148,18 +160,21 @@ fn App() -> impl IntoView {
     // once per change of the team catalog (who is signed in, a new Change
     // or a finished import), never per keystroke.
     let check_position = Memo::new(move |_| {
-        team.with(
-            |status| match status.as_ref().map(|status| &status.session) {
-                Some(TeamSession::SignedIn {
-                    can_edit: true,
-                    email,
-                    checkpoint,
-                    imports,
-                    ..
-                }) => Some((email.clone(), *checkpoint, *imports)),
-                _ => None,
-            },
-        )
+        team.with(|status| match status {
+            Some(TeamStatus {
+                server_url,
+                session:
+                    TeamSession::SignedIn {
+                        can_edit: true,
+                        email,
+                        checkpoint,
+                        imports,
+                        ..
+                    },
+                ..
+            }) => Some((format!("{server_url}\n{email}"), *checkpoint, *imports)),
+            _ => None,
+        })
     });
     let library_check = RwSignal::new(None::<LibraryCheckView>);
     // The position the shown check was worked out for, so the journeys
@@ -202,18 +217,20 @@ fn App() -> impl IntoView {
         Some(position) if checked_at.get().as_ref() == Some(&position) => "ready",
         Some(_) => "loading",
     };
-    // The header does not need the checkpoint; leaving it out keeps the
+    // The header does not need the checkpoints; leaving them out keeps the
     // menu from re-rendering whenever someone saves a Change.
-    let team_badge = Memo::new(move |_| {
-        team.get().map(|mut status| {
-            if let TeamSession::SignedIn {
-                checkpoint,
-                imports,
-                ..
-            } = &mut status.session
-            {
-                *checkpoint = 0;
-                *imports = 0;
+    let teams_badge = Memo::new(move |_| {
+        teams.get().map(|mut status| {
+            for team in &mut status.teams {
+                if let TeamSession::SignedIn {
+                    checkpoint,
+                    imports,
+                    ..
+                } = &mut team.session
+                {
+                    *checkpoint = 0;
+                    *imports = 0;
+                }
             }
             status
         })
@@ -274,7 +291,8 @@ fn App() -> impl IntoView {
                 >
                     "Libraries"
                 </button>
-                <TeamBadge team=team_badge set_team=team />
+                <TeamSwitcher teams=teams_badge set_teams=teams />
+                <TeamsMenu teams=teams_badge set_teams=teams />
                 <KicadBadge
                     status=status
                     kicad_epoch=kicad_epoch
@@ -376,6 +394,16 @@ fn App() -> impl IntoView {
             })}
         </div>
     }
+}
+
+/// One number for the shown team and how far the app has followed it, so
+/// the search runs again on a new Change or on switching teams: two teams
+/// may share a checkpoint.
+fn position_number(server_url: &str, checkpoint: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (server_url, checkpoint).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// `20000` as `20,000`.
@@ -685,7 +713,7 @@ fn SettingsProblem(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
 fn PartPanel(
     selected: RwSignal<Option<String>>,
     kicad_epoch: RwSignal<u32>,
-    team: RwSignal<Option<TeamStatus>>,
+    team: Memo<Option<TeamStatus>>,
     adding: RwSignal<bool>,
     checking: RwSignal<bool>,
     library_check: RwSignal<Option<LibraryCheckView>>,
@@ -716,27 +744,33 @@ fn PartPanel(
     // Changes whenever someone saves a Change, a CSV import run finishes
     // (it may find CSV changes to review), or on sign-in and sign-out.
     let team_checkpoint = Memo::new(move |_| {
-        team.with(
-            |status| match status.as_ref().map(|status| &status.session) {
-                Some(TeamSession::SignedIn {
-                    checkpoint,
-                    imports,
-                    ..
-                }) => Some((*checkpoint, *imports)),
-                _ => None,
-            },
-        )
+        team.with(|status| match status {
+            Some(TeamStatus {
+                server_url,
+                session:
+                    TeamSession::SignedIn {
+                        checkpoint,
+                        imports,
+                        ..
+                    },
+                ..
+            }) => Some((server_url.clone(), *checkpoint, *imports)),
+            _ => None,
+        })
     });
-    // Who is signed in; a different person starts from a clean column.
+    // Who is signed in, to which team; another person or another team
+    // starts from a clean column.
     let signed_in_as = Memo::new(move |_| {
-        team.with(
-            |status| match status.as_ref().map(|status| &status.session) {
-                Some(TeamSession::SignedIn { email, .. }) => Some(email.clone()),
-                _ => None,
-            },
-        )
+        team.with(|status| match status {
+            Some(TeamStatus {
+                server_url,
+                session: TeamSession::SignedIn { email, .. },
+                ..
+            }) => Some((server_url.clone(), email.clone())),
+            _ => None,
+        })
     });
-    Effect::new(move |previous: Option<Option<String>>| {
+    Effect::new(move |previous: Option<Option<(String, String)>>| {
         let now = signed_in_as.get();
         if previous.is_some_and(|previous| previous != now) {
             ui.reset();

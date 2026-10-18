@@ -24,6 +24,8 @@ pub mod command {
     pub const TEAM_STATUS: &str = "team_status";
     pub const TEAM_SIGN_IN: &str = "team_sign_in";
     pub const TEAM_SIGN_OUT: &str = "team_sign_out";
+    pub const TEAM_REMOVE: &str = "team_remove";
+    pub const TEAM_SHOW: &str = "team_show";
     pub const TEAM_PART: &str = "team_part";
     pub const TEAM_EDIT: &str = "team_edit";
     pub const TEAM_ARCHIVE: &str = "team_archive";
@@ -322,26 +324,79 @@ pub enum PreviewProblemReason {
 
 // ---- The team catalog ----------------------------------------------------
 //
-// The shared, revisioned Catalog on the team's PocketBase server. The app
-// signs in with an email and password, keeps the session only in memory,
-// and saves just the server address and email.
+// The shared, revisioned Catalog on each team's PocketBase server. The
+// person may be signed in to several teams at once, one server each. The
+// app signs in with an email and password, keeps each team's renewable
+// sign-in in the system's credential store, and saves each server address
+// and email in a file.
 
-/// The team catalog connection.
+/// Every team in the person's list.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamsStatus {
+    /// In the order they were added.
+    pub teams: Vec<TeamStatus>,
+    /// The server address of the team the catalog view shows; blank when
+    /// no team is signed in.
+    pub shown: String,
+    /// Whether sign-ins outlive the app.
+    pub kept: SignInsKept,
+    /// What the sign-in form starts with: the suggested server address and
+    /// email, or those of a team that needs signing in.
+    pub form_server: String,
+    pub form_email: String,
+    /// Why the last sign-in from the form failed, if it did.
+    pub problem: Option<String>,
+}
+
+impl TeamsStatus {
+    /// The team the catalog view shows, if any.
+    pub fn shown_team(&self) -> Option<&TeamStatus> {
+        self.teams
+            .iter()
+            .find(|team| !self.shown.is_empty() && team.server_url == self.shown)
+    }
+}
+
+/// One team.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamStatus {
-    /// The saved or suggested server address, such as
-    /// `http://127.0.0.1:8090`; blank if none.
+    /// The team server's address, such as `https://parts.example.com/acme`.
     pub server_url: String,
-    /// The saved or suggested email; blank if none.
+    /// The email used there.
     pub email: String,
+    /// The team's code, such as `MA`, once known; blank before.
+    #[serde(default)]
+    pub code: String,
     pub session: TeamSession,
+}
+
+impl TeamStatus {
+    /// How the person knows the team: its code, or else its server address
+    /// without `https://`.
+    pub fn label(&self) -> String {
+        if self.code.is_empty() {
+            self.server_url
+                .split_once("://")
+                .map_or(self.server_url.as_str(), |(_, rest)| rest)
+                .to_owned()
+        } else {
+            self.code.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum TeamSession {
     SignedOut {
-        /// Why the last sign-in failed, if it did.
+        /// Why the last sign-in failed or ended, if it did.
+        problem: Option<String>,
+    },
+    /// The app holds a sign-in kept from before and is reaching the team
+    /// server to carry it on. It keeps trying until it can.
+    Reaching {
+        /// Why the server could not be reached; `None` during the first
+        /// try.
         problem: Option<String>,
     },
     SignedIn {
@@ -1620,6 +1675,19 @@ mod tests {
         assert_eq!(unit_label(1), "A");
         assert_eq!(unit_label(26), "Z");
         assert_eq!(unit_label(27), "AA");
+    }
+
+    #[test]
+    fn a_team_is_named_by_its_code_or_else_its_address() {
+        let mut team = TeamStatus {
+            server_url: "https://parts.example.com/acme".into(),
+            email: "a@example.test".into(),
+            code: String::new(),
+            session: TeamSession::SignedOut { problem: None },
+        };
+        assert_eq!(team.label(), "parts.example.com/acme");
+        team.code = "AC".into();
+        assert_eq!(team.label(), "AC");
     }
 
     #[test]

@@ -1286,6 +1286,82 @@ a {
   margin-top: 0.5rem;
 }
 
+/* The list of teams in the Teams menu, each with its state and actions. */
+.teams-heading {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.team-list {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+}
+
+.team-row {
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.team-row:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.kicad-settings-body .team-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0 0 0.2rem;
+}
+
+.team-server {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.kicad-settings-body .team-state {
+  margin: 0 0 0.4rem;
+}
+
+.team-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+/* With teams listed above it, the sign-in form starts under a line. */
+.team-list ~ .team-sign-in {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+}
+
+/* The team switcher in the header, shown with two or more teams. */
+.team-switcher {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+.team-switcher label {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.team-switcher select {
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid #c9d4e2;
+  border-radius: 6px;
+}
+
+.team-switcher + .team-settings {
+  margin-left: 0;
+}
+
 /* With the team column, the right side gets more room for history and
    comparisons; the previews stay on the left. */
 .part-body.team {
