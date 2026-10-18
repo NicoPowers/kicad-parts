@@ -259,18 +259,34 @@ pub fn TeamSwitcher(
             }
         });
     };
+    // The choices and the shown team are kept apart, so switching only
+    // moves the selection: the list box is never drawn again under the
+    // person's focus.
+    let choices = Memo::new(move |_| {
+        teams.with(|status| {
+            status.as_ref().map_or_else(Vec::new, |status| {
+                status
+                    .teams
+                    .iter()
+                    .filter(|team| has_session(team))
+                    .map(|team| (team.server_url.clone(), team.label()))
+                    .collect::<Vec<_>>()
+            })
+        })
+    });
+    let shown = Memo::new(move |_| {
+        teams.with(|status| {
+            status
+                .as_ref()
+                .map(|status| status.shown.clone())
+                .unwrap_or_default()
+        })
+    });
     move || {
-        let status = teams.get()?;
-        let choices: Vec<TeamStatus> = status
-            .teams
-            .iter()
-            .filter(|t| has_session(t))
-            .cloned()
-            .collect();
+        let choices = choices.get();
         if choices.len() < 2 {
             return None;
         }
-        let shown = status.shown.clone();
         Some(view! {
             <div class="team-switcher">
                 <label for="team-shown">"Team"</label>
@@ -280,11 +296,11 @@ pub fn TeamSwitcher(
                 >
                     {choices
                         .into_iter()
-                        .map(|team| {
-                            let selected = team.server_url == shown;
+                        .map(|(server, label)| {
+                            let this = server.clone();
                             view! {
-                                <option value=team.server_url.clone() selected=selected>
-                                    {choice_label(&team)}
+                                <option value=server prop:selected=move || shown.get() == this>
+                                    {label}
                                 </option>
                             }
                         })
@@ -312,16 +328,6 @@ fn address_of(server_url: &str) -> &str {
     server_url
         .split_once("://")
         .map_or(server_url, |(_, rest)| rest)
-}
-
-/// A team in the switcher: its code and server, or its server alone.
-fn choice_label(team: &TeamStatus) -> String {
-    let address = address_of(&team.server_url);
-    if team.code.is_empty() {
-        address.to_owned()
-    } else {
-        format!("{} · {address}", team.code)
-    }
 }
 
 /// Whether the team needs the person: offline, or asking for a password
@@ -576,9 +582,5 @@ mod tests {
         assert!(state_words(&offline).starts_with("Offline: showing the parts last seen."));
         let out = team("MA", TeamSession::SignedOut { problem: None });
         assert_eq!(state_words(&out), "Signed out (ada@example.test).");
-        assert_eq!(choice_label(&ma), "MA · ma.example.com");
-        let mut unnamed = ma.clone();
-        unnamed.code.clear();
-        assert_eq!(choice_label(&unnamed), "ma.example.com");
     }
 }

@@ -789,12 +789,13 @@ async function waitForDrawnImages(browser, section, timeout) {
 /**
  * Starts `catalog-import local-team-server --json`: a disposable PocketBase
  * on 127.0.0.1 with every CSV file imported (or only `csv`, such as
- * `['g-res']`, which starts faster) and three accounts. It runs
+ * `['g-res']`, which starts faster) and three accounts. With `teamCode`,
+ * the team has that code from the start. It runs
  * windowless in a kill-on-close job and stops when its input closes, so it
  * cannot outlive this process.
  * @returns {Promise<{ url: string, accounts: { name: string, email: string, password: string, canEditCatalog: boolean }[], stop: () => Promise<void> }>}
  */
-export async function startTeamServer({ csv = [] } = {}) {
+export async function startTeamServer({ csv = [], teamCode } = {}) {
   const exe = path.join(
     repoRoot,
     'target',
@@ -802,7 +803,12 @@ export async function startTeamServer({ csv = [] } = {}) {
     process.platform === 'win32' ? 'catalog-import.exe' : 'catalog-import',
   );
   assert.ok(fs.existsSync(exe), `build it first: ${exe}`);
-  const args = ['local-team-server', '--json', ...(csv.length > 0 ? ['--csv', csv.join(',')] : [])];
+  const args = [
+    'local-team-server',
+    '--json',
+    ...(csv.length > 0 ? ['--csv', csv.join(',')] : []),
+    ...(teamCode ? ['--team-code', teamCode] : []),
+  ];
   const child = spawn(exe, args, {
     cwd: repoRoot,
     stdio: ['pipe', 'pipe', 'inherit'],
