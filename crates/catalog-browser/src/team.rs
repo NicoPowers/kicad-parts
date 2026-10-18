@@ -906,7 +906,7 @@ impl TeamCatalog {
                         )
                     } else {
                         format!(
-                            "Someone added a part with the IPN {ipn} first, so nothing was saved. The next free IPN is {next_free}."
+                            "Someone gave the IPN {ipn} to another part first, so nothing was saved. The next free IPN is {next_free}."
                         )
                     };
                     Ok(PublishResult::IpnTaken {

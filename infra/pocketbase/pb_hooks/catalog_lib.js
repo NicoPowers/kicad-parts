@@ -2537,7 +2537,9 @@ function publishEdit(e) {
 //
 //   1. replay the stored answer if the correlation ID was used before for
 //      the same request (409 correlation_reused for a different one);
-//   2. answer 409 ipn_taken if the Catalog already has a part with the IPN;
+//   2. answer 409 ipn_taken if the Catalog already has a part with the IPN,
+//      or if a row of the latest import run of a CSV file has it
+//      (csvRowKeptWithIpn);
 //   3. build part details 1 in the category, with exactly its fields, and
 //      revision 1 binding exact CAD item revisions: ones the Catalog
 //      already has, KiCad's own libraries (external), or ones made from the
@@ -2551,6 +2553,61 @@ function publishEdit(e) {
 
 // The `source` of a new part's details, revision and CAD item revisions.
 const CREATE_SOURCE = "create";
+
+// The row of the latest import run of a CSV file that has `ipn` but did not
+// become a part, as { path, rowNumber }, or null (kicad-parts-3b72).
+//
+// Every other row of a latest run is a part already, or names a part that
+// is (duplicate-ipn, ipn-given-to-another-part), or has no valid IPN, so
+// the "already has a part" check covers those. Only a row with more fields
+// than headers (row-has-extra-fields) keeps a valid IPN without a part.
+// Someone meant that IPN for a part, so giving it to another part in the
+// app would make the next import find two parts with one IPN.
+//
+// IPNs the CSV catalog has but no import has read yet are not here: only
+// the desktop app can see those, in its own folder (see
+// MOVE_THE_CSV_CATALOG.md on giving new IPNs in one place).
+function csvRowKeptWithIpn(txApp, ipn) {
+  const kept = txApp.findRecordsByFilter(
+    "catalog_import_problems",
+    "code = 'row-has-extra-fields' && detail ~ {:ipn}",
+    "",
+    0,
+    0,
+    { ipn: ipn },
+  );
+  const latestRuns = {};
+  for (const problem of kept) {
+    let detail;
+    try {
+      detail = JSON.parse(problem.getString("detail"));
+    } catch (_) {
+      continue;
+    }
+    const column = Array.isArray(detail.headers) ? detail.headers.indexOf("IPN") : -1;
+    const value = column >= 0 && Array.isArray(detail.record) ? detail.record[column] : undefined;
+    if (typeof value !== "string" || trimSpace(value) !== ipn) {
+      continue;
+    }
+    const csvFile = csvFileOf(problem.getString("path"));
+    if (latestRuns[csvFile] === undefined) {
+      const found = txApp.findRecordsByFilter(
+        "catalog_audit_entries",
+        "csv_file = {:csv_file} && csv_import_number > 0",
+        "-csv_import_number",
+        1,
+        0,
+        { csv_file: csvFile },
+      );
+      latestRuns[csvFile] = found.length > 0 ? JSON.parse(found[0].getString("sources")) : null;
+    }
+    const run = latestRuns[csvFile];
+    if (run && Array.isArray(run.problems) && run.problems.indexOf(problem.id) >= 0) {
+      return { path: problem.getString("path"), rowNumber: detail.row_number };
+    }
+  }
+  return null;
+}
 
 // The checked request of a new part.
 function createRequest(body) {
@@ -2691,6 +2748,20 @@ function publishCreate(e) {
           ipn: request.ipn,
           message: `the Catalog already has a part with the IPN ${request.ipn}; an IPN is never reused`,
           addedByYou: !!added && added.getString("kind") === CHANGE_KINDS.create && added.getString("actor") === actor.id,
+        },
+      };
+      return;
+    }
+    const keptRow = csvRowKeptWithIpn(txApp, request.ipn);
+    if (keptRow) {
+      reply = {
+        status: 409,
+        body: {
+          outcome: "ipn_taken",
+          correlationId: request.correlationId,
+          ipn: request.ipn,
+          message: `row ${keptRow.rowNumber} of ${keptRow.path} has the IPN ${request.ipn}; the row could not become a part, but its IPN is taken, and an IPN is never reused`,
+          addedByYou: false,
         },
       };
       return;

@@ -446,3 +446,47 @@ fn a_csv_review_can_never_take_a_row_for_another_part() {
     );
     team.assert_nothing_lost("a row that became another part");
 }
+
+#[test]
+fn add_part_refuses_an_ipn_that_a_csv_row_has_even_when_the_row_made_no_part() {
+    let team = Team::start();
+    // A row with one field too many cannot become a part, but its IPN is
+    // meant for one.
+    const KEPT: &str = "RES-0107-0001";
+    let file = team.root().join(CSV);
+    let mut text = fs::read_to_string(&file).unwrap();
+    text.push_str(&format!(
+        "\"{KEPT}\",\"ERJ-3EKF1002V\",\"Panasonic\",\"RES 10K\",\"10k\",\"g-res:R_US\",\"g-Resistor_SMD:R_0603_1608Metric\",\"1%\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"one too many\"\n"
+    ));
+    fs::write(&file, text).unwrap();
+    team.import("kept-row");
+    let stored = team.read();
+    assert!(stored.part(KEPT).is_none());
+
+    let mut command = CreateCommand::new(KEPT, "res", "A new resistor");
+    command.fields = vec![
+        field("Description", "RES 10K 1% 1/10W 0603"),
+        field("Value", "10k"),
+        field("Tolerance", "1%"),
+        field("Datasheet", ""),
+    ];
+    command.cad_fields = vec![
+        field("Symbol", "g-res:R_US"),
+        field("Footprint", "g-Resistor_SMD:R_0603_1608Metric"),
+    ];
+    let reply = submit_create(&team.editor, &command).unwrap();
+    let CreateOutcome::IpnTaken {
+        message,
+        added_by_you,
+        ..
+    } = &reply.outcome
+    else {
+        panic!("not refused: {}", reply.body);
+    };
+    assert!(!added_by_you);
+    assert!(
+        message.contains("row 30 of database/g-res.csv has the IPN RES-0107-0001"),
+        "{message}"
+    );
+    assert_eq!(team.read().counts(), stored.counts());
+}
