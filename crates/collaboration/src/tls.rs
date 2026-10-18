@@ -87,7 +87,7 @@ impl ServerTrust {
     }
 }
 
-/// ring, not aws-lc-rs: it builds on every platform without CMake or NASM.
+/// ring, the one crypto provider in the dependency tree (ADR 0017).
 fn crypto() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }

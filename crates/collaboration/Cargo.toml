@@ -13,8 +13,8 @@ test-trust = []
 
 [dependencies]
 getrandom = "0.3"
-# HTTPS for the REST and realtime clients (ADR 0017). ring, not aws-lc-rs,
-# so every platform builds without a C toolchain beyond the usual one.
+# HTTPS for the REST and realtime clients (ADR 0017). ring is the only
+# crypto provider in the tree (rcgen uses it too): small and quick to build.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Checks certificates with the operating system, so company root
 # certificates work on Windows, macOS and Linux.
