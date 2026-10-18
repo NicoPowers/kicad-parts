@@ -23,4 +23,4 @@ Plain `http://` stays for a server on this computer only, such as a local test s
 - Tests never change the operating system's certificate store. The `test-trust` feature adds a certificate authority made at test time (`crates/collaboration/tests/https.rs`). The app never turns it on.
 - A reverse proxy in front of PocketBase must pass `/api/realtime` through without buffering, or live updates arrive late.
 
-Mulch records: mx-8ffc3d.
+Mulch records: mx-8ffc3d, mx-5a94dc, mx-a42231.
