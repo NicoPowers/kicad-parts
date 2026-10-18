@@ -4,7 +4,7 @@
 // (apps/desktop-ui/js/*.test.mjs) and the team server's pure rules
 // (infra/pocketbase/tests/*.test.mjs).
 //
-//   npm run camera-tests --prefix apps/desktop/journeys
+//   npm run js-tests --prefix apps/desktop/journeys
 
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';

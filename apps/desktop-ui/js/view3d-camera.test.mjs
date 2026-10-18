@@ -1,7 +1,7 @@
 // Unit tests for the 3D view's camera rules (view3d-camera.js). They use
 // the app's own copy of three.js to project points and test what the
 // camera sees, so they check what a person would see on screen. No GPU is
-// needed. Run: npm run camera-tests --prefix apps/desktop/journeys
+// needed. Run: npm run js-tests --prefix apps/desktop/journeys
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
