@@ -68,15 +68,22 @@ While your team moves from the CSV catalog to a team catalog, people can add par
 
 The app only sees the CSV files in your own folder. It cannot see a row that is still on someone else's computer, not yet pushed or pulled.
 
-If two parts get one IPN anyway, the import finds it. A CSV row is a different part when its IPN belongs to a part added in the app and the row names none of that part's MPNs. When the row or the part has no MPN, the row counts as a different part too, because nothing shows they are the same part. Then:
+If two parts get one IPN anyway, the import finds it. It looks at each CSV row whose IPN belongs to a part added in the app. The row is that part when it names one of the part's MPNs, or when its part details, symbol and footprint are exactly the part's. Otherwise nothing shows they are one part. A row or part with no MPN, or with a placeholder such as `N/A` or `TBD`, has nothing to match. Then:
 
 - the import leaves the app's part exactly as it is;
-- the import records the import problem `ipn-given-to-another-part`, which keeps the whole row and says which part has the IPN;
-- the app shows "A CSV row has this IPN for another part" on that part.
+- the import records the import problem `ipn-given-to-another-part`, which keeps the whole row and names the part that has the IPN;
+- the app shows "A CSV row has this part's IPN" on that part, with the next free IPN.
 
-No CSV review can take such a row. **Give the CSV row another IPN**, commit, and import again. If the row and the part really are one part, give them the same MPN instead.
+No CSV review can take such a row. The row may be a different part, or the same part with an MPN written another way, such as `LT1763CS8#PBF` and `LT1763CS8#TRPBF`. Decide which, then:
 
-Add part also cannot use an IPN that a row of the latest import has, even a row that could not become a part, such as a row with too many fields. The team server refuses it.
+- **If the row is a different part,** give it another IPN, such as the next free one the app shows.
+- **If the row is the same part,** put the part's MPN in the row, or remove the row. A file with no MPN column, such as `database/g-art.csv`, cannot share an MPN: make the row match the part exactly, or remove it.
+
+Commit, and import again.
+
+A shared MPN is trusted, even a generic one such as `LM358` that comes in several packages. If a CSV row then differs from the part, a person still checks the differences in a CSV review before anything changes.
+
+Add part also cannot use an IPN that a row of the latest import has, even a row that could not become a part. That includes a row with too many fields, and a row whose IPN has a space after it, as spreadsheets sometimes leave. The team server refuses it.
 
 ## Not done yet
 
