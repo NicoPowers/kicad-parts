@@ -59,6 +59,25 @@ The end of the report lists each thing that was lost or differs without a reason
 
 If a difference is right and meant, ask a developer to add it to the list of meant differences, with its reason. That list is in `tooling/catalog-import/src/csv_kicad_library/intended.rs`. A difference never passes without a written reason.
 
+## Give new IPNs in one place while you move
+
+While your team moves from the CSV catalog to a team catalog, people can add parts in both. Two people can then give one IPN to two different parts. To stop that, choose one place for new IPNs and tell the whole team:
+
+- **Add new parts in the app.** Add part offers the next free IPN. It checks the team catalog and the CSV files in your folder. It checks the CSV files again just before it saves, and if a row took the IPN in the meantime, it saves nothing and offers the next free IPN.
+- **Stop adding rows to the CSV files.** If someone must add a row, they commit and push it at once, and everyone pulls before they add a part.
+
+The app only sees the CSV files in your own folder. It cannot see a row that is still on someone else's computer, not yet pushed or pulled.
+
+If two parts get one IPN anyway, the import finds it. A CSV row is a different part when its IPN belongs to a part added in the app and the row names none of that part's MPNs. A row with no MPN counts as a different part too, because nothing shows it is the same part. The import then:
+
+- leaves the app's part exactly as it is;
+- records the import problem `ipn-given-to-another-part`, which keeps the whole row and says which part has the IPN;
+- shows "A CSV row has this IPN for another part" on that part in the app.
+
+No CSV review can take such a row. **Give the CSV row another IPN**, commit, and import again. If the row and the part really are one part, give them the same MPN instead.
+
+Add part also cannot use an IPN that a row of the latest import has, even a row that could not become a part, such as a row with too many fields. The team server refuses it.
+
 ## Not done yet
 
 - **No import into your team's own server yet.** The proof only imports into throwaway servers. Importing into a team server that keeps running is kicad-parts-0694.
