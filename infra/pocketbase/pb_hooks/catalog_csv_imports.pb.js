@@ -105,8 +105,9 @@
 //   matches an archived revision of the part adds nothing, and an import
 //   problem (csv-cad-matches-archived-revision) keeps the row, on every run;
 // - a row whose IPN belongs to a part added in the app, but that names none
-//   of that part's MPNs, is a different part that got the same IPN
-//   (kicad-parts-3b72, catalog_lib.js csvRowIsAnotherPart). It is never
+//   of that part's MPNs and is no exact copy of it, may be a different part
+//   that got the same IPN (kicad-parts-3b72, catalog_lib.js
+//   csvRowIsAnotherPart). It is never
 //   taken as new values for that part: an ipn-given-to-another-part import
 //   problem keeps the row, which a CSV review cannot take, and the run does
 //   not list the part among its parts;
@@ -1069,46 +1070,31 @@ routerAdd(
         const detailsSavedBy = savedBy(currentDetails);
         const revisionSavedBy = savedBy(currentRevision);
 
-        // A row for a different part that got the same IPN as a part added
-        // in the app (catalog_lib.js csvRowIsAnotherPart). Its values are
-        // never new values for that part, so nothing below may see it: the
-        // problem keeps the row whole, and a CSV review cannot take it.
+        // A row that may be a different part that got the same IPN as a
+        // part added in the app (catalog_lib.js anotherPartProblem). Its
+        // values are never new values for that part, so nothing below may
+        // see it: the problem keeps the row whole, and a CSV review cannot
+        // take it. The run does not list the part among its parts.
         const firstChange = byId("catalog_changes", stored.getString("first_change"));
-        const storedDetails = JSON.parse(currentDetails.getString("snapshot"));
-        if (
-          lib.csvRowIsAnotherPart(
-            firstChange ? firstChange.getString("kind") : "",
-            storedDetails.manufacturer_parts,
-            part.details.parsed.manufacturer_parts,
-          )
-        ) {
-          const description = (storedDetails.fields || []).find((field) => field.name === "Description");
+        const anotherPart = lib.anotherPartProblem(
+          {
+            firstChangeKind: firstChange ? firstChange.getString("kind") : "",
+            details: JSON.parse(currentDetails.getString("snapshot")),
+          },
+          {
+            ipn: part.ipn,
+            path: row.path || "",
+            rowNumber: row.row_number,
+            rawRecord: row.raw_record,
+            substitutesCsvRows: substitutesCsvRows(row),
+            manufacturerParts: part.details.parsed.manufacturer_parts,
+            sameDetailsAndCad: sameDetails && sameRevision,
+          },
+        );
+        if (anotherPart) {
           serverProblems.push(
-            problem(
-              lib.IPN_GIVEN_TO_ANOTHER_PART,
-              part.ipn,
-              row.path || "",
-              location,
-              lib.anotherPartMessage(
-                { rowNumber: row.row_number, path: row.path, manufacturerParts: part.details.parsed.manufacturer_parts },
-                part.ipn,
-                {
-                  description: description ? description.value : "",
-                  manufacturerParts: storedDetails.manufacturer_parts,
-                },
-              ),
-              JSON.stringify({
-                path: row.path,
-                row_number: row.row_number,
-                raw_record: row.raw_record,
-                substitutes_csv_rows: substitutesCsvRows(row),
-                csv_manufacturer_parts: part.details.parsed.manufacturer_parts,
-                part_manufacturer_parts: storedDetails.manufacturer_parts,
-              }),
-            ),
+            problem(lib.IPN_GIVEN_TO_ANOTHER_PART, part.ipn, row.path || "", location, anotherPart.message, anotherPart.detail),
           );
-          // The run does not list it among its parts: this CSV file did
-          // not make the part and leaves nothing of it.
           part.anotherPart = true;
           continue;
         }

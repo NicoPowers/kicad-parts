@@ -3131,65 +3131,114 @@ function publishArchive(e) {
 // must never take such a row as new values for the app's part. If it did, a
 // CSV review could turn that part into a different one.
 //
-// The rule: a CSV row is another part when the part with its IPN was added
-// in the app (its first Change is a create) and the row names none of that
-// part's MPNs. Only a shared MPN shows that the two describe one part:
-// - one shared MPN is enough, even if the other MPNs differ. One MPN is one
-//   physical part, and the other differences go to a CSV review as usual;
-// - when the row or the part has no MPN at all, nothing shows they are one
-//   part, so the row counts as another part. Taking it would be a guess,
-//   and a wrong guess overwrites a part; a wrong flag only asks a person.
-// A part an import made is never "another part": its IPN came from the CSV
+// The rule: a CSV row may be another part when the part with its IPN was
+// added in the app (its first Change is a create), the row names none of
+// that part's MPNs, and the row is not an exact copy of the part. Then:
+// - one shared MPN is enough to count as one part, even if the other MPNs
+//   differ. A shared MPN is trusted; a generic MPN shared by two packages
+//   (LM358 in SOIC and in DIP) still counts as one part, and the CSV review
+//   of the differences is the guard (ADR 0008);
+// - a row whose part details and CAD are exactly the part's is that part,
+//   whatever its MPN: it is a copy, such as a test point with no MPN copied
+//   into g-art.csv;
+// - when the row or the part has no MPN, nothing else shows they are one
+//   part, so the row is flagged. A wrong guess overwrites a part; a wrong
+//   flag only asks a person.
+// The row may still be the same part, with a corrected or differently
+// spelled MPN (LT1763CS8#PBF against LT1763CS8#TRPBF). So the message never
+// says they differ: it says nothing shows they are one, and gives both ways
+// out.
+// A part an import made is never flagged: its IPN came from the CSV
 // catalog, which is where the row is.
 //
 // MPNs compare without regard to case or the spaces around them, as Add
-// part's MPN check does (crates/catalog-browser same_mpn).
+// part's MPN check does (crates/catalog-browser same_mpn). A placeholder
+// such as "-", "N/A" or "TBD" is no MPN.
 
 // The import problem code of such a row. The row is kept whole in the
 // problem, and the part is left as it is.
 const IPN_GIVEN_TO_ANOTHER_PART = "ipn-given-to-another-part";
 
-// The MPNs of a list of manufacturer parts, as written, without blanks.
+// MPN cells that say there is no MPN yet, compared in capitals.
+const PLACEHOLDER_MPNS = ["-", "--", "–", "—", "?", "N/A", "NA", "TBD", "TBC", "NONE", "NULL", "UNKNOWN"];
+
+// The MPNs of a list of manufacturer parts, as written, without blanks and
+// placeholders.
 function mpnsOf(manufacturerParts) {
   return (Array.isArray(manufacturerParts) ? manufacturerParts : [])
     .map((part) => (part && typeof part.mpn === "string" ? trimSpace(part.mpn) : ""))
-    .filter((mpn) => mpn !== "");
+    .filter((mpn) => mpn !== "" && PLACEHOLDER_MPNS.indexOf(mpn.toUpperCase()) < 0);
 }
 
-// Whether a CSV row with `rowManufacturerParts` is a different part from the
-// stored part with its IPN, whose first Change is of `firstChangeKind` and
-// whose current manufacturer parts are `partManufacturerParts`. See above.
-function csvRowIsAnotherPart(firstChangeKind, partManufacturerParts, rowManufacturerParts) {
-  if (firstChangeKind !== CHANGE_KINDS.create) {
+// Whether a CSV row may be a different part from the stored part with its
+// IPN (see above). `part` is { firstChangeKind, manufacturerParts } of the
+// stored part, `row` is { manufacturerParts, sameDetailsAndCad }: whether
+// the row's part details and CAD are exactly the part's current ones.
+function csvRowIsAnotherPart(part, row) {
+  if (part.firstChangeKind !== CHANGE_KINDS.create || row.sameDetailsAndCad) {
     return false;
   }
-  const partMpns = mpnsOf(partManufacturerParts).map((mpn) => mpn.toUpperCase());
-  return !mpnsOf(rowManufacturerParts).some((mpn) => partMpns.indexOf(mpn.toUpperCase()) >= 0);
+  const partMpns = mpnsOf(part.manufacturerParts).map((mpn) => mpn.toUpperCase());
+  return !mpnsOf(row.manufacturerParts).some((mpn) => partMpns.indexOf(mpn.toUpperCase()) >= 0);
 }
 
-// The plain message of an IPN_GIVEN_TO_ANOTHER_PART problem: which row,
-// which part has the IPN in the team catalog, why they are not one part,
-// and the one thing to do.
+// The plain message of an IPN_GIVEN_TO_ANOTHER_PART problem: which row, by
+// its IPN and MPN (row numbers differ by one between files and Excel),
+// which part has the IPN in the team catalog, why nothing shows they are
+// one part, and what to do either way. It holds nothing that changes from
+// one import to the next, because problems are stored by content.
 function anotherPartMessage(row, ipn, part) {
-  const named = part.description ? `: ${part.description}` : "";
-  const list = (mpns) => mpns.join(", ");
   const rowMpns = mpnsOf(row.manufacturerParts);
   const partMpns = mpnsOf(part.manufacturerParts);
-  let why;
-  if (rowMpns.length > 0 && partMpns.length > 0) {
-    const theRow = rowMpns.length === 1 ? `The row's MPN, ${rowMpns[0]}, is` : `The row's MPNs, ${list(rowMpns)}, are`;
-    why = `${theRow} not that part's (${list(partMpns)}), so they are different parts.`;
-  } else if (partMpns.length > 0) {
-    why = "The row has no MPN, so nothing shows it is that part.";
-  } else if (rowMpns.length > 0) {
-    why = "That part has no MPN, so nothing shows the row is that part.";
-  } else {
-    why = "Neither has an MPN, so nothing shows the row is that part.";
-  }
-  return (
-    `Row ${row.rowNumber} of ${row.path} has the IPN ${ipn}, but the team catalog already gave it to a part added in the app${named}. ` +
-    `${why} The import left that part as it is and kept the row here. Give this CSV row another IPN.`
+  const list = (mpns) => mpns.join(", ");
+  const theRowHas = rowMpns.length === 0 ? "has no MPN" : rowMpns.length === 1 ? `has MPN ${rowMpns[0]}` : `has MPNs ${list(rowMpns)}`;
+  const named = part.description ? `: ${part.description}` : "";
+  const why =
+    partMpns.length === 0
+      ? "That part has no MPN, and the row differs from it, so nothing shows they are one part."
+      : `That part's ${partMpns.length === 1 ? "MPN is" : "MPNs are"} ${list(partMpns)}, so nothing shows they are one part.`;
+  const ifSame =
+    partMpns.length === 0
+      ? "If it is that part, make the row match it exactly, or remove the row."
+      : `If it is that part, put that part's MPN (${partMpns[0]}) in the row, or remove the row.`;
+  return [
+    `In ${row.path}, the row with IPN ${ipn} ${theRowHas}.`,
+    `The team catalog already gave ${ipn} to a part added in the app${named}.`,
+    why,
+    "The import left that part as it is and kept the row here.",
+    "If the row is a different part, give it another IPN.",
+    ifSame,
+  ].join(" ");
+}
+
+// The IPN_GIVEN_TO_ANOTHER_PART problem of a CSV import's row, as
+// { message, detail }, or null when the row may be the part (see above).
+// `stored` is { firstChangeKind, details } of the part with the row's IPN
+// (its current part details, parsed); `row` is { ipn, path, raw_record,
+// substitutesCsvRows, manufacturerParts, sameDetailsAndCad }.
+function anotherPartProblem(stored, row) {
+  const flagged = csvRowIsAnotherPart(
+    { firstChangeKind: stored.firstChangeKind, manufacturerParts: stored.details.manufacturer_parts },
+    row,
   );
+  if (!flagged) {
+    return null;
+  }
+  const description = (stored.details.fields || []).find((field) => field.name === "Description");
+  return {
+    message: anotherPartMessage(row, row.ipn, {
+      description: description ? description.value : "",
+      manufacturerParts: stored.details.manufacturer_parts,
+    }),
+    detail: JSON.stringify({
+      path: row.path,
+      row_number: row.rowNumber,
+      raw_record: row.rawRecord,
+      substitutes_csv_rows: row.substitutesCsvRows,
+      csv_manufacturer_parts: row.manufacturerParts,
+      part_manufacturer_parts: stored.details.manufacturer_parts,
+    }),
+  };
 }
 
 // ---- Reviewing CSV changes that were not applied ------------------------------
@@ -3680,6 +3729,7 @@ module.exports = {
   IPN_GIVEN_TO_ANOTHER_PART: IPN_GIVEN_TO_ANOTHER_PART,
   csvRowIsAnotherPart: csvRowIsAnotherPart,
   anotherPartMessage: anotherPartMessage,
+  anotherPartProblem: anotherPartProblem,
   recordedCsvDocument: recordedCsvDocument,
   archiveState: archiveState,
   newestRevision: newestRevision,
