@@ -108,10 +108,9 @@ impl RealtimeConnection {
         let trust = client.trust();
         let address = ServerAddress::from_url(base_url)
             .map_err(|_| CollabError::Protocol(format!("`{base_url}` is not a team server URL")))?;
-        // On Windows, shutting down a cloned socket did not always wake a
-        // read blocked on the original, so the reader gets the clone and
-        // `disconnect` shuts down the original. A clone keeps its own
-        // timeouts there, so they are set on the reader's socket.
+        // The reader thread gets a clone of the socket; `close` shuts down
+        // this one. On Windows, timeouts belong to each handle, not to the
+        // connection, so the reader's are set on its own clone.
         let socket = open_socket(&address, timeout)?;
         let reader_socket = socket.try_clone().map_err(connecting)?;
         // The handshake and the request get `timeout`. The stream is quiet
@@ -226,7 +225,15 @@ impl RealtimeConnection {
         }
     }
 
-    /// Drops the connection immediately, like a network failure.
+    /// Drops the connection, like a network failure, and waits for the
+    /// reader thread to stop. The server sees the stream end at once.
+    ///
+    /// On Linux and macOS the reader stops at once too. On Windows,
+    /// shutting down a socket never wakes a read blocked on it, whichever
+    /// handle is shut down. The read ends when the server closes its side
+    /// in reply, which is quick, or, with the network gone, at the idle
+    /// limit (6 minutes). Signing out does not wait for this, because
+    /// nothing joins the follower's thread.
     pub fn disconnect(mut self) {
         self.close();
     }

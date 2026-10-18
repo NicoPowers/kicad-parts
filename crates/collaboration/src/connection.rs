@@ -38,8 +38,6 @@ pub enum ConnectionProblem {
     RedirectToUnencrypted,
     /// The server redirected the app again and again.
     TooManyRedirects,
-    /// The server answered the live-updates request with an error status,
-    /// such as a proxy's `502 Bad Gateway`. Holds the status line.
     /// The operating system's trusted certificates could not be read, so
     /// no server can be checked.
     NoCertificateStore(String),
@@ -48,6 +46,8 @@ pub enum ConnectionProblem {
     NotReachable(String),
     /// The server took too long to answer.
     TimedOut,
+    /// The server answered the live-updates request with an error status,
+    /// such as a proxy's `502 Bad Gateway`. Holds the status line.
     LiveUpdatesRefused(String),
     /// The connection worked, then broke.
     Lost(String),
