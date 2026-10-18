@@ -35,8 +35,8 @@ pub struct Team {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FolderState {
     pub team_id: String,
-    /// The team server the libraries were made from. Blank in a folder
-    /// made before addresses were recorded.
+    /// The team server the libraries were made from. It may be blank, such
+    /// as in a state file written by hand.
     pub server: String,
     pub code: String,
     /// When the last update finished (milliseconds since 1970, UTC).
@@ -59,10 +59,11 @@ pub(crate) enum Refusal {
 impl FolderState {
     /// Why this folder must not take an update for `team`, if it must not.
     ///
-    /// A folder with no recorded server, made before servers were
-    /// recorded, takes the update and records the server then. That trusts
-    /// the first server that claims the team's ID, once: the same trust
-    /// every update gave before, and from then on only that server writes.
+    /// Folders made since kicad-parts-f397 already name the server of their
+    /// last update. A folder with no recorded server takes the update and
+    /// records the server then. That trusts the first server that claims
+    /// the team's ID, once: the same trust every update gave before this
+    /// check. From then on, only that server writes.
     pub(crate) fn refusal(&self, team: &Team) -> Option<Refusal> {
         if self.team_id != team.id {
             Some(Refusal::OtherTeam)

@@ -274,9 +274,9 @@ pub fn update(
         None => FolderState::default(),
     };
     state.team_id.clone_from(&team.id);
-    // Records the server in a folder made before servers were recorded
-    // (see `FolderState::refusal`), and writes an older address the way
-    // sign-in writes it now.
+    // Records the server in a folder that had none (see
+    // `FolderState::refusal`), and writes an older address the way sign-in
+    // writes it now.
     state.server.clone_from(&team.server);
     state.code = naming.code().to_owned();
     team::write_state(folder, &state)?;

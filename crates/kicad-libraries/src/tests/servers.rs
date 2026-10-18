@@ -27,10 +27,10 @@ fn recorded_server(root: &Path) -> String {
 }
 
 #[test]
-fn an_older_folder_records_the_server_of_its_first_update() {
+fn a_folder_without_a_server_records_the_server_of_its_first_update() {
     let root = test_folder("server-adopted");
     std::fs::create_dir_all(root.join("MA")).unwrap();
-    // Made before servers were recorded: the team's ID and code only.
+    // A folder that records no server: the team's ID and code only.
     std::fs::write(
         root.join("MA").join(STATE_FILE),
         r#"{"team_id":"team-settings-ma","code":"MA","updated_at_ms":1}"#,
