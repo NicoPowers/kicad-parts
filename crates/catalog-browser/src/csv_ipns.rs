@@ -110,12 +110,11 @@ impl CsvIpns {
         let entries = match fs::read_dir(&database) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(could_not_read("the database folder", &error.to_string())),
+            Err(_) => return Err(could_not_open("the database folder")),
         };
         let mut stamp = Vec::new();
         for entry in entries {
-            let entry =
-                entry.map_err(|error| could_not_read("the database folder", &error.to_string()))?;
+            let entry = entry.map_err(|_| could_not_open("the database folder"))?;
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
@@ -124,7 +123,7 @@ impl CsvIpns {
             }
             let metadata = entry
                 .metadata()
-                .map_err(|error| could_not_read(&csv_path(&name), &error.to_string()))?;
+                .map_err(|_| could_not_open(&csv_path(&name)))?;
             if metadata.is_file() {
                 stamp.push((name, metadata.len(), metadata.modified().ok()));
             }
@@ -137,8 +136,13 @@ impl CsvIpns {
         let mut found = IpnsInCsv::default();
         for (name, _, _) in stamp {
             let path = csv_path(name);
-            let ipns = csv_catalog::table_ipns(&self.database().join(name))
-                .map_err(|error| could_not_read(&path, &error.to_string()))?;
+            let ipns = csv_catalog::table_ipns(&self.database().join(name)).map_err(|error| {
+                if error.is_unopened_file() {
+                    could_not_open(&path)
+                } else {
+                    not_csv(&path, &error.to_string())
+                }
+            })?;
             for ipn in ipns {
                 found.add(&ipn, &path);
             }
@@ -152,9 +156,24 @@ fn csv_path(name: &str) -> String {
     format!("database/{name}")
 }
 
-fn could_not_read(what: &str, why: &str) -> String {
+// Add part stops while any CSV file cannot be read, because an IPN in it
+// could be given away. So each message says which file, and what to do:
+// wait for a file another program holds, or fix a file that is not CSV.
+
+/// The message for `what` (a file or folder) when it cannot be opened, as
+/// when git or OneDrive holds it, or an online-only file is not downloaded
+/// yet while offline. Trying again later may work.
+fn could_not_open(what: &str) -> String {
     format!(
-        "The app could not read {what} of the CSV catalog, so it cannot check which IPNs are free: {why}. Fix the file, then try again."
+        "Add part cannot check which IPNs are free, because the app could not open {what}. Another program may be using it, such as git, or OneDrive has not downloaded it yet. Try again in a moment."
+    )
+}
+
+/// The message for the CSV file `path` when it opens but is not a CSV file
+/// the app can read. Someone has to fix it.
+fn not_csv(path: &str, why: &str) -> String {
+    format!(
+        "Add part cannot check which IPNs are free, because {path} is not a CSV file the app can read: {why}. Fix the file, then try again."
     )
 }
 
@@ -254,6 +273,27 @@ mod tests {
         assert!(ipns.now().unwrap().contains("RES-0000-0471"));
     }
 
+    /// A file another program holds, as git or OneDrive may: the message
+    /// says to wait, not to fix the file.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_another_program_holds_is_named_with_what_to_do() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = catalog(&[("g-res.csv", RES)]);
+        let ipns = CsvIpns::new(root.path());
+        // Shared with nobody, so nothing else can open it.
+        let _held = File::options()
+            .read(true)
+            .share_mode(0)
+            .open(root.path().join("database/g-res.csv"))
+            .unwrap();
+        let error = ipns.read_fresh().unwrap_err();
+        assert_eq!(
+            error,
+            "Add part cannot check which IPNs are free, because the app could not open database/g-res.csv. Another program may be using it, such as git, or OneDrive has not downloaded it yet. Try again in a moment."
+        );
+    }
+
     #[test]
     fn a_file_that_cannot_be_read_is_named() {
         let root = catalog(&[("g-res.csv", RES)]);
@@ -261,8 +301,11 @@ mod tests {
         fs::write(root.path().join("database/g-cap.csv"), b"IPN\n\xff\xfe\n").unwrap();
         let error = CsvIpns::new(root.path()).now().unwrap_err();
         assert!(
-            error.starts_with("The app could not read database/g-cap.csv of the CSV catalog"),
+            error.starts_with(
+                "Add part cannot check which IPNs are free, because database/g-cap.csv is not a CSV file the app can read:"
+            ),
             "{error}"
         );
+        assert!(error.ends_with("Fix the file, then try again."), "{error}");
     }
 }

@@ -33,6 +33,19 @@ impl fmt::Display for CatalogError {
 
 impl std::error::Error for CatalogError {}
 
+impl CatalogError {
+    /// Whether the file could not be opened or read at all, as when another
+    /// program has it locked or an online-only file is not downloaded yet,
+    /// rather than read but not understood as a CSV file.
+    pub fn is_unopened_file(&self) -> bool {
+        match self {
+            Self::Io { .. } => true,
+            Self::Csv { error, .. } => matches!(error.kind(), csv::ErrorKind::Io(_)),
+            Self::Invalid(_) => false,
+        }
+    }
+}
+
 /// One catalog row. Well-known columns are lifted out; every non-blank column
 /// is also kept in source order in `fields`.
 #[derive(Clone, Debug, Eq, PartialEq)]
