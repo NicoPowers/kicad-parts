@@ -7,6 +7,10 @@
 //! first matches with "Show all", and the others are not shown; clearing
 //! the search goes back to what the person had open. Selecting a part
 //! opens its section and scrolls the part into view.
+//!
+//! A new answer, such as one after a teammate's save, updates sections and
+//! rows in place. So keyboard focus, the open sections and the scroll
+//! position stay where the person left them.
 
 use crate::{Load, backend, grouped};
 use desktop_contract::{PartSummary, SearchResponse};
@@ -248,20 +252,20 @@ fn section_id(category: &str) -> String {
     format!("parts-in-{safe}")
 }
 
-/// Identifies a part row by what it shows, so a list redraws only the
-/// rows that changed and a focused row keeps its focus.
-fn row_key(hit: &PartSummary) -> u64 {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    (
-        &hit.ipn,
-        &hit.mpn,
-        &hit.csv_file,
-        &hit.description,
-        &hit.manufacturer,
-    )
-        .hash(&mut hasher);
-    hasher.finish()
+/// The IPNs of `rows`, in order. A section draws one row per IPN and keeps
+/// it while the part is listed, so a changed part updates in place.
+fn row_ipns(rows: &[PartSummary]) -> Vec<String> {
+    rows.iter().map(|row| row.ipn.clone()).collect()
+}
+
+/// A row's title and the text beside it. Parts without an MPN are titled
+/// by IPN, with the CSV file beside it instead of the IPN again.
+fn row_labels(part: &PartSummary) -> (String, String) {
+    if part.mpn.is_empty() {
+        (part.ipn.clone(), part.csv_file.clone())
+    } else {
+        (part.mpn.clone(), part.ipn.clone())
+    }
 }
 
 /// The parts loaded for open sections, for one search and team catalog
@@ -531,9 +535,12 @@ pub(crate) fn ResultList(
                 _ => None,
             })
         >
-            // One section per category, kept while the search and the team
-            // catalog stay the same: a new answer (such as one for a new
-            // selection) updates its contents in place, so focus stays put.
+            // One section per category, kept while the search stays the
+            // same. A new answer, such as one after a teammate's save,
+            // updates its contents in place, so focus, open sections and
+            // scroll stay put. The team catalog's position is not part of
+            // the key: after a team change, Loaded::next loads the open
+            // sections again without drawing them anew.
             // A section's parts are drawn only while it is open.
             <For
                 each=move || results.with(|results| match results {
@@ -543,13 +550,13 @@ pub(crate) fn ResultList(
                             .response
                             .sections
                             .iter()
-                            .map(|section| (query.clone(), section.category.clone(), searched.version))
+                            .map(|section| (query.clone(), section.category.clone()))
                             .collect::<Vec<_>>()
                     }
                     _ => Vec::new(),
                 })
                 key=|key| key.clone()
-                children=move |(query, category, _)| view! {
+                children=move |(query, category)| view! {
                     <Section
                         results=results
                         category=category
@@ -634,6 +641,8 @@ fn Section(
             })
         })
     });
+    // The rows drawn, by IPN.
+    let drawn = Memo::new(move |_| shown.with(|(rows, _)| row_ipns(rows)));
     let id = section_id(&category);
     let name = move || {
         section.with(|section| section.as_ref().map(|s| s.name.clone()).unwrap_or_default())
@@ -683,15 +692,22 @@ fn Section(
                 {move || is_open.get().then(|| {
                     let show_all = show_all.clone();
                     view! {
-                        // Keyed by what each row shows, so a new answer
-                        // redraws only the rows that changed.
+                        // One row per part, keyed by IPN. A part that
+                        // changes updates its row in place, so a focused
+                        // row keeps focus.
                         <For
-                            each=move || shown.with(|(rows, _)| {
-                                rows.iter().map(|row| (row_key(row), row.clone())).collect::<Vec<_>>()
-                            })
-                            key=|(key, _)| *key
-                            children=move |(_, hit)| view! {
-                                <PartRow hit=hit selected=selected choose=choose />
+                            each=move || drawn.get()
+                            key=|ipn| ipn.clone()
+                            children=move |ipn| {
+                                let part = row_part(shown, ipn.clone());
+                                view! {
+                                    <PartRow
+                                        ipn=ipn
+                                        part=part
+                                        selected=selected
+                                        choose=choose
+                                    />
+                                }
                             }
                         />
                         {move || {
@@ -737,35 +753,42 @@ fn Section(
     }
 }
 
+/// What the row of `ipn` shows: its part in the section's latest rows.
+/// While the row is being removed, it keeps the last part it had.
+fn row_part(shown: Memo<(Vec<PartSummary>, SectionEnd)>, ipn: String) -> Memo<Option<PartSummary>> {
+    Memo::new(move |before: Option<&Option<PartSummary>>| {
+        shown
+            .with(|(rows, _)| rows.iter().find(|row| row.ipn == ipn).cloned())
+            .or_else(|| before.cloned().flatten())
+    })
+}
+
 #[component]
 fn PartRow(
-    hit: PartSummary,
+    ipn: String,
+    part: Memo<Option<PartSummary>>,
     selected: RwSignal<Option<String>>,
     choose: impl Fn(String) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
-    let ipn = hit.ipn.clone();
     let is_selected = {
         let ipn = ipn.clone();
         move || selected.with(|current| current.as_deref() == Some(&ipn))
     };
-    // Parts without an MPN are titled by IPN; show the CSV file beside it
-    // instead of repeating the IPN.
-    let (title, aside) = if hit.mpn.is_empty() {
-        (hit.ipn.clone(), hit.csv_file.clone())
-    } else {
-        (hit.mpn.clone(), hit.ipn.clone())
-    };
+    let labels =
+        Memo::new(move |_| part.with(|part| part.as_ref().map(row_labels).unwrap_or_default()));
+    let description = move || part.with(|part| part.as_ref().map(|part| part.description.clone()));
     view! {
         <li>
             <button
                 type="button"
                 class="result"
+                data-ipn=ipn.clone()
                 aria-current=move || is_selected().then_some("true")
                 on:click=move |_| choose(ipn.clone())
             >
-                <span class="result-title">{title}</span>
-                <span class="result-ipn">{aside}</span>
-                <span class="result-description">{hit.description}</span>
+                <span class="result-title">{move || labels.with(|(title, _)| title.clone())}</span>
+                <span class="result-ipn">{move || labels.with(|(_, aside)| aside.clone())}</span>
+                <span class="result-description">{description}</span>
             </button>
         </li>
     }
@@ -1159,5 +1182,39 @@ mod tests {
     fn section_ids_are_safe() {
         assert_eq!(section_id("res"), "parts-in-res");
         assert_eq!(section_id("a b/c"), "parts-in-a-b-c");
+    }
+
+    #[test]
+    fn a_row_is_titled_by_mpn_or_else_by_ipn_with_its_csv_file() {
+        let with_mpn = PartSummary {
+            mpn: "RC0603FR-072KL".to_owned(),
+            ..hit("RES-0000-2001")
+        };
+        assert_eq!(
+            row_labels(&with_mpn),
+            ("RC0603FR-072KL".to_owned(), "RES-0000-2001".to_owned())
+        );
+        let without_mpn = PartSummary {
+            mpn: String::new(),
+            csv_file: "g-res.csv".to_owned(),
+            ..hit("RES-0000-2001")
+        };
+        assert_eq!(
+            row_labels(&without_mpn),
+            ("RES-0000-2001".to_owned(), "g-res.csv".to_owned())
+        );
+    }
+
+    #[test]
+    fn rows_are_identified_by_ipn_alone_so_a_changed_part_keeps_its_row() {
+        let before = vec![hit("A"), hit("B")];
+        let after = vec![
+            hit("A"),
+            PartSummary {
+                description: "Changed by a teammate".to_owned(),
+                ..hit("B")
+            },
+        ];
+        assert_eq!(row_ipns(&before), row_ipns(&after));
     }
 }
