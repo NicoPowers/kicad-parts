@@ -90,6 +90,7 @@ class View3d {
   constructor(modules, container, gltf, background, onLost) {
     const { THREE, RoomEnvironment } = modules;
     const model = gltf.scene;
+    this.modules = modules;
     // The camera rules: see view3d-camera.js.
     this.rules = modules.camera;
     this.container = container;
@@ -185,6 +186,11 @@ class View3d {
     const centre = box.isEmpty() ? null : box.getCenter(new THREE.Vector3()).toArray();
     const halfSize = box.isEmpty() ? null : box.getSize(new THREE.Vector3()).multiplyScalar(0.5).toArray();
     this.frame = this.rules.modelFrame(centre, halfSize);
+    // The box the camera rules keep in view, for view3dInfo(). A pan can
+    // stop exactly on its edge, so it is a hair larger, as rounding needs.
+    this.box = new THREE.Box3()
+      .setFromCenterAndSize(new THREE.Vector3(...this.frame.centre), new THREE.Vector3(...this.frame.halfSize).multiplyScalar(2))
+      .expandByScalar(this.frame.radius * 1e-9);
     this.centre = new THREE.Vector3(...this.frame.centre);
     this.boardMiddle = this.board ? (this.board.min.y + this.board.max.y) / 2 : this.centre.y;
     // The starting view fits the view area's real shape.
@@ -200,19 +206,19 @@ class View3d {
 
   /** The starting view: down at the front, 45 degrees up. */
   reset() {
-    this.view = this.rules.standardView(this.camera.aspect);
+    this.view = this.rules.standardView(this.frame, this.camera.aspect);
     this.place();
   }
 
   /** Straight down at the top, as the 2D view shows it. */
   top() {
-    this.view = this.rules.standardView(this.camera.aspect, 0, this.rules.STRAIGHT);
+    this.view = this.rules.standardView(this.frame, this.camera.aspect, 0, this.rules.STRAIGHT);
     this.place();
   }
 
   /** Straight up at the bottom, mirrored as KiCad shows it. */
   bottom() {
-    this.view = this.rules.standardView(this.camera.aspect, Math.PI, -this.rules.STRAIGHT);
+    this.view = this.rules.standardView(this.frame, this.camera.aspect, Math.PI, -this.rules.STRAIGHT);
     this.place();
   }
 
@@ -227,7 +233,7 @@ class View3d {
   }
 
   turn(right, up) {
-    this.view = this.rules.turned(this.view, right, up);
+    this.view = this.rules.turned(this.view, this.frame, right, up);
     this.place();
   }
 
@@ -406,12 +412,22 @@ class View3d {
       radius: this.frame.radius,
       // Where the model's centre shows, from -1 to 1 across the view, y up.
       centreOnScreen: this.centre.clone().project(this.camera).toArray().slice(0, 2),
+      // Whether the line through the middle of the view meets the model's box.
+      middleOnModel: this.middleOnModel(),
       // Heights, for checking the order the layers are drawn in.
       cameraHeight: this.camera.position.y,
       sceneMiddle: this.centre.y,
       boardMiddle: this.boardMiddle,
       boardTop: this.board?.max.y ?? null,
     };
+  }
+
+  /** Whether the line through the middle of the view meets the model's box. */
+  middleOnModel() {
+    const { THREE } = this.modules;
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+    return ray.ray.intersectsBox(this.box);
   }
 
   /**

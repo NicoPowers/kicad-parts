@@ -17,7 +17,8 @@
 // - Panning, and zooming at the pointer, slide the camera sideways in its
 //   own plane. We call this the shift. It is held in the camera's own
 //   right and up directions, so turning carries it along. The centre then
-//   stays at the same place on screen while the model turns.
+//   stays at the same place on screen while the model turns, unless the
+//   view would leave the model (see the limits below).
 //
 // Why not move the turning point, as three.js's OrbitControls does? Then
 // a pan or a zoom at the pointer moves the point the model turns around,
@@ -25,20 +26,19 @@
 //
 // Limits, so the view can never be lost or broken
 // ------------------------------------------------
-// - Zoom stays between MIN_ZOOM and MAX_ZOOM of the size that fits the
-//   model's height.
-// - Panning and zooming keep the middle of the view over the model's box,
-//   as the camera sees it. A pan stops at the box's edge, and a zoom over
-//   empty space pulls towards the model. Turning keeps the shift, so the
-//   box's edge may then lie nearer than the shift. A pan or zoom never
-//   pushes the view further out then, and never jumps it back either.
-//   The shift stays within the model's radius across and up, always.
+// - Zoom stays between MIN_ZOOM and MAX_ZOOM times the zoom at which the
+//   model's sphere fits the view's height.
+// - The middle of the view always shows the model: the line it looks
+//   along always passes through the model's box. A pan stops at the
+//   box's edge, a zoom over empty space pulls towards the model, and a
+//   turn that would carry the middle off the box slides the view just
+//   enough to stay on it. Otherwise a turn leaves the centre where it is.
 // - The elevation stops just short of straight down or up, and the
 //   azimuth wraps around to stay between -180 and 180 degrees.
 // - Every input is checked: a number that is not finite is ignored.
-//   settled() puts the angles and zoom back in bounds, and a value that
-//   is not finite back to the starting view's.
-// So the numbers stay valid after any number of wheel turns or drags.
+// - settled() is the one place these limits live. Every change to the
+//   view ends there, so the numbers stay valid after any number of wheel
+//   turns or drags.
 //
 // Units: angles in radians, lengths in the model's units (kicad-cli's
 // GLB is in metres), and pointer positions from -1 to 1 across the view.
@@ -122,24 +122,30 @@ export function fittingZoom(aspect) {
 }
 
 /**
- * A fitted view from `azimuth` and `elevation`, centred on the model.
- * With no angles it is the starting view: down at the front, 45 degrees up.
+ * A fitted view of the model in `frame` from `azimuth` and `elevation`,
+ * centred on the model. With no angles it is the starting view: down at
+ * the front, 45 degrees up.
  */
-export function standardView(aspect, azimuth = 0, elevation = START_ELEVATION) {
-  return settled({ azimuth, elevation, zoom: fittingZoom(aspect), shiftX: 0, shiftY: 0 }, aspect);
+export function standardView(frame, aspect, azimuth = 0, elevation = START_ELEVATION) {
+  return settled({ azimuth, elevation, zoom: fittingZoom(aspect), shiftX: 0, shiftY: 0 }, frame, aspect);
 }
 
 /**
- * `view` with every value valid and inside its limits. A value that is
- * not finite goes back to the starting view's.
+ * `view` of the model in `frame` with every value valid and inside its
+ * limits. Every change to the view ends here, so this is the one place
+ * the limits live. A value that is not finite goes back to the starting
+ * view's. The shift is moved, if it must be, to the nearest place where
+ * the middle of the view is over the model's box (see overModel).
  */
-export function settled(view, aspect) {
+export function settled(view, frame, aspect) {
   const start = { azimuth: 0, elevation: START_ELEVATION, zoom: fittingZoom(aspect), shiftX: 0, shiftY: 0 };
   const pick = (name) => (finite(view?.[name]) ? view[name] : start[name]);
-  const azimuth = wrapAngle(pick('azimuth'));
-  const elevation = clamp(pick('elevation'), -STRAIGHT, STRAIGHT);
-  const zoom = clamp(pick('zoom'), MIN_ZOOM, MAX_ZOOM);
-  return { azimuth, elevation, zoom, shiftX: pick('shiftX'), shiftY: pick('shiftY') };
+  const angles = {
+    azimuth: wrapAngle(pick('azimuth')),
+    elevation: clamp(pick('elevation'), -STRAIGHT, STRAIGHT),
+  };
+  const [shiftX, shiftY] = overModel([pick('shiftX'), pick('shiftY')], outline(angles, frame));
+  return { ...angles, zoom: clamp(pick('zoom'), MIN_ZOOM, MAX_ZOOM), shiftX, shiftY };
 }
 
 /**
@@ -160,28 +166,83 @@ function axes(view) {
 }
 
 /**
- * How far the model's box reaches from its centre along the camera's
- * right and up, for `view`: { x, y }. It is never more than the radius.
+ * The outline of the model's box as the camera sees it from `view`'s
+ * angles, as shift values [right, up] from the centre: the box's eight
+ * corners seen along the camera's direction, and the convex outline
+ * around them, counter-clockwise. It has up to six corners, or fewer for
+ * a flat or empty box.
  */
-export function boxReach(view, frame) {
+export function outline(view, frame) {
   const { right, up } = axes(view);
-  const reach = (direction) => direction.reduce((sum, part, i) => sum + Math.abs(part) * frame.halfSize[i], 0);
-  return { x: reach(right), y: reach(up) };
+  const [hx, hy, hz] = frame.halfSize;
+  const corners = [];
+  for (const x of [-hx, hx]) {
+    for (const y of [-hy, hy]) {
+      for (const z of [-hz, hz]) {
+        corners.push([x * right[0] + y * right[1] + z * right[2], x * up[0] + y * up[1] + z * up[2]]);
+      }
+    }
+  }
+  return convexOutline(corners);
+}
+
+/** The cross product of `o`->`a` and `o`->`b`: above 0 when they turn left. */
+function cross(o, a, b) {
+  return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+}
+
+/** The convex outline around `points`, counter-clockwise (Andrew's monotone chain). */
+function convexOutline(points) {
+  const sorted = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const half = (list) => {
+    const chain = [];
+    for (const point of list) {
+      while (chain.length >= 2 && cross(chain.at(-2), chain.at(-1), point) <= 0) chain.pop();
+      chain.push(point);
+    }
+    chain.pop();
+    return chain;
+  };
+  const hull = [...half(sorted), ...half([...sorted].reverse())];
+  // All the points on one spot: a box with no size.
+  return hull.length > 0 ? hull : [sorted[0]];
+}
+
+/** The point of the segment from `a` to `b` nearest `p`. */
+function nearestOnSegment(p, a, b) {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const length = dx * dx + dy * dy;
+  const t = length > 0 ? clamp(((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length, 0, 1) : 0;
+  return [a[0] + t * dx, a[1] + t * dy];
 }
 
 /**
- * `moved` with the middle of the view kept over the model's box, or no
- * further out than it was in `before`. So a pan or zoom never jumps the
- * view after a turn has carried the shift past the box's edge.
+ * `shift` kept inside the box's `shape` (from outline()), or moved to its
+ * nearest point on the edge.
+ *
+ * Why: the camera looks along the line through the middle of the view
+ * straight down its own direction. That line meets the box exactly when
+ * the shift lies inside this outline. So the middle of the view always
+ * shows the model, whatever the angles, pan and zoom. The outline changes
+ * smoothly as the model turns, so the view never jumps. While the shift
+ * is inside, a turn leaves the model's centre where it is on screen.
  */
-function overModel(moved, before, frame) {
-  const reach = boxReach(moved, frame);
-  const limit = (value, was, most) => clamp(value, Math.min(-most, was), Math.max(most, was));
-  return {
-    ...moved,
-    shiftX: limit(moved.shiftX, before.shiftX, reach.x),
-    shiftY: limit(moved.shiftY, before.shiftY, reach.y),
-  };
+function overModel(shift, shape) {
+  if (shape.length >= 3 && shape.every((corner, i) => cross(corner, shape[(i + 1) % shape.length], shift) >= 0)) {
+    return shift;
+  }
+  let best = shape[0];
+  let bestDistance = Infinity;
+  for (let i = 0; i < shape.length; i += 1) {
+    const point = nearestOnSegment(shift, shape[i], shape[(i + 1) % shape.length]);
+    const distance = Math.hypot(point[0] - shift[0], point[1] - shift[1]);
+    if (distance < bestDistance) {
+      best = point;
+      bestDistance = distance;
+    }
+  }
+  return best;
 }
 
 /** Half the height the view shows, in the plane through the model's centre. */
@@ -189,28 +250,34 @@ export function halfHeight(view, frame) {
   return (frame.distance * Math.tan(HALF_FIELD)) / view.zoom;
 }
 
-/** `view` turned `right` and `up` (radians), around the model's centre. */
-export function turned(view, right, up) {
+/**
+ * `view` turned `right` and `up` (radians), around the model's centre.
+ * The centre stays where it is on screen, unless the middle of the view
+ * would then leave the model: then the view slides just enough to stay
+ * over it.
+ */
+export function turned(view, frame, right, up) {
   if (!finite(right, up)) return view;
-  return settled({ ...view, azimuth: view.azimuth - right, elevation: view.elevation + up });
+  return settled({ ...view, azimuth: view.azimuth - right, elevation: view.elevation + up }, frame);
 }
 
 /**
  * `view` panned as by a drag of `dx`, `dy` pixels on a view `height`
- * pixels high: the model follows the pointer.
+ * pixels high: the model follows the pointer, until the middle of the
+ * view reaches the edge of the model.
  */
 export function panned(view, frame, dx, dy, height) {
   if (!finite(dx, dy)) return view;
   const perPixel = (2 * halfHeight(view, frame)) / Math.max(finite(height) ? height : 1, 1);
-  const moved = { ...view, shiftX: view.shiftX - dx * perPixel, shiftY: view.shiftY + dy * perPixel };
-  return overModel(settled(moved), view, frame);
+  return settled({ ...view, shiftX: view.shiftX - dx * perPixel, shiftY: view.shiftY + dy * perPixel }, frame);
 }
 
 /**
  * `view` zoomed in by `factor` (more than 1 zooms in) at `pointer`
  * ({ x, y }, each -1 to 1, y up), on a view `aspect` wide for each unit
  * high. The point under the pointer stays under it, unless a limit stops
- * the zoom or the shift. With no pointer it zooms at the view's middle.
+ * the zoom, or the middle of the view would leave the model. With no
+ * pointer it zooms at the view's middle.
  */
 export function zoomed(view, frame, factor, pointer, aspect) {
   if (!finite(factor) || factor <= 0) return view;
@@ -227,7 +294,7 @@ export function zoomed(view, frame, factor, pointer, aspect) {
     shiftX: view.shiftX + at.x * wide * (before - after),
     shiftY: view.shiftY + at.y * (before - after),
   };
-  return overModel(settled(moved, aspect), view, frame);
+  return settled(moved, frame, aspect);
 }
 
 /**

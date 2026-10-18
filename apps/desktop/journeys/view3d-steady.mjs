@@ -49,10 +49,12 @@ function cameraValid(info) {
 
 /**
  * Checks, on the focused 3D view `area`, that:
- * - after zooming at a corner and panning, a turn goes around the model's
- *   centre, which stays put on screen, and the model stays in view;
+ * - after zooming off the middle and panning, a turn goes around the
+ *   model's centre, which stays put on screen, and the model stays in view;
  * - fast bursts of wheel turns stop at the zoom limits, with the model
  *   still in view at a sensible size;
+ * - a big turn while zoomed right in keeps the middle of the view on the
+ *   model;
  * - long pans stop with the middle of the view over the model;
  * - 0 and Reset view bring back the starting view exactly.
  * `reset` clicks the Reset view button.
@@ -70,14 +72,15 @@ export async function checkSteady3d(browser, area, reset) {
   }, area);
   const middle = pixelOf(box, [0, 0]);
 
-  // Zoom in at a corner of the model, then pan.
-  const corner = pixelOf(box, [-0.25, 0.2]);
-  await wheelBurst(browser, corner, -150, 4);
-  await drag(browser, middle, { x: middle.x + 30, y: middle.y - 20 }, 2);
+  // Zoom in a little off the middle, then pan a little. The middle of the
+  // view stays well inside the model, so a turn need not slide the view.
+  const offMiddle = pixelOf(box, [-0.08, 0.04]);
+  await wheelBurst(browser, offMiddle, -150, 4);
+  await drag(browser, middle, { x: middle.x + 15, y: middle.y - 10 }, 2);
   const before = await view3dInfo(browser, area);
   assert.ok(before.zoom > start.zoom * 2, `the wheel zoomed in: ${start.zoom} to ${before.zoom}`);
   const [bx, by] = before.centreOnScreen;
-  assert.ok(Math.hypot(bx, by) > 0.1, `zooming at the corner and panning moved the centre: ${bx}, ${by}`);
+  assert.ok(Math.hypot(bx, by) > 0.1, `zooming off the middle and panning moved the centre: ${bx}, ${by}`);
 
   // Turn: the centre stays where it is on screen, and the model shows.
   await drag(browser, middle, { x: middle.x + 80, y: middle.y + 30 }, 0);
@@ -85,7 +88,7 @@ export async function checkSteady3d(browser, area, reset) {
   near(turned.azimuth, before.azimuth - 40, 0.01, 'an 80 pixel drag turns it 40 degrees');
   near(turned.centreOnScreen[0], bx, 1e-4, 'the centre stays put across while it turns');
   near(turned.centreOnScreen[1], by, 1e-4, 'the centre stays put up and down while it turns');
-  assert.deepEqual(turned.shift, before.shift, 'turning keeps the pan');
+  assert.ok(turned.middleOnModel, 'the middle of the view shows the model');
   assert.ok(turned.drawn > 2_000, `the turned model is in view: ${turned.drawn} pixels`);
   await browser.keys(['ArrowLeft', 'ArrowDown']);
   const keyed = await view3dInfo(browser, area);
@@ -101,6 +104,15 @@ export async function checkSteady3d(browser, area, reset) {
   assert.ok(cameraValid(closest), JSON.stringify(closest));
   assert.equal(closest.zoom, closest.zoomLimits[1], 'zooming in stops at its limit');
   assert.ok(closest.drawn > closest.width * closest.height * 0.5, `zoomed right in, the model fills the view: ${closest.drawn} pixels`);
+  // A big turn, zoomed right in: the view slides if it must, but the
+  // middle of the view stays on the model.
+  for (const dx of [120, -240]) {
+    await drag(browser, middle, { x: middle.x + dx, y: middle.y - 40 }, 0);
+    const swung = await view3dInfo(browser, area);
+    assert.ok(cameraValid(swung) && swung.middleOnModel, `after a ${dx} pixel turn the middle of the view shows the model`);
+    assert.ok(swung.drawn > swung.width * swung.height * 0.25, `after a ${dx} pixel turn the model is in view: ${swung.drawn} pixels`);
+  }
+  const corner = pixelOf(box, [-0.9, 0.9]);
   await wheelBurst(browser, corner, 2_000, 40);
   const farthest = await view3dInfo(browser, area);
   record({ event: '3d-steady-farthest', zoom: farthest.zoom, drawn: farthest.drawn, shift: farthest.shift });
@@ -121,7 +133,7 @@ export async function checkSteady3d(browser, area, reset) {
   const panned = await view3dInfo(browser, area);
   record({ event: '3d-steady-panned', shift: panned.shift, centreOnScreen: panned.centreOnScreen, drawn: panned.drawn });
   assert.ok(cameraValid(panned), JSON.stringify(panned));
-  assert.ok(panned.shift.every((value) => Math.abs(value) <= panned.radius), `the pan stops near the model: ${panned.shift}`);
+  assert.ok(panned.middleOnModel, `the pan stops with the middle of the view on the model: ${panned.shift}`);
   assert.ok(panned.centreOnScreen.every((value) => Math.abs(value) < 1), `the model's centre is in view: ${panned.centreOnScreen}`);
   assert.ok(panned.drawn > start.drawn / 4, `the panned model is in view: ${panned.drawn} pixels`);
 
