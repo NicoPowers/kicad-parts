@@ -29,8 +29,8 @@
 // Raw SQL bypasses record hooks; only migrations and test fixtures that
 // tamper with a stopped instance's data.db use it.
 //
-// Handlers cannot see variables outside themselves, so each one repeats
-// what it needs.
+// Handlers cannot see variables outside themselves, so the shared rules
+// live in catalog_lib.js, which each handler loads with require.
 
 onRecordCreateRequest(
   (e) => {
@@ -157,13 +157,7 @@ onRecordUpdate((e) => {
       throw new Error(`a part's ${name} never changes (${ipn})`);
     }
   }
-  const find = (collection, id) => {
-    try {
-      return e.app.findRecordById(collection, id);
-    } catch (_) {
-      return null;
-    }
-  };
+  const find = (collection, id) => lib.recordById(e.app, collection, id);
 
   // Details: stay, or move to the details saved right after them.
   const details = part.getString("current_details");
@@ -199,24 +193,23 @@ onRecordUpdate((e) => {
   return e.next();
 }, "catalog_parts");
 
-// A new part revision must be numbered right after the part's newest
-// revision (archived or not), name it as its predecessor, and have the ID
-// derived from its part and number.
-onRecordCreate((e) => {
-  const lib = require(`${__hooks}/catalog_lib.js`);
-  const revision = e.record;
-  const part = revision.getString("part");
-  const number = revision.getInt("number");
-  const newest = lib.newestRevision(e.app, part);
-  const expected = newest ? newest.getInt("number") + 1 : 1;
-  if (number !== expected || revision.getString("predecessor") !== (newest ? newest.id : "")) {
-    throw new Error(`a new revision of part ${part} must be number ${expected}, right after its newest revision`);
-  }
-  if (revision.id !== lib.deriveId("part-revision", part + "\n" + number)) {
-    throw new Error(`revision ${number} of part ${part} must have the ID derived from its part and number`);
-  }
-  return e.next();
-}, "catalog_part_revisions");
+// New part revisions (archived or not), part details, CAD item revisions
+// and category revisions must come right after their owner's newest one
+// (catalog_lib.js numberedRecordProblem).
+onRecordCreate(
+  (e) => {
+    const lib = require(`${__hooks}/catalog_lib.js`);
+    const problem = lib.numberedRecordProblem(e.app, e.record);
+    if (problem) {
+      throw new Error(problem);
+    }
+    return e.next();
+  },
+  "catalog_part_revisions",
+  "catalog_part_details",
+  "catalog_cad_item_revisions",
+  "catalog_category_revisions",
+);
 
 // An archive entry must be exactly what the archive route saves: for one of
 // the part's own revisions, in a Change of the matching kind whose seq it
@@ -230,13 +223,7 @@ onRecordCreate((e) => {
   const part = entry.getString("part");
   const number = entry.getInt("revision_number");
   const archived = entry.getBool("archived");
-  const find = (collection, id) => {
-    try {
-      return e.app.findRecordById(collection, id);
-    } catch (_) {
-      return null;
-    }
-  };
+  const find = (collection, id) => lib.recordById(e.app, collection, id);
   const revision = find("catalog_part_revisions", entry.getString("part_revision"));
   if (!revision || revision.getString("part") !== part || revision.getInt("number") !== number) {
     throw new Error(`an archive entry must name revision ${number} of its own part ${part}`);
@@ -291,13 +278,7 @@ onRecordCreate((e) => {
 onRecordCreate((e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
   const review = e.record;
-  const find = (collection, id) => {
-    try {
-      return e.app.findRecordById(collection, id);
-    } catch (_) {
-      return null;
-    }
-  };
+  const find = (collection, id) => lib.recordById(e.app, collection, id);
   const part = find("catalog_parts", review.getString("part"));
   const problem = find("catalog_import_problems", review.getString("problem"));
   const kind = problem ? lib.CSV_REVIEW_KINDS[problem.getString("code")] : undefined;
@@ -336,70 +317,13 @@ onRecordCreate((e) => {
   return e.next();
 }, "catalog_csv_reviews");
 
-// Saved part details are numbered from 1 per part: new ones must be the
-// newest number + 1, name the newest as their predecessor, and have the ID
-// derived from their part and number.
-onRecordCreate((e) => {
-  const lib = require(`${__hooks}/catalog_lib.js`);
-  const details = e.record;
-  const part = details.getString("part");
-  const number = details.getInt("number");
-  const found = e.app.findRecordsByFilter("catalog_part_details", "part = {:id}", "-number", 1, 0, {
-    id: part,
-  });
-  const newest = found.length > 0 ? found[0] : null;
-  const expected = newest ? newest.getInt("number") + 1 : 1;
-  if (number !== expected || details.getString("predecessor") !== (newest ? newest.id : "")) {
-    throw new Error(`new details of part ${part} must be number ${expected}, right after its current details`);
-  }
-  if (details.id !== lib.deriveId("part-details", part + "\n" + number)) {
-    throw new Error(`details ${number} of part ${part} must have the ID derived from its part and number`);
-  }
-  return e.next();
-}, "catalog_part_details");
-
-// A CAD item's current revision is its newest, so a new CAD item revision
-// must be numbered right after the newest stored one, name it as its
-// predecessor, and have the ID derived from its CAD item and number.
-onRecordCreate((e) => {
-  const lib = require(`${__hooks}/catalog_lib.js`);
-  const revision = e.record;
-  const cadItem = revision.getString("cad_item");
-  const number = revision.getInt("number");
-  const found = e.app.findRecordsByFilter("catalog_cad_item_revisions", "cad_item = {:id}", "-number", 1, 0, {
-    id: cadItem,
-  });
-  const newest = found.length > 0 ? found[0] : null;
-  const expected = newest ? newest.getInt("number") + 1 : 1;
-  if (number !== expected || revision.getString("predecessor") !== (newest ? newest.id : "")) {
-    throw new Error(`a new revision of CAD item ${cadItem} must be number ${expected}, right after its current revision`);
-  }
-  if (revision.id !== lib.deriveId("cad-item-revision", cadItem + "\n" + number)) {
-    throw new Error(`revision ${number} of CAD item ${cadItem} must have the ID derived from its CAD item and number`);
-  }
-  return e.next();
-}, "catalog_cad_item_revisions");
-
-// A category's current revision is its newest, so a new category revision
-// must be numbered right after the newest stored one, name it as its
-// predecessor, and have the ID derived from its category and number. A
+// A category revision must hold a category with that category's code. A
 // category's ID is derived from its code.
 onRecordCreate((e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
   const revision = e.record;
   const category = revision.getString("category");
   const number = revision.getInt("number");
-  const found = e.app.findRecordsByFilter("catalog_category_revisions", "category = {:id}", "-number", 1, 0, {
-    id: category,
-  });
-  const newest = found.length > 0 ? found[0] : null;
-  const expected = newest ? newest.getInt("number") + 1 : 1;
-  if (number !== expected || revision.getString("predecessor") !== (newest ? newest.id : "")) {
-    throw new Error(`a new revision of category ${category} must be number ${expected}, right after its current revision`);
-  }
-  if (revision.id !== lib.deriveId("category-revision", category + "\n" + number)) {
-    throw new Error(`revision ${number} of category ${category} must have the ID derived from its category and number`);
-  }
   let parsed = null;
   try {
     parsed = JSON.parse(revision.getString("snapshot"));
@@ -430,13 +354,7 @@ onRecordCreate((e) => {
 onRecordCreate((e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
   const match = e.record;
-  const find = (collection, id) => {
-    try {
-      return e.app.findRecordById(collection, id);
-    } catch (_) {
-      return null;
-    }
-  };
+  const find = (collection, id) => lib.recordById(e.app, collection, id);
   const change = find("catalog_changes", match.getString("change"));
   if (
     !change ||

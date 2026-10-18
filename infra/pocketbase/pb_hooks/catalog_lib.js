@@ -1510,6 +1510,76 @@ function newestNotArchived(txApp, partId, state) {
   return null;
 }
 
+// ---- Numbered records ----------------------------------------------------------
+//
+// A part's revisions and details, a CAD item's revisions and a category's
+// revisions are numbered from 1 for each owner, and none is ever deleted.
+// So a new one must come right after the newest: numbered one higher,
+// naming the newest as its predecessor, under the ID derived from its owner
+// and number. The write guards check this for every new one.
+
+// For each numbered collection: the field naming the owner, the ID kind,
+// and the words its messages use.
+const NUMBERED_RECORDS = Object.freeze({
+  catalog_part_revisions: {
+    ownerField: "part",
+    ownerWord: "part",
+    idKind: "part-revision",
+    newOne: "a new revision",
+    oneWord: "revision",
+    newestWords: "its newest revision",
+  },
+  catalog_part_details: {
+    ownerField: "part",
+    ownerWord: "part",
+    idKind: "part-details",
+    newOne: "new details",
+    oneWord: "details",
+    newestWords: "its current details",
+  },
+  catalog_cad_item_revisions: {
+    ownerField: "cad_item",
+    ownerWord: "CAD item",
+    idKind: "cad-item-revision",
+    newOne: "a new revision",
+    oneWord: "revision",
+    newestWords: "its current revision",
+  },
+  catalog_category_revisions: {
+    ownerField: "category",
+    ownerWord: "category",
+    idKind: "category-revision",
+    newOne: "a new revision",
+    oneWord: "revision",
+    newestWords: "its current revision",
+  },
+});
+
+// Why the new numbered `record` does not come right after its owner's
+// newest one, or "" if it does.
+function numberedRecordProblem(txApp, record) {
+  const rule = NUMBERED_RECORDS[record.collection().name];
+  const owner = record.getString(rule.ownerField);
+  const number = record.getInt("number");
+  const found = txApp.findRecordsByFilter(
+    record.collection().name,
+    rule.ownerField + " = {:owner}",
+    "-number",
+    1,
+    0,
+    { owner: owner },
+  );
+  const newest = found.length > 0 ? found[0] : null;
+  const expected = newest ? newest.getInt("number") + 1 : 1;
+  if (number !== expected || record.getString("predecessor") !== (newest ? newest.id : "")) {
+    return `${rule.newOne} of ${rule.ownerWord} ${owner} must be number ${expected}, right after ${rule.newestWords}`;
+  }
+  if (record.id !== deriveId(rule.idKind, owner + "\n" + number)) {
+    return `${rule.oneWord} ${number} of ${rule.ownerWord} ${owner} must have the ID derived from its ${rule.ownerWord} and number`;
+  }
+  return "";
+}
+
 // A hash of a CAD item revision's content: its snapshot with the numbers of
 // its 3D model bindings left out, over key-sorted JSON (see the import
 // route). Never compare it with crates/catalog's content hash.
@@ -3737,6 +3807,9 @@ module.exports = {
   anotherPartProblem: anotherPartProblem,
   recordedCsvDocument: recordedCsvDocument,
   archiveState: archiveState,
+  recordById: recordById,
+  NUMBERED_RECORDS: NUMBERED_RECORDS,
+  numberedRecordProblem: numberedRecordProblem,
   newestRevision: newestRevision,
   newestNotArchived: newestNotArchived,
   cadContent: cadContent,
