@@ -170,7 +170,7 @@ fn a_stored_revision_record_that_does_not_match_its_hash_is_not_drawn() {
 
     let data = tempfile::tempdir().unwrap();
     let browser = open_browser(&root, data.path());
-    let team = TeamCatalog::open(data.path().join("team.json"), Some(url.clone()), None);
+    let team = TeamCatalog::new();
     sign_in_live(&team, &url, &member);
     let revision = team.part(IPN).unwrap().unwrap().revision.number;
     let symbol =
@@ -218,7 +218,7 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     let browser = open_browser(changed.path(), data.path());
     let unchanged = open_browser(&root, &data.path().join("unchanged"));
 
-    let team = TeamCatalog::open(data.path().join("team.json"), Some(url.clone()), None);
+    let team = TeamCatalog::new();
     // Signed out, a team preview is a plain message, never the local file.
     for kind in [PreviewKind::Symbol, PreviewKind::Footprint] {
         match browser.preview_request(&request(kind, Some(1)), Some(&team)) {
@@ -335,7 +335,7 @@ fn after_going_back_to_earlier_content_previews_draw_each_revisions_own_cad() {
     let browser = open_browser(changed.path(), data.path());
     let original = open_browser(&root, &data.path().join("original"));
     let redrawn = open_browser(changed.path(), &data.path().join("redrawn"));
-    let team = TeamCatalog::open(data.path().join("team.json"), Some(url.clone()), None);
+    let team = TeamCatalog::new();
     sign_in_live(&team, &url, &member);
     assert_eq!(team.part(IPN).unwrap().unwrap().revision.number, 3);
 

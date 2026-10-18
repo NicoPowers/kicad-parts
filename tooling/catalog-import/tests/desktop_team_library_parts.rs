@@ -244,7 +244,7 @@ impl Team {
         let head = commit_all(copy.path(), "Drawn by hand in KiCad");
         let member = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
         let url = server.url().to_owned();
-        let team = TeamCatalog::open(state.path().join("ada.json"), Some(url.clone()), None);
+        let team = TeamCatalog::new();
         let status = team.sign_in(SignInRequest {
             server_url: url,
             email: member.email.clone(),

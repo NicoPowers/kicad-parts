@@ -36,7 +36,7 @@ fn open(dir: &Path) -> Option<(CatalogBrowser, TeamCatalog)> {
         eprintln!("KiCad 10 is not installed, so the 3D export tests are skipped.");
         return None;
     }
-    let team = TeamCatalog::open(dir.join("config").join("team.json"), None, None);
+    let team = TeamCatalog::new();
     Some((browser, team))
 }
 

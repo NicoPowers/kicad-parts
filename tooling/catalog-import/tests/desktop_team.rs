@@ -48,9 +48,8 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     let viewer = services::add_member(&admin, "Vic Viewer", "vic@example.test", false).unwrap();
     let url = server.url().to_owned();
 
-    let settings = state.path().join("desktop").join("team.json");
-    let team = TeamCatalog::open(settings.clone(), Some(url.clone()), None);
-    // A wrong password is a plain problem, and nothing is saved.
+    let team = TeamCatalog::new();
+    // A wrong password is a plain problem.
     let status = team.sign_in(SignInRequest {
         server_url: url.clone(),
         email: editor.email.clone(),
@@ -72,10 +71,6 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         panic!("{status:?}");
     };
     assert_eq!((name.as_str(), *can_edit), ("Ada Editor", true));
-    // Only the address and email are saved.
-    let saved = std::fs::read_to_string(&settings).unwrap();
-    assert!(saved.contains(&url) && saved.contains(&editor.email));
-    assert!(!saved.contains(&editor.password), "{saved}");
     wait_until("live updates", || {
         matches!(
             team.status().session,
@@ -427,7 +422,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     wait_until("the archives", || checkpoint(&team) == 9);
 
     // A read-only member sees everything but cannot save.
-    let reader = TeamCatalog::open(state.path().join("reader.json"), None, None);
+    let reader = TeamCatalog::new();
     let status = reader.sign_in(SignInRequest {
         server_url: url.clone(),
         email: viewer.email.clone(),
@@ -501,7 +496,7 @@ fn the_desktop_shows_csv_changes_live_and_takes_them_field_by_field() {
     let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     let other = services::add_member(&admin, "Grace Editor", "grace@example.test", true).unwrap();
     let url = server.url().to_owned();
-    let team = TeamCatalog::open(state.path().join("team.json"), None, None);
+    let team = TeamCatalog::new();
     team.sign_in(SignInRequest {
         server_url: url.clone(),
         email: editor.email.clone(),

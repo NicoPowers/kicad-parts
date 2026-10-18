@@ -15,6 +15,7 @@ mod library_part;
 mod model3d;
 mod pick;
 pub mod team;
+pub mod teams;
 
 pub use model3d::MAX_GLB_BYTES;
 

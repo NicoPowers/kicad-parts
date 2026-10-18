@@ -3,9 +3,8 @@
 //! archive and unarchive revisions, review CSV changes that were not
 //! applied, and follow changes others make.
 //!
-//! The session (the auth token) lives only in memory: the app saves the
-//! server address and email, never the password or the token, so signing in
-//! again after a restart asks for the password.
+//! A [`TeamCatalog`] is one team: one team server and, while signed in, one
+//! session with it. The person's list of teams is in [`crate::teams`].
 //!
 //! While signed in, a background thread keeps a replica of the team catalog
 //! in step with the server (see [`session`]).
@@ -51,39 +50,32 @@ use kicad_integration::library_file::{
     footprint_says_excluded_from_bom, symbol_entries_say_not_in_bom,
 };
 use kicad_integration::{LibRef, StoredItem, footprint_choices};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use session::{Session, sign_in};
 
-/// What the app remembers between runs. No password, no token.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-struct TeamSettings {
-    #[serde(default)]
-    server_url: String,
-    #[serde(default)]
-    email: String,
-}
-
 struct State {
-    saved: TeamSettings,
+    /// Why the last sign-in failed, if it did.
     problem: Option<String>,
     session: Option<Session>,
 }
 
+/// One team's catalog: the session with one team server, if signed in,
+/// and every use case the desktop runs against that team. [`crate::teams`]
+/// holds one for each team in the person's list.
 pub struct TeamCatalog {
-    settings_file: PathBuf,
-    /// From launch options; they fill in the sign-in form when nothing is
-    /// saved, or replace what is saved.
-    suggested: TeamSettings,
     state: Mutex<State>,
     /// Revisions never change, so what was fetched for previews is kept
     /// until the next sign-in or sign-out.
     known: Mutex<KnownRevisions>,
+}
+
+impl Default for TeamCatalog {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Default)]
@@ -181,25 +173,10 @@ pub enum TeamCadError {
 }
 
 impl TeamCatalog {
-    /// Reads the saved server address and email from `settings_file`. A
-    /// suggested server or email (from launch options) takes their place.
-    pub fn open(
-        settings_file: PathBuf,
-        suggested_server: Option<String>,
-        suggested_email: Option<String>,
-    ) -> Self {
-        let saved = fs::read(&settings_file)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+    /// A team catalog that is not signed in yet.
+    pub fn new() -> Self {
         Self {
-            settings_file,
-            suggested: TeamSettings {
-                server_url: suggested_server.unwrap_or_default(),
-                email: suggested_email.unwrap_or_default(),
-            },
             state: Mutex::new(State {
-                saved,
                 problem: None,
                 session: None,
             }),
@@ -207,36 +184,38 @@ impl TeamCatalog {
         }
     }
 
+    /// Who is signed in, and how far the app has followed the team
+    /// catalog. The server address and email are blank while signed out:
+    /// the list of teams keeps those.
     pub fn status(&self) -> TeamStatus {
         let state = self.lock();
-        let pick = |suggested: &str, saved: &str| {
-            if suggested.is_empty() {
-                saved.to_owned()
-            } else {
-                suggested.to_owned()
-            }
+        let Some(session) = &state.session else {
+            return TeamStatus {
+                server_url: String::new(),
+                email: String::new(),
+                session: TeamSession::SignedOut {
+                    problem: state.problem.clone(),
+                },
+            };
         };
-        let session = match &state.session {
-            Some(session) => {
-                let (live, checkpoint, imports) = session.follower.snapshot();
-                TeamSession::SignedIn {
-                    name: session.name.clone(),
-                    email: session.email.clone(),
-                    can_edit: session.can_edit,
-                    live,
-                    checkpoint,
-                    imports,
-                }
-            }
-            None => TeamSession::SignedOut {
-                problem: state.problem.clone(),
-            },
-        };
+        let (live, checkpoint, imports) = session.follower.snapshot();
         TeamStatus {
-            server_url: pick(&self.suggested.server_url, &state.saved.server_url),
-            email: pick(&self.suggested.email, &state.saved.email),
-            session,
+            server_url: session.client.base_url().to_owned(),
+            email: session.email.clone(),
+            session: TeamSession::SignedIn {
+                name: session.name.clone(),
+                email: session.email.clone(),
+                can_edit: session.can_edit,
+                live,
+                checkpoint,
+                imports,
+            },
         }
+    }
+
+    /// Whether a session with the team server is running.
+    pub fn is_signed_in(&self) -> bool {
+        self.lock().session.is_some()
     }
 
     /// Signs in and starts following changes. A failure is reported in the
@@ -248,14 +227,9 @@ impl TeamCatalog {
             let mut state = self.lock();
             let earlier = state.session.take();
             match outcome {
-                Ok((session, server_url)) => {
+                Ok(session) => {
                     state.problem = None;
-                    state.saved = TeamSettings {
-                        server_url,
-                        email: session.email.clone(),
-                    };
                     state.session = Some(session);
-                    let _ = save_settings(&self.settings_file, &state.saved);
                 }
                 Err(problem) => state.problem = Some(problem),
             }
@@ -632,15 +606,23 @@ impl TeamCatalog {
             .collect()
     }
 
-    /// Who is signed in and how far the app has followed the team catalog
-    /// (its checkpoint and finished imports), when they can edit: the
-    /// library check is worked out again only when this changes. No
-    /// request; `None` while signed out or for someone who can only view.
+    /// Who is signed in, to which server, and how far the app has followed
+    /// the team catalog (its checkpoint and finished imports), when they
+    /// can edit: the library check is worked out again only when this
+    /// changes. Two teams may share a checkpoint, so the server is part of
+    /// it. No request; `None` while signed out or for someone who can only
+    /// view.
     pub(crate) fn editor_position(&self) -> Option<(String, u64, u64)> {
         let state = self.lock();
         let session = state.session.as_ref().filter(|session| session.can_edit)?;
         let (_, checkpoint, imports) = session.follower.snapshot();
-        Some((session.email.clone(), checkpoint, imports))
+        let who = format!(
+            "{}
+{}",
+            session.client.base_url(),
+            session.email
+        );
+        Some((who, checkpoint, imports))
     }
 
     /// What an importer reads from the team catalog: each CAD item's
@@ -3093,16 +3075,6 @@ fn edit_conflict(
     })
 }
 
-fn save_settings(path: &Path, settings: &TeamSettings) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let json = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
-    let temp = path.with_extension("json.tmp");
-    fs::write(&temp, json).map_err(|e| e.to_string())?;
-    fs::rename(&temp, path).map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3365,42 +3337,5 @@ mod tests {
     fn dates_are_shown_to_the_minute() {
         assert_eq!(saved_at("2026-10-09 23:39:58.997Z"), "2026-10-09 23:39 UTC");
         assert_eq!(saved_at(""), "");
-    }
-
-    #[test]
-    fn settings_never_hold_a_password() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("team.json");
-        let team = TeamCatalog::open(file.clone(), None, None);
-        let status = team.sign_in(SignInRequest {
-            server_url: "http://127.0.0.1:9".into(),
-            email: "a@example.test".into(),
-            password: "secret-password".into(),
-        });
-        assert!(matches!(
-            status.session,
-            TeamSession::SignedOut { problem: Some(_) }
-        ));
-        // A failed sign-in saves nothing at all.
-        assert!(!file.exists());
-        save_settings(
-            &file,
-            &TeamSettings {
-                server_url: "http://127.0.0.1:9".into(),
-                email: "a@example.test".into(),
-            },
-        )
-        .unwrap();
-        let text = fs::read_to_string(&file).unwrap();
-        assert!(
-            !text.contains("password") && !text.contains("token"),
-            "{text}"
-        );
-        let reopened = TeamCatalog::open(file, Some("http://127.0.0.1:1".into()), None);
-        let status = reopened.status();
-        assert_eq!(
-            (status.server_url.as_str(), status.email.as_str()),
-            ("http://127.0.0.1:1", "a@example.test")
-        );
     }
 }

@@ -17,6 +17,7 @@
 //! has not written yet.
 
 use crate::team::TeamCatalog;
+use crate::teams::Teams;
 use catalog::pocketbase::{
     TeamCodeOutcome, TeamSettings, download_blob, read_revisions, read_team, submit_team_code,
 };
@@ -47,7 +48,7 @@ const POLL: Duration = Duration::from_millis(250);
 pub struct KicadLibraries {
     /// The `kicad-libraries` folder, which holds one folder per team.
     root: PathBuf,
-    team: Arc<TeamCatalog>,
+    teams: Arc<Teams>,
     shared: Arc<Shared>,
 }
 
@@ -107,19 +108,23 @@ fn shown(libraries: &[Library]) -> Vec<KicadLibrary> {
 }
 
 impl KicadLibraries {
-    /// Starts following `team` and writing its libraries into its folder
-    /// under `root`, the `kicad-libraries` folder.
-    pub fn start(root: PathBuf, team: Arc<TeamCatalog>) -> Self {
+    /// Starts following the shown team in `teams` and writing its libraries
+    /// into its folder under `root`, the `kicad-libraries` folder.
+    pub fn start(root: PathBuf, teams: Arc<Teams>) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(Known::signed_out()),
             asked: AtomicBool::new(false),
             reread: AtomicBool::new(false),
         });
         {
-            let (root, shared, team) = (root.clone(), shared.clone(), team.clone());
-            std::thread::spawn(move || follow(&root, &team, &shared));
+            let (root, shared, teams) = (root.clone(), shared.clone(), teams.clone());
+            std::thread::spawn(move || follow(&root, &teams, &shared));
         }
-        Self { root, team, shared }
+        Self {
+            root,
+            teams,
+            shared,
+        }
     }
 
     /// The signed-in team's folder, or the folder of every team's
@@ -239,7 +244,7 @@ impl KicadLibraries {
         if let Some(problem) = team_code_problem(code) {
             return Err(problem.to_owned());
         }
-        let client = self.team.client_for_libraries()?;
+        let client = self.teams.shown().client_for_libraries()?;
         let outcome = submit_team_code(&client, code).map_err(|error| match error {
             collaboration::CollabError::Forbidden(_) => {
                 "Only team members who can edit the catalog can choose the team code.".to_owned()
@@ -319,12 +324,14 @@ impl Schedule {
 }
 
 /// The thread: waits for a reason to update, then updates.
-fn follow(root: &Path, team: &TeamCatalog, shared: &Shared) {
+fn follow(root: &Path, teams: &Teams, shared: &Shared) {
     let mut schedule = Schedule::default();
     let mut signed_in_as = String::new();
     let mut settings_read: Option<Instant> = None;
     loop {
         std::thread::sleep(POLL);
+        let team = teams.shown();
+        let team = team.as_ref();
         let status = team.status();
         let TeamSession::SignedIn {
             email,

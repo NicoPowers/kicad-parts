@@ -190,7 +190,7 @@ fn the_desktop_adds_a_part_from_a_download() {
     import(&admin, copy.path(), "g-cap");
     let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     let url = server.url().to_owned();
-    let team = TeamCatalog::open(state.path().join("team.json"), Some(url.clone()), None);
+    let team = TeamCatalog::new();
     let status = team.sign_in(SignInRequest {
         server_url: url,
         email: editor.email.clone(),
@@ -468,7 +468,7 @@ fn add_part_never_gives_out_an_ipn_a_csv_row_took_since_the_app_opened() {
     import(&admin, copy.path(), "g-cap");
     let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     let url = server.url().to_owned();
-    let team = TeamCatalog::open(state.path().join("team.json"), Some(url.clone()), None);
+    let team = TeamCatalog::new();
     let status = team.sign_in(SignInRequest {
         server_url: url,
         email: editor.email.clone(),

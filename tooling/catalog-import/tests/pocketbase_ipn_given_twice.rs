@@ -170,11 +170,10 @@ impl Team {
         })
     }
 
-    /// The desktop's team catalog, signed in as the editor, with its data
-    /// in `folder`.
-    fn desktop(&self, folder: &Path) -> TeamCatalog {
+    /// The desktop's team catalog, signed in as the editor.
+    fn desktop(&self) -> TeamCatalog {
         let url = self.server.url().to_owned();
-        let team = TeamCatalog::open(folder.join("team.json"), None, None);
+        let team = TeamCatalog::new();
         let (email, password) = self.editor_login.clone();
         let status = team.sign_in(SignInRequest {
             server_url: url,
@@ -373,7 +372,7 @@ fn a_csv_row_that_gives_an_app_part_s_ipn_to_another_part_is_flagged_and_changes
     // next free IPN for it, and offers none of its values for review. A
     // part whose row shares an MPN shows the CSV's new values, as before.
     let data = tempfile::tempdir().unwrap();
-    let desktop = team.desktop(data.path());
+    let desktop = team.desktop();
     let browser = team.browser(data.path());
     let unrelated = browser.team_part(UNRELATED, &desktop).unwrap().unwrap();
     assert_eq!(
@@ -576,8 +575,7 @@ fn add_part_refuses_an_ipn_that_a_csv_row_has_even_when_the_row_made_no_part() {
 
     // The desktop passes the reason on, even when its own CSV folder lacks
     // the row.
-    let data = tempfile::tempdir().unwrap();
-    let desktop = team.desktop(data.path());
+    let desktop = team.desktop();
     let request = TeamNewPartRequest {
         correlation_id: None,
         ipn: EXTRA_FIELDS.into(),

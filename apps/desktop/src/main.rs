@@ -5,7 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use catalog_browser::kicad_libraries::KicadLibraries;
-use catalog_browser::team::TeamCatalog;
+use catalog_browser::teams::Teams;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
     AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, FootprintDrawing,
@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tauri::{Manager, PhysicalSize, State};
 
 type Browser = Arc<CatalogBrowser>;
-type Team = Arc<TeamCatalog>;
+type Team = Arc<Teams>;
 type Libraries = Arc<KicadLibraries>;
 
 /// Launch options. Every option exists so tests and unusual installs can run
@@ -260,7 +260,7 @@ async fn search_parts(
     team: State<'_, Team>,
     request: SearchRequest,
 ) -> Result<SearchResponse, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     // Parts the team catalog has are found by, and shown with, its current
     // details, as the part header shows them.
     // The list is grouped by the team catalog's category names.
@@ -276,7 +276,7 @@ async fn part_detail(
     team: State<'_, Team>,
     ipn: String,
 ) -> Result<Option<PartDetail>, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     // A part only the team catalog has, such as one added in the app, is
     // found there.
     // The team catalog's values are read only when the CSV catalog lacks it.
@@ -294,7 +294,7 @@ async fn part_preview(
     team: State<'_, Team>,
     request: PreviewRequest,
 ) -> Result<PreviewOutcome, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     // Team parts are drawn from the stored bytes of the exact CAD item
     // revision they use.
     blocking(move || browser.preview_request(&request, Some(&team))).await
@@ -316,7 +316,7 @@ async fn footprint_3d(
     team: State<'_, Team>,
     request: Footprint3dRequest,
 ) -> Result<Footprint3dView, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     // Made only when the person turns 3D on, because it takes seconds.
     blocking(move || browser.footprint_3d(&request, &team)).await
 }
@@ -337,20 +337,30 @@ async fn footprint_glb(
 
 #[tauri::command]
 async fn team_status(team: State<'_, Team>) -> Result<TeamStatus, String> {
-    let team = team.inner().clone();
-    blocking(move || team.status()).await
+    let teams = team.inner().clone();
+    blocking(move || teams.shown_status()).await
 }
 
 #[tauri::command]
 async fn team_sign_in(team: State<'_, Team>, request: SignInRequest) -> Result<TeamStatus, String> {
-    let team = team.inner().clone();
-    blocking(move || team.sign_in(request)).await
+    let teams = team.inner().clone();
+    blocking(move || {
+        // A failure is said in the status, as the sign-in form shows it.
+        let _ = teams.sign_in(request);
+        teams.shown_status()
+    })
+    .await
 }
 
 #[tauri::command]
 async fn team_sign_out(team: State<'_, Team>) -> Result<TeamStatus, String> {
-    let team = team.inner().clone();
-    blocking(move || team.sign_out()).await
+    let teams = team.inner().clone();
+    blocking(move || {
+        let shown = teams.shown_status();
+        teams.sign_out(&shown.server_url);
+        teams.shown_status()
+    })
+    .await
 }
 
 #[tauri::command]
@@ -359,7 +369,7 @@ async fn team_part(
     team: State<'_, Team>,
     ipn: String,
 ) -> Result<Option<TeamPart>, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     blocking(move || browser.team_part(&ipn, &team)).await?
 }
 
@@ -369,7 +379,7 @@ async fn team_edit(
     team: State<'_, Team>,
     request: TeamEditRequest,
 ) -> Result<PublishResult, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     blocking(move || browser.edit(request, &team)).await?
 }
 
@@ -379,7 +389,7 @@ async fn team_pick(
     team: State<'_, Team>,
     request: TeamPickRequest,
 ) -> Result<TeamPick, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     blocking(move || browser.pick(&request, &team)).await?
 }
 
@@ -389,7 +399,7 @@ async fn team_item_preview(
     team: State<'_, Team>,
     request: LibraryItemRequest,
 ) -> Result<PreviewOutcome, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     blocking(move || browser.catalog_item_preview(&request, &team)).await
 }
 
@@ -404,7 +414,7 @@ async fn team_archive(
     team: State<'_, Team>,
     request: TeamArchiveRequest,
 ) -> Result<PublishResult, String> {
-    let team = team.inner().clone();
+    let team = team.shown();
     blocking(move || team.archive(request)).await?
 }
 
@@ -413,7 +423,7 @@ async fn team_csv_review(
     team: State<'_, Team>,
     request: TeamCsvReviewRequest,
 ) -> Result<PublishResult, String> {
-    let team = team.inner().clone();
+    let team = team.shown();
     blocking(move || team.csv_review(request)).await?
 }
 
@@ -422,7 +432,7 @@ async fn team_read_file(
     team: State<'_, Team>,
     request: TeamFileRequest,
 ) -> Result<TeamFileReading, String> {
-    let team = team.inner().clone();
+    let team = team.shown();
     blocking(move || team.read_file(request)).await?
 }
 
@@ -441,7 +451,7 @@ async fn team_read_download(
     team: State<'_, Team>,
     request: TeamDownloadRequest,
 ) -> Result<TeamDownload, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     blocking(move || browser.read_download(&request, &team)).await?
 }
 
@@ -451,7 +461,7 @@ async fn team_check_ipn(
     team: State<'_, Team>,
     request: TeamIpnRequest,
 ) -> Result<TeamIpnCheck, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     blocking(move || browser.check_ipn(&request.ipn, &request.prefix, &team)).await
 }
 
@@ -460,7 +470,7 @@ async fn team_check_mpn(
     team: State<'_, Team>,
     request: TeamMpnRequest,
 ) -> Result<Vec<TeamSameMpn>, String> {
-    let team = team.inner().clone();
+    let team = team.shown();
     blocking(move || team.same_mpn(&request.mpn, &request.manufacturer)).await
 }
 
@@ -470,7 +480,7 @@ async fn team_add_part(
     team: State<'_, Team>,
     request: TeamNewPartRequest,
 ) -> Result<PublishResult, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     blocking(move || browser.add_part(request, &team)).await?
 }
 
@@ -479,7 +489,7 @@ async fn team_library_check(
     browser: State<'_, Browser>,
     team: State<'_, Team>,
 ) -> Result<Option<LibraryCheckView>, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     // Worked out again only when the team catalog changed.
     blocking(move || browser.library_check(&team)).await?
 }
@@ -497,7 +507,7 @@ async fn library_items(
     team: State<'_, Team>,
     request: LibraryItemsRequest,
 ) -> Result<LibraryItems, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     blocking(move || browser.library_items(&request, &team.current_values())).await
 }
 
@@ -507,7 +517,7 @@ async fn library_item(
     team: State<'_, Team>,
     request: LibraryItemRequest,
 ) -> Result<Option<LibraryItemDetail>, String> {
-    let (browser, team) = (browser.inner().clone(), team.inner().clone());
+    let (browser, team) = (browser.inner().clone(), team.shown());
     blocking(move || browser.library_item(&request, &team.current_values())).await
 }
 
@@ -656,15 +666,15 @@ fn main() {
                 kicad_documents_dir: app.path().document_dir().ok(),
             });
             app.manage(Arc::new(browser));
-            // Only the server address and email are saved; the session
-            // stays in memory and ends with the app.
-            let team = Arc::new(TeamCatalog::open(
+            // Only each team's server address and email are saved; the
+            // sessions stay in memory and end with the app.
+            let teams = Arc::new(Teams::open(
                 config_dir.join("team.json"),
                 options.team_server.clone(),
                 options.team_email.clone(),
             ));
-            app.manage(team.clone());
-            app.manage(Arc::new(KicadLibraries::start(libraries_dir, team)));
+            app.manage(teams.clone());
+            app.manage(Arc::new(KicadLibraries::start(libraries_dir, teams)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -98,7 +98,7 @@ impl Drop for Follower {
 }
 
 /// Checks the address, signs in, reads the account, and starts following.
-pub(super) fn sign_in(request: &SignInRequest) -> Result<(Session, String), String> {
+pub(super) fn sign_in(request: &SignInRequest) -> Result<Session, String> {
     // https:// anywhere, http:// only on this computer: see ServerAddress.
     let server_url = ServerAddress::for_sign_in(&request.server_url)
         .map_err(|refusal| refusal.to_string())?
@@ -133,7 +133,7 @@ pub(super) fn sign_in(request: &SignInRequest) -> Result<(Session, String), Stri
         can_edit: account["can_edit_catalog"].as_bool().unwrap_or(false),
         category_names: Arc::default(),
     };
-    Ok((session, server_url))
+    Ok(session)
 }
 
 /// Follows new Changes until `stop` is set: subscribe, catch up, apply each

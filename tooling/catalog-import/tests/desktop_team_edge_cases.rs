@@ -152,11 +152,7 @@ fn start_through(through: Option<&mut Option<Arc<Mutex<Fault>>>>) -> Desktop {
         }
         None => server.url().to_owned(),
     };
-    let team = TeamCatalog::open(
-        state.path().join("desktop").join("team.json"),
-        Some(url.clone()),
-        None,
-    );
+    let team = TeamCatalog::new();
     let status = team.sign_in(SignInRequest {
         server_url: url,
         email: editor.email,

@@ -257,14 +257,7 @@ impl Team {
                 ImportOutcome::Applied { .. }
             ));
         }
-        let team = Self::member(
-            &server,
-            &admin,
-            &state,
-            "Ada Editor",
-            "ada@example.test",
-            true,
-        );
+        let team = Self::member(&server, &admin, "Ada Editor", "ada@example.test", true);
         let data = tempfile::tempdir().unwrap();
         let browser = CatalogBrowser::open(BrowserConfig {
             catalog_root: copy.path().to_path_buf(),
@@ -289,18 +282,13 @@ impl Team {
     fn member(
         server: &PocketBaseServer,
         admin: &PocketBaseClient,
-        state: &tempfile::TempDir,
         name: &str,
         email: &str,
         can_edit: bool,
     ) -> TeamCatalog {
         let member = services::add_member(admin, name, email, can_edit).unwrap();
         let url = server.url().to_owned();
-        let team = TeamCatalog::open(
-            state.path().join(format!("{email}.json")),
-            Some(url.clone()),
-            None,
-        );
+        let team = TeamCatalog::new();
         let status = team.sign_in(SignInRequest {
             server_url: url,
             email: member.email.clone(),
@@ -323,14 +311,7 @@ impl Team {
     }
 
     fn second(&self, name: &str, email: &str, can_edit: bool) -> TeamCatalog {
-        Self::member(
-            &self.server,
-            &self.admin,
-            &self._state,
-            name,
-            email,
-            can_edit,
-        )
+        Self::member(&self.server, &self.admin, name, email, can_edit)
     }
 
     fn read(&self, zip: &[u8]) -> TeamDownload {

@@ -117,7 +117,7 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
     ));
     let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     let url = server.url().to_owned();
-    let team = TeamCatalog::open(state.path().join("team.json"), Some(url.clone()), None);
+    let team = TeamCatalog::new();
     let status = team.sign_in(SignInRequest {
         server_url: url,
         email: editor.email.clone(),

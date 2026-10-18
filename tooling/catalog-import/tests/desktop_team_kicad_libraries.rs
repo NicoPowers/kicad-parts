@@ -9,7 +9,7 @@
 use catalog::PartRevision;
 use catalog::pocketbase::{EditCommand, ImportCommand, read_back, submit_edit, submit_import};
 use catalog_browser::kicad_libraries::KicadLibraries;
-use catalog_browser::team::TeamCatalog;
+use catalog_browser::teams::Teams;
 use catalog_import::services;
 use desktop_contract::{KicadLibrariesState, SignInRequest, TeamCode};
 use std::path::Path;
@@ -89,16 +89,17 @@ fn the_libraries_follow_the_team_catalog() {
     )
     .unwrap();
 
-    let sign_in = |team: &TeamCatalog, member: &services::Member| {
+    let sign_in = |team: &Teams, member: &services::Member| {
         team.sign_in(SignInRequest {
             server_url: server.url().to_owned(),
             email: member.email.clone(),
             password: member.password.clone(),
-        });
+        })
+        .unwrap();
     };
 
     // A member who cannot edit sees who may choose the code, and cannot.
-    let team = Arc::new(TeamCatalog::open(
+    let team = Arc::new(Teams::open(
         state.path().join("viewer.json"),
         Some(server.url().to_owned()),
         None,
@@ -121,10 +122,10 @@ fn the_libraries_follow_the_team_catalog() {
         libraries.set_code("MA").unwrap_err(),
         "Only team members who can edit the catalog can choose the team code."
     );
-    team.sign_out();
+    team.sign_out(server.url());
 
     // Someone who can edit chooses it.
-    let team = Arc::new(TeamCatalog::open(
+    let team = Arc::new(Teams::open(
         state.path().join("team.json"),
         Some(server.url().to_owned()),
         None,
@@ -259,7 +260,7 @@ fn the_libraries_follow_the_team_catalog() {
         theirs
     );
 
-    team.sign_out();
+    team.sign_out(server.url());
     wait_for(&libraries, "signing out", |state| {
         *state == KicadLibrariesState::SignedOut
     });
