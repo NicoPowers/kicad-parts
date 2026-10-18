@@ -552,3 +552,52 @@ fn a_migration_preserves_a_populated_instance() {
     );
     server.stop();
 }
+
+#[test]
+fn a_kept_token_is_renewed_until_the_password_changes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let migrations: Vec<String> = all_migrations();
+    let migrations: Vec<&str> = migrations.iter().map(String::as_str).collect();
+    let options = support::options(temporary.path(), &migrations);
+    let (server, admin) = support::start(&options, &Superuser::generate());
+    let url = server.url().to_owned();
+    let member = create_member(&admin, "alice");
+    let kept = sign_in(&url, &member).token().unwrap().to_owned();
+
+    // After a restart the app has only the kept token: it renews it, and
+    // the new token works.
+    let (renewed, record) = PocketBaseClient::new(&url)
+        .with_token(&kept)
+        .unwrap()
+        .refresh_auth("users")
+        .unwrap();
+    assert_eq!(record["email"], member.email.as_str());
+    assert_eq!(renewed.auth_id(), Some(member.id.as_str()));
+    let account = renewed
+        .get(&format!("/api/collections/users/records/{}", member.id))
+        .unwrap();
+    assert_eq!(account.status, 200);
+
+    // A changed password ends every earlier sign-in.
+    let password = native_services::random_token(24);
+    admin
+        .patch_json(
+            &format!("/api/collections/users/records/{}", member.id),
+            &serde_json::json!({ "password": password, "passwordConfirm": password }),
+        )
+        .unwrap()
+        .success()
+        .unwrap();
+    assert!(matches!(
+        renewed.refresh_auth("users"),
+        Err(CollabError::Unauthorized(_))
+    ));
+
+    // A token is as good as a password, so it is never sent unencrypted to
+    // another computer.
+    assert!(matches!(
+        PocketBaseClient::new("http://team.example.com").with_token(&kept),
+        Err(CollabError::Address(_))
+    ));
+    server.stop();
+}

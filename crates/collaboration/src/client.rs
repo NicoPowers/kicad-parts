@@ -166,6 +166,49 @@ impl PocketBaseClient {
         })
     }
 
+    /// A client that sends `token`, kept from an earlier sign-in, such as
+    /// one the app stored to stay signed in. The server checks the token on
+    /// the first request; [`PocketBaseClient::refresh_auth`] does it at
+    /// once. While it lasts, a token is as good as a password, so a plain
+    /// `http://` server on another computer is refused here too.
+    pub fn with_token(&self, token: &str) -> CollabResult<Self> {
+        ServerAddress::from_url(&self.base_url)
+            .and_then(|address| address.may_receive_password())
+            .map_err(CollabError::Address)?;
+        Ok(Self {
+            token: Some(token.to_owned()),
+            auth_id: None,
+            ..self.clone()
+        })
+    }
+
+    /// Renews the sign-in with PocketBase's auth-refresh in the auth
+    /// collection `collection`. Returns a client that sends the new token,
+    /// and the signed-in record. A token the server no longer accepts is
+    /// [`CollabError::Unauthorized`]. The old token stays valid until it
+    /// expires, so clients that still hold it keep working meanwhile.
+    pub fn refresh_auth(&self, collection: &str) -> CollabResult<(Self, Value)> {
+        let reply = self.post_json(
+            &format!("/api/collections/{collection}/auth-refresh"),
+            &serde_json::json!({}),
+        )?;
+        let mut auth: Value = reply.json()?;
+        let token = auth["token"]
+            .as_str()
+            .ok_or_else(|| CollabError::Protocol("the auth reply has no token".into()))?
+            .to_owned();
+        let id = auth["record"]["id"]
+            .as_str()
+            .ok_or_else(|| CollabError::Protocol("the auth reply has no record ID".into()))?
+            .to_owned();
+        let client = Self {
+            token: Some(token),
+            auth_id: Some(id),
+            ..self.clone()
+        };
+        Ok((client, auth["record"].take()))
+    }
+
     /// Sends a protected edit command. Applied, no-op, conflict and
     /// correlation-reuse answers are all `Ok`; inspect the outcome.
     pub fn execute(&self, command: &EditRecord) -> CollabResult<CommandReply> {
