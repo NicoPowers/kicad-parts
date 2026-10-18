@@ -198,7 +198,7 @@ fn assert_refused(front: &TlsFront, trust: &ServerTrust, expected: ConnectionPro
         "REST"
     );
     assert_eq!(
-        RealtimeConnection::connect_with_trust(&front.url(), WAIT, trust).err(),
+        RealtimeConnection::connect(&client, WAIT).err(),
         Some(CollabError::Transport(expected.clone())),
         "realtime"
     );
@@ -233,8 +233,7 @@ fn a_trusted_certificate_works_for_rest_and_realtime() {
     let bob = sign_in(&bob_member);
 
     // Bob follows changes over HTTPS; Alice saves over HTTPS.
-    let mut stream =
-        RealtimeConnection::connect_with_trust(&front.url(), WAIT, bob.trust()).unwrap();
+    let mut stream = RealtimeConnection::connect(&bob, WAIT).unwrap();
     stream.subscribe(&bob, &["collab_changes"]).unwrap();
     let reply = alice
         .execute(&EditRecord::new("res-1", 0, "Resistor", "10k 0603"))
@@ -312,12 +311,8 @@ fn a_server_that_never_answers_times_out() {
     let silent = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("https://localhost:{}", silent.local_addr().unwrap().port());
     let started = Instant::now();
-    let failure = RealtimeConnection::connect_with_trust(
-        &url,
-        Duration::from_secs(1),
-        &TestAuthority::new("test authority").trust(),
-    )
-    .err();
+    let client = PocketBaseClient::with_trust(&url, TestAuthority::new("test authority").trust());
+    let failure = RealtimeConnection::connect(&client, Duration::from_secs(1)).err();
     assert_eq!(
         failure,
         Some(CollabError::Transport(ConnectionProblem::TimedOut))

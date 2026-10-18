@@ -8,7 +8,6 @@
 use crate::address::ServerAddress;
 use crate::client::PocketBaseClient;
 use crate::connection::ConnectionProblem;
-use crate::tls::ServerTrust;
 use crate::{CollabError, CollabResult};
 use serde_json::Value;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -48,20 +47,13 @@ pub struct RealtimeConnection {
 }
 
 impl RealtimeConnection {
-    /// Opens `GET /api/realtime` and waits for PocketBase's `PB_CONNECT`
-    /// event, which carries this connection's client ID. An `https://`
-    /// server's certificate is checked against the operating system's.
-    pub fn connect(base_url: &str, timeout: Duration) -> CollabResult<Self> {
-        Self::connect_with_trust(base_url, timeout, &ServerTrust::system())
-    }
-
-    /// Like [`RealtimeConnection::connect`], but checks an `https://`
-    /// server's certificate with `trust`.
-    pub fn connect_with_trust(
-        base_url: &str,
-        timeout: Duration,
-        trust: &ServerTrust,
-    ) -> CollabResult<Self> {
+    /// Opens `GET /api/realtime` on `client`'s server and waits for
+    /// PocketBase's `PB_CONNECT` event, which carries this connection's
+    /// client ID. An `https://` server's certificate is checked the way
+    /// `client` checks it.
+    pub fn connect(client: &PocketBaseClient, timeout: Duration) -> CollabResult<Self> {
+        let base_url = client.base_url();
+        let trust = client.trust();
         let address = ServerAddress::from_url(base_url)
             .map_err(|_| CollabError::Protocol(format!("`{base_url}` is not a team server URL")))?;
         let socket = open_socket(&address, timeout)?;
@@ -385,7 +377,10 @@ mod tests {
     #[test]
     fn only_http_and_https_urls_are_accepted() {
         assert!(matches!(
-            RealtimeConnection::connect("ws://127.0.0.1:9", Duration::from_secs(1)),
+            RealtimeConnection::connect(
+                &PocketBaseClient::new("ws://127.0.0.1:9"),
+                Duration::from_secs(1)
+            ),
             Err(CollabError::Protocol(_))
         ));
     }

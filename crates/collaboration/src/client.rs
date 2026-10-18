@@ -104,9 +104,9 @@ impl PocketBaseClient {
         &self.base_url
     }
 
-    /// How this client checks an `https://` server's certificate, for a
-    /// [`crate::RealtimeConnection`] to the same server.
-    pub fn trust(&self) -> &ServerTrust {
+    /// How this client checks an `https://` server's certificate, which a
+    /// [`crate::RealtimeConnection`] to the same server shares.
+    pub(crate) fn trust(&self) -> &ServerTrust {
         &self.trust
     }
 

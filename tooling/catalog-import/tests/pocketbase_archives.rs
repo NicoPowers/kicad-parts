@@ -337,7 +337,7 @@ fn a_second_client_follows_archive_only_changes() {
     assert_eq!(replica.catch_up(&watcher).unwrap(), 2);
     let part_id = team.read().part(IPN).unwrap().id.clone();
     assert_eq!(replica.parts()[&part_id].number, 2);
-    let mut connection = RealtimeConnection::connect(team.server.url(), wait).unwrap();
+    let mut connection = RealtimeConnection::connect(&watcher, wait).unwrap();
     connection
         .subscribe(&watcher, &["catalog_changes"])
         .unwrap();

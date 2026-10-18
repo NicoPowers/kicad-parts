@@ -190,7 +190,7 @@ fn signing_in_while_others_save_ends_like_the_server() {
 
     // The desktop subscribes first, then signs in, as its follower does.
     let wait = Duration::from_secs(20);
-    let mut connection = RealtimeConnection::connect(server.url(), wait).unwrap();
+    let mut connection = RealtimeConnection::connect(&viewer, wait).unwrap();
     connection.subscribe(&viewer, &["catalog_changes"]).unwrap();
     let noted = latest_change_seq(&viewer).unwrap();
     let mut replica = CatalogReplica::from_server_in_pages(

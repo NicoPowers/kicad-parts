@@ -134,7 +134,7 @@ fn authenticated_commands_notify_and_reconcile_a_second_client() {
     ));
 
     // Bob watches the change log and starts from an empty replica.
-    let mut bob_stream = RealtimeConnection::connect(&url, EVENT_TIMEOUT).unwrap();
+    let mut bob_stream = RealtimeConnection::connect(&bob, EVENT_TIMEOUT).unwrap();
     bob_stream.subscribe(&bob, &["collab_changes"]).unwrap();
     let mut bob_replica = Replica::new();
     assert_eq!(bob_replica.catch_up(&bob).unwrap(), 0);
@@ -319,7 +319,7 @@ fn authenticated_commands_notify_and_reconcile_a_second_client() {
 
     // Reconnect: subscribe first, then catch up from the checkpoint, so a
     // change made in between arrives both ways and is applied once.
-    let mut bob_stream = RealtimeConnection::connect(&url, EVENT_TIMEOUT).unwrap();
+    let mut bob_stream = RealtimeConnection::connect(&bob, EVENT_TIMEOUT).unwrap();
     bob_stream.subscribe(&bob, &["collab_changes"]).unwrap();
     let overlap = alice
         .execute(&EditRecord::new("cap-1", 1, "Capacitor", "100n 0402 X7R"))
@@ -352,7 +352,7 @@ fn authenticated_commands_notify_and_reconcile_a_second_client() {
             ))
             .unwrap();
     }
-    let mut bob_stream = RealtimeConnection::connect(&url, EVENT_TIMEOUT).unwrap();
+    let mut bob_stream = RealtimeConnection::connect(&bob, EVENT_TIMEOUT).unwrap();
     bob_stream.subscribe(&bob, &["collab_changes"]).unwrap();
     let current = alice.record_by_key("cap-1").unwrap().unwrap();
     alice

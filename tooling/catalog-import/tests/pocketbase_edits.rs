@@ -684,7 +684,7 @@ fn a_second_client_converges_through_realtime_and_its_checkpoint() {
     let mut replica = CatalogReplica::new();
     assert_eq!(replica.catch_up(&watcher).unwrap(), 1);
     assert_eq!((replica.checkpoint(), replica.parts().len()), (1, 29));
-    let mut connection = RealtimeConnection::connect(team.url(), wait).unwrap();
+    let mut connection = RealtimeConnection::connect(&watcher, wait).unwrap();
     connection
         .subscribe(&watcher, &["catalog_changes"])
         .unwrap();
@@ -719,7 +719,7 @@ fn a_second_client_converges_through_realtime_and_its_checkpoint() {
     applied(&submit_edit(&editor, &edit(&team.read(), IPN, "Symbol", "Device:R")).unwrap());
 
     // It reconnects and catches up from its checkpoint: nothing missed...
-    let mut connection = RealtimeConnection::connect(team.url(), wait).unwrap();
+    let mut connection = RealtimeConnection::connect(&watcher, wait).unwrap();
     connection
         .subscribe(&watcher, &["catalog_changes"])
         .unwrap();
