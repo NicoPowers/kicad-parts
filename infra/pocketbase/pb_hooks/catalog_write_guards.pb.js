@@ -249,6 +249,30 @@ onRecordCreate(
   "catalog_category_revisions",
 );
 
+// Saving new part details or a new part revision moves the part there, in
+// the same transaction, as saving an archive entry does. Desktops that
+// follow Changes make whatever a Change saved current
+// (crates/catalog/src/replica.rs, CatalogReplica::apply), so the server
+// must too. The route's own move then changes nothing. A new revision has
+// no archive entry, so it is always the newest that is not archived. The
+// part-update guard checks the move.
+onRecordCreate(
+  (e) => {
+    const saved = e.next();
+    const record = e.record;
+    const pointer = record.collection().name === "catalog_part_details" ? "current_details" : "current_revision";
+    const part = e.app.findRecordById("catalog_parts", record.getString("part"));
+    if (part.getString(pointer) !== record.id) {
+      part.set(pointer, record.id);
+      part.set(pointer + "_number", record.getInt("number"));
+      e.app.save(part);
+    }
+    return saved;
+  },
+  "catalog_part_details",
+  "catalog_part_revisions",
+);
+
 // An archive entry must be exactly what the archive route saves: for one of
 // the part's own revisions, in a Change of the matching kind whose seq it
 // copies, under the ID derived from that Change's correlation ID; it must

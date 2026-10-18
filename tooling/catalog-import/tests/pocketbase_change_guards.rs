@@ -56,6 +56,7 @@ const CHANGE_FIELDS: [(&str, &str); 12] = [
 ///   record to change instead of making one. `next` names an owner: the
 ///   record starts as a copy of the owner's newest numbered record, as the
 ///   next number. `deriveId` is `[kind, key]` for the record's ID.
+///   `withoutHooks` saves it with no hooks at all, guards included.
 ///   In `fields`, "$new" stands for the last Change saved here, and
 ///   "$last" for the record saved just before.
 /// - `uncaught`: let a refusal through, so PocketBase answers it.
@@ -112,7 +113,11 @@ routerAdd("POST", "/api/test/save", (e) => {
         const value = item.fields[name];
         made.set(name, value === "$new" ? fresh : value === "$last" ? last : value);
       }
-      app.save(made);
+      if (item.withoutHooks) {
+        app.unsafeWithoutHooks().save(made);
+      } else {
+        app.save(made);
+      }
       last = made.id;
     }
   };
@@ -477,8 +482,9 @@ fn a_part_moves_only_to_what_its_own_transactions_change_saved() {
     let team = Team::start();
     let readback = team.read();
     let other = readback.part(OTHER).unwrap().clone();
-    // The normal way: new details in a new Change, and the part moved to
-    // them, in one transaction.
+    // The way the routes do it: new details in a new Change, and the part
+    // moved to them, in one transaction. Saving the details already moved
+    // the part, so the route's own move changes nothing.
     team.saved(json!({ "changes": 1, "records": [
         { "collection": "catalog_part_details", "next": other.id, "fields": { "change": "$new" } },
         { "collection": "catalog_parts", "update": other.id, "fields": {
@@ -491,14 +497,31 @@ fn a_part_moves_only_to_what_its_own_transactions_change_saved() {
         other.current_details_number + 1
     );
 
-    // Details and a revision saved with their own Change, but the part
-    // left where it was.
+    // New details and a new revision, saved with their own Change, move
+    // the part there by themselves. Desktops following Changes make them
+    // current too, so a desktop signing in later agrees.
     let part = readback.part(IPN).unwrap().clone();
     team.saved(json!({ "changes": 1, "records": [
         { "collection": "catalog_part_details", "next": part.id, "fields": { "change": "$new" } },
         { "collection": "catalog_part_revisions", "next": part.id, "fields": { "change": "$new" } },
     ] }));
+    let moved = team.read().part(IPN).unwrap().clone();
+    assert_eq!(
+        (moved.current_details_number, moved.current_revision_number),
+        (
+            part.current_details_number + 1,
+            part.current_revision_number + 1
+        )
+    );
+
+    // Details and a revision saved with no hooks at all, as raw server
+    // code might: the part stays where it was.
+    team.saved(json!({ "changes": 1, "records": [
+        { "collection": "catalog_part_details", "next": part.id, "withoutHooks": true, "fields": { "change": "$new" } },
+        { "collection": "catalog_part_revisions", "next": part.id, "withoutHooks": true, "fields": { "change": "$new" } },
+    ] }));
     let stored = team.read();
+    assert_eq!(stored.part(IPN).unwrap(), &moved);
     let newest_details = stored
         .part_details
         .iter()
