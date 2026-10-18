@@ -227,26 +227,58 @@ fn nowhere() -> String {
     listener.local_addr().unwrap().to_string()
 }
 
-/// Asserts that REST and realtime both fail with `expected` against
-/// `front`, and that the message says what to do in plain words.
-fn assert_refused(front: &TlsFront, trust: &ServerTrust, expected: ConnectionProblem) {
+/// A plain HTTP server on 127.0.0.1 that answers every request with
+/// `response`, then closes the connection. Returns its address.
+fn answering(response: String) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for mut connection in listener.incoming().flatten() {
+            // Read the request head, then answer.
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && connection.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let _ = connection.write_all(response.as_bytes());
+            let _ = connection.shutdown(Shutdown::Both);
+        }
+    });
+    address
+}
+
+/// Asserts that REST and realtime both fail against `front` with a
+/// problem `is_expected` accepts, and that the message is plain words.
+fn assert_refused(
+    front: &TlsFront,
+    trust: &ServerTrust,
+    is_expected: impl Fn(&ConnectionProblem) -> bool,
+) {
     let client = PocketBaseClient::with_trust(&front.url(), trust.clone());
-    assert_eq!(
-        client.get("/api/health").unwrap_err(),
-        CollabError::Transport(expected.clone()),
-        "REST"
-    );
-    assert_eq!(
-        RealtimeConnection::connect(&client, WAIT).err(),
-        Some(CollabError::Transport(expected.clone())),
-        "realtime"
-    );
-    let message = CollabError::Transport(expected).to_string();
-    assert!(
-        message.starts_with("The team server's certificate"),
-        "{message}"
-    );
-    assert!(!message.contains("rustls"), "{message}");
+    for (what, failure) in [
+        ("REST", client.get("/api/health").err()),
+        ("realtime", RealtimeConnection::connect(&client, WAIT).err()),
+    ] {
+        let Some(CollabError::Transport(problem)) = failure else {
+            panic!("{what}: {failure:?}");
+        };
+        assert!(is_expected(&problem), "{what}: {problem:?}");
+        let message = problem.to_string();
+        assert!(
+            message.starts_with("The team server's certificate"),
+            "{message}"
+        );
+        assert!(!message.contains("rustls"), "{message}");
+    }
+}
+
+/// Windows reports a certificate that is not valid yet as expired, and
+/// macOS reports an expired one as some other certificate problem.
+fn out_of_date(problem: &ConnectionProblem) -> bool {
+    matches!(
+        problem,
+        ConnectionProblem::CertificateOutOfDate | ConnectionProblem::CertificateNotAccepted(_)
+    )
 }
 
 #[test]
@@ -350,11 +382,9 @@ fn a_certificate_from_an_unknown_authority_is_not_trusted() {
     let trusted = TestAuthority::new("trusted test authority");
     let unknown = TestAuthority::new("unknown test authority");
     let front = TlsFront::start(unknown.certificate("localhost", 2020, 2100), &nowhere());
-    assert_refused(
-        &front,
-        &trusted.trust(),
-        ConnectionProblem::CertificateNotTrusted,
-    );
+    assert_refused(&front, &trusted.trust(), |problem| {
+        *problem == ConnectionProblem::CertificateNotTrusted
+    });
 }
 
 #[test]
@@ -364,21 +394,69 @@ fn a_certificate_for_another_name_is_refused() {
         authority.certificate("team.example.com", 2020, 2100),
         &nowhere(),
     );
-    assert_refused(
-        &front,
-        &authority.trust(),
-        ConnectionProblem::CertificateForAnotherName,
-    );
+    assert_refused(&front, &authority.trust(), |problem| {
+        *problem == ConnectionProblem::CertificateForAnotherName
+    });
 }
 
 #[test]
 fn an_expired_certificate_is_refused() {
     let authority = TestAuthority::new("test authority");
     let front = TlsFront::start(authority.certificate("localhost", 2020, 2021), &nowhere());
-    assert_refused(
-        &front,
-        &authority.trust(),
-        ConnectionProblem::CertificateExpired,
+    assert_refused(&front, &authority.trust(), out_of_date);
+}
+
+#[test]
+fn a_certificate_not_valid_yet_is_refused() {
+    let authority = TestAuthority::new("test authority");
+    let front = TlsFront::start(authority.certificate("localhost", 2090, 2100), &nowhere());
+    assert_refused(&front, &authority.trust(), out_of_date);
+}
+
+#[test]
+fn a_redirect_to_plain_http_is_refused() {
+    let authority = TestAuthority::new("test authority");
+    let plain = answering(String::new()); // Never reached.
+    let redirect = format!(
+        "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{plain}/api/health\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let front = TlsFront::start(
+        authority.certificate("localhost", 2020, 2100),
+        &answering(redirect),
+    );
+    let failure = PocketBaseClient::with_trust(&front.url(), authority.trust())
+        .get("/api/collections/users/records")
+        .unwrap_err();
+    assert_eq!(
+        failure,
+        CollabError::Transport(ConnectionProblem::RedirectToUnencrypted)
+    );
+    assert!(
+        failure
+            .to_string()
+            .starts_with("The team server tried to switch to an unencrypted connection.")
+    );
+}
+
+#[test]
+fn an_error_answer_to_live_updates_is_said_plainly() {
+    // As a proxy answers when PocketBase behind it is down.
+    let proxy = answering(
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+    );
+    let client = PocketBaseClient::new(&format!("http://{proxy}"));
+    let failure = RealtimeConnection::connect(&client, WAIT).err();
+    let Some(CollabError::Transport(problem)) = failure else {
+        panic!("{failure:?}");
+    };
+    assert_eq!(
+        problem,
+        ConnectionProblem::LiveUpdatesRefused("HTTP/1.1 502 Bad Gateway".into())
+    );
+    assert!(
+        problem
+            .to_string()
+            .contains("The app tries again by itself.")
     );
 }
 

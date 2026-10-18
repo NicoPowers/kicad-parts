@@ -215,9 +215,9 @@ fn read_stream(stream: Box<dyn Stream>, sender: &mpsc::Sender<Message>) -> io::R
     let mut status = String::new();
     reader.read_line(&mut status)?;
     if !status.starts_with("HTTP/1.1 200") {
-        return Err(io::Error::other(format!(
-            "realtime answered `{}`",
-            status.trim_end()
+        // Carried inside the io::Error, so the plain message survives.
+        return Err(io::Error::other(ConnectionProblem::LiveUpdatesRefused(
+            status.trim_end().to_owned(),
         )));
     }
     let mut chunked = false;

@@ -23,13 +23,23 @@ pub enum ConnectionProblem {
     /// The certificate is for another server name: a typo in the address,
     /// or the server's IP address typed instead of its name.
     CertificateForAnotherName,
-    CertificateExpired,
-    /// The certificate starts in the future, so this computer's clock is
-    /// probably wrong.
-    CertificateNotYetValid,
+    /// The certificate has expired or starts in the future. One problem,
+    /// because Windows reports both as expired, and either may be this
+    /// computer's clock.
+    CertificateOutOfDate,
+    /// Any other certificate problem. macOS reports an expired
+    /// certificate this way too, so the message stays general.
+    CertificateNotAccepted(String),
     /// Any other TLS failure, such as an `https://` address for a server
     /// that only speaks plain HTTP.
     NotSecure(String),
+    /// An `https://` server redirected the app to `http://`, which would
+    /// send the password or token unencrypted. The app refuses.
+    RedirectToUnencrypted,
+    /// The server redirected the app again and again.
+    TooManyRedirects,
+    /// The server answered the live-updates request with an error status,
+    /// such as a proxy's `502 Bad Gateway`. Holds the status line.
     /// The operating system's trusted certificates could not be read, so
     /// no server can be checked.
     NoCertificateStore(String),
@@ -38,6 +48,7 @@ pub enum ConnectionProblem {
     NotReachable(String),
     /// The server took too long to answer.
     TimedOut,
+    LiveUpdatesRefused(String),
     /// The connection worked, then broke.
     Lost(String),
 }
@@ -51,15 +62,13 @@ impl ConnectionProblem {
         }
         // The text can hold a file token in the URL, so it goes.
         let detail = without_queries(&error.to_string());
-        match error {
-            ureq::Error::Transport(transport)
-                if matches!(
-                    transport.kind(),
-                    ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed
-                ) =>
-            {
-                Self::NotReachable(detail)
-            }
+        let ureq::Error::Transport(transport) = error else {
+            return Self::Lost(detail);
+        };
+        match transport.kind() {
+            ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed => Self::NotReachable(detail),
+            ureq::ErrorKind::InsecureRequestHttpsOnly => Self::RedirectToUnencrypted,
+            ureq::ErrorKind::TooManyRedirects => Self::TooManyRedirects,
             _ => Self::Lost(detail),
         }
     }
@@ -75,11 +84,11 @@ impl ConnectionProblem {
             Certificate::NotValidForName | Certificate::NotValidForNameContext { .. } => {
                 Self::CertificateForAnotherName
             }
-            Certificate::Expired | Certificate::ExpiredContext { .. } => Self::CertificateExpired,
-            Certificate::NotValidYet | Certificate::NotValidYetContext { .. } => {
-                Self::CertificateNotYetValid
-            }
-            _ => Self::NotSecure(error.to_string()),
+            Certificate::Expired
+            | Certificate::ExpiredContext { .. }
+            | Certificate::NotValidYet
+            | Certificate::NotValidYetContext { .. } => Self::CertificateOutOfDate,
+            _ => Self::CertificateNotAccepted(error.to_string()),
         }
     }
 
@@ -105,17 +114,29 @@ impl fmt::Display for ConnectionProblem {
                 formatter,
                 "The team server's certificate is for a different address. Check that you typed the address exactly as you were given it."
             ),
-            Self::CertificateExpired => write!(
+            Self::CertificateOutOfDate => write!(
                 formatter,
-                "The team server's certificate has expired. Ask whoever runs the server to renew it."
+                "The team server's certificate is out of date, or this computer's date is wrong. Check this computer's date and time. If it is right, ask whoever runs the server to renew the certificate."
             ),
-            Self::CertificateNotYetValid => write!(
+            Self::CertificateNotAccepted(detail) => write!(
                 formatter,
-                "The team server's certificate is not valid yet. Check that this computer's date and time are right."
+                "The team server's certificate was not accepted. Ask whoever runs the server to check its certificate. (Details: {detail})"
             ),
             Self::NotSecure(detail) => write!(
                 formatter,
                 "Could not make a secure connection to the team server. Ask whoever runs the server to check its HTTPS setup. (Details: {detail})"
+            ),
+            Self::RedirectToUnencrypted => write!(
+                formatter,
+                "The team server tried to switch to an unencrypted connection. Ask whoever runs the server to check its HTTPS setup."
+            ),
+            Self::TooManyRedirects => write!(
+                formatter,
+                "The team server keeps sending the app to another address. Ask whoever runs the server to check its HTTPS setup."
+            ),
+            Self::LiveUpdatesRefused(status) => write!(
+                formatter,
+                "The team server could not start live updates (it answered {status}). The app tries again by itself. If this lasts, ask whoever runs the server to check it."
             ),
             Self::NoCertificateStore(detail) => write!(
                 formatter,
@@ -131,7 +152,7 @@ impl fmt::Display for ConnectionProblem {
             ),
             Self::Lost(detail) => write!(
                 formatter,
-                "The connection to the team server broke. (Details: {detail})"
+                "The connection to the team server broke. Check your network connection, then try again. (Details: {detail})"
             ),
         }
     }
@@ -240,10 +261,13 @@ mod tests {
                 Certificate::NotValidForName,
                 ConnectionProblem::CertificateForAnotherName,
             ),
-            (Certificate::Expired, ConnectionProblem::CertificateExpired),
+            (
+                Certificate::Expired,
+                ConnectionProblem::CertificateOutOfDate,
+            ),
             (
                 Certificate::NotValidYet,
-                ConnectionProblem::CertificateNotYetValid,
+                ConnectionProblem::CertificateOutOfDate,
             ),
         ];
         for (certificate, expected) in cases {
@@ -254,8 +278,27 @@ mod tests {
             );
             assert_eq!(ConnectionProblem::while_connecting(&io), expected);
         }
+        // Anything else about the certificate, such as macOS's way of
+        // saying "expired", still reads as a certificate problem.
+        for other in [
+            Certificate::Revoked,
+            Certificate::Other(rustls::OtherError(std::sync::Arc::new(io::Error::other(
+                "expired",
+            )))),
+        ] {
+            let problem = ConnectionProblem::from_tls(&rustls::Error::InvalidCertificate(other));
+            assert!(matches!(
+                problem,
+                ConnectionProblem::CertificateNotAccepted(_)
+            ));
+            assert!(
+                problem
+                    .to_string()
+                    .starts_with("The team server's certificate")
+            );
+        }
         assert!(matches!(
-            ConnectionProblem::from_tls(&rustls::Error::InvalidCertificate(Certificate::Revoked)),
+            ConnectionProblem::from_tls(&rustls::Error::DecryptError),
             ConnectionProblem::NotSecure(_)
         ));
     }
