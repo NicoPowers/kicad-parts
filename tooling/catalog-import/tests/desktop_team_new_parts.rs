@@ -436,3 +436,111 @@ fn the_desktop_adds_a_part_from_a_download() {
     assert!(message.contains("CAP-0005-0001"), "{message}");
     drop(server);
 }
+
+/// Adds a capacitor row with `ipn` to the CSV catalog under `root`, as
+/// someone working in the CSV catalog would, or as `git pull` would.
+fn add_capacitor_row(root: &Path, ipn: &str) {
+    let file = root.join("database/g-cap.csv");
+    let mut text = fs::read_to_string(&file).unwrap();
+    assert!(text.ends_with('\n'));
+    text.push_str(&format!(
+        "\"{ipn}\",\"GRM188R71H104KA93D\",\"Murata\",\"CAP CER 0.1UF 50V X7R 0603\"\n"
+    ));
+    fs::write(&file, text).unwrap();
+}
+
+/// The CSV catalog may get new rows while Add part is open (kicad-parts-
+/// 3b72). Add part reads the folder again when it offers an IPN, while
+/// someone types one, and just before saving, so it never gives a CSV
+/// row's IPN to another part.
+#[test]
+fn add_part_never_gives_out_an_ipn_a_csv_row_took_since_the_app_opened() {
+    let root = services::repository_root();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let copy = tempfile::Builder::new()
+        .prefix("add-part-csv-ipns-")
+        .tempdir_in(root.join("target"))
+        .unwrap();
+    for folder in ["database", "symbols", "footprints", "3d-models"] {
+        copy_folder(&root.join(folder), &copy.path().join(folder));
+    }
+    import(&admin, copy.path(), "g-cap");
+    let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
+    let url = server.url().to_owned();
+    let team = TeamCatalog::open(state.path().join("team.json"), Some(url.clone()), None);
+    let status = team.sign_in(SignInRequest {
+        server_url: url,
+        email: editor.email.clone(),
+        password: editor.password.clone(),
+    });
+    assert!(status.session.is_signed_in(), "{status:?}");
+    wait_until("every imported part", || team.current_values().len() >= 17);
+    let data = tempfile::tempdir().unwrap();
+    let browser = CatalogBrowser::open(BrowserConfig {
+        catalog_root: copy.path().to_path_buf(),
+        cache_dir: data.path().join("cache"),
+        settings_file: data.path().join("settings.json"),
+        kicad_locations: SearchLocations::Standard,
+        kicad_config_dir: None,
+        kicad_documents_dir: None,
+    });
+    let zip = download(MPN, "CL10B104/KiCad/", &[]);
+    let read = || {
+        browser
+            .read_download(&request(&zip, "CL10B104.zip"), &team)
+            .unwrap()
+    };
+    let next_ipn = |reading: &TeamDownload| {
+        reading
+            .categories
+            .iter()
+            .find(|category| category.code == "cap")
+            .unwrap()
+            .next_ipn
+            .clone()
+    };
+    let reading = read();
+    assert_eq!(next_ipn(&reading), "CAP-0004-0001");
+
+    // A row takes the offered IPN while the form is open: typing it is
+    // refused, and saving with it saves nothing and offers the next one.
+    add_capacitor_row(copy.path(), "CAP-0004-0001");
+    let check = browser.check_ipn("CAP-0004-0001", "CAP", &team);
+    assert_eq!(
+        check.problem.as_deref(),
+        Some("CAP-0004-0001 is already in database/g-cap.csv. An IPN is never reused.")
+    );
+    let saved = browser
+        .add_part(new_part(&reading, "CAP-0004-0001", "cap"), &team)
+        .unwrap();
+    let PublishResult::IpnTaken {
+        message,
+        next_free,
+        yours,
+        ..
+    } = saved
+    else {
+        panic!("saved with a CSV row's IPN: {saved:?}");
+    };
+    assert_eq!(
+        message,
+        "Someone gave the IPN CAP-0004-0001 to a row of database/g-cap.csv, so nothing was saved. The next free IPN is CAP-0005-0001."
+    );
+    assert_eq!(next_free, "CAP-0005-0001");
+    assert!(!yours);
+    assert!(team.current_values().get("CAP-0004-0001").is_none());
+
+    // Add part opened again offers the IPN after the row's.
+    assert_eq!(next_ipn(&read()), "CAP-0005-0001");
+
+    // The next free IPN saves.
+    let saved = browser
+        .add_part(new_part(&reading, &next_free, "cap"), &team)
+        .unwrap();
+    assert!(
+        matches!(&saved, PublishResult::Added { part } if part.ipn == "CAP-0005-0001"),
+        "{saved:?}"
+    );
+    drop(server);
+}

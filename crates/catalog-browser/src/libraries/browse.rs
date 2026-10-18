@@ -120,7 +120,7 @@ impl CatalogBrowser {
                 );
             }
         }
-        let csv = self.csv_ipns();
+        let csv = self.loaded_csv_ipns();
         for (ipn, values) in current.iter().filter(|(ipn, _)| !csv.contains(*ipn)) {
             add(
                 ipn,

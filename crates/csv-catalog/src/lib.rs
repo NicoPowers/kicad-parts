@@ -258,6 +258,16 @@ impl SearchKey {
     }
 }
 
+/// The IPN of every row of one CSV file, such as `database/g-res.csv`, read
+/// as [`CsvCatalog::load`] reads them: trimmed, and rows without one left
+/// out.
+pub fn table_ipns(path: &Path) -> Result<Vec<String>, CatalogError> {
+    Ok(read_table(path, "")?
+        .into_iter()
+        .map(|part| part.ipn)
+        .collect())
+}
+
 fn read_table(path: &Path, category: &str) -> Result<Vec<CatalogPart>, CatalogError> {
     let csv_error = |error| CatalogError::Csv {
         path: path.to_path_buf(),

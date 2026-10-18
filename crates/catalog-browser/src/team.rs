@@ -18,6 +18,7 @@
 //! after catching up.
 
 use crate::PartValues;
+use crate::csv_ipns::IpnsInCsv;
 use catalog::library_check::{chosen_footprint_problems, judge_model_link};
 use catalog::pocketbase::UploadRole;
 use catalog::pocketbase::{
@@ -769,19 +770,22 @@ impl TeamCatalog {
     }
 
     /// Whether `ipn` can be a new part's IPN: written as an IPN, and not
-    /// one the team catalog (or `known`, such as the CSV catalog's) has.
-    pub fn check_ipn(&self, ipn: &str, prefix: &str, known: &BTreeSet<String>) -> TeamIpnCheck {
+    /// one the team catalog or the CSV catalog (`csv`) has.
+    pub fn check_ipn(&self, ipn: &str, prefix: &str, csv: &IpnsInCsv) -> TeamIpnCheck {
         let problem = if catalog::Ipn::parse(ipn).is_err() {
             Some("Write the IPN as three capital letters, four digits and four letters or digits, such as RES-0001-0001.".to_owned())
         } else if !prefix.is_empty() && !ipn.starts_with(&format!("{prefix}-")) {
             Some(format!(
                 "A part in this category has an IPN starting with {prefix}-."
             ))
-        } else if known.contains(ipn)
-            || self
-                .current_parts()
-                .iter()
-                .any(|(details, _)| details.ipn == ipn)
+        } else if let Some(file) = csv.file_of(ipn) {
+            Some(format!(
+                "{ipn} is already in {file}. An IPN is never reused."
+            ))
+        } else if self
+            .current_parts()
+            .iter()
+            .any(|(details, _)| details.ipn == ipn)
         {
             Some(format!(
                 "{ipn} is already in the Catalog. An IPN is never reused."
@@ -793,19 +797,32 @@ impl TeamCatalog {
     }
 
     /// Saves a new part: part details 1 in the confirmed category, revision
-    /// 1 with its symbol and footprint, and the files they use. `known` are
-    /// the IPNs the team catalog may not have yet (the CSV catalog's), for
-    /// the next free IPN when someone took this one first.
+    /// 1 with its symbol and footprint, and the files they use. `csv` are
+    /// the CSV catalog's IPNs, read just before saving: the team catalog
+    /// may not have them yet, so an IPN there is refused, and none of them
+    /// is offered as the next free IPN.
     pub fn add_part(
         &self,
         request: TeamNewPartRequest,
-        known: &BTreeSet<String>,
+        csv: &IpnsInCsv,
     ) -> Result<PublishResult, String> {
         let files = || {
             let uploads = crate::add_part::uploads(&request)?;
             Ok((uploads, request.downloads.clone()))
         };
-        self.add_part_with(request.clone(), known, files)
+        self.add_part_with(request.clone(), csv, files)
+    }
+
+    /// The next free IPN after `ipn` was found taken: for its prefix, after
+    /// every IPN the team catalog and the CSV catalog (`csv`) have, and
+    /// `ipn` itself.
+    fn next_free_after(&self, ipn: &str, csv: &IpnsInCsv) -> String {
+        let parts = self.current_parts();
+        let taken = csv
+            .ipns()
+            .chain(parts.iter().map(|(details, _)| details.ipn.as_str()))
+            .chain(std::iter::once(ipn));
+        catalog::download::next_free_ipn(&ipn[..3], taken).unwrap_or_default()
     }
 
     /// [`Self::add_part`] with the files to send, and the names of the files
@@ -813,7 +830,7 @@ impl TeamCatalog {
     pub(crate) fn add_part_with(
         &self,
         request: TeamNewPartRequest,
-        known: &BTreeSet<String>,
+        csv: &IpnsInCsv,
         files: impl FnOnce() -> Result<(Vec<CadUpload>, Vec<String>), String>,
     ) -> Result<PublishResult, String> {
         let client = self.client()?;
@@ -832,10 +849,30 @@ impl TeamCatalog {
             }
         }
         // A taken IPN is the server's to say: someone may take it any time.
-        if catalog::Ipn::parse(request.ipn.trim()).is_err() {
-            if let Some(problem) = self.check_ipn(request.ipn.trim(), "", known).problem {
+        let ipn = request.ipn.trim().to_owned();
+        if catalog::Ipn::parse(&ipn).is_err() {
+            if let Some(problem) = self.check_ipn(&ipn, "", csv).problem {
                 return refused(problem);
             }
+        }
+        // Only this app sees the CSV catalog folder, so it checks it here: a
+        // row saved or pulled since Add part offered the IPN has it now. A
+        // part the team catalog has is the server's to answer, because it
+        // knows whether you added it yourself.
+        let in_team_catalog = self
+            .current_parts()
+            .iter()
+            .any(|(details, _)| details.ipn == ipn);
+        if let Some(file) = csv.file_of(&ipn).filter(|_| !in_team_catalog) {
+            let next_free = self.next_free_after(&ipn, csv);
+            return Ok(PublishResult::IpnTaken {
+                message: format!(
+                    "Someone gave the IPN {ipn} to a row of {file}, so nothing was saved. The next free IPN is {next_free}."
+                ),
+                next_free,
+                ipn,
+                yours: false,
+            });
         }
         let (uploads, sources) = match files() {
             Ok(files) => files,
@@ -844,7 +881,6 @@ impl TeamCatalog {
         if let Some(message) = model_link_refusal(&client, &uploads)? {
             return refused(message);
         }
-        let ipn = request.ipn.trim().to_owned();
         let mut command = CreateCommand::new(&ipn, &request.category, request.reason.trim());
         command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
         command.fields = request
@@ -885,18 +921,7 @@ impl TeamCatalog {
                     saved_then(reload(&client, &ipn), |part| PublishResult::Added { part })
                 }
                 CreateOutcome::IpnTaken { added_by_you, .. } => {
-                    let mut taken: BTreeSet<String> = known.clone();
-                    taken.extend(
-                        self.current_parts()
-                            .into_iter()
-                            .map(|(details, _)| details.ipn),
-                    );
-                    taken.insert(ipn.clone());
-                    let next_free = catalog::download::next_free_ipn(
-                        &ipn[..3],
-                        taken.iter().map(String::as_str),
-                    )
-                    .unwrap_or_default();
+                    let next_free = self.next_free_after(&ipn, csv);
                     // A part you added yourself (a save whose answer was
                     // lost) is offered to open; another part with this IPN
                     // is someone else's.

@@ -5,6 +5,7 @@
 //! else, so everything here is testable without a window.
 
 mod add_part;
+pub mod csv_ipns;
 pub mod drawing;
 mod git;
 pub mod kicad_libraries;
@@ -84,8 +85,13 @@ pub struct CatalogBrowser {
     /// The CSV catalog's footprints with their pads, read the first time
     /// Add part needs them.
     footprints: OnceLock<Vec<add_part::LocalFootprint>>,
-    /// The CSV catalog's IPNs, read the first time they are needed.
-    csv_ipns: OnceLock<BTreeSet<String>>,
+    /// The IPNs of the CSV catalog this app loaded when it opened (`catalog`),
+    /// read the first time they are needed. The part list uses them with
+    /// `catalog`, so both must come from the same reading.
+    loaded_csv_ipns: OnceLock<BTreeSet<String>>,
+    /// The IPNs the CSV catalog folder holds now, for giving a new part its
+    /// IPN: read again when the files change (kicad-parts-3b72).
+    csv_ipns: csv_ipns::CsvIpns,
     /// The last library check and what it was worked out for.
     library_check: library::Cached,
     /// The Libraries browser's index, read in the background.
@@ -109,7 +115,8 @@ impl CatalogBrowser {
         }
         Self {
             footprints: OnceLock::new(),
-            csv_ipns: OnceLock::new(),
+            loaded_csv_ipns: OnceLock::new(),
+            csv_ipns: csv_ipns::CsvIpns::new(&config.catalog_root),
             library_check: library::Cached::default(),
             libraries: libraries::LibraryIndex::new(config.cache_dir.clone()),
             previews,
@@ -347,7 +354,7 @@ impl CatalogBrowser {
     /// The parts in `current` (the team catalog's) that the CSV catalog
     /// does not have, in IPN order.
     fn team_only_parts(&self, current: &BTreeMap<String, PartValues>) -> TeamOnlyParts {
-        let csv = self.csv_ipns();
+        let csv = self.loaded_csv_ipns();
         let (parts, categories) = current
             .iter()
             .filter(|(ipn, _)| !csv.contains(*ipn))
@@ -361,9 +368,11 @@ impl CatalogBrowser {
         TeamOnlyParts { parts, categories }
     }
 
-    /// Every IPN the CSV catalog has, read once.
-    pub fn csv_ipns(&self) -> &BTreeSet<String> {
-        self.csv_ipns.get_or_init(|| {
+    /// Every IPN of the CSV catalog this app loaded when it opened, read
+    /// once. Only for showing parts with that same reading; a new part's IPN
+    /// is checked against the folder as it is now (`csv_ipns`).
+    pub fn loaded_csv_ipns(&self) -> &BTreeSet<String> {
+        self.loaded_csv_ipns.get_or_init(|| {
             self.catalog
                 .as_ref()
                 .map(|catalog| {
@@ -561,7 +570,9 @@ impl CatalogBrowser {
     fn add_part_context(&self, team: &TeamCatalog) -> Result<add_part::Context<'_>, String> {
         let (categories, remembered) = team.categories_and_matches()?;
         let parts = team.current_parts();
-        let mut ipns = self.csv_ipns().clone();
+        // The CSV catalog as it is now, so a row added since the app opened
+        // is never offered again.
+        let mut ipns: BTreeSet<String> = self.csv_ipns.now()?.ipns().map(str::to_owned).collect();
         ipns.extend(parts.iter().map(|(details, _)| details.ipn.clone()));
         let footprints = self
             .footprints
@@ -617,7 +628,12 @@ impl CatalogBrowser {
 
     /// Whether `ipn` can be a new part's IPN.
     pub fn check_ipn(&self, ipn: &str, prefix: &str, team: &TeamCatalog) -> TeamIpnCheck {
-        team.check_ipn(ipn, prefix, self.csv_ipns())
+        match self.csv_ipns.now() {
+            Ok(csv) => team.check_ipn(ipn, prefix, &csv),
+            Err(problem) => TeamIpnCheck {
+                problem: Some(problem),
+            },
+        }
     }
 
     /// Saves a new part from Add part. A part from our libraries
@@ -676,7 +692,13 @@ impl CatalogBrowser {
             files.extend(sources);
             Ok((uploads, files))
         };
-        team.add_part_with(request.clone(), self.csv_ipns(), files)
+        // Read the CSV catalog again just before the IPN is used: a row
+        // saved or pulled since Add part offered it must stop the save.
+        let csv = match self.csv_ipns.read_fresh() {
+            Ok(csv) => csv,
+            Err(message) => return Ok(PublishResult::Refused { message }),
+        };
+        team.add_part_with(request.clone(), &csv, files)
     }
 
     pub fn part(&self, ipn: &str) -> Option<PartDetail> {
