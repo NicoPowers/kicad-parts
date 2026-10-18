@@ -39,7 +39,9 @@ use catalog::{
     CadReferenceRole, CadReferenceTarget, CategoryDetails, DetailField, DifferenceKind,
     ModelTarget, PartDetails, PartRevision, compare_details, compare_revisions,
 };
-use collaboration::{CollabError, CorrelationId, PocketBaseClient, RealtimeConnection};
+use collaboration::{
+    CollabError, CorrelationId, PocketBaseClient, RealtimeConnection, ServerAddress,
+};
 use desktop_contract::{
     ArchiveNote, CadItemUse, ConflictRow, CsvChangeRow, CsvChanges, CsvRowForAnotherPart,
     CurrentDetails, CurrentRevision, DetailChange, Field, FileKind, HistoryEntry, LiveUpdates,
@@ -1763,7 +1765,10 @@ fn model_link_refusal(
 
 /// Checks the address, signs in, reads the account, and starts following.
 fn sign_in(request: &SignInRequest) -> Result<(Session, String), String> {
-    let server_url = loopback_url(&request.server_url)?;
+    // https:// anywhere, http:// only on this computer: see ServerAddress.
+    let server_url = ServerAddress::for_sign_in(&request.server_url)
+        .map_err(|refusal| refusal.to_string())?
+        .url();
     let email = request.email.trim();
     if email.is_empty() || request.password.is_empty() {
         return Err("Enter your email and password.".into());
@@ -1795,28 +1800,6 @@ fn sign_in(request: &SignInRequest) -> Result<(Session, String), String> {
         category_names: Arc::default(),
     };
     Ok((session, server_url))
-}
-
-/// `http://` addresses on this computer only. Realtime updates need plain
-/// HTTP for now, and a password must not cross a network unencrypted.
-fn loopback_url(text: &str) -> Result<String, String> {
-    let url = text.trim().trim_end_matches('/');
-    let rest = url.strip_prefix("http://").ok_or_else(|| {
-        "Enter the team server address, starting with http://, such as http://127.0.0.1:8090."
-            .to_owned()
-    })?;
-    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let name = match host.rsplit_once(':') {
-        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
-        _ => host,
-    };
-    if !matches!(name, "127.0.0.1" | "localhost" | "[::1]") || rest.len() != host.len() {
-        return Err(
-            "For now this app only connects to a team server on this computer, such as http://127.0.0.1:8090."
-                .into(),
-        );
-    }
-    Ok(url.to_owned())
 }
 
 /// Follows new Changes until `stop` is set: subscribe, catch up, apply each
@@ -3520,26 +3503,6 @@ mod tests {
             words(false, &[(S, Missing), (F, KiCadLibrary)]),
             "Not known: the symbol is not in the Catalog, and the footprint comes from KiCad's own library, which this app does not read yet"
         );
-    }
-
-    #[test]
-    fn only_loopback_http_addresses_are_accepted() {
-        assert_eq!(
-            loopback_url(" http://127.0.0.1:8090/ ").unwrap(),
-            "http://127.0.0.1:8090"
-        );
-        assert!(loopback_url("http://localhost:8090").is_ok());
-        assert!(loopback_url("http://[::1]:8090").is_ok());
-        for refused in [
-            "https://127.0.0.1:8090",
-            "http://team.example.com:8090",
-            "http://127.0.0.1.example.com",
-            "http://127.0.0.1:8090/api",
-            "127.0.0.1:8090",
-            "",
-        ] {
-            assert!(loopback_url(refused).is_err(), "{refused}");
-        }
     }
 
     #[test]

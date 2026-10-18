@@ -100,11 +100,14 @@ pub fn TeamBadge(
                             >
                                 <p>"Sign in to see each part's history and to edit parts with your team."</p>
                                 <label for="team-server">"Team server address"</label>
+                                // Text, not url: the address may leave out https://,
+                                // which a url input would refuse before the app sees it.
                                 <input
                                     id="team-server"
-                                    type="url"
+                                    type="text"
+                                    inputmode="url"
                                     spellcheck="false"
-                                    placeholder="http://127.0.0.1:8090"
+                                    placeholder="https://team.example.com"
                                     prop:value=move || server_url.get()
                                     on:input:target=move |event| server_url.set(event.target().value())
                                 />

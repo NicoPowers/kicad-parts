@@ -187,6 +187,23 @@ describe('team catalog: history, edits and conflicts', () => {
     await screenshot(browser, '41-team-sign-in-failed', { blankOut: [SERVER_ADDRESS] });
   });
 
+  it('refuses a plain http:// address for another computer, before sending the password', async () => {
+    const address = await browser.$(SERVER_ADDRESS);
+    await address.setValue('http://team.example.com:8090');
+    await signIn(editor);
+    await waitForText(
+      browser,
+      '.team-sign-in [role="alert"]',
+      'Addresses starting with http:// send your password unencrypted, so they only work for a server on this ' +
+        'computer. Use https://team.example.com instead.',
+    );
+    assert.equal(await (await browser.$('aria/Password')).getValue(), '', 'the password is cleared');
+    await assertAccessible(browser, '99-team-sign-in-plain-http');
+    // The address has no port that changes, so nothing is blanked out.
+    await screenshot(browser, '99-team-sign-in-plain-http');
+    await address.setValue(server.url);
+  });
+
   it('signs in and shows a part from the team catalog', async () => {
     await signIn(editor);
     await waitForText(browser, BADGE, `Team catalog · ${editor.name}`);
