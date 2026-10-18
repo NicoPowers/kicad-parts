@@ -542,3 +542,55 @@ fn the_board_alone_is_named_when_no_3d_model_is_drawn() {
         None
     );
 }
+
+#[test]
+fn a_downloads_model_is_linked_as_saving_links_it() {
+    let file = TeamFile {
+        kind: desktop_contract::FileKind::Model3d,
+        file_name: "Part.step".into(),
+        base64: String::new(),
+        symbol: None,
+        model_key: None,
+        replaces: None,
+        label: None,
+        installed: None,
+        no_models: false,
+        choice: None,
+    };
+    let footprint = |text: &str| FootprintFor3d {
+        bytes: text.as_bytes().to_vec(),
+        name: "F".into(),
+        board_box: [0.0; 4],
+        blocks: model_blocks(text.as_bytes()).unwrap(),
+    };
+    let mut notes = Vec::new();
+    // The link named like the file, else the first; the bytes stay.
+    let text = "(footprint \"F\" (model \"a.step\") (model \"${X}/part.STEP\"))";
+    let mut named = footprint(text);
+    assert_eq!(
+        link_download_model(&file, &mut named, &mut notes),
+        "${X}/part.STEP"
+    );
+    let mut first = footprint("(footprint \"F\" (model \"a.step\") (model \"b.step\"))");
+    assert_eq!(link_download_model(&file, &mut first, &mut notes), "a.step");
+    assert_eq!(named.bytes, text.as_bytes());
+    assert!(notes.is_empty());
+    // No link: the footprint gets one, and a note says so.
+    let mut bare = footprint("(footprint \"F\" (layer \"F.Cu\"))");
+    assert_eq!(
+        link_download_model(&file, &mut bare, &mut notes),
+        "Part.step"
+    );
+    let links: Vec<&str> = bare
+        .blocks
+        .iter()
+        .map(|block| block.link.as_str())
+        .collect();
+    assert_eq!(links, ["Part.step"]);
+    assert_eq!(
+        notes,
+        [
+            "The footprint has no 3D model link. Saving links it to the download's 3D model Part.step."
+        ]
+    );
+}

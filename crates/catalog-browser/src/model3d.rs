@@ -551,9 +551,10 @@ impl CatalogBrowser {
     }
 
     /// The steps of [`Self::footprint_3d`], in order: find kicad-cli, read
-    /// the footprint, gather the model files the request brings, find each
-    /// link's file, build the board and export it. An error is a problem
-    /// that stops the view before kicad-cli runs.
+    /// the footprint, link a download's model, gather the model files the
+    /// request brings, find each link's file, build the board and export
+    /// it. Every step that can fail returns its problem as an error, which
+    /// becomes the view's problem; what the steps found stays in `view`.
     fn make_footprint_3d(
         &self,
         request: &Footprint3dRequest,
@@ -562,7 +563,11 @@ impl CatalogBrowser {
     ) -> Result<(), String> {
         let install = self.kicad_for_3d()?;
         let mut footprint = self.footprint_for_3d(&request.key)?;
-        let supplies = self.supplies(&install, request, team, &mut footprint, &mut view.notes);
+        let download_link = request
+            .download_model
+            .as_ref()
+            .map(|file| link_download_model(file, &mut footprint, &mut view.notes));
+        let supplies = self.supplies(&install, request, team, download_link, &mut view.notes);
         let places = self.model_places();
         let mut uses = Vec::new();
         for block in &footprint.blocks {
@@ -573,11 +578,13 @@ impl CatalogBrowser {
         }
         let board = one_footprint_board(&footprint.bytes, &uses, footprint.board_box)
             .map_err(|error| format!("The footprint file cannot be read: {error}."))?;
-        self.export_board(&install, &footprint.name, &board, request, &mut uses, view);
+        let exported =
+            self.export_board(&install, &footprint.name, &board, request, &mut uses, view);
+        // Said even when the export failed: it explains the board alone.
         if let Some(note) = board_only_note(&footprint.blocks, &uses) {
             view.notes.insert(0, note.into());
         }
-        Ok(())
+        exported
     }
 
     /// The KiCad install whose kicad-cli makes 3D views.
@@ -610,45 +617,25 @@ impl CatalogBrowser {
         })
     }
 
-    /// The model files the request brings: a download's own model, files
-    /// chosen with the footprint, and the Catalog's stored models. A
-    /// download's footprint with no model link gets one, as saving does.
+    /// The model files the request brings: a download's own model, drawn
+    /// for `download_link`, files chosen with the footprint, and the
+    /// Catalog's stored models.
     fn supplies(
         &self,
         install: &KicadInstall,
         request: &Footprint3dRequest,
         team: &TeamCatalog,
-        footprint: &mut FootprintFor3d,
+        download_link: Option<String>,
         notes: &mut Vec<String>,
     ) -> Supplies {
         let mut supplies = Supplies {
             only_chosen: request.from_download,
             ..Supplies::default()
         };
-        if let Some(file) = &request.download_model {
-            // As saving links it: the link named like the file, or the
-            // first one, or a new link when there is none.
-            let chosen = self.chosen(install, file, None);
-            let link = footprint
-                .blocks
-                .iter()
-                .find(|block| last_part(&block.link).eq_ignore_ascii_case(&file.file_name))
-                .or(footprint.blocks.first())
-                .map(|block| block.link.clone());
-            if link.is_none() {
-                let text = String::from_utf8_lossy(&footprint.bytes).into_owned();
-                footprint.bytes =
-                    catalog::download::link_model(&text, &file.file_name, &file.file_name)
-                        .into_bytes();
-                footprint.blocks = model_blocks(&footprint.bytes).unwrap_or_default();
-                notes.push(format!(
-                    "The footprint has no 3D model link. Saving links it to the download's 3D model {}.",
-                    file.file_name
-                ));
-            }
+        if let (Some(file), Some(link)) = (&request.download_model, download_link) {
             supplies.chosen.push(Chosen {
-                link: Some(link.unwrap_or_else(|| file.file_name.clone())),
-                ..chosen
+                link: Some(link),
+                ..self.chosen(install, file, None)
             });
         }
         for file in &request.files {
@@ -676,8 +663,8 @@ impl CatalogBrowser {
         supplies
     }
 
-    /// Exports the board as GLB and puts it, or why there is none, in
-    /// `view`. A model kicad-cli could not load is then not drawn.
+    /// Exports the board as GLB and puts it in `view`, or returns why there
+    /// is none. A model kicad-cli could not load is then not drawn.
     fn export_board(
         &self,
         install: &KicadInstall,
@@ -686,7 +673,7 @@ impl CatalogBrowser {
         request: &Footprint3dRequest,
         uses: &mut [(ModelBlock, ModelUse)],
         view: &mut Footprint3dView,
-    ) {
+    ) -> Result<(), String> {
         let files: Vec<PathBuf> = uses
             .iter()
             .filter_map(|(_, model)| match model {
@@ -702,20 +689,15 @@ impl CatalogBrowser {
         let glb = match self.previews.board_glb(install, &export, request.selection) {
             Ok(glb) => glb,
             Err(PreviewError::Replaced) => {
-                view.problem = Some(
+                return Err(
                     "A newer request replaced this 3D view. Turn 3D on again to make it.".into(),
                 );
-                return;
             }
             Err(PreviewError::ExportFailed { cli_message, .. }) => {
-                view.problem = Some("kicad-cli could not make the 3D view.".into());
                 view.cli_message = Some(cli_message);
-                return;
+                return Err("kicad-cli could not make the 3D view.".into());
             }
-            Err(error) => {
-                view.problem = Some(format!("The 3D view could not be made: {error}"));
-                return;
-            }
+            Err(error) => return Err(format!("The 3D view could not be made: {error}")),
         };
         for ((_, model), shown) in uses.iter_mut().zip(&mut view.models) {
             let ModelUse::File(path) = model else {
@@ -742,18 +724,18 @@ impl CatalogBrowser {
             ));
         }
         if glb.size > MAX_GLB_BYTES {
-            view.problem = Some(format!(
+            return Err(format!(
                 "The 3D view is {} MB, more than the {} MB the app can show. The 2D view still works.",
                 glb.size.div_ceil(1024 * 1024),
                 MAX_GLB_BYTES / (1024 * 1024)
             ));
-        } else {
-            view.glb = Some(GlbReady {
-                key: glb.key,
-                size: glb.size,
-                from_cache: glb.cache == CacheOutcome::Hit,
-            });
         }
+        view.glb = Some(GlbReady {
+            key: glb.key,
+            size: glb.size,
+            from_cache: glb.cache == CacheOutcome::Hit,
+        });
+        Ok(())
     }
 
     /// The GLB of a 3D view [`Self::footprint_3d`] made, by its key; `None`
@@ -941,6 +923,34 @@ fn link_view(
         }
     }
     (model, shown)
+}
+
+/// The link a download's model `file` is drawn for, as saving links it:
+/// the footprint's link named like the file, or its first link. A
+/// footprint with no model link gets one in its bytes, as saving would
+/// give it, and a note says so.
+fn link_download_model(
+    file: &TeamFile,
+    footprint: &mut FootprintFor3d,
+    notes: &mut Vec<String>,
+) -> String {
+    let named = footprint
+        .blocks
+        .iter()
+        .find(|block| last_part(&block.link).eq_ignore_ascii_case(&file.file_name))
+        .or(footprint.blocks.first());
+    if let Some(block) = named {
+        return block.link.clone();
+    }
+    let text = String::from_utf8_lossy(&footprint.bytes).into_owned();
+    footprint.bytes =
+        catalog::download::link_model(&text, &file.file_name, &file.file_name).into_bytes();
+    footprint.blocks = model_blocks(&footprint.bytes).unwrap_or_default();
+    notes.push(format!(
+        "The footprint has no 3D model link. Saving links it to the download's 3D model {}.",
+        file.file_name
+    ));
+    file.file_name.clone()
 }
 
 /// The note that only the board is shown, when no 3D model is drawn.
