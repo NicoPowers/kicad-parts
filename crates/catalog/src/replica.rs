@@ -27,12 +27,13 @@
 //! was at some moment after Change N, not all at the same moment, and a
 //! part added meanwhile may be missed. The replay still ends exactly right:
 //!
-//! - Only Changes move a part's current revision or details. Every route
-//!   that moves a part saves a new Change in the same transaction, and
-//!   each record it saves names that Change. The write guards
-//!   (`catalog_write_guards.pb.js`) block the record API and the dashboard,
-//!   and refuse moves to the wrong record. They do not check which Change
-//!   a new revision or new details name; the routes alone ensure that.
+//! - Only Changes move a part's current revision or details. The write
+//!   guards (`catalog_write_guards.pb.js`) make sure of it, for every
+//!   route and any other server code. They block the record API and the
+//!   dashboard. A transaction saves at most one Change, and every new
+//!   record names the Change saved in the same transaction. A part's
+//!   current details or revision move only to what that Change saved:
+//!   new details, a new revision, or an archive entry.
 //! - Step 3 lists the Changes after step 2 ends, so it includes every
 //!   Change whose work step 2 saw. If one were missing,
 //!   [`CatalogReplica::apply`] would refuse the gap, and the sign-in would

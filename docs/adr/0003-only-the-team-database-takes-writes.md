@@ -5,6 +5,7 @@ Each database has one job. The team server's PocketBase database is the only one
 ## Consequences
 
 - The desktop copy is in `crates/catalog/src/replica.rs`. It ignores a Change it has already applied, so nothing is missed or applied twice. At sign-in it reads every part's current state, then applies the Changes saved meanwhile, so sign-in does not slow down as the history grows.
+- Every desktop must hear of every change. So the server's write guards refuse a save that would move a part without its own new Change. A transaction saves at most one Change, every new record names it, and a part moves only to what it saved.
 - The desktop writes the KiCad database library with `crates/kicad-libraries`, from one thread, holding a lock file so no second writer runs. It changes the SQLite database in place, in one transaction, so each table KiCad reads is whole. KiCad's background refresh reads one table at a time, so during one refresh a moving row can show in two groups or in none; its links still resolve, because KiCad then looks in every table.
 
-Mulch records: mx-95dadd, mx-0350e0.
+Mulch records: mx-95dadd, mx-0350e0, mx-ab5e0a.
