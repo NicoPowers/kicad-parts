@@ -1,7 +1,8 @@
 // A team part's 3D view (kicad-parts-c9c1) draws the 3D model the Catalog
 // stores for the exact footprint revision, after the same checks previews
 // use. The app browses a copy of the catalog without that model file, so
-// only the Catalog's stored copy can supply it.
+// only the Catalog's stored copy can supply it. The view stays steady with
+// this model too (kicad-parts-4588).
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -22,6 +23,7 @@ import {
   waitForPreview,
   waitForText,
 } from '../harness.mjs';
+import { checkSteady3d } from '../view3d-steady.mjs';
 
 const MPN = 'SN74LVC1G07DBVR';
 const BADGE = '.team-settings > summary';
@@ -119,6 +121,8 @@ describe("team part 3D view: the Catalog's stored 3D model", () => {
     );
     // For people to look at: the model over its silkscreen; not compared.
     await capture(browser, path.join(screenshotsDir, '21-team-footprint-3d-drawn.png'), ['.model-path-text']);
+    // The SOT-23-5 turns around its centre, and the view can't be lost.
+    await checkSteady3d(browser, `${CLOSE_UP} .viewer-3d`, async () => (await browser.$(`${CLOSE_UP} .viewer-3d-reset`)).click());
     await browser.keys('Escape');
     await browser.waitUntil(async () => !(await isOpen(browser, CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
   });

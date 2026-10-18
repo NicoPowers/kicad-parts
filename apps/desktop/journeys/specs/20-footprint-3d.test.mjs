@@ -3,6 +3,8 @@
 // three.js from kicad-cli's GLB export. A left drag turns it, the wheel
 // zooms and a middle or right drag pans; the keyboard does the same. A
 // panel says which 3D model file each link uses, or why it is not shown.
+// The model always turns around its centre, and the view can't be lost
+// (kicad-parts-4588; see view3d-steady.mjs).
 //
 // WebGL works here: under --disable-gpu, WebView2 draws WebGL with
 // Microsoft's software renderer. That renderer can differ between
@@ -28,6 +30,7 @@ import {
   waitForPreview,
   waitForText,
 } from '../harness.mjs';
+import { checkSteady3d, drag, near } from '../view3d-steady.mjs';
 
 const CLOSE_UP = `${FOOTPRINT} dialog.zoom-dialog`;
 const LIBRARIES = 'dialog.libraries-dialog';
@@ -131,26 +134,11 @@ async function screenshotHiding3d(browser, name) {
   });
 }
 
-async function drag(browser, from, to, button) {
-  await browser
-    .action('pointer', { parameters: { pointerType: 'mouse' } })
-    .move({ x: from.x, y: from.y })
-    .down({ button })
-    .move({ x: Math.round((from.x + to.x) / 2), y: Math.round((from.y + to.y) / 2), duration: 50 })
-    .move({ x: to.x, y: to.y, duration: 50 })
-    .up({ button })
-    .perform();
-}
-
 async function centreOf(browser, selector) {
   return browser.execute((s) => {
     const rect = document.querySelector(s).getBoundingClientRect();
     return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
   }, selector);
-}
-
-function near(a, b, tolerance, message) {
-  assert.ok(Math.abs(a - b) <= tolerance, `${message}: ${a} is not ${b}`);
 }
 
 /** Opens a footprint of the Journey3d library in its close-up. */
@@ -325,14 +313,14 @@ describe('footprint 3D view', () => {
     near(now.elevation, start.elevation + 10, 0.01, 'a 20 pixel drag tilts it 10 degrees');
     await browser.action('wheel').scroll({ x: centre.x + 50, y: centre.y, deltaX: 0, deltaY: -300, duration: 0 }).perform();
     const zoomed = await info(browser, CLOSE_UP);
-    assert.ok(zoomed.distance < now.distance * 0.7, `the wheel zoomed in: ${now.distance} to ${zoomed.distance}`);
-    assert.notDeepEqual(zoomed.target, now.target, 'it zoomed at the pointer, not the centre');
+    assert.ok(zoomed.zoom > now.zoom * 1.4, `the wheel zoomed in: ${now.zoom} to ${zoomed.zoom}`);
+    assert.notDeepEqual(zoomed.shift, now.shift, 'it zoomed at the pointer, not the middle');
     await drag(browser, centre, { x: centre.x - 40, y: centre.y }, 2);
     const panned = await info(browser, CLOSE_UP);
-    assert.notDeepEqual(panned.target, zoomed.target, 'a right drag pans');
+    assert.notDeepEqual(panned.shift, zoomed.shift, 'a right drag pans');
     near(panned.azimuth, zoomed.azimuth, 0.001, 'a right drag does not turn');
     await drag(browser, centre, { x: centre.x, y: centre.y + 40 }, 1);
-    assert.notDeepEqual((await info(browser, CLOSE_UP)).target, panned.target, 'a middle drag pans');
+    assert.notDeepEqual((await info(browser, CLOSE_UP)).shift, panned.shift, 'a middle drag pans');
     assert.equal(await isOpen(browser, CLOSE_UP), true, 'a drag does not close the close-up');
 
     // The keyboard, with the view focused.
@@ -344,16 +332,20 @@ describe('footprint 3D view', () => {
     await browser.keys('ArrowUp');
     near((await info(browser, CLOSE_UP)).elevation, start.elevation + 10, 0.01, 'the up arrow tilts it');
     await browser.keys('+');
-    near((await info(browser, CLOSE_UP)).distance, start.distance / 1.5, start.distance * 1e-6, 'plus zooms in');
+    near((await info(browser, CLOSE_UP)).zoom, start.zoom * 1.5, 1e-9, 'plus zooms in');
     await browser.keys('-');
-    near((await info(browser, CLOSE_UP)).distance, start.distance, start.distance * 1e-6, 'minus zooms out');
+    near((await info(browser, CLOSE_UP)).zoom, start.zoom, 1e-9, 'minus zooms out');
     const before = await info(browser, CLOSE_UP);
     await browser.keys(['Shift', 'ArrowLeft', 'Shift']);
     const shifted = await info(browser, CLOSE_UP);
-    assert.notDeepEqual(shifted.target, before.target, 'Shift and an arrow pan');
+    assert.notDeepEqual(shifted.shift, before.shift, 'Shift and an arrow pan');
     near(shifted.azimuth, before.azimuth, 0.001, 'Shift and an arrow do not turn');
     await browser.keys('0');
     assert.deepEqual(await info(browser, CLOSE_UP), start);
+  });
+
+  it('turns the whole part around its centre after zooming into a corner, and never loses it', async () => {
+    await checkSteady3d(browser, `${CLOSE_UP} .viewer-3d`, async () => (await browser.$(`${CLOSE_UP} .viewer-3d-reset`)).click());
   });
 
   it('turns 3D off, frees the view, and makes it again from the cache', async () => {
