@@ -5,7 +5,7 @@ The person designs for many clients in one day, and each client is its own team 
 - **Several teams at once.** Each team in the person's list has its own team catalog, session, live-updates follower and catch-up (`crates/catalog-browser/src/teams/`). The catalog view shows one team at a time, chosen with a team switcher, with no sign-in. A team whose server cannot be reached shows its last-known parts, marked offline; the other teams are unaffected.
 - **What is kept, and where.** The app keeps each team's renewable sign-in, its PocketBase token, never the password. It keeps the token in the operating system's credential store through the `keyring` crate: Windows Credential Manager, the macOS Keychain, or the Secret Service on Linux (GNOME Keyring or KWallet). A token or password is never written to a file. The list file (`team.json`) holds each server address, email and team code.
 - **Renewal.** At start, each team's keeper renews the kept token with PocketBase's auth-refresh, and keeps trying while the server cannot be reached. While in use, it renews the token when half its life has passed, and at least every 12 hours. A token the server rejects, for example after the password changed, is forgotten, and only that team asks for the password again.
-- **Signing out and removing.** Sign out forgets that team's kept sign-in and keeps the team in the list. Remove also takes it off the list.
+- **Signing out and removing.** Sign out forgets that team's kept sign-in and keeps the team in the list. Remove, after asking once, also takes it off the list.
 - **No credential store.** If none works, such as on Linux with no Secret Service, sign-ins last until the app closes, and the Teams menu says so once, with the reason.
 
 ## Considered options
@@ -22,5 +22,9 @@ The person designs for many clients in one day, and each client is its own team 
 - The list of teams is one seam for what comes next: `Teams::shown` serves the one-team catalog view, and `Teams::signed_in` serves work across every team, such as one search over all teams (kicad-parts-8a71).
 - Each team's KiCad libraries are kept up to date at once, one updater per team, and each writes only its own folder (ADR 0015).
 - After a restart with a server that cannot be reached, that team has no parts to show until it is reached: the app does not yet keep a team's parts on disk.
+- PocketBase tokens last 7 days by default. Renewal happens only while the app is open, so a person who does not open the app for 7 days signs in again to each team. While the app is open, renewal keeps every team signed in.
+- On macOS, the Keychain ties each saved sign-in to the app's code signature. Until the app is signed, the Keychain may ask once per team, after each update, whether the app may read it.
+- Sign out marks the team signed out in the list file. So if the password store cannot forget the sign-in, for example a locked Linux keyring, the next start still does not use it, and the team's row says so.
+- One server has one address: the host loses its capitals and the scheme's usual port, so `https://Parts.example.com:443` and `https://parts.example.com` are one team.
 
 Mulch records: mx-ba6203 (replaces the "session in memory only" part of mx-b959cf), mx-c5104a.
