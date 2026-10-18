@@ -195,7 +195,7 @@ describe('team catalog: history, edits and conflicts', () => {
       browser,
       '.team-sign-in [role="alert"]',
       'Addresses starting with http:// send your password unencrypted, so they only work for a server on this ' +
-        'computer. Use https://team.example.com instead.',
+        'computer. Use an https:// address, such as https://team.example.com.',
     );
     assert.equal(await (await browser.$('aria/Password')).getValue(), '', 'the password is cleared');
     await assertAccessible(browser, '99-team-sign-in-plain-http');

@@ -10,18 +10,25 @@
 //! - An address without `http://` or `https://` gets `https://`, or
 //!   `http://` for a server on this computer, which is what local test
 //!   servers speak.
+//!
+//! An address may end in a path, such as `https://parts.example.com/acme`,
+//! so several team servers can share one proxy. A pasted link to a page on
+//! the server (`/_/` for the admin page, or `/api/...`) is refused: it is
+//! a mistake, not an address.
 
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-/// A team server's address, checked: a scheme, a host and maybe a port,
-/// with nothing after them.
+/// A team server's address, checked: a scheme, a host, maybe a port and
+/// maybe a path, with no query or fragment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerAddress {
     secure: bool,
     /// As typed, IPv6 addresses in brackets.
     host: String,
     port: Option<u16>,
+    /// Empty, or `/` and segments, such as `/acme`. Never ends in `/`.
+    path: String,
 }
 
 /// Why a typed address was refused, in words for the sign-in form.
@@ -31,11 +38,18 @@ pub enum AddressRefusal {
     NotAnAddress,
     /// A scheme other than `http://` or `https://`, such as `ftp://`.
     UnknownScheme,
-    /// A path, query or fragment after the host, such as a dashboard link.
-    HasPath,
-    /// `http://` for a server on another computer; `host` is as typed.
+    /// A `?` query or `#` fragment after the address.
+    HasQuery,
+    /// A link to a page on the server: the admin page (`/_/`) or the API
+    /// (`/api/...`).
+    PageLink,
+    /// A path with characters other than letters, digits and `-._~`, or
+    /// with an empty, `.` or `..` segment.
+    BadPath,
+    /// `http://` for a server on another computer. `suggestion` is the
+    /// same address with `https://` and no port.
     PlainHttpToAnotherComputer {
-        host: String,
+        suggestion: String,
     },
 }
 
@@ -54,13 +68,21 @@ impl fmt::Display for AddressRefusal {
                 formatter,
                 "The address must start with https://, such as https://team.example.com."
             ),
-            Self::HasPath => write!(
+            Self::HasQuery => write!(
                 formatter,
-                "Enter only the server's name and port, with nothing after them, such as https://team.example.com."
+                "Enter the address without ? or # and what follows them, such as https://team.example.com."
             ),
-            Self::PlainHttpToAnotherComputer { host } => write!(
+            Self::PageLink => write!(
                 formatter,
-                "Addresses starting with http:// send your password unencrypted, so they only work for a server on this computer. Use https://{host} instead."
+                "This is a link to a page on the team server, not its address. Leave out /_/ or /api and everything after it."
+            ),
+            Self::BadPath => write!(
+                formatter,
+                "After the server name, the address may hold only letters, digits, -, ., _ and ~, such as https://parts.example.com/acme."
+            ),
+            Self::PlainHttpToAnotherComputer { suggestion } => write!(
+                formatter,
+                "Addresses starting with http:// send your password unencrypted, so they only work for a server on this computer. Use an https:// address, such as {suggestion}."
             ),
         }
     }
@@ -80,21 +102,26 @@ impl ServerAddress {
             Some((scheme, rest)) => (Some(scheme.to_ascii_lowercase()), rest),
             None => (None, text),
         };
-        let (host, port) = host_and_port(rest)?;
-        let on_this_computer = is_loopback(&host);
+        let (host, port, path) = host_port_and_path(rest)?;
         let secure = match scheme.as_deref() {
             Some("https") => true,
-            Some("http") if on_this_computer => false,
-            Some("http") => return Err(AddressRefusal::PlainHttpToAnotherComputer { host }),
+            Some("http") => false,
             Some(_) => return Err(AddressRefusal::UnknownScheme),
-            None => !on_this_computer,
+            None => !is_loopback(&host),
         };
-        Ok(Self { secure, host, port })
+        let address = Self {
+            secure,
+            host,
+            port,
+            path,
+        };
+        address.may_receive_password()?;
+        Ok(address)
     }
 
     /// A base URL the app already holds, such as `http://127.0.0.1:8090`.
-    /// It must name its scheme, and only the sign-in rules decide which
-    /// hosts may use plain HTTP.
+    /// It must name its scheme. Plain HTTP to another computer parses, but
+    /// [`ServerAddress::may_receive_password`] refuses it.
     pub(crate) fn from_url(url: &str) -> Result<Self, AddressRefusal> {
         let url = url.trim_end_matches('/');
         let (scheme, rest) = url.split_once("://").ok_or(AddressRefusal::UnknownScheme)?;
@@ -103,14 +130,32 @@ impl ServerAddress {
             "http" => false,
             _ => return Err(AddressRefusal::UnknownScheme),
         };
-        let (host, port) = host_and_port(rest)?;
-        Ok(Self { secure, host, port })
+        let (host, port, path) = host_port_and_path(rest)?;
+        Ok(Self {
+            secure,
+            host,
+            port,
+            path,
+        })
     }
 
-    /// The address as a base URL, such as `https://team.example.com`.
+    /// Ok if a password may go to this address: it uses `https://`, or the
+    /// server is on this computer. Sign-in and
+    /// [`crate::PocketBaseClient::authenticate`] both check it.
+    pub(crate) fn may_receive_password(&self) -> Result<(), AddressRefusal> {
+        if self.secure || is_loopback(&self.host) {
+            return Ok(());
+        }
+        Err(AddressRefusal::PlainHttpToAnotherComputer {
+            suggestion: format!("https://{}{}", self.host, self.path),
+        })
+    }
+
+    /// The address as a base URL, such as `https://team.example.com` or
+    /// `https://parts.example.com/acme`.
     pub fn url(&self) -> String {
         let scheme = if self.secure { "https" } else { "http" };
-        format!("{scheme}://{}", self.authority())
+        format!("{scheme}://{}{}", self.authority(), self.path)
     }
 
     /// Whether the connection uses TLS (`https://`).
@@ -135,14 +180,56 @@ impl ServerAddress {
             None => self.host.clone(),
         }
     }
+
+    /// Empty, or the path the server is under, such as `/acme`. Requests
+    /// go to this path followed by `/api/...`.
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
 }
 
-/// Splits `host[:port]`, refusing anything after it, user names (`a@b`)
-/// and characters no server name has.
-fn host_and_port(authority: &str) -> Result<(String, Option<u16>), AddressRefusal> {
-    if authority.contains(['/', '?', '#']) {
-        return Err(AddressRefusal::HasPath);
+/// Splits `host[:port][/path]`, refusing queries, fragments, user names
+/// (`a@b`), links to pages on the server and characters no address has.
+fn host_port_and_path(rest: &str) -> Result<(String, Option<u16>, String), AddressRefusal> {
+    if rest.contains(['?', '#']) {
+        return Err(AddressRefusal::HasQuery);
     }
+    let (authority, path) = match rest.find('/') {
+        Some(slash) => rest.split_at(slash),
+        None => (rest, ""),
+    };
+    let (host, port) = host_and_port(authority)?;
+    check_path(path)?;
+    Ok((host, port, path.to_owned()))
+}
+
+/// Checks a path such as `/acme` or `/clients/acme`. Each segment holds
+/// only unreserved characters (RFC 3986), so it never needs encoding.
+fn check_path(path: &str) -> Result<(), AddressRefusal> {
+    let Some(segments) = path.strip_prefix('/') else {
+        return Ok(()); // No path.
+    };
+    let segments: Vec<&str> = segments.split('/').collect();
+    if segments
+        .iter()
+        .any(|segment| matches!(*segment, "_" | "api"))
+    {
+        return Err(AddressRefusal::PageLink);
+    }
+    let unreserved = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~');
+    let good = |segment: &&str| {
+        !segment.is_empty() && !matches!(*segment, "." | "..") && segment.chars().all(unreserved)
+    };
+    if segments.iter().all(good) {
+        Ok(())
+    } else {
+        Err(AddressRefusal::BadPath)
+    }
+}
+
+/// Splits `host[:port]`, refusing user names (`a@b`) and characters no
+/// server name has.
+fn host_and_port(authority: &str) -> Result<(String, Option<u16>), AddressRefusal> {
     let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
         // [IPv6]:port
         let (inside, after) = bracketed
@@ -181,6 +268,8 @@ fn host_and_port(authority: &str) -> Result<(String, Option<u16>), AddressRefusa
 }
 
 /// Whether `host` is this computer: `localhost`, `127.x.x.x` or `[::1]`.
+/// An IPv4-mapped address such as `[::ffff:127.0.0.1]` does not count:
+/// nobody types one for a local server, so it gets the stricter rule.
 fn is_loopback(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
@@ -215,6 +304,32 @@ mod tests {
     }
 
     #[test]
+    fn an_address_may_end_in_a_path_for_servers_behind_one_proxy() {
+        for (typed, url) in [
+            (
+                "https://parts.example.com/acme",
+                "https://parts.example.com/acme",
+            ),
+            (
+                "https://parts.example.com/acme/",
+                "https://parts.example.com/acme",
+            ),
+            (
+                "https://parts.example.com:8443/clients/acme-2_x.y~z",
+                "https://parts.example.com:8443/clients/acme-2_x.y~z",
+            ),
+            ("parts.example.com/acme", "https://parts.example.com/acme"),
+            ("http://127.0.0.1:8090/acme", "http://127.0.0.1:8090/acme"),
+        ] {
+            assert_eq!(sign_in_url(typed).as_deref(), Ok(url), "{typed}");
+        }
+        let address = ServerAddress::for_sign_in("https://parts.example.com/acme/").unwrap();
+        assert_eq!(address.path(), "/acme");
+        let bare = ServerAddress::for_sign_in("https://team.example.com").unwrap();
+        assert_eq!(bare.path(), "");
+    }
+
+    #[test]
     fn plain_http_works_only_on_this_computer() {
         for typed in [
             "http://127.0.0.1:8090",
@@ -226,15 +341,18 @@ mod tests {
             assert_eq!(sign_in_url(typed).as_deref(), Ok(typed), "{typed}");
         }
         assert_eq!(
-            sign_in_url("http://team.example.com:8090"),
+            sign_in_url("http://team.example.com:8090/acme"),
             Err(AddressRefusal::PlainHttpToAnotherComputer {
-                host: "team.example.com".into()
+                suggestion: "https://team.example.com/acme".into()
             })
         );
         for refused in [
             "http://192.168.1.20:8090",
             "http://127.0.0.1.example.com",
+            "http://127.0.0.1.evil.com",
+            "http://localhost.evil.com",
             "http://[2001:db8::1]",
+            "http://[::ffff:127.0.0.1]:8090",
         ] {
             assert!(
                 matches!(
@@ -247,28 +365,26 @@ mod tests {
     }
 
     #[test]
-    fn the_refusal_suggests_the_https_address() {
+    fn the_refusal_suggests_an_https_address() {
         let refusal = sign_in_url("http://team.example.com:8090").unwrap_err();
         assert_eq!(
             refusal.to_string(),
-            "Addresses starting with http:// send your password unencrypted, so they only work for a server on this computer. Use https://team.example.com instead."
+            "Addresses starting with http:// send your password unencrypted, so they only work for a server on this computer. Use an https:// address, such as https://team.example.com."
         );
     }
 
     #[test]
     fn without_a_scheme_https_is_assumed_except_on_this_computer() {
-        assert_eq!(
-            sign_in_url("team.example.com").as_deref(),
-            Ok("https://team.example.com")
-        );
-        assert_eq!(
-            sign_in_url("127.0.0.1:8090").as_deref(),
-            Ok("http://127.0.0.1:8090")
-        );
-        assert_eq!(
-            sign_in_url("localhost:8090").as_deref(),
-            Ok("http://localhost:8090")
-        );
+        for (typed, url) in [
+            ("team.example.com", "https://team.example.com"),
+            ("127.0.0.1:8090", "http://127.0.0.1:8090"),
+            ("localhost:8090", "http://localhost:8090"),
+            ("localhost.evil.com", "https://localhost.evil.com"),
+            ("127.0.0.1.evil.com", "https://127.0.0.1.evil.com"),
+            ("[::ffff:127.0.0.1]:8090", "https://[::ffff:127.0.0.1]:8090"),
+        ] {
+            assert_eq!(sign_in_url(typed).as_deref(), Ok(url), "{typed}");
+        }
     }
 
     #[test]
@@ -277,9 +393,25 @@ mod tests {
             ("", AddressRefusal::Empty),
             ("  / ", AddressRefusal::Empty),
             ("ftp://team.example.com", AddressRefusal::UnknownScheme),
-            ("https://team.example.com/_/", AddressRefusal::HasPath),
-            ("http://127.0.0.1:8090/api", AddressRefusal::HasPath),
-            ("https://team.example.com?x=1", AddressRefusal::HasPath),
+            ("https://team.example.com/_/", AddressRefusal::PageLink),
+            ("https://parts.example.com/acme/_", AddressRefusal::PageLink),
+            ("http://127.0.0.1:8090/api", AddressRefusal::PageLink),
+            (
+                "https://team.example.com/api/health",
+                AddressRefusal::PageLink,
+            ),
+            ("https://team.example.com?x=1", AddressRefusal::HasQuery),
+            (
+                "https://team.example.com/acme#top",
+                AddressRefusal::HasQuery,
+            ),
+            ("https://parts.example.com//acme", AddressRefusal::BadPath),
+            ("https://parts.example.com/a%20b", AddressRefusal::BadPath),
+            (
+                "https://parts.example.com/acme corp",
+                AddressRefusal::BadPath,
+            ),
+            ("https://parts.example.com/../x", AddressRefusal::BadPath),
             ("https://", AddressRefusal::NotAnAddress),
             ("https://me@team.example.com", AddressRefusal::NotAnAddress),
             (
@@ -307,6 +439,11 @@ mod tests {
         let local = ServerAddress::from_url("http://[::1]:8090").unwrap();
         assert!(!local.is_secure());
         assert_eq!((local.host(), local.port()), ("[::1]", 8090));
+        let behind_proxy = ServerAddress::from_url("https://parts.example.com/acme").unwrap();
+        assert_eq!(behind_proxy.path(), "/acme");
         assert!(ServerAddress::from_url("team.example.com").is_err());
+        // It parses, but no password may go there.
+        let plain = ServerAddress::from_url("http://team.example.com").unwrap();
+        assert!(plain.may_receive_password().is_err());
     }
 }

@@ -10,7 +10,8 @@
 mod support;
 
 use collaboration::{
-    CollabError, ConnectionProblem, EditRecord, PocketBaseClient, RealtimeConnection, ServerTrust,
+    CollabError, ConnectionProblem, EditRecord, PocketBaseClient, RealtimeConnection,
+    ServerAddress, ServerTrust,
 };
 use native_services::Superuser;
 use rcgen::{
@@ -87,6 +88,13 @@ struct TlsFront {
 
 impl TlsFront {
     fn start(certificate: ServerCertificate, upstream: &str) -> Self {
+        Self::start_under(certificate, upstream, "")
+    }
+
+    /// Like `start`, but serves PocketBase under `prefix`, such as
+    /// `/acme`, as a proxy for several team servers on one name would:
+    /// `/acme/api/...` goes to `/api/...`, and `/api/...` goes nowhere.
+    fn start_under(certificate: ServerCertificate, upstream: &str, prefix: &str) -> Self {
         let config =
             ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
                 .with_safe_default_protocol_versions()
@@ -100,15 +108,20 @@ impl TlsFront {
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let upstream = upstream.to_owned();
+        let prefix = prefix.to_owned();
         let stopping = stop.clone();
         std::thread::spawn(move || {
             while !stopping.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((client, _)) => {
-                        let (config, upstream, stopping) =
-                            (config.clone(), upstream.clone(), stopping.clone());
+                        let (config, upstream, prefix, stopping) = (
+                            config.clone(),
+                            upstream.clone(),
+                            prefix.clone(),
+                            stopping.clone(),
+                        );
                         std::thread::spawn(move || {
-                            let _ = forward(client, config, &upstream, &stopping);
+                            let _ = forward(client, config, &upstream, &prefix, &stopping);
                         });
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(10)),
@@ -132,12 +145,14 @@ impl Drop for TlsFront {
 }
 
 /// Copies bytes both ways between a TLS client and `upstream` until either
-/// side closes. One thread polls both with short timeouts, because a
-/// rustls stream can't be split between two threads.
+/// side closes, taking `prefix` out of request lines. One thread polls
+/// both with short timeouts, because a rustls stream can't be split
+/// between two threads.
 fn forward(
     client: TcpStream,
     config: Arc<ServerConfig>,
     upstream: &str,
+    prefix: &str,
     stop: &AtomicBool,
 ) -> io::Result<()> {
     client.set_nonblocking(false)?;
@@ -155,7 +170,7 @@ fn forward(
     while !stop.load(Ordering::SeqCst) {
         match tls.read(&mut buffer) {
             Ok(0) => break,
-            Ok(count) => server.write_all(&buffer[..count])?,
+            Ok(count) => server.write_all(&without_prefix(&buffer[..count], prefix))?,
             Err(error) if is_timeout(&error) => {}
             Err(error) => return Err(error),
         }
@@ -172,6 +187,30 @@ fn forward(
     let _ = server.shutdown(Shutdown::Both);
     let _ = tls.sock.shutdown(Shutdown::Both);
     Ok(())
+}
+
+/// `request` with `GET {prefix}/api/` made `GET /api/`, and a request for
+/// `/api/` without the prefix sent to a path PocketBase doesn't have. The
+/// clients write each request head in one piece, so a request line never
+/// spans two reads here.
+fn without_prefix(request: &[u8], prefix: &str) -> Vec<u8> {
+    if prefix.is_empty() {
+        return request.to_vec();
+    }
+    let unprefixed = replace(request, b" /api/", b" /not-under-the-prefix/api/");
+    replace(&unprefixed, format!(" {prefix}/api/").as_bytes(), b" /api/")
+}
+
+fn replace(haystack: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(haystack.len());
+    let mut rest = haystack;
+    while let Some(at) = rest.windows(from.len()).position(|window| window == from) {
+        out.extend_from_slice(&rest[..at]);
+        out.extend_from_slice(to);
+        rest = &rest[at + from.len()..];
+    }
+    out.extend_from_slice(rest);
+    out
 }
 
 fn is_timeout(error: &io::Error) -> bool {
@@ -266,6 +305,44 @@ fn a_trusted_certificate_works_for_rest_and_realtime() {
             .to_string()
             .starts_with("Could not make a secure connection")
     );
+}
+
+#[test]
+fn a_server_under_a_path_works_for_rest_and_realtime() {
+    let temporary = tempfile::tempdir().unwrap();
+    let migrations: Vec<String> = all_migrations();
+    let migrations: Vec<&str> = migrations.iter().map(String::as_str).collect();
+    let options = support::options(temporary.path(), &migrations);
+    let (server, admin) = support::start(&options, &Superuser::generate());
+    let member = create_member(&admin, "carol");
+
+    let authority = TestAuthority::new("kicad-parts test authority");
+    let upstream = server.url().trim_start_matches("http://");
+    let front = TlsFront::start_under(
+        authority.certificate("localhost", 2020, 2100),
+        upstream,
+        "/acme",
+    );
+    // The address as typed at sign-in, with its path.
+    let address = ServerAddress::for_sign_in(&format!("{}/acme/", front.url())).unwrap();
+    let carol = PocketBaseClient::with_trust(&address.url(), authority.trust())
+        .authenticate("users", &member.email, &member.password)
+        .unwrap();
+    let mut stream = RealtimeConnection::connect(&carol, WAIT).unwrap();
+    stream.subscribe(&carol, &["collab_changes"]).unwrap();
+    let reply = carol
+        .execute(&EditRecord::new("cap-1", 0, "Capacitor", "100n 0402"))
+        .unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let event = stream.next_on("collab_changes", WAIT).unwrap().unwrap();
+    assert_eq!(event.data["record"]["record_key"], "cap-1");
+
+    // Without the path, the front has no team server: the path matters.
+    let missing = PocketBaseClient::with_trust(&front.url(), authority.trust())
+        .get("/api/health")
+        .unwrap()
+        .status;
+    assert_eq!(missing, 404);
 }
 
 #[test]

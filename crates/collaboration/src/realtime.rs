@@ -47,7 +47,7 @@ pub struct RealtimeConnection {
 }
 
 impl RealtimeConnection {
-    /// Opens `GET /api/realtime` on `client`'s server and waits for
+    /// Opens `GET {path}/api/realtime` on `client`'s server and waits for
     /// PocketBase's `PB_CONNECT` event, which carries this connection's
     /// client ID. An `https://` server's certificate is checked the way
     /// `client` checks it.
@@ -75,7 +75,8 @@ impl RealtimeConnection {
         };
         write!(
             stream,
-            "GET /api/realtime HTTP/1.1\r\nHost: {}\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n\r\n",
+            "GET {}/api/realtime HTTP/1.1\r\nHost: {}\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n\r\n",
+            address.path(),
             address.authority()
         )
         .and_then(|()| stream.flush())
