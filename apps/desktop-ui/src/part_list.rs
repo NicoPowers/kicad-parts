@@ -205,6 +205,11 @@ enum SectionEnd {
 /// among `hits` whenever it is in this section, so it is always shown.
 /// While `reloading`, the loaded parts are from before a team catalog
 /// change and may not match the new count, so nothing ends them.
+///
+/// Each IPN shows once, as the first row with it. The CSV catalog can
+/// repeat an IPN (the team import flags it as duplicate-ipn and keeps the
+/// first row). Rows are keyed by IPN, and two rows with one key would
+/// break the list.
 fn section_rows(
     searching: bool,
     loaded: Option<&Load<Vec<PartSummary>>>,
@@ -221,11 +226,9 @@ fn section_rows(
         None => (Vec::new(), Some(SectionEnd::Loading)),
     };
     let loaded_all = matches!(loaded, Some(Load::Ready(_)));
-    for hit in hits {
-        if !rows.iter().any(|row| row.ipn == hit.ipn) {
-            rows.push(hit.clone());
-        }
-    }
+    rows.extend(hits.iter().cloned());
+    let mut seen = BTreeSet::new();
+    rows.retain(|row| seen.insert(row.ipn.clone()));
     let end = end.unwrap_or(if total <= rows.len() {
         SectionEnd::Nothing
     } else if loaded_all {
@@ -1195,6 +1198,26 @@ mod tests {
             (ipns(&rows), end),
             (vec!["RES-1", "RES-2"], SectionEnd::Nothing)
         );
+    }
+
+    #[test]
+    fn a_repeated_ipn_shows_once_as_its_first_row() {
+        let first = PartSummary {
+            description: "First row".to_owned(),
+            ..hit("RES-1")
+        };
+        let repeat = PartSummary {
+            description: "Repeated row".to_owned(),
+            ..hit("RES-1")
+        };
+        let loaded = Load::Ready(vec![first.clone(), hit("RES-2"), repeat.clone()]);
+        let (rows, _) = section_rows(false, Some(&loaded), false, &[repeat.clone()], 3);
+        assert_eq!(ipns(&rows), vec!["RES-1", "RES-2"]);
+        assert_eq!(rows[0].description, "First row");
+        // The same while searching, from the search's own matches.
+        let (rows, _) = section_rows(true, None, false, &[first, repeat], 2);
+        assert_eq!(ipns(&rows), vec!["RES-1"]);
+        assert_eq!(rows[0].description, "First row");
     }
 
     #[test]
