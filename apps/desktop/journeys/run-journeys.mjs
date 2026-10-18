@@ -11,10 +11,10 @@
 //                                   # approved screenshot, if every journey
 //                                   # passes; look at them before committing
 //
-// On Windows the tests run with Node.js 24.22.0 or newer: older ones
-// sometimes crash a test process at launch (journey-node.mjs). If the
-// Node.js running this script is older, the runner downloads 24.22.0 once
-// into target/journey-tools/node.
+// On Windows the runner first re-runs itself, with the same arguments,
+// under the Node.js pinned in infra/versions.lock (journey-node.mjs). It
+// downloads it once into target/journey-tools/node. Node.js before 24.16.0
+// crashes now and then on a TCP connect (libuv #5106).
 //
 // By default tauri-driver, msedgedriver, the app and WebView2 run on a
 // hidden, run-scoped Win32 desktop (tooling/journey-desktop), so no window
@@ -47,7 +47,12 @@ import {
   visualProblem,
   visualResultsFile,
 } from './harness.mjs';
-import { NODE_CRASH_EXIT_CODE, journeyNode, specsKilledByNodeCrash } from './journey-node.mjs';
+import { NODE_CRASH_EXIT_CODE, currentNode, runUnderPinnedNode, specsKilledByNodeCrash } from './journey-node.mjs';
+
+// First, before any TCP connection: a connection made under an affected
+// Node.js can crash this runner too.
+await runUnderPinnedNode(repoRoot, fileURLToPath(import.meta.url));
+const testNode = currentNode();
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skipBuild = process.argv.includes('--skip-build');
@@ -151,13 +156,7 @@ const driverCache = path.join(repoRoot, 'target', 'journey-tools', 'msedgedriver
 fs.mkdirSync(driverCache, { recursive: true });
 const nativeDriver = await download(version, driverCache);
 console.log(`WebView2 ${version}; msedgedriver ${nativeDriver}`);
-// Some Node.js versions crash a test process now and then on Windows, so
-// the tests may run with another Node.js than this script (journey-node.mjs).
-const testNode = await journeyNode(path.join(repoRoot, 'target', 'journey-tools')).catch((error) => {
-  console.error(`could not get a Node.js to run the journeys with: ${error.message}`);
-  process.exit(1);
-});
-console.log(`tests run with ${testNode.why}`);
+console.log(`Node.js ${testNode.version} (${testNode.path})`);
 
 const driverArgs = ['--port', String(driverPort), '--native-driver', nativeDriver];
 console.log(`mode: ${visible ? 'visible desktop' : 'hidden desktop (journey-desktop)'}`);
@@ -186,7 +185,7 @@ try {
     .sort()
     .map((name) => path.join(here, 'specs', name));
   const result = spawnSync(
-    testNode.node,
+    testNode.path,
     [
       '--test',
       '--test-concurrency=1',
@@ -208,7 +207,7 @@ try {
   console.log(`journeys took ${seconds} s on the ${visible ? 'visible' : 'hidden'} desktop`);
   fs.appendFileSync(
     path.join(outDir, 'evidence.jsonl'),
-    `${JSON.stringify({ event: 'run', mode: visible ? 'visible' : 'hidden', seconds: Number(seconds), node: testNode.node })}\n`,
+    `${JSON.stringify({ event: 'run', mode: visible ? 'visible' : 'hidden', seconds: Number(seconds), node: testNode })}\n`,
   );
 } finally {
   tauriDriver.kill();
@@ -241,15 +240,15 @@ function explainNodeCrashes(junitFile, testNode) {
   const code = `0x${NODE_CRASH_EXIT_CODE.toString(16).toUpperCase()}`;
   for (const spec of crashed) {
     console.error(
-      `\n${spec}: its Node.js test process crashed with exit code ${code} and reported nothing. ` +
-        `The journey did not fail a check. The tests ran with ${testNode.why}. ` +
+      `\n${spec}: its Node.js ${testNode.version} test process crashed (exit code ${code}, a Windows ` +
+        'fast-fail); anything it printed is above. No journey check failed. ' +
         'Rerun it with JOURNEYS_ONLY. If it happens again, see mulch mx-625975.',
     );
   }
   if (crashed.length > 0) {
     fs.appendFileSync(
       path.join(outDir, 'evidence.jsonl'),
-      `${JSON.stringify({ event: 'node-crash', specs: crashed, node: testNode.node })}\n`,
+      `${JSON.stringify({ event: 'node-crash', specs: crashed, node: testNode })}\n`,
     );
   }
 }
