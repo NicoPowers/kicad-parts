@@ -259,6 +259,7 @@ fn team_row(
                 {address.map(|address| view! { <span class="team-server">{address}</span> })}
             </p>
             <p class="team-state">{state_words(&team)}</p>
+            {team.note.clone().map(|note| view! { <p class="team-state hint">{note}</p> })}
             <div class="team-actions">
                 {needs_password.then(|| view! {
                     <button type="button" on:click=move |_| sign_in_again(again.clone())>
@@ -508,6 +509,7 @@ mod tests {
             email: "ada@example.test".into(),
             code: code.into(),
             session,
+            note: None,
         }
     }
 

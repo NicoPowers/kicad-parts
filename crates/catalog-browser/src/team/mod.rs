@@ -61,6 +61,21 @@ use session::{Session, sign_in};
 pub const SIGN_IN_AGAIN: &str =
     "The team server no longer accepts your sign-in. Enter your password to sign in again.";
 
+/// How renewing a session's sign-in went.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Renewed {
+    /// The session sends this new token from now on.
+    Token(String),
+    /// The team server no longer accepts the session's sign-in.
+    Rejected,
+    /// The person signed in or out while it ran, so the answer is about a
+    /// sign-in that is gone. Nothing to do.
+    SessionChanged,
+    /// Anything else, such as a network problem, in plain words. Try
+    /// again later.
+    Failed(String),
+}
+
 /// How carrying on a kept sign-in went.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Resumed {
@@ -232,6 +247,7 @@ impl TeamCatalog {
                 server_url: String::new(),
                 email: String::new(),
                 code: self.code(),
+                note: None,
                 session: TeamSession::SignedOut {
                     problem: state.problem.clone(),
                 },
@@ -242,6 +258,7 @@ impl TeamCatalog {
             server_url: session.client().base_url().to_owned(),
             email: session.email.clone(),
             code: self.code(),
+            note: None,
             session: TeamSession::SignedIn {
                 name: session.name.clone(),
                 email: session.email.clone(),
@@ -334,39 +351,60 @@ impl TeamCatalog {
         client.token().map(str::to_owned)
     }
 
-    /// Renews the sign-in with the team server and returns the new token.
-    /// The session sends it from now on. A token the server no longer
-    /// accepts is [`CollabError::Unauthorized`].
-    pub fn renew(&self) -> Result<String, CollabError> {
+    /// Renews the session's sign-in with the team server. Only the session
+    /// that was renewed is judged: if the person signed in or out while the
+    /// request ran, the answer is [`Renewed::SessionChanged`], whatever
+    /// the server said.
+    pub fn renew(&self) -> Renewed {
         let Some(client) = self.lock().session.as_ref().map(|session| session.client()) else {
-            return Err(CollabError::Unauthorized("signed out".into()));
+            return Renewed::SessionChanged;
         };
-        let (renewed, _) = client.refresh_auth("users")?;
-        let token = renewed.token().unwrap_or_default().to_owned();
+        let answer = client.refresh_auth("users");
         let state = self.lock();
-        // Only the session that was renewed takes the new client: a sign-in
-        // meanwhile has its own.
-        match state.session.as_ref() {
-            Some(session) if session.client().token() == client.token() => {
+        let Some(session) = state
+            .session
+            .as_ref()
+            .filter(|session| session.client().token() == client.token())
+        else {
+            return Renewed::SessionChanged;
+        };
+        match answer {
+            Ok((renewed, _)) => {
+                let token = renewed.token().unwrap_or_default().to_owned();
                 session.renewed(renewed);
-                Ok(token)
+                Renewed::Token(token)
             }
-            _ => Err(CollabError::Unauthorized(
-                "signed in again meanwhile".into(),
-            )),
+            Err(CollabError::Unauthorized(_) | CollabError::Forbidden(_)) => Renewed::Rejected,
+            Err(other) => Renewed::Failed(other.to_string()),
         }
     }
 
-    /// Ends the session because the team server no longer accepts it. The
-    /// status then asks the person to sign in again.
-    pub fn sign_in_again(&self) {
-        self.forget_known();
+    /// Ends the session because the team server no longer accepts its
+    /// sign-in, and asks the person to sign in again. It acts only on the
+    /// sign-in that was judged: the session whose token is `judged`, or,
+    /// with `None`, a kept sign-in not carried on yet, while no session
+    /// runs. Says whether it acted.
+    pub fn sign_in_again(&self, judged: Option<&str>) -> bool {
         let earlier = {
             let mut state = self.lock();
+            let token = state
+                .session
+                .as_ref()
+                .map(|session| session.client().token().map(str::to_owned));
+            let same = match (judged, token) {
+                (None, None) => true,
+                (Some(judged), Some(Some(token))) => judged == token,
+                _ => false,
+            };
+            if !same {
+                return false;
+            }
             state.problem = Some(SIGN_IN_AGAIN.into());
             state.session.take()
         };
         drop(earlier);
+        self.forget_known();
+        true
     }
 
     /// Every category's plain name, by code, for grouping the part list;

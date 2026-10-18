@@ -368,6 +368,10 @@ pub struct TeamStatus {
     #[serde(default)]
     pub code: String,
     pub session: TeamSession,
+    /// Something the person should know about this team, in a plain
+    /// sentence, such as a sign-in the password store could not remove.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 impl TeamStatus {
@@ -1683,6 +1687,7 @@ mod tests {
             server_url: "https://parts.example.com/acme".into(),
             email: "a@example.test".into(),
             code: String::new(),
+            note: None,
             session: TeamSession::SignedOut { problem: None },
         };
         assert_eq!(team.label(), "parts.example.com/acme");

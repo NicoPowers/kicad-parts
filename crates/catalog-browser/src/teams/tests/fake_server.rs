@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const EMAIL: &str = "ada@example.test";
@@ -33,6 +33,12 @@ struct State {
     /// Drops every connection without an answer, as if the server were off.
     down: AtomicBool,
     stop: AtomicBool,
+    /// While true, auth-refresh requests wait before they are answered, so
+    /// a test can act while a renewal is in flight.
+    hold_refreshes: Mutex<bool>,
+    released: Condvar,
+    /// How many auth-refresh requests are waiting.
+    held: AtomicU64,
 }
 
 impl FakeServer {
@@ -60,6 +66,26 @@ impl FakeServer {
         self.state.tokens.lock().unwrap().clear();
     }
 
+    /// Ends one sign-in.
+    pub fn reject(&self, token: &str) {
+        self.state.tokens.lock().unwrap().remove(token);
+    }
+
+    /// Makes auth-refresh requests wait until [`Self::release_refreshes`].
+    pub fn hold_refreshes(&self) {
+        *self.state.hold_refreshes.lock().unwrap() = true;
+    }
+
+    pub fn release_refreshes(&self) {
+        *self.state.hold_refreshes.lock().unwrap() = false;
+        self.state.released.notify_all();
+    }
+
+    /// How many auth-refresh requests are waiting now.
+    pub fn held(&self) -> u64 {
+        self.state.held.load(Ordering::SeqCst)
+    }
+
     pub fn set_down(&self, down: bool) {
         self.state.down.store(down, Ordering::SeqCst);
     }
@@ -79,6 +105,7 @@ impl FakeServer {
 
 impl Drop for FakeServer {
     fn drop(&mut self) {
+        self.release_refreshes();
         self.state.stop.store(true, Ordering::SeqCst);
         // Wakes the accepting thread so it sees `stop`.
         let _ = TcpStream::connect(self.url.trim_start_matches("http://"));
@@ -94,6 +121,16 @@ fn answer(mut stream: TcpStream, state: &State) {
         return;
     };
     let request_line = head.lines().next().unwrap_or_default().to_owned();
+    if request_line.starts_with("POST /api/collections/users/auth-refresh ") {
+        let mut hold = state.hold_refreshes.lock().unwrap();
+        if *hold {
+            state.held.fetch_add(1, Ordering::SeqCst);
+            while *hold {
+                hold = state.released.wait(hold).unwrap();
+            }
+            state.held.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
     let token = head
         .lines()
         .find_map(|line| {

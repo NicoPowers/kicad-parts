@@ -49,6 +49,9 @@ struct Team {
     /// team (such as its KiCad libraries) keeps following the same one.
     catalog: Arc<TeamCatalog>,
     keeper: Arc<Keeper>,
+    /// Something the person should know about this team, such as a
+    /// sign-in the store could not forget.
+    note: Option<String>,
 }
 
 struct TeamList {
@@ -102,11 +105,15 @@ impl Teams {
             .into_iter()
             .map(|saved| {
                 let catalog = Arc::new(TeamCatalog::new());
-                let keeper = keeper_for(&saved, &catalog, &sign_ins, &kept, true);
+                // A team the person signed out of is never carried on, even
+                // if the store could not forget its sign-in.
+                let look_for_kept = !saved.signed_out;
+                let keeper = keeper_for(&saved, &catalog, &sign_ins, &kept, look_for_kept);
                 Team {
                     saved,
                     catalog,
                     keeper,
+                    note: None,
                 }
             })
             .collect();
@@ -117,7 +124,7 @@ impl Teams {
             suggested: SavedTeam {
                 server_url: suggested_server.unwrap_or_default(),
                 email: suggested_email.unwrap_or_default(),
-                code: String::new(),
+                ..SavedTeam::default()
             },
             state: Mutex::new(TeamList {
                 teams,
@@ -146,10 +153,6 @@ impl Teams {
             .lock()
             .find(&server_url)
             .map(|team| (team.catalog.clone(), team.keeper.clone()));
-        if let Some((_, keeper)) = &known {
-            // A password replaces any kept sign-in still being carried on.
-            keeper.signed_in();
-        }
         let catalog = match &known {
             Some((catalog, _)) => catalog.clone(),
             None => Arc::new(TeamCatalog::new()),
@@ -161,13 +164,20 @@ impl Teams {
         let email = match status.session {
             TeamSession::SignedIn { email, .. } => email,
             TeamSession::SignedOut { problem } | TeamSession::Reaching { problem } => {
+                // A kept sign-in still being carried on stays: it may be
+                // good, and only the password was wrong.
                 return self.failed(problem.unwrap_or_default());
             }
         };
+        if let Some((_, keeper)) = &known {
+            // The password replaces any kept sign-in still being carried on.
+            keeper.signed_in();
+        }
         let saved = SavedTeam {
             server_url: server_url.clone(),
             email,
             code: catalog.code(),
+            signed_out: false,
         };
         let mut list = self.lock();
         list.problem = None;
@@ -176,13 +186,17 @@ impl Teams {
             .iter_mut()
             .find(|team| team.saved.server_url == server_url)
         {
-            Some(team) => team.saved = saved,
+            Some(team) => {
+                team.saved = saved;
+                team.note = None;
+            }
             None => {
                 let keeper = keeper_for(&saved, &catalog, &self.sign_ins, &self.kept, false);
                 list.teams.push(Team {
                     saved,
                     catalog,
                     keeper,
+                    note: None,
                 });
             }
         }
@@ -192,15 +206,37 @@ impl Teams {
     }
 
     /// Signs out of one team and forgets its kept sign-in. It stays in the
-    /// list, so signing in again needs only the password.
+    /// list, marked signed out, so signing in again needs only the
+    /// password, and the next start never carries on a sign-in the store
+    /// could not forget.
     pub fn sign_out(&self, server_url: &str) {
         let keeper = {
             let mut list = self.lock();
             list.problem = None;
-            list.find(server_url).map(|team| team.keeper.clone())
+            let Some(team) = list
+                .teams
+                .iter_mut()
+                .find(|team| team.saved.server_url == server_url)
+            else {
+                return;
+            };
+            team.saved.signed_out = true;
+            team.note = None;
+            let keeper = team.keeper.clone();
+            self.save(&list);
+            keeper
         };
-        if let Some(keeper) = keeper {
-            self.store_result(keeper.sign_out());
+        if let Err(problem) = keeper.sign_out() {
+            let mut list = self.lock();
+            if let Some(team) = list
+                .teams
+                .iter_mut()
+                .find(|team| team.saved.server_url == server_url)
+            {
+                team.note = Some(format!(
+                    "Your sign-in for this team could not be removed from the system's password store ({problem}). The app will not use it again. You can delete it there yourself."
+                ));
+            }
         }
     }
 
@@ -220,8 +256,11 @@ impl Teams {
             self.save(&list);
             removed
         };
-        // Signed out outside the lock, so status polling never waits.
-        self.store_result(removed.keeper.sign_out());
+        // Signed out outside the lock, so status polling never waits. A
+        // sign-in the store could not forget is harmless: the team is off
+        // the list, so it is never carried on, and adding the team again
+        // replaces it.
+        let _ = removed.keeper.sign_out();
     }
 
     /// Shows the team at `server_url` in the catalog view. No sign-in is
@@ -283,6 +322,7 @@ impl Teams {
                     learned_a_code = true;
                 }
                 status.code.clone_from(&team.saved.code);
+                status.note.clone_from(&team.note);
                 status.server_url.clone_from(&team.saved.server_url);
                 status.email.clone_from(&team.saved.email);
                 if !team.catalog.is_signed_in() {
@@ -338,12 +378,6 @@ impl Teams {
     /// server could not be reached.
     pub fn reaching(&self, server_url: &str) -> Option<Option<String>> {
         self.lock().find(server_url)?.keeper.reaching()
-    }
-
-    fn store_result(&self, result: Result<(), String>) {
-        if let Err(problem) = result {
-            store_failed(&self.kept, problem);
-        }
     }
 
     fn failed(&self, problem: String) -> Result<(), String> {

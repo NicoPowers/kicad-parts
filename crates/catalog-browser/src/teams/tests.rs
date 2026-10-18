@@ -104,6 +104,7 @@ fn suggested_values_fill_in_the_sign_in_form() {
                 server_url: "https://parts.example.com".into(),
                 email: "a@example.test".into(),
                 code: "PE".into(),
+                signed_out: false,
             }],
             shown: "https://parts.example.com".into(),
         },
@@ -371,4 +372,164 @@ fn a_store_that_fails_says_sign_ins_last_until_the_app_closes() {
             reason: "this computer has no password store".into()
         }
     );
+}
+
+/// Signs in to `server`, whose first token lasts 2 seconds, and waits
+/// until the keeper's renewal of it is held by the server. Returns the
+/// token being renewed.
+fn renewal_in_flight(teams: &Teams, server: &FakeServer, store: &MemorySignIns) -> String {
+    server.set_token_lifetime(2);
+    server.hold_refreshes();
+    teams.sign_in(request(server)).unwrap();
+    wait_until("the sign-in to be kept", || {
+        kept_token(store, server).is_some()
+    });
+    let renewing = kept_token(store, server).unwrap();
+    wait_until("a renewal to be in flight", || server.held() == 1);
+    // Later tokens last long, so they are not renewed during the test.
+    server.set_token_lifetime(7 * 24 * 3600);
+    renewing
+}
+
+/// Lets the held renewal answer, and gives the keeper time to act on it.
+fn answer_the_renewal(server: &FakeServer) {
+    server.release_refreshes();
+    wait_until("the renewal to be answered", || server.held() == 0);
+    std::thread::sleep(Duration::from_millis(800));
+}
+
+#[test]
+fn a_renewal_answered_after_a_new_sign_in_leaves_the_new_sign_in_alone() {
+    let server = FakeServer::start();
+    let store = store();
+    let dir = tempfile::tempdir().unwrap();
+    let teams = Teams::open(dir.path().join("team.json"), kept_in(&store), None, None);
+    let old = renewal_in_flight(&teams, &server, &store);
+    // The person signs in again meanwhile, and the old sign-in ends.
+    teams.sign_in(request(&server)).unwrap();
+    let new = teams.shown().token().unwrap();
+    assert_ne!(new, old);
+    server.reject(&old);
+    answer_the_renewal(&server);
+    // The rejection was about the old sign-in: the new one stays, kept.
+    assert!(is_signed_in(&teams, &server));
+    assert_eq!(teams.shown().token(), Some(new.clone()));
+    assert_eq!(kept_token(&store, &server), Some(new));
+    assert!(teams.status().teams[0].session.is_signed_in());
+}
+
+#[test]
+fn a_renewal_answered_after_signing_out_says_nothing_and_keeps_nothing() {
+    let server = FakeServer::start();
+    let store = store();
+    let dir = tempfile::tempdir().unwrap();
+    let teams = Teams::open(dir.path().join("team.json"), kept_in(&store), None, None);
+    let old = renewal_in_flight(&teams, &server, &store);
+    teams.sign_out(&server.url);
+    server.reject(&old);
+    answer_the_renewal(&server);
+    // Signed out, as the person chose: not "sign in again".
+    assert_eq!(
+        teams.status().teams[0].session,
+        TeamSession::SignedOut { problem: None }
+    );
+    assert_eq!(kept_token(&store, &server), None);
+}
+
+#[test]
+fn a_renewal_answered_after_removing_and_adding_the_team_keeps_the_new_sign_in() {
+    let server = FakeServer::start();
+    let store = store();
+    let dir = tempfile::tempdir().unwrap();
+    let teams = Teams::open(dir.path().join("team.json"), kept_in(&store), None, None);
+    let old = renewal_in_flight(&teams, &server, &store);
+    teams.remove(&server.url);
+    teams.sign_in(request(&server)).unwrap();
+    wait_until("the new sign-in to be kept", || {
+        kept_token(&store, &server).is_some_and(|token| token != old)
+    });
+    let new = kept_token(&store, &server).unwrap();
+    server.reject(&old);
+    answer_the_renewal(&server);
+    // The removed team's keeper is stopped and writes nothing.
+    assert_eq!(kept_token(&store, &server), Some(new));
+    assert!(is_signed_in(&teams, &server));
+}
+
+#[test]
+fn a_wrong_password_leaves_a_kept_sign_in_being_carried_on() {
+    let server = FakeServer::start();
+    let store = store();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("team.json");
+    {
+        let teams = Teams::open(file.clone(), kept_in(&store), None, None);
+        teams.sign_in(request(&server)).unwrap();
+        wait_until("the sign-in to be kept", || {
+            kept_token(&store, &server).is_some()
+        });
+    }
+    // At the next start, carrying on the kept sign-in is in flight when
+    // someone types a wrong password.
+    server.hold_refreshes();
+    let teams = Teams::open(file, kept_in(&store), None, None);
+    wait_until("the kept sign-in to be in flight", || server.held() == 1);
+    let wrong = SignInRequest {
+        password: "wrong".into(),
+        ..request(&server)
+    };
+    assert!(teams.sign_in(wrong).is_err());
+    server.release_refreshes();
+    wait_until("the kept sign-in to be carried on", || {
+        is_signed_in(&teams, &server)
+    });
+    assert!(kept_token(&store, &server).is_some());
+}
+
+/// A store that cannot forget, like a locked keyring whose prompt was
+/// dismissed.
+#[derive(Default)]
+struct UnforgettingStore(MemorySignIns);
+
+impl SignInStore for UnforgettingStore {
+    fn read(&self, server_url: &str) -> Result<Option<String>, String> {
+        self.0.read(server_url)
+    }
+    fn keep(&self, server_url: &str, token: &str) -> Result<(), String> {
+        self.0.keep(server_url, token)
+    }
+    fn forget(&self, _: &str) -> Result<(), String> {
+        Err("the keyring is locked".into())
+    }
+}
+
+#[test]
+fn a_sign_out_the_store_cannot_forget_is_still_never_carried_on() {
+    let server = FakeServer::start();
+    let store = Arc::new(UnforgettingStore::default());
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("team.json");
+    {
+        let teams = Teams::open(file.clone(), SignIns::kept_in(store.clone()), None, None);
+        teams.sign_in(request(&server)).unwrap();
+        wait_until("the sign-in to be kept", || {
+            store.read(&server.url).unwrap().is_some()
+        });
+        teams.sign_out(&server.url);
+        let note = teams.status().teams[0].note.clone().unwrap_or_default();
+        assert!(
+            note.starts_with("Your sign-in for this team could not be removed")
+                && note.contains("the keyring is locked"),
+            "{note}"
+        );
+    }
+    assert!(store.read(&server.url).unwrap().is_some(), "it lingers");
+    let teams = Teams::open(file.clone(), SignIns::kept_in(store.clone()), None, None);
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(!is_signed_in(&teams, &server));
+    assert_eq!(teams.reaching(&server.url), None);
+    assert_eq!(server.refreshes(), 0, "the lingering sign-in was not used");
+    // Signing in again clears the mark.
+    teams.sign_in(request(&server)).unwrap();
+    assert!(!saved::read(&file).teams[0].signed_out);
 }

@@ -10,13 +10,16 @@
 //!   kept token and asks for this team's password again. Other teams carry
 //!   on: each team has its own keeper.
 //!
-//! Every write to the store for this team takes the team's turn, so a
-//! sign-out never races a renewal into keeping a token it just forgot.
+//! The person may sign in, sign out or remove the team while a request
+//! runs, so an answer may be about a sign-in that is gone. Every write to
+//! the store for this team takes the team's turn, and a judgement acts only
+//! if, in that turn, the sign-in it judged is still the team's: the keeper
+//! is not stopped, the person has not signed in or out since, and the
+//! session is the one judged. A stopped keeper never writes to the store.
 
 use super::sign_ins::SignInStore;
-use crate::team::{Resumed, TeamCatalog};
+use crate::team::{Renewed, Resumed, TeamCatalog};
 use base64::Engine;
-use collaboration::CollabError;
 use desktop_contract::{LiveUpdates, TeamSession};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -56,11 +59,19 @@ struct Shared {
     /// `None` inside while the first try runs, then why the server could
     /// not be reached.
     reaching: Mutex<Option<Option<String>>>,
-    /// Grows whenever the person signs in or out of this team, so a
-    /// carried-on sign-in that finishes afterwards is dropped.
+    /// Grows whenever the person signs in or out of this team, so an
+    /// answer about an earlier sign-in is dropped.
     changes: AtomicU64,
     turn: Mutex<()>,
     stop: AtomicBool,
+}
+
+/// The sign-in a rejection is about.
+enum Judged<'a> {
+    /// The session that sends this token.
+    Session(&'a str),
+    /// The kept sign-in, while no session runs yet.
+    Kept,
 }
 
 impl Keeper {
@@ -87,14 +98,16 @@ impl Keeper {
     }
 
     /// The person signed in with a password: stop carrying on any kept
-    /// sign-in. The keeper keeps the new token itself.
+    /// sign-in, and drop any answer about an earlier one. The keeper keeps
+    /// the new token itself.
     pub(super) fn signed_in(&self) {
         let _turn = self.shared.turn();
         self.shared.changes.fetch_add(1, Ordering::SeqCst);
         *self.shared.reaching() = None;
     }
 
-    /// Signs out of the team and forgets its kept sign-in.
+    /// Signs out of the team and forgets its kept sign-in. An error says
+    /// why the store could not forget it.
     pub(super) fn sign_out(&self) -> Result<(), String> {
         let _turn = self.shared.turn();
         self.shared.changes.fetch_add(1, Ordering::SeqCst);
@@ -119,19 +132,49 @@ impl Shared {
         self.turn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn changes(&self) -> u64 {
+        self.changes.load(Ordering::SeqCst)
+    }
+
+    /// Whether a judgement made when `changes` stood at `changes_at` may
+    /// still act. Call it in the team's turn.
+    fn still_current(&self, changes_at: u64) -> bool {
+        !self.stop.load(Ordering::SeqCst) && self.changes() == changes_at
+    }
+
     fn store_result(&self, result: Result<(), String>) {
         if let Err(problem) = result {
             (self.task.store_failed)(problem);
         }
     }
 
-    /// The server no longer accepts the sign-in: forget it, and ask for
-    /// this team's password again.
-    fn rejected(&self) {
+    /// The server no longer accepts the `judged` sign-in: forget it, and
+    /// ask for this team's password again. Does nothing if, by now, that
+    /// sign-in is gone.
+    fn rejected(&self, judged: Judged<'_>, changes_at: u64) {
         let _turn = self.turn();
-        *self.reaching() = None;
-        self.task.catalog.sign_in_again();
-        self.store_result(self.task.store.forget(&self.task.server_url));
+        if !self.still_current(changes_at) {
+            return;
+        }
+        let token = match judged {
+            Judged::Session(token) => Some(token),
+            Judged::Kept => None,
+        };
+        if self.task.catalog.sign_in_again(token) {
+            *self.reaching() = None;
+            self.store_result(self.task.store.forget(&self.task.server_url));
+        }
+    }
+
+    /// Keeps `token`, the session's token, unless that changed meanwhile.
+    /// Says whether it did.
+    fn keep(&self, token: &str) -> bool {
+        let _turn = self.turn();
+        if self.stop.load(Ordering::SeqCst) || self.task.catalog.token().as_deref() != Some(token) {
+            return false;
+        }
+        self.store_result(self.task.store.keep(&self.task.server_url, token));
+        true
     }
 }
 
@@ -152,7 +195,9 @@ fn keep(shared: &Shared, look_for_kept: bool) {
     let mut retry = FIRST_RETRY;
     let mut try_at = Instant::now();
     let mut kept: Option<String> = None;
-    let mut renew_at = Instant::now();
+    // Wall-clock time, so a computer that slept still renews on waking:
+    // an Instant stands still during sleep on macOS and Linux.
+    let mut renew_at = SystemTime::now();
     while !shared.stop.load(Ordering::SeqCst) {
         if let Some(token) = to_carry_on.clone() {
             if shared.reaching().is_none() {
@@ -161,13 +206,13 @@ fn keep(shared: &Shared, look_for_kept: bool) {
                 continue;
             }
             if Instant::now() >= try_at {
-                let changes = shared.changes.load(Ordering::SeqCst);
+                let changes_at = shared.changes();
                 match task.catalog.resume(&task.server_url, &token) {
                     Resumed::SignedIn { token: carried_on } => {
                         to_carry_on = None;
                         let _turn = shared.turn();
                         *shared.reaching() = None;
-                        if shared.changes.load(Ordering::SeqCst) != changes
+                        if !shared.still_current(changes_at)
                             && task.catalog.token() == Some(carried_on)
                         {
                             // The person signed out while this ran: do not
@@ -185,49 +230,45 @@ fn keep(shared: &Shared, look_for_kept: bool) {
                     }
                     Resumed::Rejected => {
                         to_carry_on = None;
-                        shared.rejected();
+                        shared.rejected(Judged::Kept, changes_at);
                     }
                 }
             }
             std::thread::sleep(TICK);
             continue;
         }
-        match task.catalog.status().session {
-            TeamSession::SignedIn {
-                live: LiveUpdates::SignInAgain { .. },
-                ..
-            } => {
+        let changes_at = shared.changes();
+        let token = task.catalog.token();
+        match (task.catalog.status().session, token) {
+            (
+                TeamSession::SignedIn {
+                    live: LiveUpdates::SignInAgain { .. },
+                    ..
+                },
+                Some(token),
+            ) => {
                 kept = None;
-                shared.rejected();
+                shared.rejected(Judged::Session(&token), changes_at);
             }
-            TeamSession::SignedIn { .. } => {
-                let token = task.catalog.token();
-                if token != kept {
-                    let _turn = shared.turn();
-                    // Kept only while it is still the session's token: a
-                    // sign-out takes the turn before it forgets.
-                    if let Some(now) = task
-                        .catalog
-                        .token()
-                        .filter(|now| Some(now) == token.as_ref())
-                    {
-                        shared.store_result(task.store.keep(&task.server_url, &now));
-                        renew_at = Instant::now() + renewal_delay(&now, SystemTime::now());
+            (TeamSession::SignedIn { .. }, Some(token)) => {
+                if kept.as_ref() != Some(&token) {
+                    if shared.keep(&token) {
+                        renew_at = SystemTime::now() + renewal_delay(&token, SystemTime::now());
+                        kept = Some(token);
                     }
-                    kept = token;
-                } else if Instant::now() >= renew_at {
+                } else if SystemTime::now() >= renew_at {
                     match task.catalog.renew() {
                         // The next look keeps the new token.
-                        Ok(_) => {}
-                        Err(CollabError::Unauthorized(_) | CollabError::Forbidden(_)) => {
+                        Renewed::Token(_) | Renewed::SessionChanged => {}
+                        Renewed::Rejected => {
                             kept = None;
-                            shared.rejected();
+                            shared.rejected(Judged::Session(&token), changes_at);
                         }
-                        Err(_) => renew_at = Instant::now() + RENEW_RETRY,
+                        Renewed::Failed(_) => renew_at = SystemTime::now() + RENEW_RETRY,
                     }
                 }
             }
-            TeamSession::SignedOut { .. } | TeamSession::Reaching { .. } => kept = None,
+            _ => kept = None,
         }
         std::thread::sleep(TICK);
     }

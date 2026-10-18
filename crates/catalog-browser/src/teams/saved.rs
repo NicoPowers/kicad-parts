@@ -18,6 +18,10 @@ pub(super) struct SavedTeam {
     /// its server is reached.
     #[serde(default)]
     pub(super) code: String,
+    /// The person signed out of this team. Its kept sign-in, if the store
+    /// could not forget it, is never carried on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) signed_out: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -103,11 +107,13 @@ mod tests {
                     server_url: "https://parts.example.com/acme".into(),
                     email: "a@example.test".into(),
                     code: "AC".into(),
+                    signed_out: false,
                 },
                 SavedTeam {
                     server_url: "https://beta.example.com".into(),
                     email: "a@example.test".into(),
                     code: String::new(),
+                    signed_out: false,
                 },
             ],
             shown: "https://beta.example.com".into(),
