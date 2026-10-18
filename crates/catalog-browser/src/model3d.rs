@@ -297,18 +297,61 @@ pub(crate) fn resolve(
         Ok(expanded) => expanded,
         Err(missing) => return not_shown(NotShown::VariableNotSet(missing.0)),
     };
-    let path = PathBuf::from(&expanded);
+    match openable_path(link, &expanded, &places.variables) {
+        Ok(path) => found(ModelSource::Installed, &checked_model(&path)),
+        Err(why) => not_shown(why),
+    }
+}
+
+/// The path that a model link `link`, expanded to `expanded`, may be opened
+/// at, or why it may not be (ADR 0013). The 3D view and copying a model
+/// from an installed library both use it, so neither opens a network path
+/// the person didn't set: opening one can send their Windows sign-in.
+///
+/// It is the link's own path when its leading path variable is one the
+/// person set to something unusual, such as a network folder. Otherwise
+/// the path must be ordinary (see [`ordinary_path`]) and, made absolute,
+/// on a drive of this computer.
+pub(crate) fn openable_path(
+    link: &str,
+    expanded: &str,
+    variables: &PathVariables,
+) -> Result<PathBuf, NotShown> {
+    let path = PathBuf::from(expanded);
     // `/models/x.step` names a folder on the current drive, as KiCad reads it.
     if path.is_relative() && !path.has_root() {
-        return not_shown(NotShown::NoFolder);
+        return Err(NotShown::NoFolder);
     }
-    // Only an ordinary path on this computer, unless the person set the
-    // link's leading path variable to another kind, such as a network
-    // folder. Anything else could open a network share.
-    if !ordinary_path(&expanded) && !leading_value_is_unusual(link, &places.variables) {
-        return not_shown(NotShown::NetworkPath);
+    if leading_value_is_unusual(link, variables) {
+        return Ok(path);
     }
-    found(ModelSource::Installed, &checked_model(&path))
+    if !ordinary_path(expanded) {
+        return Err(NotShown::NetworkPath);
+    }
+    // Windows reads a path with one slash and no drive, such as
+    // `\x.step` or `/./x.step`, on the drive of the app's current folder.
+    // If the app started in a network folder, that is a network share.
+    let absolute = std::path::absolute(&path).map_err(|why| NotShown::Unreadable {
+        path: path.clone(),
+        why: why.to_string(),
+    })?;
+    if !on_a_drive(&absolute) {
+        return Err(NotShown::NetworkPath);
+    }
+    Ok(absolute)
+}
+
+/// Whether the absolute path `path` is on a drive of this computer, such
+/// as `C:\`, and not a network share. Paths off Windows always are.
+fn on_a_drive(path: &Path) -> bool {
+    if !cfg!(windows) {
+        return true;
+    }
+    use std::path::{Component, Prefix};
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    )
 }
 
 /// Whether `text` is an ordinary path on this computer: a drive path
@@ -318,8 +361,9 @@ pub(crate) fn resolve(
 /// not.
 ///
 /// After one slash, only an empty first part (a second slash) or a `?` or
-/// `*` can leave the current drive. So odd first parts, as in `/./x.step`
-/// or `/C:/x.step`, stay on this computer, and the file is looked for.
+/// `*` can name a network or device path by itself. So odd first parts,
+/// as in `/./x.step` or `/C:/x.step`, are ordinary. Such a path still
+/// needs [`openable_path`]'s check of the drive it lands on.
 fn ordinary_path(text: &str) -> bool {
     let bytes = text.as_bytes();
     if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {

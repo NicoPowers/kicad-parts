@@ -413,8 +413,9 @@ fn network_paths_are_opened_only_through_the_persons_path_variables() {
     );
     assert!(!ordinary_path("C:x.step") && !ordinary_path(r"\??\C:\x.step"));
     assert!(ordinary_path("/") && ordinary_path(r"\") && !ordinary_path("//"));
-    // Odd paths on the current drive are no network paths: the file is
-    // looked for, and it is missing.
+    // Odd paths with one slash are no network paths. They are read on the
+    // drive of the app's current folder, here a local drive: the file is
+    // looked for there, and it is missing.
     for link in [
         "/./kicad-parts-no-such-model.step",
         "/../kicad-parts-no-such-model.step",
@@ -422,11 +423,21 @@ fn network_paths_are_opened_only_through_the_persons_path_variables() {
         r"\C:\kicad-parts-no-such-model.step",
         "/-models/kicad-parts-no-such-model.step",
     ] {
+        let looked = std::path::absolute(link).unwrap();
+        assert!(on_a_drive(&looked), "{}", looked.display());
         assert_eq!(
             places.resolve(link),
-            Resolved::NotShown(NotShown::Missing(PathBuf::from(link))),
+            Resolved::NotShown(NotShown::Missing(looked)),
             "{link}"
         );
+    }
+    // Only a drive path is opened. A one-slash path that lands on a
+    // network share, as when the app starts in a network folder, is not.
+    if cfg!(windows) {
+        assert!(on_a_drive(Path::new(r"C:\x.step")) && on_a_drive(Path::new(r"\\?\C:\x.step")));
+        assert!(!on_a_drive(Path::new(r"\\host.invalid\share\x.step")));
+        assert!(!on_a_drive(Path::new(r"\\?\UNC\host.invalid\share\x.step")));
+        assert!(!on_a_drive(Path::new(r"\\.\pipe\x.step")));
     }
     // A folder the person set as a path variable is looked in, even one
     // written like a network path.

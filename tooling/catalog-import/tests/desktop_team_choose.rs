@@ -618,7 +618,7 @@ fn edit_part_uses_a_choice_by_where_it_lives() {
     // Only KiCad's 3D model files are copied, and a link must say where.
     for (name, says) in [
         ("C_0603_Key", "is not a 3D model file"),
-        ("C_0603_Bare", "names no folder"),
+        ("C_0603_Bare", "has no folder or path variable"),
     ] {
         let pick = team.pick(
             PreviewKind::Footprint,

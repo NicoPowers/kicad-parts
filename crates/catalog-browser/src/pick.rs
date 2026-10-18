@@ -21,8 +21,8 @@ use crate::libraries::query::{self, SymbolOrFootprint};
 use crate::libraries::read::{
     Links, MAX_FOOTPRINT_FILE_BYTES, MAX_SYMBOL_FILE_BYTES, read_limited,
 };
-use crate::libraries::sources::{Format, Source, path_variables};
-use crate::model3d::{NotShown, checked_model, starts_as_model};
+use crate::libraries::sources::{Format, Source};
+use crate::model3d::{NotShown, checked_model, openable_path, starts_as_model};
 use crate::team::TeamCatalog;
 use catalog::CadItemKind;
 use catalog::cad_file::{is_model_file_name, is_plain_name, read_footprint_file, symbol_upload};
@@ -410,24 +410,8 @@ impl CatalogBrowser {
     /// that says where the file is: one with no folder and no variable is
     /// not guessed at.
     fn model_file(&self, link: &str) -> Result<(PathBuf, Vec<u8>), String> {
-        let places = self.library_places();
-        let expanded = match &places.kicad_config {
-            Some(config) => path_variables(&places, config).0.expand(link),
-            None => kicad_integration::lib_table::PathVariables::new(places.environment.clone())
-                .expand(link),
-        }
-        .map_err(|missing| format!("{missing}."))?;
-        let path = PathBuf::from(&expanded);
-        if !is_model_file_name(&expanded) {
-            return Err(
-                "it is not a 3D model file: KiCad's are .step, .stp, .stpz, .wrl or .wrz.".into(),
-            );
-        }
-        if path.is_relative() {
-            return Err(
-                "it names no folder and no path variable, so where it is is not known.".into(),
-            );
-        }
+        let variables = self.model_places().variables;
+        let path = model_path(link, &variables).map_err(|why| as_clause(&why.words()))?;
         let bytes = read_model(&path)?;
         Ok((path, bytes))
     }
@@ -539,6 +523,22 @@ impl CatalogBrowser {
     }
 }
 
+/// Where the 3D model file `link` names may be opened, through the
+/// person's KiCad path `variables`, by the 3D view's rules: only KiCad's
+/// model files, and never a network path the person didn't set.
+fn model_path(
+    link: &str,
+    variables: &kicad_integration::lib_table::PathVariables,
+) -> Result<PathBuf, NotShown> {
+    let expanded = variables
+        .expand(link)
+        .map_err(|missing| NotShown::VariableNotSet(missing.0))?;
+    if !is_model_file_name(&expanded) {
+        return Err(NotShown::NotModelFile);
+    }
+    openable_path(link, &expanded, variables)
+}
+
 /// The bytes of the 3D model file at `path`, only when it really is one.
 /// The path, or a folder on it, may be a link (a library cloned with
 /// links, say), so [`checked_model`] checks the real file, as the 3D view
@@ -603,6 +603,46 @@ mod tests {
             read_model(&dir.path().join("gone.step")).unwrap_err(),
             "the file is missing."
         );
+    }
+
+    /// Copying a model follows the 3D view's network rule (ADR 0013): a
+    /// network path is refused before anything is opened, unless the
+    /// person set a path variable to that folder.
+    #[test]
+    fn copying_a_model_never_opens_a_network_path_the_person_did_not_set() {
+        use kicad_integration::lib_table::PathVariables;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x.step"), "ISO-10303-21;\n").unwrap();
+        let mut set = std::collections::BTreeMap::new();
+        set.insert("SHARE".to_owned(), r"\\host.invalid\share".to_owned());
+        set.insert("MINE".to_owned(), dir.path().to_string_lossy().into_owned());
+        let variables = PathVariables::new(set);
+        // The links name host.invalid, which never resolves.
+        for link in [
+            r"\\host.invalid\share\x.step",
+            "//host.invalid/share/x.step",
+            r"\\?\UNC\host.invalid\share\x.step",
+            "/??/UNC/host.invalid/share/x.step",
+        ] {
+            assert_eq!(
+                model_path(link, &variables),
+                Err(NotShown::NetworkPath),
+                "{link}"
+            );
+        }
+        // The person's own network folder is trusted as they set it.
+        assert_eq!(
+            model_path("${SHARE}/x.step", &variables),
+            Ok(PathBuf::from(r"\\host.invalid\share/x.step"))
+        );
+        assert_eq!(model_path("x.step", &variables), Err(NotShown::NoFolder));
+        assert_eq!(
+            model_path("${MINE}/id_rsa", &variables),
+            Err(NotShown::NotModelFile)
+        );
+        // A local model is read.
+        let path = model_path("${MINE}/x.step", &variables).unwrap();
+        assert!(read_model(&path).is_ok());
     }
 
     /// A folder junction (Windows makes one without special rights) to a
