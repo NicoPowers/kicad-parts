@@ -87,6 +87,9 @@ struct State {
 /// holds one for each team in the person's list.
 pub struct TeamCatalog {
     state: Mutex<State>,
+    /// The team's code, such as `MA`, once read from the team's settings;
+    /// blank before. It names the team in the list of teams.
+    code: Mutex<String>,
     /// Revisions never change, so what was fetched for previews is kept
     /// until the next sign-in or sign-out.
     known: Mutex<KnownRevisions>,
@@ -201,6 +204,21 @@ impl TeamCatalog {
                 session: None,
             }),
             known: Mutex::new(KnownRevisions::default()),
+            code: Mutex::new(String::new()),
+        }
+    }
+
+    /// The team's code, such as `MA`; blank until the team's settings are
+    /// read, or while the team has none.
+    pub fn code(&self) -> String {
+        self.code.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Notes the team's code, as read from its settings. The code never
+    /// changes once set, so it is kept after signing out.
+    pub(crate) fn remember_code(&self, code: &str) {
+        if !code.is_empty() {
+            *self.code.lock().unwrap_or_else(|e| e.into_inner()) = code.to_owned();
         }
     }
 

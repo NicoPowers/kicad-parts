@@ -244,6 +244,16 @@ impl Teams {
             .unwrap_or_else(|| self.nobody.clone())
     }
 
+    /// Every team in the list, signed in or not, by server address, in
+    /// list order.
+    pub fn every(&self) -> Vec<(String, Arc<TeamCatalog>)> {
+        self.lock()
+            .teams
+            .iter()
+            .map(|team| (team.saved.server_url.clone(), team.catalog.clone()))
+            .collect()
+    }
+
     /// Every team that is signed in, by server address, in list order.
     pub fn signed_in(&self) -> Vec<(String, Arc<TeamCatalog>)> {
         self.lock()

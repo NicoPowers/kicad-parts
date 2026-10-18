@@ -1,4 +1,4 @@
-//! Keeps the signed-in team's KiCad libraries (kicad-parts-f397) up to date:
+//! Keeps one team's KiCad libraries (kicad-parts-f397) up to date:
 //! once the sign-in has caught up, and again about 2 seconds after the last
 //! new Change, so a burst of Changes causes one update. "Update now" runs
 //! one at once. A failed update, such as when KiCad holds a file open, is
@@ -12,12 +12,12 @@
 //! team updates only that team's folder, so other teams' libraries keep
 //! working in KiCad.
 //!
-//! One background thread does every update, so a folder has one writer.
+//! One background thread per team does every update of that team's folder,
+//! so a folder has one writer.
 //! Each update reads the Catalog's records and downloads only the files it
 //! has not written yet.
 
 use crate::team::TeamCatalog;
-use crate::teams::Teams;
 use catalog::pocketbase::{
     TeamCodeOutcome, TeamSettings, download_blob, read_revisions, read_team, submit_team_code,
 };
@@ -45,20 +45,23 @@ const CODE_POLL: Duration = Duration::from_secs(5);
 /// How often the thread looks at the team catalog's position.
 const POLL: Duration = Duration::from_millis(250);
 
-pub struct KicadLibraries {
+/// One team's KiCad libraries and the thread that updates them. Dropping
+/// it stops the thread.
+pub struct TeamLibraries {
     /// The `kicad-libraries` folder, which holds one folder per team.
     root: PathBuf,
-    teams: Arc<Teams>,
+    team: Arc<TeamCatalog>,
     shared: Arc<Shared>,
 }
 
-struct Shared {
+pub(super) struct Shared {
     state: Mutex<Known>,
     /// Set by "Update now".
     asked: AtomicBool,
     /// Set when the team's settings must be read again, such as after
     /// choosing its code.
     reread: AtomicBool,
+    stop: AtomicBool,
 }
 
 /// What the updates found, kept for the status.
@@ -107,24 +110,21 @@ fn shown(libraries: &[Library]) -> Vec<KicadLibrary> {
         .collect()
 }
 
-impl KicadLibraries {
-    /// Starts following the shown team in `teams` and writing its libraries
-    /// into its folder under `root`, the `kicad-libraries` folder.
-    pub fn start(root: PathBuf, teams: Arc<Teams>) -> Self {
-        let shared = Arc::new(Shared {
-            state: Mutex::new(Known::signed_out()),
-            asked: AtomicBool::new(false),
-            reread: AtomicBool::new(false),
-        });
+impl TeamLibraries {
+    /// Starts following `team` and writing its libraries into its folder
+    /// under `root`, the `kicad-libraries` folder.
+    pub fn start(root: PathBuf, team: Arc<TeamCatalog>) -> Self {
+        let shared = Arc::new(Shared::new());
         {
-            let (root, shared, teams) = (root.clone(), shared.clone(), teams.clone());
-            std::thread::spawn(move || follow(&root, &teams, &shared));
+            let (root, shared, team) = (root.clone(), shared.clone(), team.clone());
+            std::thread::spawn(move || follow(&root, &team, &shared));
         }
-        Self {
-            root,
-            teams,
-            shared,
-        }
+        Self { root, team, shared }
+    }
+
+    /// The team these libraries are made from.
+    pub(super) fn team(&self) -> &Arc<TeamCatalog> {
+        &self.team
     }
 
     /// The signed-in team's folder, or the folder of every team's
@@ -244,7 +244,7 @@ impl KicadLibraries {
         if let Some(problem) = team_code_problem(code) {
             return Err(problem.to_owned());
         }
-        let client = self.teams.shown().client_for_libraries()?;
+        let client = self.team.client_for_libraries()?;
         let outcome = submit_team_code(&client, code).map_err(|error| match error {
             collaboration::CollabError::Forbidden(_) => {
                 "Only team members who can edit the catalog can choose the team code.".to_owned()
@@ -259,13 +259,29 @@ impl KicadLibraries {
         self.shared.reread.store(true, Ordering::SeqCst);
         self.shared.asked.store(true, Ordering::SeqCst);
         if let Ok(team) = read_team(&client) {
+            self.team.remember_code(&team.code);
             self.shared.lock().team = Some(team);
         }
         Ok(self.status())
     }
 }
 
+impl Drop for TeamLibraries {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::SeqCst);
+    }
+}
+
 impl Shared {
+    pub(super) fn new() -> Self {
+        Self {
+            state: Mutex::new(Known::signed_out()),
+            asked: AtomicBool::new(false),
+            reread: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Known> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -324,14 +340,12 @@ impl Schedule {
 }
 
 /// The thread: waits for a reason to update, then updates.
-fn follow(root: &Path, teams: &Teams, shared: &Shared) {
+fn follow(root: &Path, team: &TeamCatalog, shared: &Shared) {
     let mut schedule = Schedule::default();
     let mut signed_in_as = String::new();
     let mut settings_read: Option<Instant> = None;
-    loop {
+    while !shared.stop.load(Ordering::SeqCst) {
         std::thread::sleep(POLL);
-        let team = teams.shown();
-        let team = team.as_ref();
         let status = team.status();
         let TeamSession::SignedIn {
             email,
@@ -378,7 +392,10 @@ fn follow(root: &Path, teams: &Teams, shared: &Shared) {
                 read_team(&client)
                     .map_err(|error| format!("The team's settings could not be read: {error}"))
             }) {
-                Ok(settings) => shared.lock().team = Some(settings),
+                Ok(settings) => {
+                    team.remember_code(&settings.code);
+                    shared.lock().team = Some(settings);
+                }
                 Err(reason) => {
                     shared.set(KicadLibrariesState::Failed {
                         at_ms: now_ms(),

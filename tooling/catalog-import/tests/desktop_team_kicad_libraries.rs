@@ -8,8 +8,8 @@
 
 use catalog::PartRevision;
 use catalog::pocketbase::{EditCommand, ImportCommand, read_back, submit_edit, submit_import};
-use catalog_browser::kicad_libraries::KicadLibraries;
-use catalog_browser::teams::{MemorySignIns, SignIns, Teams};
+use catalog_browser::kicad_libraries::TeamLibraries;
+use catalog_browser::team::TeamCatalog;
 use catalog_import::services;
 use desktop_contract::{KicadLibrariesState, SignInRequest, TeamCode};
 use std::path::Path;
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn wait_for(
-    libraries: &KicadLibraries,
+    libraries: &TeamLibraries,
     what: &str,
     mut done: impl FnMut(&KicadLibrariesState) -> bool,
 ) -> KicadLibrariesState {
@@ -89,23 +89,17 @@ fn the_libraries_follow_the_team_catalog() {
     )
     .unwrap();
 
-    let sign_in = |team: &Teams, member: &services::Member| {
+    let sign_in = |team: &TeamCatalog, member: &services::Member| {
         team.sign_in(SignInRequest {
             server_url: server.url().to_owned(),
             email: member.email.clone(),
             password: member.password.clone(),
-        })
-        .unwrap();
+        });
     };
 
     // A member who cannot edit sees who may choose the code, and cannot.
-    let team = Arc::new(Teams::open(
-        state.path().join("viewer.json"),
-        SignIns::kept_in(Arc::new(MemorySignIns::default())),
-        Some(server.url().to_owned()),
-        None,
-    ));
-    let libraries = KicadLibraries::start(folder.clone(), team.clone());
+    let team = Arc::new(TeamCatalog::new());
+    let libraries = TeamLibraries::start(folder.clone(), team.clone());
     assert_eq!(libraries.status().state, KicadLibrariesState::SignedOut);
     sign_in(&team, &viewer);
     wait_for(&libraries, "the team to need a code", |state| {
@@ -123,16 +117,11 @@ fn the_libraries_follow_the_team_catalog() {
         libraries.set_code("MA").unwrap_err(),
         "Only team members who can edit the catalog can choose the team code."
     );
-    team.sign_out(server.url());
+    team.sign_out();
 
     // Someone who can edit chooses it.
-    let team = Arc::new(Teams::open(
-        state.path().join("team.json"),
-        SignIns::kept_in(Arc::new(MemorySignIns::default())),
-        Some(server.url().to_owned()),
-        None,
-    ));
-    let libraries = KicadLibraries::start(folder.clone(), team.clone());
+    let team = Arc::new(TeamCatalog::new());
+    let libraries = TeamLibraries::start(folder.clone(), team.clone());
     sign_in(&team, &editor);
     wait_for(&libraries, "the team to need a code", |state| {
         *state == KicadLibrariesState::NeedsCode
@@ -166,6 +155,9 @@ fn the_libraries_follow_the_team_catalog() {
     assert_eq!((older, archived), (0, 0));
     let status = libraries.status();
     assert!(!status.restart_kicad);
+    // The team catalog knows its code now, which names it in the list of
+    // teams.
+    assert_eq!(team.code(), "MA");
     assert_eq!(
         status.team_code,
         TeamCode::Set {
@@ -242,7 +234,7 @@ fn the_libraries_follow_the_team_catalog() {
     std::fs::create_dir_all(crowded.join("MA")).unwrap();
     let theirs = r#"{"team_id":"another-team","server":"http://127.0.0.1:9999","code":"MA","updated_at_ms":1}"#;
     std::fs::write(crowded.join("MA").join(kicad_libraries::STATE_FILE), theirs).unwrap();
-    let clash = KicadLibraries::start(crowded.clone(), team.clone());
+    let clash = TeamLibraries::start(crowded.clone(), team.clone());
     let taken = KicadLibrariesState::CodeTaken {
         code: "MA".into(),
         other_server: "http://127.0.0.1:9999".into(),
@@ -262,7 +254,7 @@ fn the_libraries_follow_the_team_catalog() {
         theirs
     );
 
-    team.sign_out(server.url());
+    team.sign_out();
     wait_for(&libraries, "signing out", |state| {
         *state == KicadLibrariesState::SignedOut
     });
