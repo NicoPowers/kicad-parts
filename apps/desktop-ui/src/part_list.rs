@@ -10,8 +10,9 @@
 //!
 //! A new answer, such as one after a teammate's save, updates sections and
 //! rows in place. So keyboard focus, the open sections and the scroll
-//! position stay where the person left them.
+//! position stay where the person left them (see list_focus).
 
+use crate::list_focus::{Focused, ListFocus};
 use crate::{Load, backend, grouped};
 use desktop_contract::{PartSummary, SearchResponse};
 use leptos::prelude::*;
@@ -244,7 +245,7 @@ fn count_text(response: &SearchResponse) -> String {
 }
 
 /// An HTML ID for a section's list of parts.
-fn section_id(category: &str) -> String {
+pub(crate) fn section_id(category: &str) -> String {
     let safe: String = category
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -355,6 +356,7 @@ pub(crate) fn ResultList(
 ) -> impl IntoView {
     let open = RwSignal::new(OpenSections::default());
     let loaded = RwSignal::new(Loaded::default());
+    let focus = ListFocus::new();
     let reveals = StoredValue::new(Reveals::default());
     // The search (trimmed) the shown results are for.
     let shown_query = StoredValue::new(None::<String>);
@@ -513,6 +515,27 @@ pub(crate) fn ResultList(
         try_scroll();
     });
 
+    // The sections shown, by category code, in order. When the one holding
+    // focus goes, focus moves to the one that took its place.
+    let shown_sections = Memo::new(move |_| {
+        results.with(|results| match results {
+            Load::Ready(searched) => searched
+                .response
+                .sections
+                .iter()
+                .map(|section| section.category.clone())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+    });
+    Effect::new(move |before: Option<Vec<String>>| {
+        let now = shown_sections.get();
+        if let Some(before) = before.filter(|before| *before != now) {
+            focus.sections_changed(&before, &now);
+        }
+        now
+    });
+
     let choose = move |ipn: String| {
         adding.set(false);
         checking.set(false);
@@ -530,6 +553,7 @@ pub(crate) fn ResultList(
         <ul
             class="results"
             aria-label="Search results"
+            on:focusout=move |event| focus.left(&event)
             data-query=move || results.with(|results| match results {
                 Load::Ready(searched) => Some(searched.response.query.clone()),
                 _ => None,
@@ -568,6 +592,7 @@ pub(crate) fn ResultList(
                         load=load_section
                         toggled=toggled
                         focus_after_load=focus_after_load
+                        focus=focus
                     />
                 }
             />
@@ -588,6 +613,7 @@ fn Section(
     load: impl Fn(String) + Copy + Send + Sync + 'static,
     toggled: impl Fn() + Copy + Send + Sync + 'static,
     focus_after_load: StoredValue<Option<String>>,
+    focus: ListFocus,
 ) -> impl IntoView {
     let is_searching = searching(&query);
     // This section's contents in the latest answer.
@@ -641,8 +667,25 @@ fn Section(
             })
         })
     });
-    // The rows drawn, by IPN.
-    let drawn = Memo::new(move |_| shown.with(|(rows, _)| row_ipns(rows)));
+    // The rows drawn, by IPN. When the focused row leaves or moves, focus
+    // goes back to it or to the row that took its place.
+    let drawn = Memo::new(move |_| {
+        if is_open.get() {
+            shown.with(|(rows, _)| row_ipns(rows))
+        } else {
+            Vec::new()
+        }
+    });
+    {
+        let category = category.clone();
+        Effect::new(move |before: Option<Vec<String>>| {
+            let now = drawn.get();
+            if let Some(before) = before.filter(|before| *before != now) {
+                focus.rows_changed(&category, &before, &now);
+            }
+            now
+        });
+    }
     let id = section_id(&category);
     let name = move || {
         section.with(|section| section.as_ref().map(|s| s.name.clone()).unwrap_or_default())
@@ -665,6 +708,10 @@ fn Section(
                 class="section-toggle"
                 aria-expanded=move || if is_open.get() { "true" } else { "false" }
                 aria-controls=id.clone()
+                on:focus={
+                    let category = category.clone();
+                    move |_| focus.took(Focused::Section { category: category.clone() })
+                }
                 on:click={
                     let category = category.clone();
                     move |_| {
@@ -691,6 +738,7 @@ fn Section(
             >
                 {move || is_open.get().then(|| {
                     let show_all = show_all.clone();
+                    let category = category.clone();
                     view! {
                         // One row per part, keyed by IPN. A part that
                         // changes updates its row in place, so a focused
@@ -704,8 +752,10 @@ fn Section(
                                     <PartRow
                                         ipn=ipn
                                         part=part
+                                        category=category.clone()
                                         selected=selected
                                         choose=choose
+                                        focus=focus
                                     />
                                 }
                             }
@@ -767,8 +817,10 @@ fn row_part(shown: Memo<(Vec<PartSummary>, SectionEnd)>, ipn: String) -> Memo<Op
 fn PartRow(
     ipn: String,
     part: Memo<Option<PartSummary>>,
+    category: String,
     selected: RwSignal<Option<String>>,
     choose: impl Fn(String) + Copy + Send + Sync + 'static,
+    focus: ListFocus,
 ) -> impl IntoView {
     let is_selected = {
         let ipn = ipn.clone();
@@ -777,6 +829,10 @@ fn PartRow(
     let labels =
         Memo::new(move |_| part.with(|part| part.as_ref().map(row_labels).unwrap_or_default()));
     let description = move || part.with(|part| part.as_ref().map(|part| part.description.clone()));
+    let focused = Focused::Row {
+        category,
+        ipn: ipn.clone(),
+    };
     view! {
         <li>
             <button
@@ -784,6 +840,7 @@ fn PartRow(
                 class="result"
                 data-ipn=ipn.clone()
                 aria-current=move || is_selected().then_some("true")
+                on:focus=move |_| focus.took(focused.clone())
                 on:click=move |_| choose(ipn.clone())
             >
                 <span class="result-title">{move || labels.with(|(title, _)| title.clone())}</span>

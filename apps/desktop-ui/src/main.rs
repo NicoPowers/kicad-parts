@@ -10,6 +10,7 @@ mod edit_cad;
 mod kicad_libraries;
 mod libraries;
 mod library_check;
+mod list_focus;
 mod part_list;
 mod team;
 mod viewer;
