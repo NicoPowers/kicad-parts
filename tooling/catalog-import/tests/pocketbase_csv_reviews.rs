@@ -512,6 +512,7 @@ fn taking_a_csv_symbol_adds_a_revision_unless_it_is_archived() {
 
 /// A route that saves a CSV review directly, in a new Change, as buggy
 /// server code might: a valid review unless the body overrides a field.
+/// With `change`, it saves no Change and names that earlier one instead.
 const DIRECT_SAVE_HOOK: &str = r#"
 routerAdd("POST", "/api/test/csv-review", (e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
@@ -522,19 +523,23 @@ routerAdd("POST", "/api/test/csv-review", (e) => {
       const problem = txApp.findRecordById("catalog_import_problems", body.problem);
       const detail = JSON.parse(problem.getString("detail"));
       const recorded = detail.details || detail.revision;
-      const last = txApp.findRecordsByFilter("catalog_changes", "seq > 0", "-seq", 1, 0)[0];
-      const seq = last.getInt("seq") + 1;
-      const correlation = "test-" + seq;
-      const change = new Record(txApp.findCollectionByNameOrId("catalog_changes"));
-      change.set("id", lib.deriveId("change", correlation));
-      change.set("seq", seq);
-      change.set("kind", body.kind || "csv-review");
-      change.set("reason", "test");
-      change.set("correlation_id", correlation);
-      change.set("actor", "test");
-      change.set("sources", "{}");
-      change.set("summary", "{}");
-      txApp.save(change);
+      let change = body.change ? txApp.findRecordById("catalog_changes", body.change) : null;
+      if (!change) {
+        const last = txApp.findRecordsByFilter("catalog_changes", "seq > 0", "-seq", 1, 0)[0];
+        const correlation = "test-" + (last.getInt("seq") + 1);
+        change = new Record(txApp.findCollectionByNameOrId("catalog_changes"));
+        change.set("id", lib.deriveId("change", correlation));
+        change.set("seq", last.getInt("seq") + 1);
+        change.set("kind", body.kind || "csv-review");
+        change.set("reason", "test");
+        change.set("correlation_id", correlation);
+        change.set("actor", "test");
+        change.set("sources", "{}");
+        change.set("summary", "{}");
+        txApp.save(change);
+      }
+      const seq = change.getInt("seq");
+      const correlation = change.getString("correlation_id");
       const review = new Record(txApp.findCollectionByNameOrId("catalog_csv_reviews"));
       review.set("id", body.id || lib.deriveId("csv-review", correlation));
       review.set("part", body.part ? txApp.findFirstRecordByData("catalog_parts", "ipn", body.part).id : part.id);
@@ -613,6 +618,19 @@ fn server_code_can_only_save_the_reviews_the_route_saves() {
     assert_eq!(valid.status, 200, "{}", valid.body);
     let saved = team.read().csv_reviews;
     assert_eq!(saved.len(), 1);
+    // The same review again, in that review's Change, passes every check
+    // above but is refused: its Change was saved by an earlier transaction,
+    // so desktops that applied it would never fetch this one
+    // (kicad-parts-2707).
+    let late_change = team.read().changes.last().unwrap().id.clone();
+    let late = save(serde_json::json!({ "change": late_change }));
+    assert_eq!(late.status, 409, "{}", late.body);
+    assert!(
+        late.body.contains("this transaction saved no Change"),
+        "{}",
+        late.body
+    );
+    assert_eq!(team.read().csv_reviews, saved, "nothing was written");
     let path = format!(
         "/api/collections/catalog_csv_reviews/records/{}",
         saved[0].id

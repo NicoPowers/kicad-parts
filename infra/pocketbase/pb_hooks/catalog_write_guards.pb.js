@@ -25,12 +25,27 @@
 //   revisions must be numbered right after the newest one, archived or not,
 //   name it as their predecessor and have the ID derived from their owner
 //   and number.
+// - A transaction saves at most one Change, numbered right after the
+//   newest. Every new record that names a Change, in any collection, names
+//   the one saved in the same transaction. A part's current details or
+//   revision move only to what that Change saved. So every move reaches
+//   every desktop (seed kicad-parts-2707; catalog_lib.js explains how).
+//   Breaking this is a programming error: the save answers 500, and the
+//   server logs it as an error.
 //
 // Raw SQL bypasses record hooks; only migrations and test fixtures that
 // tamper with a stopped instance's data.db use it.
 //
 // Handlers cannot see variables outside themselves, so the shared rules
 // live in catalog_lib.js, which each handler loads with require.
+
+// The guards read committed records through the app PocketBase started
+// with; inside a hook, e.app is the transaction.
+onBootstrap((e) => {
+  e.next();
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  lib.rememberCommittedApp(e.app);
+});
 
 onRecordCreateRequest(
   (e) => {
@@ -142,8 +157,9 @@ onRecordUpdate(
 
 // The one update the Catalog makes: a part's current details move to the
 // details saved right after them, and its current revision moves to its
-// newest revision that is not archived, in the same transaction as the
-// records that make it so.
+// newest revision that is not archived. Either move must be made by the
+// Change saved in the same transaction (catalog_lib.js
+// requireMoveByOwnChange).
 onRecordUpdate((e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
   const part = e.record;
@@ -163,7 +179,8 @@ onRecordUpdate((e) => {
   const details = part.getString("current_details");
   const detailsNumber = part.getInt("current_details_number");
   const previousDetails = before.getString("current_details");
-  if (details !== previousDetails || detailsNumber !== before.getInt("current_details_number")) {
+  const detailsMoved = details !== previousDetails || detailsNumber !== before.getInt("current_details_number");
+  if (detailsMoved) {
     const record = find("catalog_part_details", details);
     if (!record || record.getString("part") !== part.id || record.getInt("number") !== detailsNumber) {
       throw new Error(`the current details of ${ipn} must be one of its own, numbered ${detailsNumber}`);
@@ -178,7 +195,9 @@ onRecordUpdate((e) => {
   // Revision: stay, or move to the newest revision that is not archived.
   const revision = part.getString("current_revision");
   const revisionNumber = part.getInt("current_revision_number");
-  if (revision !== before.getString("current_revision") || revisionNumber !== before.getInt("current_revision_number")) {
+  const revisionMoved =
+    revision !== before.getString("current_revision") || revisionNumber !== before.getInt("current_revision_number");
+  if (revisionMoved) {
     const record = find("catalog_part_revisions", revision);
     if (!record || record.getString("part") !== part.id || record.getInt("number") !== revisionNumber) {
       throw new Error(`the current revision of ${ipn} must be one of its own, numbered ${revisionNumber}`);
@@ -189,6 +208,9 @@ onRecordUpdate((e) => {
         `the current revision of ${ipn} can only move to its newest revision that is not archived`,
       );
     }
+  }
+  if (detailsMoved || revisionMoved) {
+    lib.requireMoveByOwnChange(e.app, part, { details: detailsMoved, revision: revisionMoved });
   }
   return e.next();
 }, "catalog_parts");
@@ -403,6 +425,27 @@ onRecordCreate((e) => {
   }
   return e.next();
 }, "catalog_category_matches");
+
+// ---- Every new record names its own transaction's Change -------------------
+//
+// These two run after each collection's own checks above, so those give
+// their more specific messages first. catalog_lib.js explains the rules.
+
+// A transaction saves at most one Change, numbered right after the newest.
+onRecordCreate((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  lib.requireNextChange(e.app, e.record);
+  return e.next();
+}, "catalog_changes");
+
+// Every new record that names a Change names the one saved in the same
+// transaction. This hook runs for every collection and finds the fields
+// that name a Change in the schema, so no collection can be missed.
+onRecordCreate((e) => {
+  const lib = require(`${__hooks}/catalog_lib.js`);
+  lib.requireOwnChange(e.app, e.record);
+  return e.next();
+});
 
 // ---- Collections -----------------------------------------------------------
 //

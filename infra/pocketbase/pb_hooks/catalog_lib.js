@@ -1580,6 +1580,204 @@ function numberedRecordProblem(txApp, record) {
   return "";
 }
 
+// ---- Every new record names its own transaction's Change -----------------------
+//
+// Desktops follow the Catalog Change by Change (crates/catalog/src/replica.rs).
+// For each new Change, a desktop fetches the records that name it, once. A
+// record that names an older Change would never reach a desktop that had
+// already applied that Change. So the write guards hold every save to two
+// rules:
+//
+// - A transaction saves at most one Change, numbered right after the
+//   newest.
+// - Every new record that names a Change names the one saved in the same
+//   transaction. A part's current details or revision may move only to
+//   what that Change saved.
+//
+// How a guard finds the Change saved in this transaction: a transaction
+// sees its own writes at once, but other database connections see them
+// only once it is committed. In a hook, e.app is the transaction. The app
+// PocketBase started with reads through its own connections, so it sees
+// committed records only. The newest Change the transaction sees is its
+// own exactly when that app cannot find it. Outside a transaction both
+// see the same records, so no Change counts as this save's own.
+//
+// "The Change with the highest seq" is not enough on its own: server code
+// that saved no Change would pass by naming the newest committed one.
+//
+// A refused save is always a programming error in server code, never a
+// person's mistake, so it answers 500 and is logged as an error.
+
+const COMMITTED_APP = "catalog.committedApp";
+
+// Remembers the app PocketBase started with, so guards can read committed
+// records. catalog_write_guards.pb.js calls it once, at start-up.
+function rememberCommittedApp(app) {
+  app.store().set(COMMITTED_APP, app);
+}
+
+// The newest Change `app` can see, or null when there is none.
+function newestChange(app) {
+  const found = app.findRecordsByFilter("catalog_changes", "seq > 0", "-seq", 1, 0);
+  return found.length > 0 ? found[0] : null;
+}
+
+// The Change saved earlier in the transaction `txApp` runs, or null when
+// it saved none or `txApp` is not a transaction.
+function changeOfThisTransaction(txApp) {
+  const committed = txApp.store().get(COMMITTED_APP);
+  if (!committed) {
+    refuseProgrammingError(
+      txApp,
+      "the write guards cannot read committed records, because the app was not remembered at start-up.",
+    );
+  }
+  const newest = newestChange(txApp);
+  if (!newest || recordById(committed, "catalog_changes", newest.id)) {
+    return null;
+  }
+  return newest;
+}
+
+// The fields of `collection` that name a Change: each relation field to
+// the catalog_changes collection, as { name, required }. Fields are read
+// from the schema, so a new collection or field is covered without being
+// listed anywhere.
+function changeFieldsOf(collection, changesCollectionId) {
+  const found = [];
+  const fields = collection.fields;
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+    if (field.type() === "relation" && field.collectionId === changesCollectionId) {
+      found.push({ name: field.name, required: field.required });
+    }
+  }
+  return found;
+}
+
+// Why a new record breaks the rule that it names its own transaction's
+// Change, or "" if it keeps it. `fields` lists its Change fields as
+// { name, required, value }. `ownChangeId` is the ID of the Change this
+// transaction saved, or "" when it saved none. An optional field may stay
+// empty, as an audit entry's does for an import run that saved no Change.
+function changeFieldsProblem(collectionName, fields, ownChangeId) {
+  for (const field of fields) {
+    if (field.value === "" && !field.required) {
+      continue;
+    }
+    if (ownChangeId !== "" && field.value === ownChangeId) {
+      continue;
+    }
+    const named = field.value === "" ? "no Change" : `Change ${field.value}`;
+    if (ownChangeId === "") {
+      return `a new ${collectionName} record names ${named} in ${field.name}, but this transaction saved no Change. Save a new Change first, in the same transaction.`;
+    }
+    return `a new ${collectionName} record names ${named} in ${field.name}. It must name Change ${ownChangeId}, which this transaction saved.`;
+  }
+  return "";
+}
+
+// Why a new Change numbered `seq` breaks the numbering, or "" if it does
+// not. `newest` is the newest Change the transaction sees, as
+// { id, seq, own }, or null; `own` says this transaction saved it.
+function newChangeProblem(seq, newest) {
+  if (newest && newest.own) {
+    return `this transaction already saved Change ${newest.id}. A transaction saves one Change, so desktops fetch all its records together.`;
+  }
+  const expected = newest ? newest.seq + 1 : 1;
+  if (seq !== expected) {
+    return `a new Change must be numbered ${expected}, right after the newest, not ${seq}. Desktops refuse gaps in the numbering.`;
+  }
+  return "";
+}
+
+// Refuses a save that a write guard caught. Only wrong server code gets
+// here, so the message says so. The request answers 500 with the message.
+// It is also logged as an error twice: in the dashboard's Logs, and in the
+// server's own output, which is where a service manager keeps it.
+function refuseProgrammingError(app, problem) {
+  const message = `Programming error in the team server, not a user mistake: ${problem} The save was refused. See catalog_write_guards.pb.js.`;
+  app.logger().error(message);
+  console.error(message);
+  throw new InternalServerError(message);
+}
+
+// Refuses a new record that names a Change other than its own
+// transaction's (see the rules above).
+function requireOwnChange(txApp, record) {
+  const collection = record.collection();
+  let changes = null;
+  try {
+    changes = txApp.findCollectionByNameOrId("catalog_changes");
+  } catch (_) {
+    // Before the Catalog migrations run, no field can name a Change.
+    return;
+  }
+  const fields = changeFieldsOf(collection, changes.id);
+  if (fields.length === 0) {
+    return;
+  }
+  const own = changeOfThisTransaction(txApp);
+  const problem = changeFieldsProblem(
+    collection.name,
+    fields.map((field) => ({ name: field.name, required: field.required, value: record.getString(field.name) })),
+    own ? own.id : "",
+  );
+  if (problem) {
+    refuseProgrammingError(txApp, problem);
+  }
+}
+
+// Refuses a new Change that is not the first in its transaction or that
+// is not numbered right after the newest.
+function requireNextChange(txApp, change) {
+  const newest = newestChange(txApp);
+  // This transaction's Change, when there is one, is always the newest.
+  const own = changeOfThisTransaction(txApp) !== null;
+  const problem = newChangeProblem(
+    change.getInt("seq"),
+    newest ? { id: newest.id, seq: newest.getInt("seq"), own: own } : null,
+  );
+  if (problem) {
+    refuseProgrammingError(txApp, problem);
+  }
+}
+
+// Refuses a move of `part`'s current details or revision that the Change
+// saved in this transaction did not make. `moved` says which pointers
+// moved; the part-update guard has already checked where they point.
+// Details move only to details that Change saved. A revision moves only to
+// a revision that Change saved, or because of an archive entry in it.
+function requireMoveByOwnChange(txApp, part, moved) {
+  const own = changeOfThisTransaction(txApp);
+  const ipn = part.getString("ipn");
+  if (moved.details) {
+    const details = recordById(txApp, "catalog_part_details", part.getString("current_details"));
+    if (!own || !details || details.getString("change") !== own.id) {
+      refuseProgrammingError(
+        txApp,
+        `the current details of ${ipn} moved to details that this transaction's Change did not save. Desktops would never hear of the move.`,
+      );
+    }
+  }
+  if (moved.revision) {
+    const revision = recordById(txApp, "catalog_part_revisions", part.getString("current_revision"));
+    const savedByOwn = own !== null && revision !== null && revision.getString("change") === own.id;
+    const archivedByOwn =
+      own !== null &&
+      txApp.findRecordsByFilter("catalog_archive_entries", "part = {:part} && change = {:change}", "", 1, 0, {
+        part: part.id,
+        change: own.id,
+      }).length > 0;
+    if (!savedByOwn && !archivedByOwn) {
+      refuseProgrammingError(
+        txApp,
+        `the current revision of ${ipn} moved, but this transaction's Change saved neither that revision nor an archive entry. Desktops would never hear of the move.`,
+      );
+    }
+  }
+}
+
 // A hash of a CAD item revision's content: its snapshot with the numbers of
 // its 3D model bindings left out, over key-sorted JSON (see the import
 // route). Never compare it with crates/catalog's content hash.
@@ -3810,6 +4008,14 @@ module.exports = {
   recordById: recordById,
   NUMBERED_RECORDS: NUMBERED_RECORDS,
   numberedRecordProblem: numberedRecordProblem,
+  rememberCommittedApp: rememberCommittedApp,
+  changeOfThisTransaction: changeOfThisTransaction,
+  changeFieldsOf: changeFieldsOf,
+  changeFieldsProblem: changeFieldsProblem,
+  newChangeProblem: newChangeProblem,
+  requireOwnChange: requireOwnChange,
+  requireNextChange: requireNextChange,
+  requireMoveByOwnChange: requireMoveByOwnChange,
   newestRevision: newestRevision,
   newestNotArchived: newestNotArchived,
   cadContent: cadContent,

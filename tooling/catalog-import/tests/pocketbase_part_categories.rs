@@ -640,12 +640,18 @@ fn server_code_can_only_save_a_remembered_match_with_a_persons_category_change()
         assert_eq!(reply.status, 409, "{overrides}: {}", reply.body);
         assert!(reply.body.contains(says), "{says}: {}", reply.body);
     }
+    // Even a match that would pass every check above is refused: it names
+    // the edit's Change, saved in an earlier transaction, so desktops that
+    // applied that Change would never fetch it (kicad-parts-2707). Only the
+    // edit route itself saves matches.
+    let late = save(serde_json::json!({}));
+    assert_eq!(late.status, 409, "{}", late.body);
+    assert!(
+        late.body.contains("this transaction saved no Change"),
+        "{}",
+        late.body
+    );
     assert_eq!(team.read(), stored, "nothing was written");
-    // The person's own confirmation in that edit is accepted (here a
-    // supplier category, which only ever counts once a person confirms it).
-    let valid = save(serde_json::json!({}));
-    assert_eq!(valid.status, 200, "{}", valid.body);
-    assert_eq!(team.read().category_matches.len(), 4);
     team.server.stop();
 }
 
