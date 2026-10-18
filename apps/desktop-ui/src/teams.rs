@@ -94,134 +94,68 @@ pub fn TeamsMenu(
         adding.set(true);
         focus_later(PASSWORD);
     };
-    move || {
-        let Some(status) = teams.get() else {
-            return ().into_any();
-        };
-        let (summary, badge) = summary(&status);
-        let anyone_signed_in = status.teams.iter().any(has_session);
-        let show_form = adding.get() || !anyone_signed_in;
-        let rows = status
-            .teams
-            .iter()
-            .cloned()
-            .map(|team| {
-                let server = team.server_url.clone();
-                let can_sign_out = has_session(&team);
-                let needs_password = matches!(team.session, TeamSession::SignedOut { .. });
-                let again = team.clone();
-                let (sign_out_server, remove_server) = (server.clone(), server.clone());
-                let label = team.label();
-                let address = (label != address_of(&team.server_url)).then(|| team.server_url.clone());
-                view! {
-                    <li class="team-row">
-                        <p class="team-name">
-                            <strong>{label}</strong>
-                            {address.map(|address| view! { <span class="team-server">{address}</span> })}
-                        </p>
-                        <p class="team-state">{state_words(&team)}</p>
-                        <div class="team-actions">
-                            {needs_password.then(|| view! {
-                                <button type="button" on:click=move |_| sign_in_again(again.clone())>
-                                    "Sign in"
-                                </button>
-                            })}
-                            {can_sign_out.then(|| view! {
-                                <button type="button" on:click=move |_| act(Action::SignOut, sign_out_server.clone())>
-                                    "Sign out"
-                                </button>
-                            })}
-                            <button type="button" on:click=move |_| act(Action::Remove, remove_server.clone())>
-                                "Remove"
-                            </button>
-                        </div>
-                    </li>
-                }
-            })
-            .collect_view();
-        let has_teams = !status.teams.is_empty();
-        let until_closed = match &status.kept {
-            SignInsKept::AfterRestart => None,
-            SignInsKept::UntilClosed { reason } => Some(format!(
+    // Only the rows follow every status change. The form is drawn once
+    // while it shows, so a team going offline never takes the focus away
+    // from what the person is typing.
+    let anyone_signed_in = Memo::new(move |_| {
+        teams.with(|status| {
+            status
+                .as_ref()
+                .is_some_and(|status| status.teams.iter().any(has_session))
+        })
+    });
+    let has_teams = Memo::new(move |_| {
+        teams.with(|status| {
+            status
+                .as_ref()
+                .is_some_and(|status| !status.teams.is_empty())
+        })
+    });
+    let show_form = Memo::new(move |_| adding.get() || !anyone_signed_in.get());
+    let badge = Memo::new(move |_| teams.with(|status| status.as_ref().map(summary)));
+    let until_closed = Memo::new(move |_| {
+        teams.with(|status| match status.as_ref().map(|status| &status.kept) {
+            Some(SignInsKept::UntilClosed { reason }) => Some(format!(
                 "You stay signed in only until the app closes, because {reason}. After a restart, the app asks for each password again."
             )),
-        };
-        let hint = if until_closed.is_some() {
-            "The app never saves your password."
-        } else {
-            "You stay signed in after a restart. The app never saves your password."
-        };
-        let problem = status.problem.clone();
-        view! {
-            <details class="team-settings" open=open.get_untracked() on:toggle=toggled>
-                <summary class=badge>{summary}</summary>
+            _ => None,
+        })
+    });
+    let problem = Memo::new(move |_| {
+        teams.with(|status| status.as_ref().and_then(|status| status.problem.clone()))
+    });
+    let rows = move || {
+        teams.with(|status| {
+            status
+                .iter()
+                .flat_map(|status| status.teams.iter().cloned())
+                .map(|team| team_row(team, act, sign_in_again))
+                .collect_view()
+        })
+    };
+    let loaded = Memo::new(move |_| badge.with(Option::is_some));
+    let look = move || badge.with(|badge| badge.as_ref().map(|badge| badge.1).unwrap_or_default());
+    let words = move || {
+        badge.with(|badge| {
+            badge
+                .as_ref()
+                .map(|badge| badge.0.clone())
+                .unwrap_or_default()
+        })
+    };
+    move || {
+        loaded.get().then(|| view! {
+            <details class="team-settings" prop:open=move || open.get() on:toggle=toggled>
+                <summary class=look>{words}</summary>
                 <div class="kicad-settings-body team-settings-body">
-                    {has_teams.then(|| view! {
+                    <Show when=move || has_teams.get()>
                         <h2 class="teams-heading" id="teams-heading">"Your teams"</h2>
                         <ul class="team-list" aria-labelledby="teams-heading">{rows}</ul>
-                    })}
-                    {until_closed.map(|text| view! { <p class="hint" id="sign-ins-until-closed">{text}</p> })}
-                    {if show_form {
-                        view! {
-                            <form
-                                class="team-sign-in"
-                                aria-label="Sign in to the team catalog"
-                                on:submit=move |event| {
-                                    event.prevent_default();
-                                    sign_in();
-                                }
-                            >
-                                <p>
-                                    {if has_teams {
-                                        "Sign in to a team, or add one. Each client's team has its own server."
-                                    } else {
-                                        "Sign in to see each part's history and to edit parts with your team."
-                                    }}
-                                </p>
-                                <label for="team-server">"Team server address"</label>
-                                // Text, not url: the address may leave out https://,
-                                // which a url input would refuse before the app sees it.
-                                <input
-                                    id="team-server"
-                                    type="text"
-                                    inputmode="url"
-                                    spellcheck="false"
-                                    placeholder="https://team.example.com"
-                                    prop:value=move || server_url.get()
-                                    on:input:target=move |event| server_url.set(event.target().value())
-                                />
-                                <label for="team-email">"Email"</label>
-                                <input
-                                    id="team-email"
-                                    type="email"
-                                    autocomplete="username"
-                                    spellcheck="false"
-                                    prop:value=move || email.get()
-                                    on:input:target=move |event| email.set(event.target().value())
-                                />
-                                <label for=PASSWORD>"Password"</label>
-                                <input
-                                    id=PASSWORD
-                                    type="password"
-                                    autocomplete="current-password"
-                                    prop:value=move || password.get()
-                                    on:input:target=move |event| password.set(event.target().value())
-                                />
-                                <p class="hint">{hint}</p>
-                                {problem.map(|message| view! { <p class="problem" role="alert">{message}</p> })}
-                                <div class="team-actions">
-                                    <button type="submit" class="primary" disabled=move || busy.get()>
-                                        {move || if busy.get() { "Signing in…" } else { "Sign in" }}
-                                    </button>
-                                    {anyone_signed_in.then(|| view! {
-                                        <button type="button" on:click=move |_| adding.set(false)>"Cancel"</button>
-                                    })}
-                                </div>
-                            </form>
-                        }
-                        .into_any()
-                    } else {
-                        view! {
+                    </Show>
+                    {move || until_closed.get().map(|text| view! { <p class="hint" id="sign-ins-until-closed">{text}</p> })}
+                    <Show
+                        when=move || show_form.get()
+                        fallback=move || view! {
                             <button
                                 type="button"
                                 id="team-add"
@@ -235,12 +169,112 @@ pub fn TeamsMenu(
                                 "Add a team"
                             </button>
                         }
-                        .into_any()
-                    }}
+                    >
+                        <form
+                            class="team-sign-in"
+                            aria-label="Sign in to the team catalog"
+                            on:submit=move |event| {
+                                event.prevent_default();
+                                sign_in();
+                            }
+                        >
+                            <p>
+                                {move || if has_teams.get() {
+                                    "Sign in to a team, or add one. Each client's team has its own server."
+                                } else {
+                                    "Sign in to see each part's history and to edit parts with your team."
+                                }}
+                            </p>
+                            <label for="team-server">"Team server address"</label>
+                            // Text, not url: the address may leave out https://,
+                            // which a url input would refuse before the app sees it.
+                            <input
+                                id="team-server"
+                                type="text"
+                                inputmode="url"
+                                spellcheck="false"
+                                placeholder="https://team.example.com"
+                                prop:value=move || server_url.get()
+                                on:input:target=move |event| server_url.set(event.target().value())
+                            />
+                            <label for="team-email">"Email"</label>
+                            <input
+                                id="team-email"
+                                type="email"
+                                autocomplete="username"
+                                spellcheck="false"
+                                prop:value=move || email.get()
+                                on:input:target=move |event| email.set(event.target().value())
+                            />
+                            <label for=PASSWORD>"Password"</label>
+                            <input
+                                id=PASSWORD
+                                type="password"
+                                autocomplete="current-password"
+                                prop:value=move || password.get()
+                                on:input:target=move |event| password.set(event.target().value())
+                            />
+                            <p class="hint">
+                                {move || if until_closed.with(Option::is_some) {
+                                    "The app never saves your password."
+                                } else {
+                                    "You stay signed in after a restart. The app never saves your password."
+                                }}
+                            </p>
+                            {move || problem.get().map(|message| view! { <p class="problem" role="alert">{message}</p> })}
+                            <div class="team-actions">
+                                <button type="submit" class="primary" disabled=move || busy.get()>
+                                    {move || if busy.get() { "Signing in…" } else { "Sign in" }}
+                                </button>
+                                {move || anyone_signed_in.get().then(|| view! {
+                                    <button type="button" on:click=move |_| adding.set(false)>"Cancel"</button>
+                                })}
+                            </div>
+                        </form>
+                    </Show>
                 </div>
             </details>
-        }
-        .into_any()
+        })
+    }
+}
+
+/// One team's row in the Teams menu: its name, where it stands, and what
+/// the person can do.
+fn team_row(
+    team: TeamStatus,
+    act: impl Fn(Action, String) + Copy + 'static,
+    sign_in_again: impl Fn(TeamStatus) + Copy + 'static,
+) -> impl IntoView {
+    let server = team.server_url.clone();
+    let can_sign_out = has_session(&team);
+    let needs_password = matches!(team.session, TeamSession::SignedOut { .. });
+    let again = team.clone();
+    let (sign_out_server, remove_server) = (server.clone(), server);
+    let label = team.label();
+    let address = (label != address_of(&team.server_url)).then(|| team.server_url.clone());
+    view! {
+        <li class="team-row">
+            <p class="team-name">
+                <strong>{label}</strong>
+                {address.map(|address| view! { <span class="team-server">{address}</span> })}
+            </p>
+            <p class="team-state">{state_words(&team)}</p>
+            <div class="team-actions">
+                {needs_password.then(|| view! {
+                    <button type="button" on:click=move |_| sign_in_again(again.clone())>
+                        "Sign in"
+                    </button>
+                })}
+                {can_sign_out.then(|| view! {
+                    <button type="button" on:click=move |_| act(Action::SignOut, sign_out_server.clone())>
+                        "Sign out"
+                    </button>
+                })}
+                <button type="button" on:click=move |_| act(Action::Remove, remove_server.clone())>
+                    "Remove"
+                </button>
+            </div>
+        </li>
     }
 }
 
@@ -377,7 +411,10 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
     if again > 0 {
         notes.push(format!("{again} to sign in again"));
     }
-    if offline > 0 {
+    if offline > 0 && status.teams.len() == 1 {
+        // With one team there is nothing to count.
+        notes.push("offline".to_owned());
+    } else if offline > 0 {
         notes.push(format!("{offline} offline"));
     }
     let look = if !notes.is_empty() {
@@ -519,6 +556,20 @@ mod tests {
         assert_eq!(
             summary(&status(vec![rejected])),
             ("Team catalog: sign in again".into(), PROBLEM)
+        );
+    }
+
+    #[test]
+    fn one_team_offline_is_said_without_a_count() {
+        let offline = team(
+            "MA",
+            signed_in(LiveUpdates::Reconnecting {
+                message: "refused".into(),
+            }),
+        );
+        assert_eq!(
+            summary(&status(vec![offline])),
+            ("Team catalog · Ada Editor · offline".into(), PROBLEM)
         );
     }
 
