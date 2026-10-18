@@ -871,10 +871,12 @@ export async function teamSignIn(url, account) {
  * would: read the current details and revision, change fields, and POST
  * /api/catalog/edits with only the section that changed (Symbol and
  * Footprint belong to the revision, every other field to the details).
+ * With `mpn`, it also gives the main manufacturer part that MPN.
  * Returns the Change's number.
  * @param {Record<string, string>} values field name to new value
+ * @param {{ mpn?: string }} options
  */
-export async function editAsSomeoneElse(url, token, ipn, values, reason) {
+export async function editAsSomeoneElse(url, token, ipn, values, reason, { mpn } = {}) {
   const headers = { Authorization: token, 'Content-Type': 'application/json' };
   const get = (path) => fetch(`${url}${path}`, { headers }).then((r) => r.json());
   const parts = await get(`/api/collections/catalog_parts/records?filter=${encodeURIComponent(`ipn = "${ipn}"`)}`);
@@ -891,11 +893,14 @@ export async function editAsSomeoneElse(url, token, ipn, values, reason) {
     reason,
     ipn,
   };
-  if (changed(details.fields)) {
+  if (changed(details.fields) || mpn !== undefined) {
     body.details = {
       expectedDetails: savedDetails.number,
       fields: apply(details.fields),
-      manufacturerParts: details.manufacturer_parts,
+      manufacturerParts:
+        mpn === undefined
+          ? details.manufacturer_parts
+          : details.manufacturer_parts.map((part, at) => (at === 0 ? { ...part, mpn } : part)),
     };
   }
   if (changed(cad.cad_fields)) {
@@ -904,7 +909,7 @@ export async function editAsSomeoneElse(url, token, ipn, values, reason) {
   const reply = await fetch(`${url}/api/catalog/edits`, { method: 'POST', headers, body: JSON.stringify(body) });
   const answer = await reply.json();
   assert.equal(reply.status, 200, `someone else's edit: ${JSON.stringify(answer)}`);
-  record({ event: 'edit-by-someone-else', ipn, seq: answer.seq, values });
+  record({ event: 'edit-by-someone-else', ipn, seq: answer.seq, values, mpn });
   return answer.seq;
 }
 

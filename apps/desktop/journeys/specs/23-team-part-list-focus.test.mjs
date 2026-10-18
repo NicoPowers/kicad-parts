@@ -9,7 +9,11 @@
 // leaves the list. Focus then moves to the row that took its place, never
 // to the top of the page. A part that now matches appears, and focus
 // stays where it is. When a section's last match leaves, focus moves to
-// the section that took its place.
+// the section that took its place. When a save moves the focused row's
+// section above another, the row keeps focus.
+//
+// Focus the person has put elsewhere, such as in the search box or in an
+// Edit part field, stays there whatever the teammate's save removes.
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -23,6 +27,7 @@ import {
   searchFor,
   startTeamServer,
   teamSignIn,
+  textOf,
   waitForLiveUpdates,
   waitForPreviewImages,
   waitForText,
@@ -123,6 +128,26 @@ describe('team catalog: the part list stays put when a teammate saves', () => {
   /** Publishes the teammate's change to `ipn`'s description. */
   async function teammateDescribes(ipn, description) {
     await editAsSomeoneElse(server.url, teammateToken, ipn, { Description: description }, 'Plainer description');
+  }
+
+  /** Publishes the teammate's change to `ipn`'s main MPN. */
+  async function teammateRenames(ipn, mpn) {
+    await editAsSomeoneElse(server.url, teammateToken, ipn, {}, 'Correct MPN', { mpn });
+  }
+
+  /** The section names, in list order. */
+  async function sectionOrder() {
+    return browser.execute(() =>
+      [...document.querySelectorAll('.results .section-name')].map((name) => name.textContent),
+    );
+  }
+
+  /** What has focus, and its text when it is a text box. */
+  async function focusedBox() {
+    return browser.execute(() => {
+      const active = document.activeElement;
+      return { mark: active?.dataset.journeyMark ?? null, id: active?.id ?? null, value: active?.value ?? null };
+    });
   }
 
   it('keeps focus, selection, open sections and scroll, and shows the change', async () => {
@@ -233,6 +258,8 @@ describe('team catalog: the part list stays put when a teammate saves', () => {
     await waitForListSettled(browser);
     const after = await listState(browser);
     assert.equal(after.focusedIpn, takesItsPlace, `focus moves to the row that took its place: ${JSON.stringify(after)}`);
+    // Screen readers hear why focus moved.
+    assert.equal(await textOf(browser, '#list-focus-note'), `${leaving} left the list.`);
     assert.deepEqual(
       { selected: after.selected, open: after.open, scrollTop: after.scrollTop },
       { selected: before.selected, open: before.open, scrollTop: before.scrollTop },
@@ -266,6 +293,106 @@ describe('team catalog: the part list stays put when a teammate saves', () => {
     await waitForListSettled(browser);
     const after = await listState(browser);
     assert.equal(after.focusedSection, 'Resistors', `focus moves to the section that took its place: ${JSON.stringify(after)}`);
+    assert.equal(await textOf(browser, '#list-focus-note'), 'CAP-0000-0100 left the list.');
     await assertAccessible(browser, 'part-list-section-left');
+  });
+
+  it('keeps focus on a row when a save moves its section above another', async () => {
+    // Both sections match equally well, so they are in name order.
+    await teammateDescribes('CAP-0000-0100', 'CAP CER 10pF 50V C0G 0603 zeta');
+    await waitForText(browser, '#result-count', '3 matching parts');
+    await browser.waitUntil(async () => (await sectionOrder()).join() === 'Capacitors,Resistors', {
+      timeout: 20_000,
+      timeoutMsg: 'Capacitors never came back above Resistors',
+    });
+    await waitForListSettled(browser);
+    await focusRow(browser, 'RES-0000-1500');
+    await markFocused(browser, 'moved-row');
+    const before = await listState(browser);
+
+    // An MPN that starts with the search is a better match, so Resistors
+    // moves above Capacitors. The browser moves the focused row with it.
+    await teammateRenames('RES-0000-1800', 'ZETA-1800');
+    await browser.waitUntil(async () => (await sectionOrder()).join() === 'Resistors,Capacitors', {
+      timeout: 20_000,
+      timeoutMsg: 'Resistors never moved above Capacitors',
+    });
+    await waitForListSettled(browser);
+    assert.deepEqual(
+      await listState(browser),
+      { ...before, open: ['Resistors', 'Capacitors'] },
+      'the moved row keeps focus',
+    );
+  });
+
+  it('leaves focus in the search box when the row it came from leaves', async () => {
+    await focusRow(browser, 'RES-0000-1500');
+    await (await browser.$('#part-search')).click();
+    await markFocused(browser, 'search-box');
+    const before = await focusedBox();
+    assert.deepEqual(before, { mark: 'search-box', id: 'part-search', value: 'zeta' });
+
+    await teammateDescribes('RES-0000-1500', 'RES 150 OHM 1% 1/10W 0603');
+    await waitForText(browser, '#result-count', '2 matching parts');
+    await browser.waitUntil(async () => !(await rowIpns(browser, 'Resistors')).includes('RES-0000-1500'), {
+      timeout: 20_000,
+      timeoutMsg: 'RES-0000-1500 stayed in the list',
+    });
+    await waitForListSettled(browser);
+    assert.deepEqual(await focusedBox(), before, 'the search box keeps focus and its text');
+  });
+
+  it('leaves focus in an Edit part field when the row it came from leaves', async () => {
+    // Choose the capacitor from the keyboard and start editing it.
+    await focusRow(browser, 'CAP-0000-0100');
+    await browser.keys('Enter');
+    await waitForText(browser, '#part-title', 'CL10C100JB8NNNC');
+    // Edit part shows once the team catalog's details have loaded.
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() => {
+          const button = [...document.querySelectorAll('.part-fields button')].find(
+            (b) => b.textContent.trim() === 'Edit part',
+          );
+          button?.click();
+          return button !== undefined;
+        }),
+      { timeout: 20_000, interval: 100, timeoutMsg: 'the capacitor never offered Edit part' },
+    );
+    await waitForText(browser, '#edit-heading', 'Edit part');
+
+    // Focus a resistor row, then move to the Description field and type.
+    await focusRow(browser, 'RES-0000-1800');
+    const fieldId = await browser.execute(
+      () =>
+        [...document.querySelectorAll('.edit-form .edit-row label')].find(
+          (label) => label.textContent.trim() === 'Description',
+        )?.htmlFor ?? null,
+    );
+    assert.ok(fieldId, 'the edit form has a Description field');
+    const field = await browser.$(`#${fieldId}`);
+    await field.click();
+    await browser.keys('End');
+    await browser.keys(' draft');
+    await markFocused(browser, 'edit-field');
+    const before = await focusedBox();
+    assert.deepEqual(before, { mark: 'edit-field', id: fieldId, value: 'CAP CER 10pF 50V C0G 0603 zeta draft' });
+
+    // The teammate's change takes the last resistor, and its section, away.
+    await editAsSomeoneElse(
+      server.url,
+      teammateToken,
+      'RES-0000-1800',
+      { Description: 'RES 180 OHM 1% 1/10W 0603' },
+      'Back to the CSV',
+      { mpn: 'RC0603FR-0718KL' },
+    );
+    await waitForText(browser, '#result-count', '1 matching part');
+    await browser.waitUntil(async () => browser.execute(() => document.getElementById('parts-in-res') === null), {
+      timeout: 20_000,
+      timeoutMsg: 'the Resistors section stayed',
+    });
+    await waitForListSettled(browser);
+    assert.deepEqual(await focusedBox(), before, 'the Edit part field keeps focus and its text');
   });
 });
