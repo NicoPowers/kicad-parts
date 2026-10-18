@@ -1331,7 +1331,7 @@ fn server_code_cannot_move_a_part_backwards_or_skip_a_revision() {
     assert_eq!(skip.status, 409, "{}", skip.body);
     assert!(
         skip.body
-            .contains("must be number 3, right after its newest revision"),
+            .contains("must be number 3, right after the newest one"),
         "{}",
         skip.body
     );

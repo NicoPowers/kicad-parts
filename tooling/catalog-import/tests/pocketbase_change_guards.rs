@@ -592,26 +592,24 @@ fn a_part_moves_only_to_what_its_own_transactions_change_saved() {
     team.server.stop();
 }
 
-#[test]
-fn a_refusal_answers_500_and_is_logged_as_an_error() {
-    let team = Team::start();
-    let part = team.read().part(IPN).unwrap().clone();
-    let import_change = team.read().changes[0].id.clone();
-    let reply = team.save(json!({ "uncaught": true, "records": [
-        { "collection": "catalog_part_details", "next": part.id, "fields": { "change": import_change } },
-    ] }));
+/// Saves `body` with the refusal let through, and checks that PocketBase
+/// answers 500 and logs the message as an error in both places. Returns
+/// the message.
+fn refused_as_programming_error(team: &Team, body: Value) -> String {
+    let mut body = body;
+    body["uncaught"] = json!(true);
+    let reply = team.save(body);
     assert_eq!(reply.status, 500, "{}", reply.body);
-    let message: Value = serde_json::from_str(&reply.body).unwrap();
-    let message = message["message"].as_str().unwrap();
+    let answer: Value = serde_json::from_str(&reply.body).unwrap();
+    let message = answer["message"].as_str().unwrap().to_string();
     assert!(
-        message.starts_with(
-            "Programming error in the team server, not a user mistake: the new catalog_part_details record"
-        ) && message.ends_with("The write was refused. See catalog_write_guards.pb.js."),
+        message.starts_with("Programming error in the team server, not a user mistake: ")
+            && message.ends_with("The write was refused. See catalog_write_guards.pb.js."),
         "{message}"
     );
     // In the server's own output...
     let output = fs::read_to_string(&team.log_file).unwrap();
-    assert!(output.contains(message), "{output}");
+    assert!(output.contains(&message), "{output}");
     // ...and as an error in the dashboard's Logs, which PocketBase writes
     // in batches.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -626,12 +624,38 @@ fn a_refusal_answers_500_and_is_logged_as_an_error() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|item| item["message"] == message)
+            .any(|item| item["message"] == message.as_str())
         {
-            break;
+            return message;
         }
         assert!(Instant::now() < deadline, "not in the Logs: {}", reply.body);
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+#[test]
+fn every_guard_refusal_answers_500_and_is_logged_as_an_error() {
+    let team = Team::start();
+    let part = team.read().part(IPN).unwrap().clone();
+    let import_change = team.read().changes[0].id.clone();
+    // The rule of this seed: details that name an old Change.
+    let message = refused_as_programming_error(
+        &team,
+        json!({ "records": [
+            { "collection": "catalog_part_details", "next": part.id, "fields": { "change": import_change } },
+        ] }),
+    );
+    assert!(
+        message.contains("the new catalog_part_details record"),
+        "{message}"
+    );
+    // An older rule: details that skip a number.
+    let message = refused_as_programming_error(
+        &team,
+        json!({ "changes": 1, "records": [
+            { "collection": "catalog_part_details", "next": part.id, "fields": { "change": "$new", "number": 99 } },
+        ] }),
+    );
+    assert!(message.contains("must be number"), "{message}");
     team.server.stop();
 }

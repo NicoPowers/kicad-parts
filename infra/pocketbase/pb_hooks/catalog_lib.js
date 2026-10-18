@@ -1518,64 +1518,33 @@ function newestNotArchived(txApp, partId, state) {
 // naming the newest as its predecessor, under the ID derived from its owner
 // and number. The write guards check this for every new one.
 
-// For each numbered collection: the field naming the owner, the ID kind,
-// and the words its messages use.
+// For each numbered collection: the field naming the owner, and the kind
+// its IDs are derived with.
 const NUMBERED_RECORDS = Object.freeze({
-  catalog_part_revisions: {
-    ownerField: "part",
-    ownerWord: "part",
-    idKind: "part-revision",
-    newOne: "a new revision",
-    oneWord: "revision",
-    newestWords: "its newest revision",
-  },
-  catalog_part_details: {
-    ownerField: "part",
-    ownerWord: "part",
-    idKind: "part-details",
-    newOne: "new details",
-    oneWord: "details",
-    newestWords: "its current details",
-  },
-  catalog_cad_item_revisions: {
-    ownerField: "cad_item",
-    ownerWord: "CAD item",
-    idKind: "cad-item-revision",
-    newOne: "a new revision",
-    oneWord: "revision",
-    newestWords: "its current revision",
-  },
-  catalog_category_revisions: {
-    ownerField: "category",
-    ownerWord: "category",
-    idKind: "category-revision",
-    newOne: "a new revision",
-    oneWord: "revision",
-    newestWords: "its current revision",
-  },
+  catalog_part_revisions: { ownerField: "part", idKind: "part-revision" },
+  catalog_part_details: { ownerField: "part", idKind: "part-details" },
+  catalog_cad_item_revisions: { ownerField: "cad_item", idKind: "cad-item-revision" },
+  catalog_category_revisions: { ownerField: "category", idKind: "category-revision" },
 });
 
 // Why the new numbered `record` does not come right after its owner's
 // newest one, or "" if it does.
 function numberedRecordProblem(txApp, record) {
-  const rule = NUMBERED_RECORDS[record.collection().name];
+  const collection = record.collection().name;
+  const rule = NUMBERED_RECORDS[collection];
   const owner = record.getString(rule.ownerField);
   const number = record.getInt("number");
-  const found = txApp.findRecordsByFilter(
-    record.collection().name,
-    rule.ownerField + " = {:owner}",
-    "-number",
-    1,
-    0,
-    { owner: owner },
-  );
+  const found = txApp.findRecordsByFilter(collection, rule.ownerField + " = {:owner}", "-number", 1, 0, {
+    owner: owner,
+  });
   const newest = found.length > 0 ? found[0] : null;
   const expected = newest ? newest.getInt("number") + 1 : 1;
+  const which = `the new ${collection} record for ${rule.ownerField} ${owner}`;
   if (number !== expected || record.getString("predecessor") !== (newest ? newest.id : "")) {
-    return `${rule.newOne} of ${rule.ownerWord} ${owner} must be number ${expected}, right after ${rule.newestWords}`;
+    return `${which} must be number ${expected}, right after the newest one, and name it as its predecessor`;
   }
   if (record.id !== deriveId(rule.idKind, owner + "\n" + number)) {
-    return `${rule.oneWord} ${number} of ${rule.ownerWord} ${owner} must have the ID derived from its ${rule.ownerWord} and number`;
+    return `${which} must have the ID derived from its ${rule.ownerField} and number ${number}`;
   }
   return "";
 }

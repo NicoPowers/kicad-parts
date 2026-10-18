@@ -30,8 +30,13 @@
 //   the one saved in the same transaction. A part's current details or
 //   revision move only to what that Change saved. So every move reaches
 //   every desktop (seed kicad-parts-2707; catalog_lib.js explains how).
-//   Breaking this is a programming error: the save answers 500, and the
-//   server logs it as an error.
+// - Saving new part details, a new part revision or an archive entry moves
+//   the part there, so everything a Change saves becomes current.
+//
+// Only wrong server code can break a rule that the record API cannot
+// reach, so every such refusal is a programming error: it answers 500 and
+// is logged as an error (catalog_lib.js refuseProgrammingError). The
+// record API itself answers 403.
 //
 // Raw SQL bypasses record hooks; only migrations and test fixtures that
 // tamper with a stopped instance's data.db use it.
@@ -116,7 +121,8 @@ onRecordDeleteRequest(
 
 onRecordDelete(
   (e) => {
-    throw new Error(`${e.record.collection().name} records are never deleted`);
+    const lib = require(`${__hooks}/catalog_lib.js`);
+    lib.refuseProgrammingError(e.app, `${e.record.collection().name} records are never deleted`);
   },
   "catalog_changes",
   "catalog_blobs",
@@ -137,7 +143,8 @@ onRecordDelete(
 
 onRecordUpdate(
   (e) => {
-    throw new Error(`${e.record.collection().name} records never change once written`);
+    const lib = require(`${__hooks}/catalog_lib.js`);
+    lib.refuseProgrammingError(e.app, `${e.record.collection().name} records never change once written`);
   },
   "catalog_changes",
   "catalog_blobs",
@@ -170,7 +177,7 @@ onRecordUpdate((e) => {
   const ipn = before.getString("ipn");
   for (const name of ["ipn", "ipn_prefix", "variant", "first_change"]) {
     if (part.getString(name) !== before.getString(name)) {
-      throw new Error(`a part's ${name} never changes (${ipn})`);
+      lib.refuseProgrammingError(e.app, `a part's ${name} never changes (${ipn})`);
     }
   }
   const find = (collection, id) => lib.recordById(e.app, collection, id);
@@ -184,12 +191,12 @@ onRecordUpdate((e) => {
   if (details !== previousDetails || detailsNumber !== before.getInt("current_details_number")) {
     const record = find("catalog_part_details", details);
     if (!record || record.getString("part") !== part.id || record.getInt("number") !== detailsNumber) {
-      throw new Error(`the current details of ${ipn} must be one of its own, numbered ${detailsNumber}`);
+      lib.refuseProgrammingError(e.app, `the current details of ${ipn} must be one of its own, numbered ${detailsNumber}`);
     }
     // A new part has none until its first ones are saved.
     const previousNumber = previousDetails === "" ? 0 : before.getInt("current_details_number");
     if (detailsNumber !== previousNumber + 1 || record.getString("predecessor") !== previousDetails) {
-      throw new Error(`the current details of ${ipn} can only move to the one saved right after it`);
+      lib.refuseProgrammingError(e.app, `the current details of ${ipn} can only move to the one saved right after it`);
     }
     moved.details = record;
   }
@@ -200,11 +207,11 @@ onRecordUpdate((e) => {
   if (revision !== before.getString("current_revision") || revisionNumber !== before.getInt("current_revision_number")) {
     const record = find("catalog_part_revisions", revision);
     if (!record || record.getString("part") !== part.id || record.getInt("number") !== revisionNumber) {
-      throw new Error(`the current revision of ${ipn} must be one of its own, numbered ${revisionNumber}`);
+      lib.refuseProgrammingError(e.app, `the current revision of ${ipn} must be one of its own, numbered ${revisionNumber}`);
     }
     const newest = lib.newestNotArchived(e.app, part.id, lib.archiveState(e.app, part.id));
     if (!newest || newest.id !== revision) {
-      throw new Error(
+      lib.refuseProgrammingError(e.app, 
         `the current revision of ${ipn} can only move to its newest revision that is not archived`,
       );
     }
@@ -240,7 +247,7 @@ onRecordCreate(
     const lib = require(`${__hooks}/catalog_lib.js`);
     const problem = lib.numberedRecordProblem(e.app, e.record);
     if (problem) {
-      throw new Error(problem);
+      lib.refuseProgrammingError(e.app, problem);
     }
     return e.next();
   },
@@ -289,32 +296,32 @@ onRecordCreate((e) => {
   const find = (collection, id) => lib.recordById(e.app, collection, id);
   const revision = find("catalog_part_revisions", entry.getString("part_revision"));
   if (!revision || revision.getString("part") !== part || revision.getInt("number") !== number) {
-    throw new Error(`an archive entry must name revision ${number} of its own part ${part}`);
+    lib.refuseProgrammingError(e.app, `an archive entry must name revision ${number} of its own part ${part}`);
   }
   const change = find("catalog_changes", entry.getString("change"));
   // crates/catalog/src/replica.rs relies on this rule: it asks for archive
   // entries only in archive and unarchive Changes. A test there checks it.
   const kind = archived ? "archive" : "unarchive";
   if (!change || change.getString("kind") !== kind || change.getInt("seq") !== entry.getInt("seq")) {
-    throw new Error(`an archive entry must belong to a Change of kind ${kind} and copy its seq`);
+    lib.refuseProgrammingError(e.app, `an archive entry must belong to a Change of kind ${kind} and copy its seq`);
   }
   if (entry.id !== lib.deriveId("archive-entry", change.getString("correlation_id"))) {
-    throw new Error("an archive entry must have the ID derived from its Change's correlation ID");
+    lib.refuseProgrammingError(e.app, "an archive entry must have the ID derived from its Change's correlation ID");
   }
   const state = lib.archiveState(e.app, part);
   if ((state[number] === true) === archived) {
-    throw new Error(`an archive entry must change the state of revision ${number}`);
+    lib.refuseProgrammingError(e.app, `an archive entry must change the state of revision ${number}`);
   }
   state[number] = archived;
   const current = lib.newestNotArchived(e.app, part, state);
   if (!current) {
-    throw new Error(`an archive entry cannot archive the only revision of part ${part} that is not archived`);
+    lib.refuseProgrammingError(e.app, `an archive entry cannot archive the only revision of part ${part} that is not archived`);
   }
   if (
     entry.getString("current_revision_after") !== current.id ||
     entry.getInt("current_revision_number_after") !== current.getInt("number")
   ) {
-    throw new Error(
+    lib.refuseProgrammingError(e.app, 
       `an archive entry must name revision ${current.getInt("number")}, the newest not archived, as current afterwards`,
     );
   }
@@ -346,10 +353,10 @@ onRecordCreate((e) => {
   const problem = find("catalog_import_problems", review.getString("problem"));
   const kind = problem ? lib.CSV_REVIEW_KINDS[problem.getString("code")] : undefined;
   if (!part || !problem || !kind || problem.getString("subject") !== part.getString("ipn")) {
-    throw new Error("a CSV review must name a CSV difference of its own part");
+    lib.refuseProgrammingError(e.app, "a CSV review must name a CSV difference of its own part");
   }
   if (review.getString("code") !== problem.getString("code")) {
-    throw new Error("a CSV review must copy its problem's code");
+    lib.refuseProgrammingError(e.app, "a CSV review must copy its problem's code");
   }
   let recorded = null;
   try {
@@ -359,14 +366,14 @@ onRecordCreate((e) => {
     recorded = null;
   }
   if (typeof recorded !== "string" || review.getString("csv_sha256") !== $security.sha256(recorded)) {
-    throw new Error("a CSV review must name the SHA-256 of the CSV document its problem recorded");
+    lib.refuseProgrammingError(e.app, "a CSV review must name the SHA-256 of the CSV document its problem recorded");
   }
   const change = find("catalog_changes", review.getString("change"));
   if (!change || change.getString("kind") !== "csv-review" || change.getInt("seq") !== review.getInt("seq")) {
-    throw new Error("a CSV review must belong to a Change of kind csv-review and copy its seq");
+    lib.refuseProgrammingError(e.app, "a CSV review must belong to a Change of kind csv-review and copy its seq");
   }
   if (review.id !== lib.deriveId("csv-review", change.getString("correlation_id"))) {
-    throw new Error("a CSV review must have the ID derived from its Change's correlation ID");
+    lib.refuseProgrammingError(e.app, "a CSV review must have the ID derived from its Change's correlation ID");
   }
   let accepted = null;
   try {
@@ -375,7 +382,7 @@ onRecordCreate((e) => {
     accepted = null;
   }
   if (!Array.isArray(accepted) || !accepted.every((name) => typeof name === "string" && name.length > 0)) {
-    throw new Error("a CSV review must list the field names it took, as JSON");
+    lib.refuseProgrammingError(e.app, "a CSV review must list the field names it took, as JSON");
   }
   return e.next();
 }, "catalog_csv_reviews");
@@ -395,7 +402,7 @@ onRecordCreate((e) => {
   }
   const document = lib.categoryDocument(parsed);
   if (typeof document === "string" || lib.deriveId("category", document.code) !== category) {
-    throw new Error(`revision ${number} of category ${category} must be a category with that category's code`);
+    lib.refuseProgrammingError(e.app, `revision ${number} of category ${category} must be a category with that category's code`);
   }
   return e.next();
 }, "catalog_category_revisions");
@@ -403,7 +410,7 @@ onRecordCreate((e) => {
 onRecordCreate((e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
   if (e.record.id !== lib.deriveId("category", e.record.getString("code"))) {
-    throw new Error("a category must have the ID derived from its code");
+    lib.refuseProgrammingError(e.app, "a category must have the ID derived from its code");
   }
   return e.next();
 }, "catalog_categories");
@@ -426,10 +433,10 @@ onRecordCreate((e) => {
     change.getString("actor") !== match.getString("actor") ||
     change.getString("actor_name") !== match.getString("actor_name")
   ) {
-    throw new Error("a remembered match must belong to an edit or a new part and copy its seq and who made it");
+    lib.refuseProgrammingError(e.app, "a remembered match must belong to an edit or a new part and copy its seq and who made it");
   }
   if (match.id !== lib.deriveId("category-match", change.id + "\n" + match.getString("clue"))) {
-    throw new Error("a remembered match must have the ID derived from its Change and clue");
+    lib.refuseProgrammingError(e.app, "a remembered match must have the ID derived from its Change and clue");
   }
   const saved = e.app.findRecordsByFilter(
     "catalog_part_details",
@@ -460,7 +467,7 @@ onRecordCreate((e) => {
     lib.deriveId("category", category) !== match.getString("category") ||
     !confirmed
   ) {
-    throw new Error(
+    lib.refuseProgrammingError(e.app, 
       "a remembered match must come with an edit that moves its part to the match's category, or with a new part in it",
     );
   }
