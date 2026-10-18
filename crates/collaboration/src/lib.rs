@@ -5,6 +5,8 @@
 //!   (`infra/pocketbase/pb_hooks/collab_commands.pb.js`) and of the
 //!   provisional collections (`infra/pocketbase/pb_migrations`).
 //! - [`PocketBaseClient`] authenticates and calls the REST API.
+//! - [`ConnectionProblem`] says in plain words why the server could not be
+//!   reached.
 //! - [`RealtimeConnection`] receives change notifications over PocketBase's
 //!   server-sent events.
 //! - [`Replica`] keeps a local copy consistent: it applies changes in
@@ -15,11 +17,13 @@
 //! model (kicad-parts-fef6, kicad-parts-2254) will adopt these mechanics.
 
 mod client;
+mod connection;
 pub mod contract;
 mod realtime;
 mod replica;
 
 pub use client::{HttpReply, PocketBaseClient};
+pub use connection::ConnectionProblem;
 pub use contract::{
     ChangeEntry, CommandOutcome, CommandReply, CorrelationId, EditRecord, RecordSnapshot,
 };
@@ -32,7 +36,7 @@ use std::fmt;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CollabError {
     /// The server could not be reached or the connection broke.
-    Transport(String),
+    Transport(ConnectionProblem),
     /// 401: not signed in, or the token is not valid for this route.
     Unauthorized(String),
     /// 403: signed in, but the rules forbid it.
@@ -46,9 +50,7 @@ pub enum CollabError {
 impl fmt::Display for CollabError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Transport(message) => {
-                write!(formatter, "cannot reach the team server: {message}")
-            }
+            Self::Transport(problem) => problem.fmt(formatter),
             Self::Unauthorized(message) => write!(formatter, "not signed in: {message}"),
             Self::Forbidden(message) => write!(formatter, "not allowed: {message}"),
             Self::Http { status, message } => {

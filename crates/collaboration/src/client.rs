@@ -1,5 +1,6 @@
 //! A blocking PocketBase REST client.
 
+use crate::connection::ConnectionProblem;
 use crate::contract::{ChangeEntry, CommandOutcome, CommandReply, EditRecord, RecordSnapshot};
 use crate::{CollabError, CollabResult};
 use serde::de::DeserializeOwned;
@@ -334,7 +335,7 @@ impl PocketBaseClient {
         response
             .into_reader()
             .read_to_end(&mut bytes)
-            .map_err(|io| CollabError::Transport(io.to_string()))?;
+            .map_err(|io| CollabError::Transport(ConnectionProblem::after_connecting(&io)))?;
         Ok(bytes)
     }
 
@@ -408,7 +409,7 @@ impl PocketBaseClient {
         let replayed = response.header("X-Collab-Replayed") == Some("true");
         let body = response
             .into_string()
-            .map_err(|io| CollabError::Transport(io.to_string()))?;
+            .map_err(|io| CollabError::Transport(ConnectionProblem::after_connecting(&io)))?;
         Ok(HttpReply {
             status,
             body,
@@ -417,27 +418,8 @@ impl PocketBaseClient {
     }
 }
 
-/// A transport error without URL query strings, which can carry file
-/// tokens (`?token=...`).
 fn transport_error(error: &ureq::Error) -> CollabError {
-    CollabError::Transport(without_queries(&error.to_string()))
-}
-
-/// Drops everything from each `?` to the next whitespace.
-fn without_queries(text: &str) -> String {
-    let mut clean = String::with_capacity(text.len());
-    let mut in_query = false;
-    for ch in text.chars() {
-        if ch == '?' {
-            in_query = true;
-        } else if ch.is_whitespace() {
-            in_query = false;
-        }
-        if !in_query {
-            clean.push(ch);
-        }
-    }
-    clean
+    CollabError::Transport(ConnectionProblem::from_ureq(error))
 }
 
 #[cfg(test)]
@@ -472,10 +454,6 @@ mod tests {
 
     #[test]
     fn transport_errors_never_show_url_queries() {
-        assert_eq!(
-            without_queries("http://h/api/files/c/r/f.pdf?token=secret: Connection refused"),
-            "http://h/api/files/c/r/f.pdf Connection refused"
-        );
         let client = PocketBaseClient::new("http://127.0.0.1:9");
         let failure = client
             .download_file("c", "r", "f.pdf", Some("secret-token"))
@@ -491,7 +469,7 @@ mod tests {
         assert_eq!(client.base_url(), "http://127.0.0.1:9");
         assert!(matches!(
             client.get("/api/health"),
-            Err(CollabError::Transport(_))
+            Err(CollabError::Transport(ConnectionProblem::NotReachable(_)))
         ));
     }
 }

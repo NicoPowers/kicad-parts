@@ -7,6 +7,7 @@
 //! deployment work).
 
 use crate::client::PocketBaseClient;
+use crate::connection::ConnectionProblem;
 use crate::{CollabError, CollabResult};
 use serde_json::Value;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -26,7 +27,7 @@ pub struct RealtimeEvent {
 
 enum Message {
     Event(RealtimeEvent),
-    Closed(String),
+    Closed(ConnectionProblem),
 }
 
 /// An open realtime stream.
@@ -35,7 +36,7 @@ pub struct RealtimeConnection {
     socket: TcpStream,
     events: Receiver<Message>,
     reader: Option<JoinHandle<()>>,
-    closed: Option<String>,
+    closed: Option<ConnectionProblem>,
 }
 
 impl RealtimeConnection {
@@ -52,27 +53,26 @@ impl RealtimeConnection {
             })?;
         let address = authority
             .to_socket_addrs()
-            .map_err(|io| CollabError::Transport(io.to_string()))?
+            .map_err(connecting)?
             .next()
-            .ok_or_else(|| CollabError::Transport(format!("`{authority}` has no address")))?;
-        let socket = TcpStream::connect_timeout(&address, timeout)
-            .map_err(|io| CollabError::Transport(io.to_string()))?;
-        let mut writer = socket
-            .try_clone()
-            .map_err(|io| CollabError::Transport(io.to_string()))?;
+            .ok_or_else(|| {
+                CollabError::Transport(ConnectionProblem::NotReachable(format!(
+                    "`{authority}` has no address"
+                )))
+            })?;
+        let socket = TcpStream::connect_timeout(&address, timeout).map_err(connecting)?;
+        let mut writer = socket.try_clone().map_err(connecting)?;
         write!(
             writer,
             "GET /api/realtime HTTP/1.1\r\nHost: {authority}\r\nAccept: text/event-stream\r\nCache-Control: no-cache\r\n\r\n"
         )
-        .map_err(|io| CollabError::Transport(io.to_string()))?;
-        let reader_socket = socket
-            .try_clone()
-            .map_err(|io| CollabError::Transport(io.to_string()))?;
+        .map_err(connecting)?;
+        let reader_socket = socket.try_clone().map_err(connecting)?;
         let (sender, events) = mpsc::channel();
         let reader = std::thread::spawn(move || {
             let reason = match read_stream(reader_socket, &sender) {
-                Ok(()) => "the server closed the stream".to_owned(),
-                Err(io) => io.to_string(),
+                Ok(()) => ConnectionProblem::Lost("the server closed the stream".into()),
+                Err(io) => ConnectionProblem::after_connecting(&io),
             };
             let _ = sender.send(Message::Closed(reason));
         });
@@ -85,7 +85,7 @@ impl RealtimeConnection {
         };
         let connect = connection
             .next_event(timeout)?
-            .ok_or_else(|| CollabError::Transport("no PB_CONNECT event".into()))?;
+            .ok_or(CollabError::Transport(ConnectionProblem::TimedOut))?;
         if connect.topic != "PB_CONNECT" {
             return Err(CollabError::Protocol(format!(
                 "expected PB_CONNECT, got `{}`",
@@ -128,9 +128,9 @@ impl RealtimeConnection {
                 Err(CollabError::Transport(reason))
             }
             Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(CollabError::Transport("the realtime reader stopped".into()))
-            }
+            Err(RecvTimeoutError::Disconnected) => Err(CollabError::Transport(
+                ConnectionProblem::Lost("the realtime reader stopped".into()),
+            )),
         }
     }
 
@@ -168,6 +168,10 @@ impl Drop for RealtimeConnection {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+fn connecting(error: io::Error) -> CollabError {
+    CollabError::Transport(ConnectionProblem::while_connecting(&error))
 }
 
 fn read_stream(socket: TcpStream, sender: &mpsc::Sender<Message>) -> io::Result<()> {

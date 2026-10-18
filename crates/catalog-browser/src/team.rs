@@ -1771,7 +1771,7 @@ fn sign_in(request: &SignInRequest) -> Result<(Session, String), String> {
     let client = PocketBaseClient::new(&server_url)
         .authenticate("users", email, &request.password)
         .map_err(|error| match error {
-            CollabError::Transport(_) => format!("Cannot reach a team server at {server_url}."),
+            CollabError::Transport(problem) => problem.to_string(),
             CollabError::Http { status: 400, .. } | CollabError::Unauthorized(_) => {
                 "The email or password is not right.".into()
             }
@@ -3547,7 +3547,9 @@ mod tests {
             assert_eq!(after_break(&rejected), AfterBreak::SignInAgain);
         }
         assert_eq!(
-            after_break(&CollabError::Transport("refused".into())),
+            after_break(&CollabError::Transport(
+                collaboration::ConnectionProblem::NotReachable("refused".into())
+            )),
             AfterBreak::Retry
         );
         let mut delay = RECONNECT_DELAY;
