@@ -301,9 +301,14 @@ pub(crate) fn resolve(
 }
 
 /// Whether `text` is an ordinary path on this computer: a drive path
-/// (`C:\` or `C:/`), or one slash and then a plain name, as `/home/...`.
-/// Network and device paths, such as `\\host\share`, `//host`,
-/// `\\?\UNC\host`, `\??\C:\` or `\\.\pipe`, are not.
+/// (`C:\` or `C:/`), or one slash and then a folder or file on the current
+/// drive, as `/home/...`. Network and device paths, such as
+/// `\\host\share`, `//host`, `\\?\UNC\host`, `\??\C:\` or `\\.\pipe`, are
+/// not.
+///
+/// After one slash, only an empty first part (a second slash) or a `?` or
+/// `*` can leave the current drive. So odd first parts, as in `/./x.step`
+/// or `/C:/x.step`, stay on this computer, and the file is looked for.
 fn ordinary_path(text: &str) -> bool {
     let bytes = text.as_bytes();
     if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
@@ -317,7 +322,7 @@ fn ordinary_path(text: &str) -> bool {
         return true;
     }
     let first = rest.split(['/', '\\']).next().unwrap_or_default();
-    is_plain_name(first) && !first.contains(['?', '*'])
+    !first.is_empty() && !first.contains(['?', '*'])
 }
 
 /// Whether `link` starts with a path variable whose own value, which the
@@ -391,7 +396,7 @@ pub(crate) fn checked_model(path: &Path) -> Result<PathBuf, NotShown> {
     match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => return Err(NotShown::Missing(path.to_path_buf())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound || names_nothing(&error) => {
             return Err(NotShown::Missing(path.to_path_buf()));
         }
         Err(error) => return Err(unreadable(error)),
@@ -415,6 +420,15 @@ pub(crate) fn checked_model(path: &Path) -> Result<PathBuf, NotShown> {
         return Err(NotShown::NotModel(path.to_path_buf()));
     }
     Ok(real)
+}
+
+/// Whether `error` says the path is not a valid name, as `\C:\x.step` is
+/// on Windows. No file can have such a name, so the file is missing.
+/// (Rust 1.85 has no stable `ErrorKind` for it.)
+fn names_nothing(error: &std::io::Error) -> bool {
+    /// Windows' ERROR_INVALID_NAME.
+    const INVALID_NAME: i32 = 123;
+    cfg!(windows) && error.raw_os_error() == Some(INVALID_NAME)
 }
 
 /// Whether `bytes` start as the 3D model their file `name` says: STEP with
