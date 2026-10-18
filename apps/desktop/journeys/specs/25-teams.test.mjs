@@ -6,7 +6,8 @@
 // out and removing touch one team only. Without a credential store, the
 // Teams menu says once why the app will ask again after a restart. KiCad
 // libraries made from another server address wait until the person, asked
-// on the team's row, says the team moved (kicad-parts-092b).
+// on the team's row, says the team moved (kicad-parts-092b). If both
+// servers are in the person's teams, the row says so and asks nothing.
 // Sign-ins stay in the app's memory (--sign-ins), never the person's
 // credential store.
 
@@ -64,6 +65,10 @@ describe('several teams at once', () => {
     await acme?.stop();
     await beta?.stop();
   });
+
+  /** AC's KiCad library folder state file, once a step makes it. */
+  let stateFile;
+  const recorded = () => JSON.parse(fs.readFileSync(stateFile, 'utf8'));
 
   async function setMenuOpen(open) {
     await browser.execute((wanted) => {
@@ -279,8 +284,7 @@ describe('several teams at once', () => {
     const settings = await (await fetch(`${acme.url}/api/team`, { headers: { Authorization: token } })).json();
     const dataDir = tempDir('data');
     const folder = path.join(dataDir, 'kicad-libraries', 'AC');
-    const stateFile = path.join(folder, '.kicad-parts.json');
-    const recorded = () => JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    stateFile = path.join(folder, '.kicad-parts.json');
     fs.mkdirSync(folder, { recursive: true });
     fs.writeFileSync(
       stateFile,
@@ -348,5 +352,54 @@ describe('several teams at once', () => {
       timeoutMsg: 'the libraries were never made from the new address',
     });
     await setMenuOpen(false);
+  });
+
+  it('says plainly when two team servers in your teams claim one team', async () => {
+    // A second server in the person's teams says it is AC, and AC's
+    // libraries came from it last.
+    const gamma = await startTeamServer({ csv: ['g-res'], teamCode: 'GA' });
+    try {
+      await setMenuOpen(true);
+      await (await browser.$('#team-add')).click();
+      await signInWithForm(gamma, gamma.accounts[0]);
+      await setMenuOpen(true);
+      await browser.waitUntil(async () => (await rowText('GA')) !== null, {
+        timeout: 20_000,
+        timeoutMsg: 'the second team was never named by its code',
+      });
+      // The app keeps the file read-only.
+      fs.chmodSync(stateFile, 0o644);
+      fs.writeFileSync(stateFile, JSON.stringify({ ...recorded(), server: gamma.url }));
+      // Signing in to AC again updates its libraries.
+      await clickInRow('AC', 'Sign out');
+      await browser.waitUntil(async () => (await rowText('AC')) === `Signed out (${editor.email}).`, {
+        timeout: 10_000,
+        timeoutMsg: 'AC never showed as signed out',
+      });
+      await clickInRow('AC', 'Sign in');
+      await setMenuOpen(true);
+      await signInWithForm(acme, editor);
+      await setMenuOpen(true);
+      await waitForText(
+        browser,
+        '.team-two-servers',
+        `Two team servers say they are team AC: ${gamma.url} and ${acme.url}. The app updates AC's libraries only from ${gamma.url}. If the team moved, remove ${gamma.url} from your teams. If it did not, remove ${acme.url}.`,
+        30_000,
+      );
+      // There is no answer to give on the row, and nothing was written.
+      assert.equal(await browser.execute(() => document.querySelectorAll('.team-question button').length), 0);
+      assert.equal(recorded().server, gamma.url);
+      assert.match(await textOf(browser, BADGE), / · 1 team needs a look$/);
+      await waitForLibraryCheck(browser);
+      // A sign-in that works closes the menu; open it to show the row.
+      await setMenuOpen(true);
+      await assertAccessible(browser, '37-teams-two-servers');
+      await screenshot(browser, '37-teams-two-servers', {
+        blankOut: [...ADDRESSES, '.team-question-server'],
+      });
+      await setMenuOpen(false);
+    } finally {
+      await gamma.stop();
+    }
   });
 });

@@ -461,10 +461,22 @@ fn new_server_question(
         let code = made.code.clone();
         if made.in_your_teams {
             let text = two_servers_claim_a_team(&code, &made.server, &server);
+            // Each address has its own element, so a journey can blank out
+            // its port, which changes from run to run.
+            let parts = split_out(&text, &[&made.server, &server])
+                .into_iter()
+                .map(|(part, is_address)| {
+                    if is_address {
+                        view! { <span class="team-question-server">{part}</span> }.into_any()
+                    } else {
+                        part.into_any()
+                    }
+                })
+                .collect_view();
             return Some(
                 view! {
                     <div class="team-confirm team-question">
-                        <p class="team-two-servers">{text}</p>
+                        <p class="team-two-servers">{parts}</p>
                     </div>
                 }
                 .into_any(),
@@ -531,6 +543,33 @@ fn new_server_question(
             .into_any(),
         )
     }
+}
+
+/// `text` cut into parts, each with whether it is one of `addresses`. At
+/// one place, the longest address wins, so `http://h:80` never takes the
+/// start of `http://h:8090`.
+fn split_out(text: &str, addresses: &[&str]) -> Vec<(String, bool)> {
+    let mut parts = Vec::new();
+    let mut rest = text;
+    loop {
+        let next = addresses
+            .iter()
+            .filter(|address| !address.is_empty())
+            .filter_map(|address| rest.find(address).map(|at| (at, *address)))
+            .min_by_key(|(at, address)| (*at, std::cmp::Reverse(address.len())));
+        let Some((at, address)) = next else {
+            break;
+        };
+        if at > 0 {
+            parts.push((rest[..at].to_owned(), false));
+        }
+        parts.push((address.to_owned(), true));
+        rest = &rest[at + address.len()..];
+    }
+    if !rest.is_empty() {
+        parts.push((rest.to_owned(), false));
+    }
+    parts
 }
 
 /// `text` as letters, digits and `_`, for use in an element ID. Every
@@ -932,6 +971,27 @@ mod tests {
         assert_eq!(
             summary(&status(vec![connecting])),
             ("Team catalog: connecting…".into(), OFF)
+        );
+    }
+
+    #[test]
+    fn addresses_are_split_out_of_a_sentence() {
+        let parts = |text: &str| -> Vec<(String, bool)> {
+            split_out(text, &["http://h:80", "http://h:8090"])
+        };
+        assert_eq!(
+            parts("From http://h:8090, not http://h:80."),
+            vec![
+                ("From ".to_owned(), false),
+                ("http://h:8090".to_owned(), true),
+                (", not ".to_owned(), false),
+                ("http://h:80".to_owned(), true),
+                (".".to_owned(), false),
+            ]
+        );
+        assert_eq!(
+            parts("No address."),
+            vec![("No address.".to_owned(), false)]
         );
     }
 
