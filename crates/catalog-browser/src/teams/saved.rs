@@ -2,6 +2,7 @@
 //! address and the email last used there, and which team the catalog view
 //! shows. It never holds a password or a token.
 
+use collaboration::ServerAddress;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -50,14 +51,46 @@ pub(super) fn read(file: &Path) -> SavedList {
     else {
         return SavedList::default();
     };
-    match on_disk {
+    let list = match on_disk {
         OnDisk::List(list) => list,
         OnDisk::OneTeam(team) if team.server_url.is_empty() => SavedList::default(),
         OnDisk::OneTeam(team) => SavedList {
             shown: team.server_url.clone(),
             teams: vec![team],
         },
+    };
+    one_address_per_server(list)
+}
+
+/// The list with each address as sign-in writes it now (see
+/// `ServerAddress::for_sign_in`), and each server once. An earlier version
+/// may have saved `https://Parts.example.com` beside
+/// `https://parts.example.com`: they are one team, kept as the first one
+/// listed, with a code either one knew.
+fn one_address_per_server(list: SavedList) -> SavedList {
+    let mut teams: Vec<SavedTeam> = Vec::new();
+    for mut team in list.teams {
+        team.server_url = address_now(&team.server_url);
+        match teams
+            .iter_mut()
+            .find(|known| known.server_url == team.server_url)
+        {
+            Some(known) if known.code.is_empty() => known.code = team.code,
+            Some(_) => {}
+            None => teams.push(team),
+        }
     }
+    SavedList {
+        teams,
+        shown: address_now(&list.shown),
+    }
+}
+
+/// `address` as sign-in writes it now; as it is if it is not an address.
+fn address_now(address: &str) -> String {
+    ServerAddress::for_sign_in(address)
+        .map(|address| address.url())
+        .unwrap_or_else(|_| address.to_owned())
 }
 
 /// Writes the list to `file` through a temporary file, so a crash never
@@ -95,6 +128,35 @@ mod tests {
         fs::write(&file, "not json").unwrap();
         assert_eq!(read(&file), SavedList::default());
         assert_eq!(read(&dir.path().join("missing.json")), SavedList::default());
+    }
+
+    #[test]
+    fn one_server_saved_under_two_addresses_is_one_team() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("team.json");
+        fs::write(
+            &file,
+            r#"{"teams":[
+                {"server_url":"https://Parts.example.com","email":"a@example.test"},
+                {"server_url":"https://beta.example.com","email":"a@example.test"},
+                {"server_url":"https://parts.example.com:443","email":"b@example.test","code":"PE"}
+            ],"shown":"https://PARTS.example.com"}"#,
+        )
+        .unwrap();
+        let list = read(&file);
+        let addresses: Vec<&str> = list
+            .teams
+            .iter()
+            .map(|team| team.server_url.as_str())
+            .collect();
+        assert_eq!(
+            addresses,
+            ["https://parts.example.com", "https://beta.example.com"]
+        );
+        // The first is kept, with the code the other knew.
+        assert_eq!(list.teams[0].email, "a@example.test");
+        assert_eq!(list.teams[0].code, "PE");
+        assert_eq!(list.shown, "https://parts.example.com");
     }
 
     #[test]
