@@ -33,6 +33,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy -q -p kicad-parts-desktop-ui --target wasm32-unknown-unknown --locked -- -D warnings
 cargo test --workspace --locked --no-fail-fast
+node --test "apps/desktop-ui/js/*.test.mjs"
 cargo run -q --locked -p csv-catalog-fixture -- check .
 for f in database/g-*.csv; do n=$(basename "$f" .csv); cargo run -q --locked -p catalog-import -- pilot . "$n"; done
 cargo run -q --locked -p catalog-import -- full-pilot
@@ -40,7 +41,7 @@ npm run journeys --prefix apps/desktop/journeys
 ml doctor
 ```
 
-The pilots check each CSV file on its own, in an empty team catalog. The full pilot checks the whole CSV catalog together, and the KiCad libraries made from it.
+The node tests check the 3D view's camera rules. The pilots check each CSV file on its own, in an empty team catalog. The full pilot checks the whole CSV catalog together, and the KiCad libraries made from it.
 
 ## API credentials (optional)
 Some scripts use DigiKey and Mouser APIs. To use them, copy the example secrets file and add your keys:

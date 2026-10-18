@@ -16,6 +16,12 @@
 // - the arrow keys turn, Shift and the arrow keys pan, + and - zoom, and
 //   0 shows the starting view again.
 //
+// The model always turns around its own centre, even after zooming at
+// the pointer or panning, and the view can't be lost: zoom and pan have
+// limits, and every input is checked. view3d-camera.js holds those rules
+// and explains them; this file only applies them to three.js. Trunk
+// copies it into the app as /js/view3d-camera.js (index.html).
+//
 // Leptos calls dispose() when the 3D view or its close-up closes. It frees
 // the GPU memory and removes every listener, so opening the view again
 // and again does not leak.
@@ -28,10 +34,12 @@ function loadThree() {
     import('/three/three.module.js'),
     import('/three/addons/loaders/GLTFLoader.js'),
     import('/three/addons/environments/RoomEnvironment.js'),
-  ]).then(([THREE, loader, room]) => ({
+    import('/js/view3d-camera.js'),
+  ]).then(([THREE, loader, room, camera]) => ({
     THREE,
     GLTFLoader: loader.GLTFLoader,
     RoomEnvironment: room.RoomEnvironment,
+    camera,
   }));
   // A failed load may work next time.
   loading.catch(() => {
@@ -60,18 +68,14 @@ export function webglAvailable() {
  * takes the view's WebGL away, such as after a graphics driver reset.
  */
 export async function createView(container, bytes, background, onLost) {
-  const { THREE, GLTFLoader, RoomEnvironment } = await loadThree();
+  const { THREE, GLTFLoader, RoomEnvironment, camera } = await loadThree();
   const gltf = await new Promise((resolve, reject) => {
     new GLTFLoader().parse(bytes, '', resolve, (error) => reject(new Error(String(error?.message ?? error))));
   });
-  return new View3d(THREE, RoomEnvironment, container, gltf, background, onLost);
+  return new View3d({ THREE, RoomEnvironment, camera }, container, gltf, background, onLost);
 }
 
 const DEGREE = Math.PI / 180;
-/** The starting view looks down at the front at this angle. */
-const START_ELEVATION = 45 * DEGREE;
-/** Top and Bottom stop just short of straight down or up. */
-const STRAIGHT = 89.9 * DEGREE;
 /** How far one arrow key turns the model. */
 const TURN_STEP = 10 * DEGREE;
 /** How far a drag of one pixel turns the model. */
@@ -80,13 +84,14 @@ const TURN_PER_PIXEL = 0.5 * DEGREE;
 const PAN_STEP = 0.1;
 /** How much + and - zoom. */
 const ZOOM_STEP = 1.5;
-/** The camera's field of view, in degrees. */
-const FIELD_OF_VIEW = 30;
 
 class View3d {
-  constructor(THREE, RoomEnvironment, container, gltf, background, onLost) {
+  /** `modules` holds three.js, its RoomEnvironment and view3d-camera.js. */
+  constructor(modules, container, gltf, background, onLost) {
+    const { THREE, RoomEnvironment } = modules;
     const model = gltf.scene;
-    this.THREE = THREE;
+    // The camera rules: see view3d-camera.js.
+    this.rules = modules.camera;
     this.container = container;
     this.model = model;
     // The GLB's own mesh names: the model's, from its file, and the
@@ -163,7 +168,8 @@ class View3d {
     this.scene.environment = this.environment;
     this.scene.environmentIntensity = 0.5;
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8d8d8d, 0.6));
-    this.camera = new THREE.PerspectiveCamera(FIELD_OF_VIEW, 1, 1e-6, 10);
+    // placeCamera() sets the field of view, near and far.
+    this.camera = new THREE.PerspectiveCamera();
     const key = new THREE.DirectionalLight(0xffffff, 1.0);
     key.position.set(-0.5, 1, 1);
     const fill = new THREE.DirectionalLight(0xffffff, 0.3);
@@ -173,17 +179,19 @@ class View3d {
     fill.target.position.set(0, 0, -1);
     this.scene.add(this.camera);
 
-    // Turn around the model's centre; fit its whole size.
+    // Turn around the model's centre; fit its whole size. modelFrame()
+    // copes with an empty box.
     const box = new THREE.Box3().setFromObject(model);
-    this.centre = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
+    const centre = box.isEmpty() ? null : box.getCenter(new THREE.Vector3()).toArray();
+    const halfSize = box.isEmpty() ? null : box.getSize(new THREE.Vector3()).multiplyScalar(0.5).toArray();
+    this.frame = this.rules.modelFrame(centre, halfSize);
+    this.centre = new THREE.Vector3(...this.frame.centre);
     this.boardMiddle = this.board ? (this.board.min.y + this.board.max.y) / 2 : this.centre.y;
-    const size = box.isEmpty() ? 0.001 : box.getSize(new THREE.Vector3()).length() / 2;
-    this.radius = Math.max(size, 1e-5);
-    this.target = new THREE.Vector3();
+    // The starting view fits the view area's real shape.
+    this.fitSize();
     this.reset();
 
     this.listen();
-    this.resize();
     // The journeys read what is drawn through the view area.
     container.view3dInfo = () => this.info();
   }
@@ -192,98 +200,51 @@ class View3d {
 
   /** The starting view: down at the front, 45 degrees up. */
   reset() {
-    this.show(0, START_ELEVATION);
+    this.view = this.rules.standardView(this.camera.aspect);
+    this.place();
   }
 
   /** Straight down at the top, as the 2D view shows it. */
   top() {
-    this.show(0, STRAIGHT);
+    this.view = this.rules.standardView(this.camera.aspect, 0, this.rules.STRAIGHT);
+    this.place();
   }
 
   /** Straight up at the bottom, mirrored as KiCad shows it. */
   bottom() {
-    this.show(Math.PI, -STRAIGHT);
-  }
-
-  show(azimuth, elevation) {
-    this.azimuth = azimuth;
-    this.elevation = elevation;
-    this.target.copy(this.centre);
-    this.distance = this.fittingDistance();
+    this.view = this.rules.standardView(this.camera.aspect, Math.PI, -this.rules.STRAIGHT);
     this.place();
   }
 
-  /** How far away the camera sees the whole model. */
-  fittingDistance() {
-    const vertical = (FIELD_OF_VIEW / 2) * DEGREE;
-    const horizontal = Math.atan(Math.tan(vertical) * Math.max(this.camera.aspect, 1e-3));
-    return (this.radius * 1.15) / Math.sin(Math.min(vertical, horizontal));
-  }
-
-  /** Puts the camera where the angles, distance and target say. */
+  /** Puts the camera where the view says, and draws. */
   place() {
-    const { THREE } = this;
-    this.elevation = Math.max(-STRAIGHT, Math.min(STRAIGHT, this.elevation));
-    const flat = Math.cos(this.elevation);
-    const offset = new THREE.Vector3(
-      flat * Math.sin(this.azimuth),
-      Math.sin(this.elevation),
-      flat * Math.cos(this.azimuth),
-    ).multiplyScalar(this.distance);
-    this.camera.position.copy(this.target).add(offset);
-    this.camera.up.set(0, 1, 0);
-    this.camera.lookAt(this.target);
+    this.rules.placeCamera(this.camera, this.view, this.frame);
     const above = this.camera.position.y >= this.boardMiddle;
     this.layers.forEach(({ object }, rank) => {
       object.renderOrder = above ? rank : -rank;
     });
-    this.camera.near = this.distance / 200;
-    this.camera.far = this.distance * 20 + this.radius * 4;
-    this.camera.updateProjectionMatrix();
     this.render();
   }
 
   turn(right, up) {
-    this.azimuth -= right;
-    this.elevation += up;
+    this.view = this.rules.turned(this.view, right, up);
     this.place();
   }
 
   /** Moves the view by `dx`, `dy` pixels, as a drag would. */
   pan(dx, dy) {
-    const { THREE } = this;
-    const height = Math.max(this.canvas.clientHeight, 1);
-    const perPixel = (2 * this.distance * Math.tan((FIELD_OF_VIEW / 2) * DEGREE)) / height;
-    const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrix, 0);
-    const up = new THREE.Vector3().setFromMatrixColumn(this.camera.matrix, 1);
-    this.target.addScaledVector(right, -dx * perPixel).addScaledVector(up, dy * perPixel);
+    this.view = this.rules.panned(this.view, this.frame, dx, dy, this.canvas.clientHeight);
     this.place();
   }
 
   /**
    * Zooms in by `factor` (more than 1 zooms in) at the pixel `x`, `y` of
-   * the view, which stays where it is; at the centre with no pixel.
+   * the view, which stays where it is; at the view's middle with no pixel.
    */
   zoom(factor, x, y) {
-    const { THREE } = this;
-    const nearest = this.radius * 0.02;
-    const farthest = this.radius * 60;
-    const distance = Math.max(nearest, Math.min(farthest, this.distance / factor));
-    const scale = distance / this.distance;
-    let at = this.target.clone();
-    if (x !== undefined) {
-      // The point under the pointer on the plane through the target.
-      const width = Math.max(this.canvas.clientWidth, 1);
-      const height = Math.max(this.canvas.clientHeight, 1);
-      const ray = new THREE.Raycaster();
-      ray.setFromCamera(new THREE.Vector2((x / width) * 2 - 1, 1 - (y / height) * 2), this.camera);
-      const facing = this.camera.getWorldDirection(new THREE.Vector3());
-      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(facing, this.target);
-      at = ray.ray.intersectPlane(plane, new THREE.Vector3()) ?? at;
-    }
-    // Scaling the camera and target about that point keeps it in place.
-    this.target.sub(at).multiplyScalar(scale).add(at);
-    this.distance = distance;
+    const { clientWidth, clientHeight } = this.canvas;
+    const pointer = x === undefined ? null : this.rules.pointerAt(x, y, clientWidth, clientHeight);
+    this.view = this.rules.zoomed(this.view, this.frame, factor, pointer, this.camera.aspect);
     this.place();
   }
 
@@ -291,11 +252,17 @@ class View3d {
     this.renderer.render(this.scene, this.camera);
   }
 
-  resize() {
+  /** Sizes the drawing to the view area. */
+  fitSize() {
     const width = Math.max(this.container.clientWidth, 1);
     const height = Math.max(this.container.clientHeight, 1);
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
+  }
+
+  /** A new size keeps the view: the same angles, zoom and shift. */
+  resize() {
+    this.fitSize();
     this.place();
   }
 
@@ -340,10 +307,8 @@ class View3d {
       },
       wheel: (event) => {
         event.preventDefault();
-        // Lines and pages are about 40 and 800 pixels.
-        const unit = event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? 800 : 1;
-        const factor = Math.exp(Math.max(-1, Math.min(1, -event.deltaY * unit * 0.002)));
         const rect = this.canvas.getBoundingClientRect();
+        const factor = this.rules.wheelFactor(event.deltaY, event.deltaMode);
         this.zoom(factor, event.clientX - rect.left, event.clientY - rect.top);
       },
       keydown: (event) => {
@@ -431,16 +396,21 @@ class View3d {
       silkscreen,
       // How light the silkscreen is, 0 to 255: KiCad's is white.
       silkscreenLightness: silkscreen ? Math.round(lightness / silkscreen) : 0,
-      azimuth: this.azimuth / DEGREE,
-      elevation: this.elevation / DEGREE,
-      distance: this.distance,
-      fitting: this.fittingDistance(),
+      azimuth: this.view.azimuth / DEGREE,
+      elevation: this.view.elevation / DEGREE,
+      zoom: this.view.zoom,
+      // The zoom Reset view uses, and the limits.
+      startZoom: this.rules.fittingZoom(this.camera.aspect),
+      zoomLimits: [this.rules.MIN_ZOOM, this.rules.MAX_ZOOM],
+      shift: [this.view.shiftX, this.view.shiftY],
+      radius: this.frame.radius,
+      // Where the model's centre shows, from -1 to 1 across the view, y up.
+      centreOnScreen: this.centre.clone().project(this.camera).toArray().slice(0, 2),
       // Heights, for checking the order the layers are drawn in.
       cameraHeight: this.camera.position.y,
       sceneMiddle: this.centre.y,
       boardMiddle: this.boardMiddle,
       boardTop: this.board?.max.y ?? null,
-      target: this.target.toArray(),
     };
   }
 

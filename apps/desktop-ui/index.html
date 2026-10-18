@@ -8,6 +8,8 @@
     <link data-trunk rel="rust" data-wasm-opt="z" />
     <!-- three.js, copied into the app for the 3D view (vendor/three/SOURCE.txt). -->
     <link data-trunk rel="copy-dir" href="vendor/three" />
+    <!-- The 3D view's camera rules, which js/view3d.js loads with three.js. -->
+    <link data-trunk rel="copy-file" href="js/view3d-camera.js" data-target-path="js" />
   </head>
   <body></body>
 </html>
