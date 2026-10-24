@@ -70,7 +70,13 @@ fn colours(teams: &Teams) -> Vec<String> {
 fn a_failed_sign_in_adds_no_team_and_saves_no_password() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("team.json");
-    let teams = Teams::open(file.clone(), memory(), None, None);
+    let teams = Teams::open(
+        file.clone(),
+        dir.path().join("parts-files"),
+        memory(),
+        None,
+        None,
+    );
     let problem = teams
         .sign_in(SignInRequest {
             // Port 9 (discard) on loopback is closed on any normal machine.
@@ -91,7 +97,13 @@ fn a_failed_sign_in_adds_no_team_and_saves_no_password() {
 #[test]
 fn an_address_that_may_not_receive_a_password_is_refused_first() {
     let dir = tempfile::tempdir().unwrap();
-    let teams = Teams::open(dir.path().join("team.json"), memory(), None, None);
+    let teams = Teams::open(
+        dir.path().join("team.json"),
+        dir.path().join("parts-files"),
+        memory(),
+        None,
+        None,
+    );
     let problem = teams
         .sign_in(SignInRequest {
             server_url: "http://team.example.com".into(),
@@ -123,7 +135,14 @@ fn suggested_values_fill_in_the_sign_in_form() {
         },
     )
     .unwrap();
-    let status = Teams::open(file.clone(), memory(), None, None).status();
+    let status = Teams::open(
+        file.clone(),
+        dir.path().join("parts-files"),
+        memory(),
+        None,
+        None,
+    )
+    .status();
     assert_eq!(
         (status.form_server.as_str(), status.form_email.as_str()),
         ("https://parts.example.com", "a@example.test")
@@ -136,7 +155,14 @@ fn suggested_values_fill_in_the_sign_in_form() {
     assert_eq!(status.teams[0].colour, "blue");
     assert_eq!(saved::read(&file).teams[0].colour, "blue");
     let suggested = Some("http://127.0.0.1:1".into());
-    let status = Teams::open(file, memory(), suggested, None).status();
+    let status = Teams::open(
+        file,
+        dir.path().join("parts-files"),
+        memory(),
+        suggested,
+        None,
+    )
+    .status();
     assert_eq!(
         (status.form_server.as_str(), status.form_email.as_str()),
         ("http://127.0.0.1:1", "a@example.test")
@@ -149,7 +175,13 @@ fn signing_in_keeps_the_sign_in_in_the_store_never_in_a_file() {
     let store = store();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("team.json");
-    let teams = Teams::open(file.clone(), kept_in(&store), None, None);
+    let teams = Teams::open(
+        file.clone(),
+        dir.path().join("parts-files"),
+        kept_in(&store),
+        None,
+        None,
+    );
     teams.sign_in(request(&server)).unwrap();
     assert!(first(&teams).is_signed_in());
     wait_until("the sign-in to be kept", || {
@@ -173,7 +205,13 @@ fn a_restart_carries_on_every_kept_sign_in_without_a_password() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("team.json");
     {
-        let teams = Teams::open(file.clone(), kept_in(&store), None, None);
+        let teams = Teams::open(
+            file.clone(),
+            dir.path().join("parts-files"),
+            kept_in(&store),
+            None,
+            None,
+        );
         teams.sign_in(request(&acme)).unwrap();
         teams.sign_in(request(&beta)).unwrap();
         // Signing in to beta kept acme signed in. Each team got its own
@@ -184,7 +222,13 @@ fn a_restart_carries_on_every_kept_sign_in_without_a_password() {
             kept_token(&store, &acme).is_some() && kept_token(&store, &beta).is_some()
         });
     }
-    let teams = Teams::open(file, kept_in(&store), None, None);
+    let teams = Teams::open(
+        file,
+        dir.path().join("parts-files"),
+        kept_in(&store),
+        None,
+        None,
+    );
     assert_eq!(teams.reaching(&acme.url), Some(None), "connecting at first");
     wait_until("both teams to be signed in again", || {
         is_signed_in(&teams, &acme) && is_signed_in(&teams, &beta)
@@ -203,7 +247,13 @@ fn every_request_names_its_team_and_the_list_choices_are_kept() {
     let (acme, beta) = (FakeServer::start(), FakeServer::start());
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("team.json");
-    let teams = Teams::open(file.clone(), memory(), None, None);
+    let teams = Teams::open(
+        file.clone(),
+        dir.path().join("parts-files"),
+        memory(),
+        None,
+        None,
+    );
     teams.sign_in(request(&acme)).unwrap();
     teams.sign_in(request(&beta)).unwrap();
     // Each team is reached by its address, with no team "shown".
@@ -247,7 +297,13 @@ fn signing_out_and_removing_touch_one_team_only() {
     let store = store();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("team.json");
-    let teams = Teams::open(file.clone(), kept_in(&store), None, None);
+    let teams = Teams::open(
+        file.clone(),
+        dir.path().join("parts-files"),
+        kept_in(&store),
+        None,
+        None,
+    );
     teams.sign_in(request(&acme)).unwrap();
     teams.sign_in(request(&beta)).unwrap();
     wait_until("both sign-ins to be kept", || {
@@ -281,7 +337,13 @@ fn a_rejected_sign_in_asks_only_that_team_again() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("team.json");
     {
-        let teams = Teams::open(file.clone(), kept_in(&store), None, None);
+        let teams = Teams::open(
+            file.clone(),
+            dir.path().join("parts-files"),
+            kept_in(&store),
+            None,
+            None,
+        );
         teams.sign_in(request(&acme)).unwrap();
         teams.sign_in(request(&beta)).unwrap();
         wait_until("both sign-ins to be kept", || {
@@ -290,7 +352,13 @@ fn a_rejected_sign_in_asks_only_that_team_again() {
     }
     // Acme's password changed while the app was closed.
     acme.reject_all();
-    let teams = Teams::open(file, kept_in(&store), None, None);
+    let teams = Teams::open(
+        file,
+        dir.path().join("parts-files"),
+        kept_in(&store),
+        None,
+        None,
+    );
     wait_until("beta to be signed in", || is_signed_in(&teams, &beta));
     wait_until("acme to give up its kept sign-in", || {
         teams.reaching(&acme.url).is_none() && kept_token(&store, &acme).is_none()
@@ -326,7 +394,13 @@ fn a_server_that_cannot_be_reached_is_tried_again_while_others_work() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("team.json");
     {
-        let teams = Teams::open(file.clone(), kept_in(&store), None, None);
+        let teams = Teams::open(
+            file.clone(),
+            dir.path().join("parts-files"),
+            kept_in(&store),
+            None,
+            None,
+        );
         teams.sign_in(request(&acme)).unwrap();
         teams.sign_in(request(&beta)).unwrap();
         wait_until("both sign-ins to be kept", || {
@@ -334,7 +408,13 @@ fn a_server_that_cannot_be_reached_is_tried_again_while_others_work() {
         });
     }
     acme.set_down(true);
-    let teams = Teams::open(file, kept_in(&store), None, None);
+    let teams = Teams::open(
+        file,
+        dir.path().join("parts-files"),
+        kept_in(&store),
+        None,
+        None,
+    );
     wait_until("beta to be signed in", || is_signed_in(&teams, &beta));
     wait_until("acme to be offline", || {
         matches!(teams.reaching(&acme.url), Some(Some(_)))
@@ -361,7 +441,13 @@ fn a_sign_in_is_renewed_before_it_ends() {
     server.set_token_lifetime(4);
     let store = store();
     let dir = tempfile::tempdir().unwrap();
-    let teams = Teams::open(dir.path().join("team.json"), kept_in(&store), None, None);
+    let teams = Teams::open(
+        dir.path().join("team.json"),
+        dir.path().join("parts-files"),
+        kept_in(&store),
+        None,
+        None,
+    );
     teams.sign_in(request(&server)).unwrap();
     wait_until("the sign-in to be kept", || {
         kept_token(&store, &server).is_some()
@@ -396,7 +482,13 @@ fn a_store_that_fails_says_sign_ins_last_until_the_app_closes() {
     let server = FakeServer::start();
     let dir = tempfile::tempdir().unwrap();
     let sign_ins = SignIns::kept_in(Arc::new(LockedStore));
-    let teams = Teams::open(dir.path().join("team.json"), sign_ins, None, None);
+    let teams = Teams::open(
+        dir.path().join("team.json"),
+        dir.path().join("parts-files"),
+        sign_ins,
+        None,
+        None,
+    );
     teams.sign_in(request(&server)).unwrap();
     wait_until("the failure to be said", || {
         teams.kept() != SignInsKept::AfterRestart
@@ -408,7 +500,13 @@ fn a_store_that_fails_says_sign_ins_last_until_the_app_closes() {
     // The session itself carries on.
     assert!(first(&teams).is_signed_in());
     let until_closed = SignIns::until_closed("this computer has no password store");
-    let teams = Teams::open(dir.path().join("other.json"), until_closed, None, None);
+    let teams = Teams::open(
+        dir.path().join("other.json"),
+        dir.path().join("parts-files"),
+        until_closed,
+        None,
+        None,
+    );
     assert_eq!(
         teams.kept(),
         SignInsKept::UntilClosed {
@@ -446,7 +544,13 @@ fn a_renewal_answered_after_a_new_sign_in_leaves_the_new_sign_in_alone() {
     let server = FakeServer::start();
     let store = store();
     let dir = tempfile::tempdir().unwrap();
-    let teams = Teams::open(dir.path().join("team.json"), kept_in(&store), None, None);
+    let teams = Teams::open(
+        dir.path().join("team.json"),
+        dir.path().join("parts-files"),
+        kept_in(&store),
+        None,
+        None,
+    );
     let old = renewal_in_flight(&teams, &server, &store);
     // The person signs in again meanwhile, and the old sign-in ends.
     teams.sign_in(request(&server)).unwrap();
@@ -466,7 +570,13 @@ fn a_renewal_answered_after_signing_out_says_nothing_and_keeps_nothing() {
     let server = FakeServer::start();
     let store = store();
     let dir = tempfile::tempdir().unwrap();
-    let teams = Teams::open(dir.path().join("team.json"), kept_in(&store), None, None);
+    let teams = Teams::open(
+        dir.path().join("team.json"),
+        dir.path().join("parts-files"),
+        kept_in(&store),
+        None,
+        None,
+    );
     let old = renewal_in_flight(&teams, &server, &store);
     teams.sign_out(&server.url);
     server.reject(&old);
@@ -484,7 +594,13 @@ fn a_renewal_answered_after_removing_and_adding_the_team_keeps_the_new_sign_in()
     let server = FakeServer::start();
     let store = store();
     let dir = tempfile::tempdir().unwrap();
-    let teams = Teams::open(dir.path().join("team.json"), kept_in(&store), None, None);
+    let teams = Teams::open(
+        dir.path().join("team.json"),
+        dir.path().join("parts-files"),
+        kept_in(&store),
+        None,
+        None,
+    );
     let old = renewal_in_flight(&teams, &server, &store);
     teams.remove(&server.url);
     teams.sign_in(request(&server)).unwrap();
@@ -506,7 +622,13 @@ fn a_wrong_password_leaves_a_kept_sign_in_being_carried_on() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("team.json");
     {
-        let teams = Teams::open(file.clone(), kept_in(&store), None, None);
+        let teams = Teams::open(
+            file.clone(),
+            dir.path().join("parts-files"),
+            kept_in(&store),
+            None,
+            None,
+        );
         teams.sign_in(request(&server)).unwrap();
         wait_until("the sign-in to be kept", || {
             kept_token(&store, &server).is_some()
@@ -515,7 +637,13 @@ fn a_wrong_password_leaves_a_kept_sign_in_being_carried_on() {
     // At the next start, carrying on the kept sign-in is in flight when
     // someone types a wrong password.
     server.hold_refreshes();
-    let teams = Teams::open(file, kept_in(&store), None, None);
+    let teams = Teams::open(
+        file,
+        dir.path().join("parts-files"),
+        kept_in(&store),
+        None,
+        None,
+    );
     wait_until("the kept sign-in to be in flight", || server.held() == 1);
     let wrong = SignInRequest {
         password: "wrong".into(),
@@ -553,7 +681,13 @@ fn a_sign_out_the_store_cannot_forget_is_still_never_carried_on() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("team.json");
     {
-        let teams = Teams::open(file.clone(), SignIns::kept_in(store.clone()), None, None);
+        let teams = Teams::open(
+            file.clone(),
+            dir.path().join("parts-files"),
+            SignIns::kept_in(store.clone()),
+            None,
+            None,
+        );
         teams.sign_in(request(&server)).unwrap();
         wait_until("the sign-in to be kept", || {
             store.read(&server.url).unwrap().is_some()
@@ -567,7 +701,13 @@ fn a_sign_out_the_store_cannot_forget_is_still_never_carried_on() {
         );
     }
     assert!(store.read(&server.url).unwrap().is_some(), "it lingers");
-    let teams = Teams::open(file.clone(), SignIns::kept_in(store.clone()), None, None);
+    let teams = Teams::open(
+        file.clone(),
+        dir.path().join("parts-files"),
+        SignIns::kept_in(store.clone()),
+        None,
+        None,
+    );
     std::thread::sleep(Duration::from_millis(800));
     assert!(!is_signed_in(&teams, &server));
     assert_eq!(teams.reaching(&server.url), None);
@@ -582,7 +722,13 @@ fn a_wrong_password_leaves_a_signed_in_team_signed_in() {
     let server = FakeServer::start();
     let store = store();
     let dir = tempfile::tempdir().unwrap();
-    let teams = Teams::open(dir.path().join("team.json"), kept_in(&store), None, None);
+    let teams = Teams::open(
+        dir.path().join("team.json"),
+        dir.path().join("parts-files"),
+        kept_in(&store),
+        None,
+        None,
+    );
     teams.sign_in(request(&server)).unwrap();
     wait_until("the sign-in to be kept", || {
         kept_token(&store, &server).is_some()
@@ -633,6 +779,7 @@ fn a_removed_team_whose_sign_in_lingers_is_said_once() {
     let dir = tempfile::tempdir().unwrap();
     let teams = Teams::open(
         dir.path().join("team.json"),
+        dir.path().join("parts-files"),
         SignIns::kept_in(store.clone()),
         None,
         None,
@@ -705,6 +852,7 @@ fn adding_a_team_back_waits_until_its_removal_forgot_the_old_sign_in() {
     let dir = tempfile::tempdir().unwrap();
     let teams = Arc::new(Teams::open(
         dir.path().join("team.json"),
+        dir.path().join("parts-files"),
         SignIns::kept_in(store.clone()),
         None,
         None,
@@ -760,7 +908,13 @@ fn signing_in_again_keeps_the_teams_code_until_its_settings_are_read() {
         },
     )
     .unwrap();
-    let teams = Teams::open(file.clone(), memory(), None, None);
+    let teams = Teams::open(
+        file.clone(),
+        dir.path().join("parts-files"),
+        memory(),
+        None,
+        None,
+    );
     teams.sign_in(request(&server)).unwrap();
     assert_eq!(teams.status().teams[0].label(), "AC");
     assert_eq!(saved::read(&file).teams[0].code, "AC");

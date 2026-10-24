@@ -34,12 +34,17 @@ fn parts_file(server: &FakeServer, value: &str) -> PartsFile {
     }
 }
 
+/// The parts folder these tests pass beside the list `file`.
+fn parts_folder(file: &Path) -> PathBuf {
+    file.with_file_name("parts-files")
+}
+
 fn write_file(file: &Path, parts: &PartsFile) {
-    disk::write(&parts_folder_of(file), parts).unwrap();
+    disk::write(&parts_folder(file), parts).unwrap();
 }
 
 fn has_file(file: &Path, server: &FakeServer) -> bool {
-    disk::file_for(&parts_folder_of(file), &server.url).is_file()
+    disk::file_for(&parts_folder(file), &server.url).is_file()
 }
 
 /// The Value of each part the list shows for `server`.
@@ -64,7 +69,13 @@ fn parts_as_of(teams: &Teams, server: &FakeServer) -> Option<u64> {
 
 /// Signs in to `server` in a first run, so a later run has its sign-in.
 fn signed_in_before(file: &Path, store: &Arc<MemorySignIns>, server: &FakeServer) {
-    let teams = Teams::open(file.to_owned(), kept_in(store), None, None);
+    let teams = Teams::open(
+        file.to_owned(),
+        parts_folder(file),
+        kept_in(store),
+        None,
+        None,
+    );
     teams.sign_in(request(server)).unwrap();
     wait_until("the sign-in to be kept", || {
         kept_token(store, server).is_some()
@@ -80,7 +91,13 @@ fn a_team_whose_server_is_down_at_start_shows_its_parts_file_offline() {
     signed_in_before(&file, &store, &server);
     write_file(&file, &parts_file(&server, "47"));
     server.set_down(true);
-    let teams = Teams::open(file, kept_in(&store), None, None);
+    let teams = Teams::open(
+        file.clone(),
+        parts_folder(&file),
+        kept_in(&store),
+        None,
+        None,
+    );
     wait_until("the server to be found unreachable", || {
         matches!(teams.reaching(&server.url), Some(Some(_)))
     });
@@ -97,7 +114,7 @@ fn a_team_with_no_kept_sign_in_shows_no_parts_file() {
     signed_in_before(&file, &store(), &server);
     write_file(&file, &parts_file(&server, "47"));
     // A new store: as on a computer whose password store lost the sign-in.
-    let teams = Teams::open(file.clone(), memory(), None, None);
+    let teams = Teams::open(file.clone(), parts_folder(&file), memory(), None, None);
     wait_until("the keeper to find no sign-in", || {
         teams.reaching(&server.url).is_none()
     });
@@ -116,14 +133,20 @@ fn a_parts_file_from_another_server_is_never_shown() {
     signed_in_before(&file, &store, &server);
     // A file in the team's place, holding another server's parts.
     write_file(&file, &parts_file(&other, "47"));
-    let folder = parts_folder_of(&file);
+    let folder = parts_folder(&file);
     std::fs::rename(
         disk::file_for(&folder, &other.url),
         disk::file_for(&folder, &server.url),
     )
     .unwrap();
     server.set_down(true);
-    let teams = Teams::open(file, kept_in(&store), None, None);
+    let teams = Teams::open(
+        file.clone(),
+        parts_folder(&file),
+        kept_in(&store),
+        None,
+        None,
+    );
     wait_until("the server to be found unreachable", || {
         matches!(teams.reaching(&server.url), Some(Some(_)))
     });
@@ -135,7 +158,7 @@ fn signing_out_and_removing_delete_the_parts_file() {
     let (acme, beta) = (FakeServer::start(), FakeServer::start());
     let dir = data_folder();
     let file = dir.path().join("team.json");
-    let teams = Teams::open(file.clone(), memory(), None, None);
+    let teams = Teams::open(file.clone(), parts_folder(&file), memory(), None, None);
     teams.sign_in(request(&acme)).unwrap();
     teams.sign_in(request(&beta)).unwrap();
     write_file(&file, &parts_file(&acme, "47"));
@@ -157,7 +180,13 @@ fn a_team_asked_to_sign_in_again_shows_none_but_keeps_them_for_the_sign_in() {
     write_file(&file, &parts_file(&server, "47"));
     // The password changed while the app was closed.
     server.reject_all();
-    let teams = Teams::open(file.clone(), kept_in(&store), None, None);
+    let teams = Teams::open(
+        file.clone(),
+        parts_folder(&file),
+        kept_in(&store),
+        None,
+        None,
+    );
     wait_until("the team to ask for its password", || {
         first(&teams).problem().as_deref() == Some(SIGN_IN_AGAIN)
     });

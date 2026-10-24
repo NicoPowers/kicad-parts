@@ -2,8 +2,8 @@
 //! server cannot be reached at start still shows its parts, marked offline
 //! (kicad-parts-ed46, ADR 0020).
 //!
-//! One file per team, in a `parts-files` folder in the app's own data
-//! folder. A file holds what the part list needs (each part's values and
+//! One file per team, in the folder the app gives the list of teams: a
+//! `parts-files` folder in its local data folder. A file holds what the part list needs (each part's values and
 //! the category names), the server address it came from, and when it last
 //! matched the server. It never holds a password or a token.
 //!
@@ -17,9 +17,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// The folder, next to the list of teams, that holds every team's file.
-pub(super) const FOLDER: &str = "parts-files";
 
 /// The file layout. A file with another version is ignored, never read in
 /// part; change it whenever the layout or `PartValues` changes.
@@ -163,7 +160,7 @@ mod tests {
 
     #[test]
     fn each_server_has_its_own_file_with_a_name_every_system_accepts() {
-        let dir = Path::new(FOLDER);
+        let dir = Path::new("parts-files");
         let acme = file_for(dir, ACME);
         assert_eq!(
             acme.file_name().unwrap(),

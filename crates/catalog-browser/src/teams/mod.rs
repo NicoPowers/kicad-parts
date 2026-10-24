@@ -43,8 +43,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 pub struct Teams {
     list_file: PathBuf,
-    /// The folder that keeps each team's last-known parts, next to the
-    /// list file.
+    /// The folder that holds each team's parts file.
     parts_folder: PathBuf,
     sign_ins: SignIns,
     /// Whether sign-ins outlive the app. Turns to "until closed" if the
@@ -114,10 +113,12 @@ impl TeamList {
 
 impl Teams {
     /// Reads the list of teams from `list_file`, and carries on, in the
-    /// background, each team's sign-in kept in `sign_ins`. A suggested
-    /// server or email (from launch options) fills in the sign-in form.
+    /// background, each team's sign-in kept in `sign_ins`. Each team's
+    /// parts file is in `parts_folder`. A suggested server or email (from
+    /// launch options) fills in the sign-in form.
     pub fn open(
         list_file: PathBuf,
+        parts_folder: PathBuf,
         sign_ins: SignIns,
         suggested_server: Option<String>,
         suggested_email: Option<String>,
@@ -140,7 +141,6 @@ impl Teams {
             let _ = saved::write(&list_file, &saved);
         }
         let kept = Arc::new(Mutex::new(sign_ins.kept.clone()));
-        let parts_folder = parts_folder_of(&list_file);
         let teams: Vec<Team> = saved
             .teams
             .into_iter()
@@ -502,15 +502,6 @@ impl Teams {
     fn lock(&self) -> MutexGuard<'_, TeamList> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
-}
-
-/// The folder that keeps each team's last-known parts: next to the list
-/// file, in the app's own data folder.
-fn parts_folder_of(list_file: &Path) -> PathBuf {
-    list_file
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(parts_file::FOLDER)
 }
 
 fn writer_for(folder: &Path, saved: &SavedTeam, catalog: &Arc<TeamCatalog>) -> Arc<PartsWriter> {

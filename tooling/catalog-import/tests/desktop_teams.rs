@@ -283,7 +283,13 @@ fn two_teams_are_followed_side_by_side_and_stay_signed_in() {
     let _ = std::fs::remove_dir_all(&folder);
 
     // Sign in to both: the second sign-in keeps the first team signed in.
-    let teams = Arc::new(Teams::open(list.clone(), kept_in(), None, None));
+    let teams = Arc::new(Teams::open(
+        list.clone(),
+        config.path().join("parts-files"),
+        kept_in(),
+        None,
+        None,
+    ));
     let libraries = KicadLibraries::start(folder.clone(), teams.clone());
     teams.sign_in(acme.sign_in()).unwrap();
     teams.sign_in(beta.sign_in()).unwrap();
@@ -331,7 +337,13 @@ fn two_teams_are_followed_side_by_side_and_stay_signed_in() {
     // A restart carries on both sign-ins from the kept tokens.
     drop(libraries);
     drop(teams);
-    let teams = Teams::open(list.clone(), kept_in(), None, None);
+    let teams = Teams::open(
+        list.clone(),
+        config.path().join("parts-files"),
+        kept_in(),
+        None,
+        None,
+    );
     wait_until("both teams to be live again with no password", || {
         live(&teams, &acme).is_some() && live(&teams, &beta).is_some()
     });
@@ -342,7 +354,13 @@ fn two_teams_are_followed_side_by_side_and_stay_signed_in() {
     // sign in again.
     drop(teams);
     acme.change_password();
-    let teams = Teams::open(list.clone(), kept_in(), None, None);
+    let teams = Teams::open(
+        list.clone(),
+        config.path().join("parts-files"),
+        kept_in(),
+        None,
+        None,
+    );
     wait_until("beta to be live", || live(&teams, &beta).is_some());
     wait_until("acme to ask for its password", || {
         team(&teams.status().teams, &acme).session
@@ -414,6 +432,7 @@ fn a_second_server_claiming_a_team_cannot_write_its_libraries_until_confirmed() 
     let _ = std::fs::remove_dir_all(&folder);
     let teams = Arc::new(Teams::open(
         config.path().join("team.json"),
+        config.path().join("parts-files"),
         SignIns::kept_in(Arc::new(MemorySignIns::default())),
         None,
         None,
@@ -565,6 +584,7 @@ fn one_list_holds_both_teams_and_each_edit_goes_to_its_own_server() {
     let config = tempfile::tempdir().unwrap();
     let teams = Teams::open(
         config.path().join("team.json"),
+        config.path().join("parts-files"),
         SignIns::kept_in(Arc::new(MemorySignIns::default())),
         None,
         None,
@@ -675,8 +695,8 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Whether a kept-parts file in `folder` holds `text`.
-fn kept_file_holds(folder: &Path, text: &str) -> bool {
+/// Whether a parts file in `folder` holds `text`.
+fn parts_file_holds(folder: &Path, text: &str) -> bool {
     std::fs::read_dir(folder).is_ok_and(|entries| {
         entries.flatten().any(|entry| {
             std::fs::read_to_string(entry.path()).is_ok_and(|json| json.contains(text))
@@ -699,7 +719,9 @@ fn a_team_down_at_start_shows_its_kept_parts_until_its_server_is_back() {
     std::fs::create_dir_all(&scratch).unwrap();
     let config = tempfile::tempdir_in(&scratch).unwrap();
     let list_file = config.path().join("team.json");
-    let kept_folder = config.path().join("parts-files");
+    // The parts files live in the local data folder, apart from the list.
+    let data = tempfile::tempdir_in(&scratch).unwrap();
+    let parts_folder = data.path().join("parts-files");
     let cache = tempfile::tempdir_in(&scratch).unwrap();
     let browser = CatalogBrowser::open(BrowserConfig {
         catalog_root: root.clone(),
@@ -713,12 +735,18 @@ fn a_team_down_at_start_shows_its_kept_parts_until_its_server_is_back() {
     // The first run catches up, follows a teammate's save, and keeps the
     // parts on disk once they stay the same for a few seconds.
     let first_run_at = now_ms();
-    let teams = Teams::open(list_file.clone(), kept_in(), None, None);
+    let teams = Teams::open(
+        list_file.clone(),
+        parts_folder.clone(),
+        kept_in(),
+        None,
+        None,
+    );
     teams.sign_in(acme.sign_in()).unwrap();
     wait_until("acme to be live", || live(&teams, &acme).is_some());
     acme.someone_else_edits("47R");
     wait_until("the teammate's save to be kept on disk", || {
-        kept_file_holds(&kept_folder, "\"47R\"")
+        parts_file_holds(&parts_folder, "\"47R\"")
     });
     wait_until("the sign-in to be kept", || {
         store.read(&acme.url).unwrap().is_some()
@@ -731,7 +759,13 @@ fn a_team_down_at_start_shows_its_kept_parts_until_its_server_is_back() {
     let stopped = acme.server.take().unwrap().stop_for_a_while();
 
     // The next start shows the kept parts, offline, as of the first run.
-    let teams = Teams::open(list_file.clone(), kept_in(), None, None);
+    let teams = Teams::open(
+        list_file.clone(),
+        parts_folder.clone(),
+        kept_in(),
+        None,
+        None,
+    );
     wait_until("acme to be found unreachable", || {
         matches!(teams.reaching(&acme.url), Some(Some(_)))
     });
@@ -764,10 +798,10 @@ fn a_team_down_at_start_shows_its_kept_parts_until_its_server_is_back() {
     ));
     assert_eq!(acme.value_on_server(), "47 ohm");
     wait_until("the edit to be kept on disk", || {
-        kept_file_holds(&kept_folder, "\"47 ohm\"")
+        parts_file_holds(&parts_folder, "\"47 ohm\"")
     });
 
     // Signing out deletes the kept parts.
     teams.sign_out(&acme.url);
-    assert!(!kept_file_holds(&kept_folder, "47"));
+    assert!(!parts_file_holds(&parts_folder, "47"));
 }

@@ -770,6 +770,13 @@ fn main() {
                 Some(dir) => dir.join("kicad-libraries"),
                 None => app.path().app_local_data_dir()?.join("kicad-libraries"),
             };
+            // Each team's parts file: data of this computer, which may be
+            // large, so local (never roaming), and not in the cache, which
+            // the system may clear (kicad-parts-ed46).
+            let parts_folder = match &options.data_dir {
+                Some(dir) => dir.join("parts-files"),
+                None => app.path().app_local_data_dir()?.join("parts-files"),
+            };
             let (config_dir, cache_dir) = match &options.data_dir {
                 Some(dir) => (dir.join("config"), dir.join("cache")),
                 None => {
@@ -813,6 +820,7 @@ fn main() {
             // its renewable sign-in only in the credential store.
             let teams = Arc::new(Teams::open(
                 config_dir.join("team.json"),
+                parts_folder,
                 sign_ins.clone(),
                 options.team_server.clone(),
                 options.team_email.clone(),
