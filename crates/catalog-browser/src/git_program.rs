@@ -128,6 +128,7 @@ impl Git {
             .with_env("GIT_CONFIG_NOSYSTEM", "1")
             .without_env("GIT_SSH_COMMAND")
             .without_env("GIT_SSH")
+            .without_env("GIT_SSH_VARIANT")
             .without_env("HTTPS_PROXY")
             .without_env("HTTP_PROXY")
             .without_env("ALL_PROXY")
@@ -184,9 +185,12 @@ impl Git {
     }
 
     /// Whether the person chose an SSH command of their own, in the
-    /// environment or in git's settings as seen from `dir`.
+    /// environment or in git's settings as seen from `dir`. Telling git
+    /// which kind of SSH program to expect (`GIT_SSH_VARIANT` or
+    /// `ssh.variant`, as for PuTTY) counts too: "ssh -o ..." might not suit
+    /// it.
     fn has_own_ssh_command(&self, dir: Option<&Path>) -> Result<bool, NotInstalled> {
-        if ["GIT_SSH_COMMAND", "GIT_SSH"]
+        if ["GIT_SSH_COMMAND", "GIT_SSH", "GIT_SSH_VARIANT"]
             .iter()
             .any(|name| self.env_var(name).is_some_and(|value| !value.is_empty()))
         {
@@ -194,7 +198,11 @@ impl Git {
         }
         let ran = self.run(
             dir,
-            ["config", "--get", "core.sshCommand"],
+            [
+                "config",
+                "--get-regexp",
+                r"^(core\.sshcommand|ssh\.variant)$",
+            ],
             Duration::from_secs(30),
         )?;
         Ok(ran.succeeded && !ran.stdout_text().trim().is_empty())
@@ -404,6 +412,10 @@ mod tests {
         assert_eq!(own.has_own_ssh_command(None), Ok(true));
         let plink = git.clone().with_env("GIT_SSH", "plink.exe");
         assert_eq!(plink.has_own_ssh_command(None), Ok(true));
+        let variant = git.clone().with_env("GIT_SSH_VARIANT", "putty");
+        assert_eq!(variant.has_own_ssh_command(None), Ok(true));
+        std::fs::write(dir.path().join("gitconfig"), "[ssh]\n\tvariant = plink\n").unwrap();
+        assert_eq!(git.has_own_ssh_command(None), Ok(true));
         // Set in git's settings, as Windows' OpenSSH for 1Password often is.
         std::fs::write(
             dir.path().join("gitconfig"),
