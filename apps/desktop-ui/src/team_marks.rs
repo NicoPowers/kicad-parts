@@ -179,6 +179,56 @@ pub(crate) fn team_for(
         .or_else(|| candidates.first().cloned())
 }
 
+/// Each team in `teams` (server addresses), with its code, for a list box.
+pub(crate) fn team_options(status: &TeamsStatus, teams: &[String]) -> Vec<(String, String)> {
+    status
+        .teams
+        .iter()
+        .filter(|team| teams.contains(&team.server_url))
+        .map(|team| (team.server_url.clone(), team.label()))
+        .collect()
+}
+
+/// The small Team list box of a feature that works on one team at a time,
+/// such as Add part. Shown only with two teams or more to choose from.
+/// The options and the chosen team are kept apart, so a choice only moves
+/// the selection, and the keyboard focus stays on it (mx-b28a31).
+#[component]
+pub(crate) fn TeamSelect(
+    /// The element ID, which the label names.
+    id: &'static str,
+    /// Each team to choose from, by server address, with its code.
+    options: Memo<Vec<(String, String)>>,
+    /// The team chosen, by server address.
+    #[prop(into)]
+    chosen: Signal<String>,
+    changed: Callback<String>,
+) -> impl IntoView {
+    move || {
+        let options = options.get();
+        (options.len() >= 2).then(|| {
+            view! {
+                <p class="team-select">
+                    <label for=id>"Team"</label>
+                    <select id=id on:change:target=move |event| changed.run(event.target().value())>
+                        {options
+                            .into_iter()
+                            .map(|(server, label)| {
+                                let this = server.clone();
+                                view! {
+                                    <option value=server prop:selected=move || chosen.get() == this>
+                                        {label}
+                                    </option>
+                                }
+                            })
+                            .collect_view()}
+                    </select>
+                </p>
+            }
+        })
+    }
+}
+
 /// A row's team mark: the team's code in its colour, and "offline" in
 /// words while its server cannot be reached.
 #[component]

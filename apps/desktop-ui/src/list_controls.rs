@@ -47,24 +47,8 @@ pub(crate) fn ListControls(
                 .unwrap_or_default()
         })
     });
-    // Shows the change at once, then keeps it for the next start.
     let choose = move |change: Box<dyn FnOnce(&mut TeamChoices) + Send>| {
-        let Some(mut choices) =
-            teams.with_untracked(|status| status.as_ref().map(|s| s.choices.clone()))
-        else {
-            return;
-        };
-        change(&mut choices);
-        set_teams.update(|status| {
-            if let Some(status) = status {
-                status.choices = choices.clone();
-            }
-        });
-        spawn_local(async move {
-            if let Ok(status) = backend::team_choose(choices).await {
-                set_teams.set(Some(status));
-            }
-        });
+        save_choices(set_teams, change);
     };
     move || {
         let options = options.get();
@@ -115,4 +99,42 @@ pub(crate) fn ListControls(
             }
         })
     }
+}
+
+/// Changes what the person chose, as `change` says: shows it at once, then
+/// keeps it in the list of teams for the next start.
+pub(crate) fn save_choices(
+    set_teams: RwSignal<Option<TeamsStatus>>,
+    change: impl FnOnce(&mut TeamChoices),
+) {
+    let Some(mut choices) =
+        set_teams.with_untracked(|status| status.as_ref().map(|status| status.choices.clone()))
+    else {
+        return;
+    };
+    change(&mut choices);
+    set_teams.update(|status| {
+        if let Some(status) = status {
+            status.choices = choices.clone();
+        }
+    });
+    spawn_local(async move {
+        if let Ok(status) = backend::team_choose(choices).await {
+            set_teams.set(Some(status));
+        }
+    });
+}
+
+/// Remembers `team` as the team `feature` (one of `feature::*`) last used.
+pub(crate) fn remember_team(set_teams: RwSignal<Option<TeamsStatus>>, feature: &str, team: &str) {
+    let used =
+        |choices: &TeamChoices| choices.last_used.get(feature).map(String::as_str) == Some(team);
+    if set_teams.with_untracked(|status| status.as_ref().is_none_or(|status| used(&status.choices)))
+    {
+        return;
+    }
+    let (feature, team) = (feature.to_owned(), team.to_owned());
+    save_choices(set_teams, move |choices| {
+        choices.last_used.insert(feature, team);
+    });
 }

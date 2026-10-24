@@ -37,7 +37,7 @@ use std::time::Duration;
 use team::{Notice, TeamColumn, TeamUi};
 use team_marks::{
     TeamMarks, editable_teams, hidden_teams_note, list_filter, list_group_by, showing_teams,
-    team_for,
+    team_for, team_options,
 };
 use teams::TeamsMenu;
 use viewer::{CloseUp, CloseUpDialog, Picture, Viewer};
@@ -92,6 +92,8 @@ fn App() -> impl IntoView {
     // Every team in the person's list; the part list shows every team's
     // parts at once.
     let teams = RwSignal::new(None::<TeamsStatus>);
+    // Features that remember their team save it through this.
+    provide_context(teams);
     // The header does not need the checkpoints; leaving them out keeps the
     // menu from re-rendering whenever someone saves a Change.
     let teams_badge = Memo::new(move |_| {
@@ -138,6 +140,15 @@ fn App() -> impl IntoView {
     let check_team = feature_team(feature::LIBRARY_CHECK, editable_teams);
     let kicad_team = feature_team(feature::KICAD_LIBRARIES, showing_teams);
     let add_team_url = Memo::new(move |_| add_team.get().unwrap_or_default());
+    // The teams Add part can add to, with their codes.
+    let add_teams = Memo::new(move |_| {
+        teams_badge.with(|status| {
+            status
+                .as_ref()
+                .map(|status| team_options(status, &editable_teams(status)))
+                .unwrap_or_default()
+        })
+    });
     let kicad_team_url = Memo::new(move |_| kicad_team.get().unwrap_or_default());
     // The selected part's team, while it has one and it is in the list.
     let part_team = Memo::new(move |_| {
@@ -425,6 +436,7 @@ fn App() -> impl IntoView {
                     team=part_team
                     any_team=any_team
                     add_team=add_team_url
+                    add_teams=add_teams
                     adding=adding
                     checking=checking
                     library_check=library_check
@@ -787,8 +799,10 @@ fn PartPanel(
     team: Memo<Option<TeamStatus>>,
     /// Whether any team shows parts.
     any_team: Memo<bool>,
-    /// The team a new part goes into.
+    /// The team a new part starts going into.
     add_team: Memo<String>,
+    /// The teams a new part can go into, with their codes.
+    add_teams: Memo<Vec<(String, String)>>,
     adding: RwSignal<bool>,
     checking: RwSignal<bool>,
     library_check: RwSignal<Option<LibraryCheckView>>,
@@ -871,7 +885,6 @@ fn PartPanel(
         })
     });
     Effect::new(move |_| ui.team.set(team_url.get()));
-    Effect::new(move |_| add_form.team.set(add_team.get()));
     // For a part the team catalog has: the revision shown, whose exact CAD
     // item revisions the previews are drawn from, and its Symbol and
     // Footprint in case those cannot be fetched. Otherwise the CSV catalog's.
@@ -1094,7 +1107,14 @@ fn PartPanel(
             }
         >
             {move || adding.get().then(|| view! {
-                <AddPartView form=add_form close=close_adding done=added open_part=open_part />
+                <AddPartView
+                    form=add_form
+                    teams=add_teams
+                    start_team=add_team
+                    close=close_adding
+                    done=added
+                    open_part=open_part
+                />
             })}
             {move || (checking.get() && !adding.get()).then(|| view! {
                 <LibraryCheckPanel check=library_check close=close_checking add_from=add_from />

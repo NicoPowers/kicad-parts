@@ -5,7 +5,10 @@
 //! offers, looks at the checks, and saves the new part with a reason.
 //!
 //! The form takes the part panel: the drawings on the left, the form on
-//! the right, like Edit part.
+//! the right, like Edit part. With two teams or more the person can add
+//! to, a Team list box at the top says which team the part goes into
+//! (kicad-parts-8a71). It starts on the team chosen in the part list, else
+//! the team last added to, else the first.
 //!
 //! No CAD name is typed (kicad-parts-bc6f): Symbol and Footprint show the
 //! chosen reference, read only, with Choose... (the Libraries browser for
@@ -24,12 +27,14 @@ use crate::cad_choice::{
 };
 use crate::focus::focus_later;
 use crate::libraries::BrowseFor;
+use crate::list_controls::remember_team;
 use crate::team::{FilePreview, MAX_FILE_BYTES, RetrySlot, base64, shown};
+use crate::team_marks::TeamSelect;
 use desktop_contract::{
     DownloadedFile, Field, FileKind, FilePreviewRequest, LibraryGroup, LibraryKey,
     ManufacturerPart, PickUse, PreviewKind, PreviewRequest, PublishResult, TeamDownload,
     TeamDownloadRequest, TeamFile, TeamLibraryChoice, TeamNewCategory, TeamNewPartRequest,
-    TeamPick, TeamPickRequest, TeamSameMpn,
+    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus, feature,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -115,6 +120,9 @@ pub struct Form {
     /// The server address of the team the new part goes into. Every
     /// request the form makes names it.
     pub team: RwSignal<String>,
+    /// The person chose the team in this form, so it no longer follows the
+    /// part list's team until the form is emptied.
+    team_chosen: StoredValue<bool>,
     reading: RwSignal<Option<TeamDownload>>,
     downloads: StoredValue<Vec<DownloadedFile>>,
     reading_files: RwSignal<bool>,
@@ -195,6 +203,7 @@ impl Form {
     pub fn new() -> Self {
         Self {
             team: RwSignal::new(String::new()),
+            team_chosen: StoredValue::new(false),
             reading: RwSignal::new(None),
             downloads: StoredValue::new(Vec::new()),
             reading_files: RwSignal::new(false),
@@ -277,6 +286,7 @@ impl Form {
 
     /// Empties the form, after a save or Cancel.
     pub fn reset(&self) {
+        self.team_chosen.set_value(false);
         self.reading.set(None);
         self.downloads.set_value(Vec::new());
         self.read_problem.set(None);
@@ -326,10 +336,12 @@ impl Form {
         let downloads = self.downloads.get_value();
         let picks = self.picks.get_untracked();
         let focus = self.focus_after.get_value();
+        let team_chosen = self.team_chosen.get_value();
         self.reset();
         self.downloads.set_value(downloads);
         self.picks.set(picks);
         self.focus_after.set_value(focus);
+        self.team_chosen.set_value(team_chosen);
     }
 
     /// Sets `value` to `new` if it is still what the app offered before (or
@@ -583,6 +595,12 @@ fn draw_file(
 #[component]
 pub fn AddPartView(
     form: Form,
+    /// The teams the person can add parts to, by server address, with each
+    /// one's code.
+    teams: Memo<Vec<(String, String)>>,
+    /// The team to start on: the part list's, else the last one used, else
+    /// the first.
+    start_team: Memo<String>,
     close: Callback<()>,
     done: Callback<String>,
     open_part: Callback<(String, Option<ManufacturerPart>)>,
@@ -603,6 +621,7 @@ pub fn AddPartView(
         ..
     } = form;
     let opener = use_context::<LibrariesOpener>();
+    let set_teams = use_context::<RwSignal<Option<TeamsStatus>>>();
     // Keyboard and screen reader users land in the form.
     focus_later("add-files");
 
@@ -810,6 +829,26 @@ pub fn AddPartView(
             }
         });
     };
+    // The team the part goes into follows the part list's team while the
+    // form is empty and the person has not chosen one here. Otherwise it
+    // stays, unless that team can no longer take parts, such as after
+    // signing out; what was chosen is then read again for the new team.
+    Effect::new(move |_| {
+        let start = start_team.get();
+        let usable = teams.with(|teams| {
+            form.team
+                .with_untracked(|team| teams.iter().any(|(server, _)| server == team))
+        });
+        let empty = form.reading.with_untracked(Option::is_none);
+        let follows = empty && !form.team_chosen.get_value();
+        if (usable && !follows) || form.team.with_untracked(|team| *team == start) {
+            return;
+        }
+        form.team.set(start);
+        if !empty {
+            read(None, None, true);
+        }
+    });
     let on_choose =
         move |event: leptos::ev::Targeted<leptos::ev::Event, leptos::web_sys::HtmlInputElement>| {
             let input = event.target();
@@ -991,6 +1030,9 @@ pub fn AddPartView(
             match result {
                 Ok(PublishResult::Added { part }) => {
                     form.reset();
+                    if let Some(set_teams) = set_teams {
+                        remember_team(set_teams, feature::ADD_PART, &team);
+                    }
                     done.run(part.ipn);
                 }
                 Ok(PublishResult::IpnTaken {
@@ -1125,6 +1167,23 @@ pub fn AddPartView(
                         }
                     >
                         <h3 id="add-heading" class="visually-hidden">"Add part"</h3>
+                        <TeamSelect
+                            id="add-team"
+                            options=teams
+                            chosen=form.team
+                            changed=Callback::new(move |team: String| {
+                                form.team_chosen.set_value(true);
+                                form.team.set(team.clone());
+                                if let Some(set_teams) = set_teams {
+                                    remember_team(set_teams, feature::ADD_PART, &team);
+                                }
+                                // Categories and free IPNs are the team's own,
+                                // so what was chosen is read again for it.
+                                if form.reading.with_untracked(Option::is_some) {
+                                    read(None, None, true);
+                                }
+                            })
+                        />
                         <div class="add-files">
                             <input
                                 type="file"

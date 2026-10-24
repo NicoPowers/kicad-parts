@@ -462,6 +462,25 @@ button:disabled {
   margin-right: 0.5rem;
 }
 
+/* The Team list box of a feature that works on one team at a time. */
+.team-select {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+}
+
+.team-select label {
+  font-weight: 600;
+}
+
+.team-select select {
+  font: inherit;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+}
+
 /* Teams whose parts are hidden, and how to show them. */
 .hidden-teams {
   margin: -0.2rem 0.9rem 0.5rem;
