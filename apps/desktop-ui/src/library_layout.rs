@@ -122,6 +122,13 @@ pub(crate) fn doubt_groups(doubts: &[LayoutDoubt]) -> Vec<DoubtGroup> {
                 "Library tables that can't be read",
                 format!("{table}: {why}."),
             ),
+            LayoutDoubt::PathNotUsable { path } => (
+                6,
+                "File names Windows can't use",
+                format!(
+                    "{path}: Windows can't keep a file with this name, so the app leaves it out. Rename it in the repo."
+                ),
+            ),
         };
         let group = groups
             .entry(order)

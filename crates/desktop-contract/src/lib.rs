@@ -626,6 +626,9 @@ pub enum LayoutDoubt {
     GitLfs { path: String },
     /// A lib table the app could not read.
     TableUnreadable { table: String, why: String },
+    /// A library file whose name Windows can't keep, such as `CON` or one
+    /// ending in a dot; the app leaves it out.
+    PathNotUsable { path: String },
 }
 
 /// What the person changed in a scanned layout: only what the scan got

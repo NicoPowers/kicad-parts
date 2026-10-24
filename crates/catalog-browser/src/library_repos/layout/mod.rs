@@ -174,7 +174,7 @@ impl Layouts {
     ) -> Option<Result<(SourceProfile, PathBuf), RepoProblem>> {
         let name = repo.address().folder_name();
         let reviewed = self.store.read(&name)?;
-        let files_folder = self.store.folder().join(format!("{name}.files"));
+        let files_folder = self.store.files_folder(&name);
         Some(
             files::library_files(repo, &reviewed.commit, &reviewed.profile, &files_folder)
                 .map(|folder| (reviewed.profile, folder)),
@@ -187,10 +187,11 @@ impl Layouts {
         let Ok(entries) = fs::read_dir(self.store.folder()) else {
             return;
         };
+        let wanted: BTreeSet<String> = wanted.iter().map(|name| Store::key(name)).collect();
         let _writing = self.writing();
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let repo = [".json.tmp", ".json", ".files"]
+            let repo = [".json.tmp", ".json"]
                 .iter()
                 .find_map(|suffix| name.strip_suffix(suffix))
                 .unwrap_or(&name);

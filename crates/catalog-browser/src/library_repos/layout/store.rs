@@ -230,8 +230,20 @@ impl Store {
         &self.folder
     }
 
+    /// A short name for the repo whose copy is `name`: the start of its
+    /// SHA-256. Copy folder names can be long, and library paths inside
+    /// the files folder add more, near Windows' path length limit.
+    pub(crate) fn key(name: &str) -> String {
+        sha256_hex(name.as_bytes())[..12].to_owned()
+    }
+
     fn file(&self, name: &str) -> PathBuf {
-        self.folder.join(format!("{name}.json"))
+        self.folder.join(format!("{}.json", Self::key(name)))
+    }
+
+    /// The folder for the library files of the repo whose copy is `name`.
+    pub(crate) fn files_folder(&self, name: &str) -> PathBuf {
+        self.folder.join(Self::key(name))
     }
 
     /// The reviewed layout of the repo whose copy is `name`; `None` if
@@ -437,7 +449,7 @@ mod tests {
         store.write("repo", &reviewed).unwrap();
         assert_eq!(store.read("repo"), Some(reviewed));
         // A broken file means: review again.
-        fs::write(store.folder().join("repo.json"), "{not json").unwrap();
+        fs::write(store.file("repo"), "{not json").unwrap();
         assert_eq!(store.read("repo"), None);
     }
 }

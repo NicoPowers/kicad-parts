@@ -17,7 +17,8 @@
 //! - **Doubts** are what the person should check: a link to a missing 3D
 //!   model, a name that differs only in capitals, two libraries with one
 //!   nickname, a variable with no matching folder, a file stored with Git
-//!   LFS, and a lib table that can't be read.
+//!   LFS, a lib table that can't be read, and a library file whose name
+//!   Windows can't keep (such as `CON.kicad_sym`), which is left out.
 //!
 //! Paths are repo paths with `/`, compared with exact case, as on Linux:
 //! a link that works only on Windows or macOS is a doubt.
@@ -26,7 +27,9 @@ use super::super::RepoFile;
 use catalog::download::model_links;
 use desktop_contract::{LayoutDoubt, LayoutLibrary, LayoutVariable, LibraryLayout};
 use kicad_integration::lib_table::{LibTable, TableKind};
-use kicad_integration::library_source::{join, parent, plain_path, resolve_path};
+use kicad_integration::library_source::{
+    is_plain_repo_path, join, parent, plain_path, resolve_path,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// The file extensions of 3D models KiCad opens.
@@ -78,6 +81,14 @@ pub(crate) fn scan(
     let mut models: Vec<&str> = Vec::new();
     let mut databases = Vec::new();
     for path in &paths {
+        let library_file = symbol_library(path).is_some() || footprint_library(path).is_some();
+        if library_file && !is_plain_repo_path(path) {
+            // The app could not write it out as a file on Windows.
+            doubts.insert(LayoutDoubt::PathNotUsable {
+                path: (*path).to_owned(),
+            });
+            continue;
+        }
         if let Some(library) = symbol_library(path) {
             symbols
                 .entry(library.clone())

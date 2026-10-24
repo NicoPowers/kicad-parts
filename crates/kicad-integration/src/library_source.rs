@@ -327,8 +327,32 @@ impl SourceProfile {
 /// the folder it is joined to.
 pub fn is_plain_repo_path(path: &str) -> bool {
     path.split('/').all(|part| {
-        !part.is_empty() && part != "." && part != ".." && !part.contains([':', '\\', '\0'])
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && !part.contains([':', '\\', '\0'])
+            && is_windows_safe(part)
     })
+}
+
+/// Whether Windows can keep a file or folder named `part`: not one of its
+/// reserved device names (such as `CON` or `com1.txt`), and not ending in
+/// a dot or space, which Windows drops, so `a.` would overwrite `a`.
+fn is_windows_safe(part: &str) -> bool {
+    if part.ends_with(['.', ' ']) {
+        return false;
+    }
+    let stem = part
+        .split('.')
+        .next()
+        .unwrap_or(part)
+        .trim_end()
+        .to_ascii_uppercase();
+    let numbered = |name: &str| {
+        stem.strip_prefix(name)
+            .is_some_and(|digit| digit.len() == 1 && digit.as_bytes()[0].is_ascii_digit())
+    };
+    !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") && !numbered("COM") && !numbered("LPT")
 }
 
 /// `folder/name`, or `name` alone for the top folder.
@@ -638,7 +662,25 @@ mod tests {
     #[test]
     fn only_plain_repo_paths_become_files() {
         assert!(is_plain_repo_path("lib/Acme.pretty/R 0603.kicad_mod"));
-        for bad in ["", "a//b", "./a", "a/../b", "C:/x", "lib/c:x", "a\\b", "/a"] {
+        // Names that only start like a device name are fine.
+        assert!(is_plain_repo_path("console/COM10.kicad_sym"));
+        assert!(is_plain_repo_path("Connectors.pretty/AUX_IN.kicad_mod"));
+        for bad in [
+            "",
+            "a//b",
+            "./a",
+            "a/../b",
+            "C:/x",
+            "lib/c:x",
+            "a\\b",
+            "/a",
+            "lib/CON",
+            "nul.kicad_sym",
+            "x/com1.step",
+            "LPT9",
+            "trail.",
+            "trail ",
+        ] {
             assert!(!is_plain_repo_path(bad), "{bad}");
         }
     }

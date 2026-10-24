@@ -1,7 +1,8 @@
 //! The library files of a reviewed layout, written out of the app's copy
 //! so the Libraries browser and kicad-cli can read them as files
 //! (kicad-parts-e9a3). The copy has no files checked out, so each commit's
-//! symbol and footprint libraries go in `<repo>.files/<commit>/`, once.
+//! symbol and footprint libraries go in `<repo key>/<commit start>/`, once.
+//! Both names are short, to stay clear of Windows' path length limit.
 //! 3D models stay in the copy: they can be large, and browsing needs none.
 //!
 //! These are the app's own files, made from one commit; a person never
@@ -20,15 +21,16 @@ use std::path::{Path, PathBuf};
 const COMPLETE: &str = ".complete";
 
 /// The folder holding the library files of `profile` at `commit`, written
-/// from `repo`'s copy if they are not there yet. `files_folder` is
-/// `<repo>.files`; other commits' folders in it are deleted.
+/// from `repo`'s copy if they are not there yet. `files_folder` is the
+/// repo's own; other commits' folders in it are deleted.
 pub(crate) fn library_files(
     repo: &LibraryRepo,
     commit: &str,
     profile: &SourceProfile,
     files_folder: &Path,
 ) -> Result<PathBuf, RepoProblem> {
-    let folder = files_folder.join(commit);
+    let short = &commit[..12.min(commit.len())];
+    let folder = files_folder.join(short);
     if folder.join(COMPLETE).is_file() {
         return Ok(folder);
     }
@@ -36,7 +38,7 @@ pub(crate) fn library_files(
     let wanted = wanted(&listed, profile);
     let paths: Vec<&str> = wanted.iter().map(String::as_str).collect();
     let bytes = repo.read_files(commit, &paths)?;
-    let partial = files_folder.join(format!("{commit}.partial"));
+    let partial = files_folder.join(format!("{short}.partial"));
     let written = (|| -> std::io::Result<()> {
         super::super::repo::remove_folder(&partial)?;
         for (path, bytes) in paths.iter().zip(bytes) {
@@ -63,7 +65,7 @@ pub(crate) fn library_files(
     // Only the newest commit's files are kept.
     if let Ok(entries) = fs::read_dir(files_folder) {
         for entry in entries.flatten() {
-            if entry.file_name() != commit {
+            if entry.file_name() != short {
                 let _ = super::super::repo::remove_folder(&entry.path());
             }
         }

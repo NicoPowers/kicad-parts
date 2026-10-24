@@ -337,3 +337,29 @@ fn only_small_models_and_every_footprint_and_table_are_read() {
         ["3d/small.step", "Acme.pretty/A.kicad_mod", "fp-lib-table"]
     );
 }
+
+#[test]
+fn library_files_windows_cannot_keep_are_left_out_and_said() {
+    let layout = scanned(&[
+        ("CON.kicad_sym", SYMBOLS),
+        ("Acme.pretty/R.kicad_mod", &footprint(&[])),
+        ("lib./Acme.pretty/R.kicad_mod", &footprint(&[])),
+        ("Good.kicad_sym", SYMBOLS),
+    ]);
+    assert_eq!(
+        layout.symbol_libraries,
+        [library("Good", "Good.kicad_sym", false)]
+    );
+    assert_eq!(layout.footprint_libraries.len(), 1);
+    assert_eq!(
+        layout.doubts,
+        [
+            LayoutDoubt::PathNotUsable {
+                path: "CON.kicad_sym".into()
+            },
+            LayoutDoubt::PathNotUsable {
+                path: "lib./Acme.pretty/R.kicad_mod".into()
+            },
+        ]
+    );
+}
