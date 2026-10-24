@@ -213,17 +213,18 @@ describe('a client library repo laid out its own way', () => {
         browser.execute(() => document.getElementById('library-items')?.getAttribute('aria-busy') === 'false'),
       { timeout: 20_000, interval: 25, timeoutMsg: 'the list never showed its answer' },
     );
+    // KiCad's own libraries take a while to read, and until then the
+    // count adds that more may appear; once every library is read, it is
+    // the same each run.
+    await browser.waitUntil(
+      async () => browser.execute(() => document.querySelector('.libraries-progress')?.dataset.state === 'ready'),
+      { timeout: 240_000, interval: 250, timeoutMsg: 'the libraries were never all read' },
+    );
     await waitForText(browser, '#library-count', '1 symbol');
     const rows = await browser.execute(() =>
       [...document.querySelectorAll('#library-items .library-item-name')].map((n) => n.textContent),
     );
     assert.deepEqual(rows, ['Acme_R']);
-    // KiCad's own libraries take a while to read; the progress line goes
-    // once every library is read, so the screenshot is the same each run.
-    await browser.waitUntil(
-      async () => browser.execute(() => document.querySelector('.libraries-progress')?.dataset.state === 'ready'),
-      { timeout: 240_000, interval: 250, timeoutMsg: 'the libraries were never all read' },
-    );
     await screenshot(browser, '109-libraries-team-repo');
     await assertAccessible(browser, '109-libraries-team-repo');
     await (await browser.$('#libraries-close')).click();
