@@ -871,10 +871,11 @@ fn lists_each_linked_teams_reviewed_libraries_in_a_group_of_its_own() {
             models_by_library: None,
             own_library_start: None,
         },
-        folder: files,
+        folder: Some(files),
+        problem: None,
     };
     let browser = open(&fixture, None);
-    browser.libraries_with_teams(true, || (vec![acme.clone()], Vec::new()));
+    browser.libraries_with_teams(true, || vec![acme.clone()]);
     assert!(browser.wait_for_libraries(WAIT));
     let view = browser.libraries(false);
     assert_eq!(view.teams.len(), 1);
@@ -912,10 +913,44 @@ fn lists_each_linked_teams_reviewed_libraries_in_a_group_of_its_own() {
         ..request(PreviewKind::Symbol)
     };
     assert_eq!(names(&browser, &only_acme), ["Device:Acme_R"]);
-    // A later refresh with no teams lists none.
-    browser.libraries_with_teams(true, || (Vec::new(), vec!["A note".into()]));
+    // While a newer commit's files are written, the group says so, the
+    // browser answers at once and keeps asking, and the files are listed
+    // once ready.
+    let writing = TeamLibraries {
+        folder: None,
+        ..acme.clone()
+    };
+    let view = browser.libraries_with_teams(true, || vec![writing.clone()]);
+    assert!(browser.wait_for_libraries(WAIT));
+    let view_now = browser.libraries_with_teams(false, || vec![writing.clone()]);
+    assert!(!view_now.is_ready(), "one library still to come");
+    assert_eq!(
+        view.teams[0].note.as_deref(),
+        Some("Getting this repo's library files ready…")
+    );
+    assert!(
+        view_now
+            .symbols
+            .iter()
+            .all(|entry| entry.key.group != LibraryGroup::Team)
+    );
+    browser.libraries_with_teams(false, || vec![acme.clone()]);
     assert!(browser.wait_for_libraries(WAIT));
     let view = browser.libraries_with_teams(false, || unreachable!());
-    assert!(view.teams.is_empty());
-    assert!(view.notes.contains(&"A note".to_owned()));
+    assert!(view.is_ready());
+    assert_eq!(view.teams[0].note, None);
+    assert!(
+        view.symbols
+            .iter()
+            .any(|entry| entry.key.group == LibraryGroup::Team)
+    );
+    // A later refresh with no teams lists none.
+    browser.libraries_with_teams(true, Vec::new);
+    assert!(browser.wait_for_libraries(WAIT));
+    assert!(
+        browser
+            .libraries_with_teams(false, || unreachable!())
+            .teams
+            .is_empty()
+    );
 }

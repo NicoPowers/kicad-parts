@@ -42,6 +42,23 @@ impl Fixture {
         self.git(work, &["push", "-q", &bare_text, "HEAD:main"]);
     }
 
+    /// Every team's reviewed libraries, once their files are written out
+    /// of the copy on their own threads.
+    fn ready_libraries(&self, repos: &LibraryRepos) -> Vec<TeamLibraries> {
+        let started = Instant::now();
+        loop {
+            let libraries = repos.team_libraries();
+            if !libraries.iter().any(TeamLibraries::is_being_written) {
+                return libraries;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "the library files were never written"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn layout_state(&self, repos: &LibraryRepos, team: &str) -> Option<LayoutState> {
         self.status(repos, team).and_then(|status| status.layout)
     }
@@ -169,8 +186,7 @@ fn a_linked_repo_is_scanned_reviewed_and_browsed_offline() {
 
     // Browsing works offline, from the app's copy.
     fs::rename(&acme, fixture.path("acme-moved.git")).unwrap();
-    let (libraries, notes) = repos.team_libraries();
-    assert!(notes.is_empty(), "{notes:?}");
+    let libraries = fixture.ready_libraries(&repos);
     let [team] = libraries.as_slice() else {
         panic!("one team's libraries: {libraries:?}");
     };
@@ -185,7 +201,7 @@ fn a_linked_repo_is_scanned_reviewed_and_browsed_offline() {
         .library_path(TableKind::Symbol, "ACME")
         .unwrap();
     assert_eq!(
-        fs::read_to_string(team.folder.join(&symbols)).unwrap(),
+        fs::read_to_string(team.folder.as_ref().unwrap().join(&symbols)).unwrap(),
         SYMBOLS
     );
     let footprints = team
@@ -194,12 +210,14 @@ fn a_linked_repo_is_scanned_reviewed_and_browsed_offline() {
         .unwrap();
     assert!(
         team.folder
+            .as_ref()
+            .unwrap()
             .join(&footprints)
             .join("R_0603.kicad_mod")
             .is_file()
     );
     // 3D models stay in the copy.
-    assert!(!team.folder.join("models").exists());
+    assert!(!team.folder.as_ref().unwrap().join("models").exists());
 }
 
 #[test]
@@ -265,7 +283,7 @@ fn a_newer_commit_asks_for_a_review_only_when_the_layout_changed() {
         Some(LayoutState::Changed)
     );
     // The layout reviewed before stays in use meanwhile.
-    let (libraries, _) = repos.team_libraries();
+    let libraries = fixture.ready_libraries(&repos);
     assert_eq!(
         libraries[0]
             .profile
@@ -289,6 +307,24 @@ fn a_newer_commit_asks_for_a_review_only_when_the_layout_changed() {
             footprint_libraries: 2
         })
     );
+
+    // The browser gets the newer commit's files. The folder it had before
+    // stays until it asks again, so it never meets a folder deleted under
+    // it; then only the newest is kept.
+    let commit_folders = || -> usize {
+        let layouts = fixture.path("library-layouts");
+        fs::read_dir(&layouts)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .map(|repo| fs::read_dir(repo.path()).unwrap().count())
+            .sum()
+    };
+    let newest = fixture.ready_libraries(&repos);
+    assert_eq!(commit_folders(), 2);
+    let again = fixture.ready_libraries(&repos);
+    assert_eq!(commit_folders(), 1);
+    assert_eq!(newest[0].folder, again[0].folder);
 }
 
 #[test]
@@ -306,7 +342,7 @@ fn removing_the_repo_forgets_its_layout() {
             choices: review.choices,
         })
         .unwrap();
-    let _ = repos.team_libraries();
+    let _ = fixture.ready_libraries(&repos);
     let layouts = fixture.path("library-layouts");
     assert_eq!(
         fs::read_dir(&layouts).unwrap().count(),

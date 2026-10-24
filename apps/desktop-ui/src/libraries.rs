@@ -649,7 +649,7 @@ fn list_groups(
                         offline: false,
                     }),
                     in_team,
-                    None,
+                    team.note.clone(),
                 );
             }
         }

@@ -6,7 +6,7 @@ use super::read::{Links, MAX_SYMBOL_FILE_BYTES, read_limited};
 use super::sources::{Format, Places, is_link};
 use crate::library_repos::TeamLibraries;
 use crate::team::KnownParts;
-use crate::{CatalogBrowser, Drawn, export_problem, problem, ready};
+use crate::{CatalogBrowser, Drawn, TeamState, export_problem, problem, ready};
 use desktop_contract::{
     LibrariesView, LibraryGroup, LibraryItemDetail, LibraryItemRequest, LibraryItems,
     LibraryItemsRequest, PartUse, PreviewKind, PreviewOutcome, PreviewProblemReason,
@@ -24,33 +24,54 @@ impl CatalogBrowser {
     /// changes in the background (the browser asks once when it opens).
     pub fn libraries(&self, refresh: bool) -> LibrariesView {
         if refresh {
-            self.libraries.refresh(&self.library_places());
+            let _ = self.libraries.refresh(&self.library_places());
         }
         self.libraries.view()
     }
 
     /// [`Self::libraries`], with the linked teams' reviewed library
-    /// layouts found again first (`teams`, asked only with `refresh`), and
-    /// notes about repos whose files could not be written.
+    /// layouts (`teams`). They are found again with `refresh`, and at each
+    /// later call while some team's files are still being written. When
+    /// what is found changes, the libraries are found again too. Until
+    /// then the view counts one more library to read, so the browser keeps
+    /// asking.
     pub fn libraries_with_teams(
         &self,
         refresh: bool,
-        teams: impl FnOnce() -> (Vec<TeamLibraries>, Vec<String>),
+        teams: impl FnOnce() -> Vec<TeamLibraries>,
     ) -> LibrariesView {
-        if refresh {
-            let (found, notes) = teams();
-            *self
+        let waiting = |state: &TeamState| {
+            !state.applied || state.found.iter().any(TeamLibraries::is_being_written)
+        };
+        let must_refresh = {
+            let mut state = self
                 .team_libraries
                 .lock()
-                .unwrap_or_else(|e| e.into_inner()) = (found, notes);
+                .unwrap_or_else(|e| e.into_inner());
+            if refresh || waiting(&state) {
+                let found = teams();
+                if found != state.found {
+                    state.found = found;
+                    state.applied = false;
+                }
+            }
+            refresh || !state.applied
+        };
+        if must_refresh && self.libraries.refresh(&self.library_places()) {
+            self.team_libraries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .applied = true;
         }
-        let mut view = self.libraries(refresh);
-        let notes = &self
-            .team_libraries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .1;
-        view.notes.extend(notes.iter().cloned());
+        let mut view = self.libraries.view();
+        if waiting(
+            &self
+                .team_libraries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        ) {
+            view.total += 1;
+        }
         view
     }
 
@@ -71,7 +92,7 @@ impl CatalogBrowser {
                 .team_libraries
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .0
+                .found
                 .clone(),
         }
     }

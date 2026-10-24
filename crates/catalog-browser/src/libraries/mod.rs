@@ -85,16 +85,17 @@ impl LibraryIndex {
     }
 
     /// Finds the libraries again and checks each one in the background.
-    /// Does nothing while a refresh is still running.
-    pub fn refresh(&self, places: &Places) {
+    /// Does nothing while a refresh is still running, and then says so
+    /// with `false`.
+    pub fn refresh(&self, places: &Places) -> bool {
         if self.lock().readers > 0 {
-            return;
+            return false;
         }
         let found = find_sources(places);
         let (sources, notes) = (found.sources, found.notes);
         let mut state = self.lock();
         if state.readers > 0 {
-            return;
+            return false;
         }
         if !state.cleaned {
             state.cleaned = true;
@@ -145,6 +146,7 @@ impl LibraryIndex {
             std::thread::spawn(move || read_libraries(&shared, generation));
         }
         self.shared.progress.notify_all();
+        true
     }
 
     /// Reads `key` next, if it is still waiting.

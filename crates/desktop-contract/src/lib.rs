@@ -1773,6 +1773,10 @@ pub struct LibraryTeam {
     pub colour: String,
     /// The repo's short name, such as `acme/kicad-lib`.
     pub repo_name: String,
+    /// Said in the group while its libraries can't be listed, such as
+    /// while the app writes their files out of its copy.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// One library in the browser's list.

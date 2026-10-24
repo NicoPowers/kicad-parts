@@ -19,7 +19,7 @@ use desktop_contract::{
 };
 use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_source::{LibraryList, SourceProfile};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
@@ -34,6 +34,29 @@ pub(crate) struct Layouts {
     /// The last scan shown for review, by the repo's copy name, so "Use
     /// this layout" does not scan the same commit again.
     last_review: Mutex<Option<(String, LibraryLayout)>>,
+    /// The repos whose library files are being written, by copy name: one
+    /// writer per repo at a time.
+    files_writing: Mutex<HashSet<String>>,
+    /// The folder each repo's files were last given to the browser from.
+    files_given: Mutex<HashMap<String, PathBuf>>,
+    /// Why each repo's files could not be written, until a write works.
+    files_problems: Mutex<HashMap<String, String>>,
+}
+
+/// Where a reviewed layout's library files stand for browsing.
+#[derive(Clone, Debug)]
+pub(crate) enum Files {
+    /// Written whole in `folder`, at their repo paths.
+    Ready {
+        profile: SourceProfile,
+        folder: PathBuf,
+    },
+    /// Not written yet, or being written; `problem` says why the last
+    /// write failed.
+    Writing {
+        profile: SourceProfile,
+        problem: Option<String>,
+    },
 }
 
 impl Layouts {
@@ -42,6 +65,9 @@ impl Layouts {
             store: Store::new(folder),
             writing: Mutex::new(()),
             last_review: Mutex::new(None),
+            files_writing: Mutex::default(),
+            files_given: Mutex::default(),
+            files_problems: Mutex::default(),
         }
     }
 
@@ -173,19 +199,63 @@ impl Layouts {
         })
     }
 
-    /// The reviewed profile of `repo` and the folder its library files are
-    /// in, written out of the copy if needed; `None` before a review.
-    pub(crate) fn browsable(
-        &self,
-        repo: &LibraryRepo,
-    ) -> Option<Result<(SourceProfile, PathBuf), RepoProblem>> {
+    /// Where the reviewed libraries of `repo` stand for browsing; `None`
+    /// before a review. Ready files are returned at once; files not
+    /// written yet are for [`Self::write_files`], on a thread of its own.
+    ///
+    /// Once the files of a newer commit are ready, the folder the browser
+    /// was given before is kept until the next call, so the browser never
+    /// meets a folder deleted under it; older ones go.
+    pub(crate) fn browsable(&self, repo: &LibraryRepo) -> Option<Files> {
         let name = repo.address().folder_name();
         let reviewed = self.store.read(&name)?;
         let files_folder = self.store.files_folder(&name);
-        Some(
-            files::library_files(repo, &reviewed.commit, &reviewed.profile, &files_folder)
-                .map(|folder| (reviewed.profile, folder)),
-        )
+        let folder = files::commit_folder(&files_folder, &reviewed.commit);
+        if !files::is_complete(&folder) {
+            let problem = lock(&self.files_problems).get(&name).cloned();
+            return Some(Files::Writing {
+                profile: reviewed.profile,
+                problem,
+            });
+        }
+        if !lock(&self.files_writing).contains(&name) {
+            let mut given = lock(&self.files_given);
+            let before = given.insert(name, folder.clone());
+            let mut keep = vec![folder.as_path()];
+            keep.extend(before.as_deref());
+            files::delete_other_commits(&files_folder, &keep);
+        }
+        Some(Files::Ready {
+            profile: reviewed.profile,
+            folder,
+        })
+    }
+
+    /// Starts writing the library files of `repo`: `true` when the caller
+    /// should run [`Self::write_files`], `false` while another call does.
+    pub(crate) fn begin_writing(&self, repo: &LibraryRepo) -> bool {
+        lock(&self.files_writing).insert(repo.address().folder_name())
+    }
+
+    /// Writes the library files of `repo`'s reviewed layout out of the
+    /// copy, after [`Self::begin_writing`]. A problem is kept for the
+    /// browser to say, until a later write works.
+    pub(crate) fn write_files(&self, repo: &LibraryRepo) {
+        let name = repo.address().folder_name();
+        let written = match self.store.read(&name) {
+            Some(reviewed) => files::write_library_files(
+                repo,
+                &reviewed.commit,
+                &reviewed.profile,
+                &self.store.files_folder(&name),
+            ),
+            None => Ok(()),
+        };
+        match written {
+            Ok(()) => lock(&self.files_problems).remove(&name),
+            Err(problem) => lock(&self.files_problems).insert(name.clone(), problem.summary),
+        };
+        lock(&self.files_writing).remove(&name);
     }
 
     /// Deletes the layouts of repos no team links: every entry not named
@@ -196,6 +266,11 @@ impl Layouts {
         };
         let wanted: BTreeSet<String> = wanted.iter().map(|name| Store::key(name)).collect();
         let _writing = self.writing();
+        let writing = lock(&self.files_writing).clone();
+        let wanted: BTreeSet<String> = wanted
+            .into_iter()
+            .chain(writing.iter().map(|name| Store::key(name)))
+            .collect();
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let repo = [".json.tmp", ".json"]

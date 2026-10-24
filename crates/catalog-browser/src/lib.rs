@@ -100,9 +100,16 @@ pub struct CatalogBrowser {
     library_check: library::Cached,
     /// The Libraries browser's index, read in the background.
     libraries: libraries::LibraryIndex,
-    /// The linked teams' reviewed library layouts the browser lists, as
-    /// last found, and notes about repos whose files could not be written.
-    team_libraries: std::sync::Mutex<(Vec<library_repos::TeamLibraries>, Vec<String>)>,
+    /// The linked teams' reviewed library layouts the browser lists.
+    team_libraries: std::sync::Mutex<TeamState>,
+}
+
+/// The linked teams' reviewed library layouts, as last found, and whether
+/// the Libraries browser's index was found again with them.
+#[derive(Debug, Default)]
+pub(crate) struct TeamState {
+    pub found: Vec<library_repos::TeamLibraries>,
+    pub applied: bool,
 }
 
 impl CatalogBrowser {

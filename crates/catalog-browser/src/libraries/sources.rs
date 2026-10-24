@@ -108,6 +108,11 @@ pub(crate) fn find_sources(places: &Places) -> Found {
                 code: team.code.clone(),
                 colour: team.colour.clone(),
                 repo_name: team.repo_name.clone(),
+                note: match (&team.folder, &team.problem) {
+                    (Some(_), _) => None,
+                    (None, Some(problem)) => Some(problem.clone()),
+                    (None, None) => Some("Getting this repo's library files ready…".to_owned()),
+                },
             }
         })
         .collect();
@@ -155,6 +160,9 @@ pub(crate) fn find_sources(places: &Places) -> Found {
 /// paths in the folder the app wrote them to. Nicknames stay as the repo
 /// names them.
 fn team_libraries(team: &TeamLibraries, sources: &mut Vec<Source>) {
+    let Some(folder) = &team.folder else {
+        return;
+    };
     for (kind, table) in [
         (PreviewKind::Symbol, TableKind::Symbol),
         (PreviewKind::Footprint, TableKind::Footprint),
@@ -172,7 +180,7 @@ fn team_libraries(team: &TeamLibraries, sources: &mut Vec<Source>) {
                 },
                 kind,
                 description: String::new(),
-                path: native_path(&team.folder, &library.path),
+                path: native_path(folder, &library.path),
                 format: format_of(kind, &library.path),
                 problem: None,
                 strict_links: true,

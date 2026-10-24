@@ -43,7 +43,7 @@ use desktop_contract::{
     TeamsStatus,
 };
 use kicad_integration::library_source::SourceProfile;
-use layout::Layouts;
+use layout::{Files, Layouts};
 use problems::{Step, git_not_installed};
 use repo::CopyLocks;
 use serde::{Deserialize, Serialize};
@@ -79,7 +79,7 @@ enum Found {
 
 /// A linked team's reviewed library layout, with its library files
 /// written out of the app's copy, for the Libraries browser.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeamLibraries {
     pub server_url: String,
     /// The team's code and colour, for its mark.
@@ -88,8 +88,18 @@ pub struct TeamLibraries {
     /// The repo's short name, such as `acme/kicad-lib`.
     pub repo_name: String,
     pub profile: SourceProfile,
-    /// Holds the profile's libraries at their repo paths.
-    pub folder: PathBuf,
+    /// Holds the profile's libraries at their repo paths, once written;
+    /// `None` while the app writes them out of its copy.
+    pub folder: Option<PathBuf>,
+    /// Why the files could not be written, if they could not.
+    pub problem: Option<String>,
+}
+
+impl TeamLibraries {
+    /// The files are being written out of the app's copy now.
+    pub fn is_being_written(&self) -> bool {
+        self.folder.is_none() && self.problem.is_none()
+    }
 }
 
 /// A refusal in plain words, with no git message behind it.
@@ -252,11 +262,11 @@ impl LibraryRepos {
     }
 
     /// Every linked team's reviewed library layout, with its library files
-    /// ready to read, and a note for each repo whose files could not be
-    /// written. Works offline, from the app's copies.
-    pub fn team_libraries(&self) -> (Vec<TeamLibraries>, Vec<String>) {
+    /// when they are ready. Files not written yet are written out of the
+    /// app's copy on a thread of their own, one per repo, so this answers
+    /// at once. Works offline, from the app's copies.
+    pub fn team_libraries(&self) -> Vec<TeamLibraries> {
         let mut found = Vec::new();
-        let mut notes = Vec::new();
         let linked: HashMap<String, String> =
             self.shared.teams.library_repos().into_iter().collect();
         for team in self.shared.teams.status().teams {
@@ -267,20 +277,28 @@ impl LibraryRepos {
             else {
                 continue;
             };
-            match self.shared.layouts.browsable(&repo) {
-                None => {}
-                Some(Ok((profile, folder))) => found.push(TeamLibraries {
-                    server_url: team.server_url.clone(),
-                    code: team.label(),
-                    colour: team.colour.clone(),
-                    repo_name: repo.address().name(),
-                    profile,
-                    folder,
-                }),
-                Some(Err(problem)) => notes.push(problem.summary),
-            }
+            let (profile, folder, problem) = match self.shared.layouts.browsable(&repo) {
+                None => continue,
+                Some(Files::Ready { profile, folder }) => (profile, Some(folder), None),
+                Some(Files::Writing { profile, problem }) => {
+                    if self.shared.layouts.begin_writing(&repo) {
+                        let (shared, repo) = (self.shared.clone(), repo.clone());
+                        std::thread::spawn(move || shared.layouts.write_files(&repo));
+                    }
+                    (profile, None, problem)
+                }
+            };
+            found.push(TeamLibraries {
+                server_url: team.server_url.clone(),
+                code: team.label(),
+                colour: team.colour.clone(),
+                repo_name: repo.address().name(),
+                profile,
+                folder,
+                problem,
+            });
         }
-        (found, notes)
+        found
     }
 
     /// Fills in each team's library repo in `status`. A copy no team links
