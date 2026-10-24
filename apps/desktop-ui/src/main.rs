@@ -544,11 +544,12 @@ fn list_version(status: &TeamsStatus) -> Option<u64> {
     any.then(|| hasher.finish())
 }
 
-/// Why a part of the team `label` can't be edited while its server cannot
-/// be reached, in plain words.
-fn offline_words(label: &str) -> String {
+/// Why a part can't be edited while its team's server cannot be reached,
+/// in plain words, naming the team by `label` when there are several.
+fn offline_words(label: Option<&str>) -> String {
+    let team = label.map_or_else(|| "The team catalog".to_owned(), str::to_owned);
     format!(
-        "{label} is offline, so this part can't be edited now. You see it as it was last seen. The app reconnects by itself."
+        "{team} is offline, so this part can't be edited now. You see it as it was last seen. The app reconnects by itself."
     )
 }
 
@@ -949,7 +950,11 @@ fn PartPanel(
     });
     // Why the part's team can't take edits now, while its server cannot be
     // reached: it shows the parts last seen.
+    let marks = use_context::<Memo<TeamMarks>>();
     let offline_note = Memo::new(move |_| {
+        // With one team the note says "the team catalog", as the rest of
+        // the one-team view does.
+        let several = marks.is_some_and(|marks| marks.with(|marks| marks.shown));
         team.with(|status| {
             let status = status.as_ref()?;
             matches!(
@@ -959,10 +964,16 @@ fn PartPanel(
                     ..
                 }
             )
-            .then(|| offline_words(&status.label()))
+            .then(|| offline_words(several.then(|| status.label()).as_deref()))
         })
     });
     Effect::new(move |_| ui.offline.set(offline_note.with(Option::is_some)));
+    // The part's team code, said in its Source while several teams show
+    // parts, as its row's mark says it.
+    let source_team = Memo::new(move |_| {
+        let several = marks.is_some_and(|marks| marks.with(|marks| marks.shown));
+        team.with(|status| status.as_ref().filter(|_| several).map(TeamStatus::label))
+    });
     let can_edit = Memo::new(move |_| {
         let may_edit = team.with(|status| {
             matches!(
@@ -1262,6 +1273,7 @@ fn PartPanel(
                             any_team.get() && team_url.with(String::is_empty)
                         })
                         offline_note=offline_note
+                        source_team=source_team
                         can_edit=can_edit
                         ui=ui
                     />
@@ -1284,6 +1296,8 @@ fn PartView(
     in_no_team: Signal<bool>,
     /// Why the part can't be edited now, while its team is offline.
     offline_note: Memo<Option<String>>,
+    /// The part's team code, while several teams show parts.
+    source_team: Memo<Option<String>>,
     can_edit: Memo<bool>,
     ui: TeamUi,
 ) -> impl IntoView {
@@ -1318,11 +1332,13 @@ fn PartView(
             .split_once('-')
             .map(|(prefix, _)| prefix.to_owned())
             .unwrap_or_default();
+        let catalog = match source_team.get() {
+            Some(code) => format!("{code} team catalog"),
+            None => "Team catalog".to_owned(),
+        };
         let source = match &team {
-            Some(part) => format!(
-                "Team catalog, revision {} of this part",
-                part.revision.number
-            ),
+            Some(part) => format!("{catalog}, revision {} of this part", part.revision.number),
+            None if summary.csv_file == "Team catalog" => catalog,
             None => summary.csv_file.clone(),
         };
         let facts: Vec<(&str, String)> = [
