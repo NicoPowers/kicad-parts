@@ -13,9 +13,18 @@
 //! Each team's sign-in is kept between runs in a [`SignInStore`] (the
 //! operating system's credential store in the app), and each team's
 //! [`keeper`] carries it on at start and renews it while in use.
+//!
+//! Each team's last-known parts are kept between runs too, in a file next
+//! to the list ([`kept_parts`]), written by the team's [`parts_writer`]. A
+//! team that has a kept sign-in shows them at start, marked offline, until
+//! its first catch-up replaces them. Signing out and removing the team
+//! delete them. A team asked to sign in again shows none, but keeps the
+//! file, so signing in again shows its parts at once.
 
 mod colours;
 mod keeper;
+mod kept_parts;
+mod parts_writer;
 mod saved;
 mod sign_ins;
 
@@ -27,12 +36,16 @@ use desktop_contract::{
     SignInRequest, SignInsKept, TeamChoices, TeamSession, TeamsStatus, team_label,
 };
 use keeper::{Keeper, KeeperTask};
+use parts_writer::{PartsWriter, WriterTask};
 use saved::{SavedList, SavedTeam};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub struct Teams {
     list_file: PathBuf,
+    /// The folder that keeps each team's last-known parts, next to the
+    /// list file.
+    parts_folder: PathBuf,
     sign_ins: SignIns,
     /// Whether sign-ins outlive the app. Turns to "until closed" if the
     /// store fails.
@@ -53,6 +66,8 @@ struct Team {
     /// team (such as its KiCad libraries) keeps following the same one.
     catalog: Arc<TeamCatalog>,
     keeper: Arc<Keeper>,
+    /// Keeps the team's last-known parts on disk.
+    writer: Arc<PartsWriter>,
     /// Something the person should know about this team, such as a
     /// sign-in the store could not forget.
     note: Option<String>,
@@ -125,6 +140,7 @@ impl Teams {
             let _ = saved::write(&list_file, &saved);
         }
         let kept = Arc::new(Mutex::new(sign_ins.kept.clone()));
+        let parts_folder = parts_folder_of(&list_file);
         let teams: Vec<Team> = saved
             .teams
             .into_iter()
@@ -133,17 +149,27 @@ impl Teams {
                 // A team the person signed out of is never carried on, even
                 // if the store could not forget its sign-in.
                 let look_for_kept = !saved.signed_out;
+                if look_for_kept {
+                    // Shown while its kept sign-in is carried on. The
+                    // keeper stops showing them if there is none.
+                    if let Some(parts) = kept_parts::read(&parts_folder, &saved.server_url) {
+                        catalog.show_kept(parts);
+                    }
+                }
                 let keeper = keeper_for(&saved, &catalog, &sign_ins, &kept, look_for_kept);
+                let writer = writer_for(&parts_folder, &saved, &catalog);
                 Team {
                     saved,
                     catalog,
                     keeper,
+                    writer,
                     note: None,
                 }
             })
             .collect();
         Self {
             list_file,
+            parts_folder,
             sign_ins,
             kept,
             suggested: SavedTeam {
@@ -196,6 +222,10 @@ impl Teams {
             // The password replaces any kept sign-in still being carried on.
             keeper.signed_in();
         }
+        // Parts kept from before show at once, until the catch-up ends.
+        if let Some(parts) = kept_parts::read(&self.parts_folder, &server_url) {
+            catalog.show_kept(parts);
+        }
         let mut list = self.lock();
         // A team keeps its colour; a new one gets the next free colour.
         let colour = match list.find(&server_url) {
@@ -228,10 +258,12 @@ impl Teams {
             }
             None => {
                 let keeper = keeper_for(&saved, &catalog, &self.sign_ins, &self.kept, false);
+                let writer = writer_for(&self.parts_folder, &saved, &catalog);
                 list.teams.push(Team {
                     saved,
                     catalog,
                     keeper,
+                    writer,
                     note: None,
                 });
             }
@@ -243,9 +275,9 @@ impl Teams {
     /// Signs out of one team and forgets its kept sign-in. It stays in the
     /// list, marked signed out, so signing in again needs only the
     /// password, and the next start never carries on a sign-in the store
-    /// could not forget.
+    /// could not forget. Its kept parts are deleted.
     pub fn sign_out(&self, server_url: &str) {
-        let keeper = {
+        let (keeper, writer) = {
             let mut list = self.lock();
             list.problem = None;
             list.note = None;
@@ -259,10 +291,14 @@ impl Teams {
             team.saved.signed_out = true;
             team.note = None;
             let keeper = team.keeper.clone();
+            let writer = team.writer.clone();
             self.save(&list);
-            keeper
+            (keeper, writer)
         };
-        if let Err(problem) = keeper.sign_out() {
+        let forgotten = keeper.sign_out();
+        // Once the session has ended, so no later write brings them back.
+        delete_kept_parts(&writer, server_url);
+        if let Err(problem) = forgotten {
             let mut list = self.lock();
             if let Some(team) = list
                 .teams
@@ -276,8 +312,8 @@ impl Teams {
         }
     }
 
-    /// Signs out of one team, forgets its kept sign-in, and takes it off
-    /// the list.
+    /// Signs out of one team, forgets its kept sign-in, deletes its kept
+    /// parts, and takes it off the list.
     pub fn remove(&self, server_url: &str) {
         // The sign-in is forgotten while the team is still in the list,
         // and no sign-in runs meanwhile. So adding the team back, even
@@ -285,11 +321,16 @@ impl Teams {
         // unlocked), waits until the old sign-in is gone: the old one can
         // never be forgotten in place of the new one.
         let _one_at_a_time = self.one_at_a_time();
-        let Some(keeper) = self.lock().find(server_url).map(|team| team.keeper.clone()) else {
+        let Some((keeper, writer)) = self
+            .lock()
+            .find(server_url)
+            .map(|team| (team.keeper.clone(), team.writer.clone()))
+        else {
             return;
         };
         // Outside the list's lock, so status polling never waits.
         let forgotten = keeper.sign_out();
+        delete_kept_parts(&writer, server_url);
         let mut list = self.lock();
         list.teams
             .retain(|team| team.saved.server_url != server_url);
@@ -460,6 +501,34 @@ impl Teams {
 
     fn lock(&self) -> MutexGuard<'_, TeamList> {
         self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+/// The folder that keeps each team's last-known parts: next to the list
+/// file, in the app's own data folder.
+fn parts_folder_of(list_file: &Path) -> PathBuf {
+    list_file
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(kept_parts::FOLDER)
+}
+
+fn writer_for(folder: &Path, saved: &SavedTeam, catalog: &Arc<TeamCatalog>) -> Arc<PartsWriter> {
+    Arc::new(PartsWriter::start(WriterTask {
+        folder: folder.to_owned(),
+        server_url: saved.server_url.clone(),
+        catalog: catalog.clone(),
+    }))
+}
+
+/// Deletes a team's kept parts, once its session has ended. A file that
+/// cannot be deleted is logged, not shown: a team signed out or off the
+/// list shows no parts anyway, and never reads the file again.
+fn delete_kept_parts(writer: &PartsWriter, server_url: &str) {
+    if let Err(problem) = writer.delete() {
+        eprintln!(
+            "kicad-parts-desktop: could not delete the kept parts of {server_url} ({problem})."
+        );
     }
 }
 

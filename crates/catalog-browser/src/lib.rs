@@ -1297,7 +1297,12 @@ fn display(path: &Path) -> String {
 
 /// A part's current values from somewhere other than the CSV catalog, such
 /// as the team catalog. `None` keeps the CSV catalog's value.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+///
+/// Each team's last-known parts are kept on disk in this shape (see
+/// `teams::kept_parts`). Renaming or changing a field there needs a new
+/// file version; unknown fields make a file unreadable, so it is ignored.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PartValues {
     /// The part's category code.
     pub category: Option<String>,

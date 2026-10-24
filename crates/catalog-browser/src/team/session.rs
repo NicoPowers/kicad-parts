@@ -17,7 +17,7 @@ use desktop_contract::{LiveUpdates, SignInRequest};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The realtime topic of new Changes.
 const CHANGES_TOPIC: &str = "catalog_changes";
@@ -87,6 +87,10 @@ pub(super) struct Live {
     pub(super) replica: CatalogReplica,
     /// Counts finished CSV import runs and catch-ups.
     pub(super) imports: u64,
+    /// When the replica last matched the server, in milliseconds since
+    /// 1970: when a catch-up finished, or when live updates broke after
+    /// one. While live, the replica matches the server now.
+    pub(super) in_step_at_ms: u64,
 }
 
 /// The background thread that follows new Changes.
@@ -102,6 +106,7 @@ impl Follower {
             updates: LiveUpdates::Connecting,
             replica: CatalogReplica::new(),
             imports: 0,
+            in_step_at_ms: 0,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -122,6 +127,14 @@ impl Follower {
             live.replica.checkpoint(),
             live.imports,
         )
+    }
+
+    /// When the replica last matched the server (see [`Live`]).
+    pub(super) fn in_step_at(&self) -> u64 {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .in_step_at_ms
     }
 }
 
@@ -191,6 +204,9 @@ fn follow_changes(shared: &Mutex<PocketBaseClient>, live: &Mutex<Live>, stop: &A
     let imported = || {
         live.lock().unwrap_or_else(|e| e.into_inner()).imports += 1;
     };
+    let in_step_now = || {
+        live.lock().unwrap_or_else(|e| e.into_inner()).in_step_at_ms = now_ms();
+    };
     // Network calls run on a copy so `status` never waits for them.
     let update_replica = |work: &dyn Fn(&mut CatalogReplica) -> Result<(), CollabError>| {
         let mut replica = live
@@ -223,6 +239,7 @@ fn follow_changes(shared: &Mutex<PocketBaseClient>, live: &Mutex<Live>, stop: &A
             })?;
             // An import run may have finished while disconnected.
             imported();
+            in_step_now();
             set(LiveUpdates::Live);
             went_live.set(true);
             while !stop.load(Ordering::SeqCst) {
@@ -249,6 +266,8 @@ fn follow_changes(shared: &Mutex<PocketBaseClient>, live: &Mutex<Live>, stop: &A
         })();
         if went_live.get() {
             delay = RECONNECT_DELAY;
+            // Live until now: the parts shown are as of this moment.
+            in_step_now();
         }
         if let Err(error) = result {
             match after_break(&error, went_live.get()) {
@@ -297,6 +316,13 @@ fn after_break(error: &CollabError, went_live: bool) -> AfterBreak {
         }
         _ => AfterBreak::Retry,
     }
+}
+
+/// The time now, in milliseconds since 1970.
+pub(crate) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
 }
 
 fn next_delay(delay: Duration) -> Duration {

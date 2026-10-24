@@ -17,7 +17,7 @@
 mod known_parts;
 mod session;
 
-pub use known_parts::KnownParts;
+pub use known_parts::{KeptParts, KnownParts};
 
 use crate::PartValues;
 use crate::csv_ipns::IpnsInCsv;
@@ -57,6 +57,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+pub(crate) use session::now_ms;
 use session::{Session, sign_in};
 
 /// What the status says when the team server no longer accepts a sign-in,
@@ -118,6 +119,9 @@ pub struct TeamCatalog {
     known: Mutex<KnownRevisions>,
     /// The parts last made for the part list (see `last_known_parts`).
     known_parts: Mutex<Option<Arc<KnownParts>>>,
+    /// Parts an earlier run kept on disk, shown until this run's first
+    /// catch-up (see `last_known_parts`).
+    kept: Mutex<known_parts::Kept>,
 }
 
 impl Default for TeamCatalog {
@@ -233,6 +237,7 @@ impl TeamCatalog {
             }),
             known: Mutex::new(KnownRevisions::default()),
             known_parts: Mutex::new(None),
+            kept: Mutex::default(),
             code: Mutex::new(String::new()),
         }
     }
@@ -265,12 +270,14 @@ impl TeamCatalog {
                 colour: String::new(),
                 note: None,
                 libraries_made_from: None,
+                parts_as_of: self.parts_as_of(None),
                 session: TeamSession::SignedOut {
                     problem: state.problem.clone(),
                 },
             };
         };
         let (live, checkpoint, imports) = session.follower.snapshot();
+        let in_step_at = session.follower.in_step_at();
         TeamStatus {
             server_url: session.client().base_url().to_owned(),
             email: session.email.clone(),
@@ -278,6 +285,7 @@ impl TeamCatalog {
             colour: String::new(),
             note: None,
             libraries_made_from: None,
+            parts_as_of: self.parts_as_of(Some((&live, imports, in_step_at))),
             session: TeamSession::SignedIn {
                 name: session.name.clone(),
                 email: session.email.clone(),
@@ -349,6 +357,7 @@ impl TeamCatalog {
 
     pub fn sign_out(&self) -> TeamStatus {
         self.forget_known();
+        self.forget_kept();
         let earlier = {
             let mut state = self.lock();
             state.problem = None;
@@ -441,6 +450,9 @@ impl TeamCatalog {
         };
         drop(earlier);
         self.forget_known();
+        // Old parts are never shown in place of a sign-in. The list of
+        // teams keeps their file, so signing in again shows them at once.
+        self.forget_kept();
         true
     }
 

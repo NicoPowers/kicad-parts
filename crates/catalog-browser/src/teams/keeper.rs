@@ -189,9 +189,9 @@ fn keep(shared: &Shared, look_for_kept: bool) {
     if look_for_kept {
         match task.store.read(&task.server_url) {
             Ok(Some(token)) => to_carry_on = Some(token),
-            Ok(None) => *shared.reaching() = None,
+            Ok(None) => no_sign_in_to_carry_on(shared),
             Err(problem) => {
-                *shared.reaching() = None;
+                no_sign_in_to_carry_on(shared);
                 (task.store_failed)(problem);
             }
         }
@@ -280,6 +280,16 @@ fn keep(shared: &Shared, look_for_kept: bool) {
             _ => kept = None,
         }
         std::thread::sleep(TICK);
+    }
+}
+
+/// The team has no kept sign-in to carry on, so it is signed out: it stops
+/// showing the parts kept on disk, which only a team being signed in shows.
+fn no_sign_in_to_carry_on(shared: &Shared) {
+    let _turn = shared.turn();
+    *shared.reaching() = None;
+    if !shared.task.catalog.is_signed_in() {
+        shared.task.catalog.forget_kept();
     }
 }
 

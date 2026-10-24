@@ -3,6 +3,7 @@
 //! credential store: that code is in the desktop app, not in this crate.
 
 mod fake_server;
+mod kept_parts;
 
 use super::*;
 use crate::team::SIGN_IN_AGAIN;

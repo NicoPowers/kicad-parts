@@ -788,6 +788,7 @@ mod tests {
             session,
             note: None,
             libraries_made_from: None,
+            parts_as_of: None,
         }
     }
 

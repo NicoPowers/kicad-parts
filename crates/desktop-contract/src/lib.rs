@@ -485,6 +485,13 @@ pub struct TeamStatus {
     /// here (kicad-parts-092b).
     #[serde(default)]
     pub libraries_made_from: Option<LibrariesMadeFrom>,
+    /// Set while the team shows parts that may be out of date, because its
+    /// server cannot be reached: when they last matched the server, in
+    /// milliseconds since 1970. They may come from an earlier run, kept on
+    /// disk (kicad-parts-ed46). `None` while the parts are current, or
+    /// while none are shown.
+    #[serde(default)]
+    pub parts_as_of: Option<u64>,
 }
 
 /// Where a team's KiCad libraries come from, when it is not the team's
@@ -1869,6 +1876,7 @@ mod tests {
             colour: "blue".into(),
             note: None,
             libraries_made_from: None,
+            parts_as_of: None,
             session: TeamSession::SignedOut { problem: None },
         };
         assert_eq!(team.label(), "parts.example.com/acme");
