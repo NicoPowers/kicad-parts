@@ -1401,7 +1401,8 @@ a {
   margin: 0 0 0.2rem;
 }
 
-.team-server {
+.team-server,
+.team-repo-host {
   color: var(--muted);
   font-size: 0.9rem;
 }
@@ -1452,8 +1453,8 @@ a {
   font-weight: 600;
 }
 
-.team-repo-label::after {
-  content: ":";
+.team-repo-problem {
+  color: var(--danger);
 }
 
 .team-repo-which {

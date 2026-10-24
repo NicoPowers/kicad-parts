@@ -37,6 +37,22 @@ pub(crate) fn library_repo_part(
     });
     let said = Memo::new(move |_| repo.with(|repo| repo.as_ref().map(access_words)));
     let details = Memo::new(move |_| repo.with(|repo| repo.as_ref().and_then(details_of)));
+    // A problem reads in the danger colour too; its words say it first.
+    let state_class = move || {
+        let problem = repo.with(|repo| {
+            repo.as_ref().is_some_and(|repo| {
+                matches!(
+                    repo.access,
+                    RepoAccess::CanReadOnly { .. } | RepoAccess::CannotRead { .. }
+                )
+            })
+        });
+        if problem {
+            "team-state team-repo-state team-repo-problem"
+        } else {
+            "team-state team-repo-state"
+        }
+    };
     let adding = RwSignal::new(false);
     let place = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
@@ -220,18 +236,22 @@ pub(crate) fn library_repo_part(
     view! {
         <div class="team-repo" role="group" aria-labelledby=labelled_by>
             <p class="team-repo-name">
-                <span class="team-repo-label" id=label_id>"Library repo"</span>
+                // Spaces between the parts, so a screen reader and the
+                // text read "Library repo: acme/lib on gitlab.com".
+                <span class="team-repo-label" id=label_id>"Library repo:"</span>
+                " "
                 {move || match which.get() {
                     Some((name, host)) => view! {
                         <span class="team-repo-which">{name}</span>
-                        <span class="team-server">{format!("on {host}")}</span>
+                        " "
+                        <span class="team-repo-host">{format!("on {host}")}</span>
                     }
                     .into_any(),
                     None => view! { <span class="hint">"None yet"</span> }.into_any(),
                 }}
             </p>
             {move || said.get().map(|said| view! {
-                <p class="team-state team-repo-state" role="status"><SaidView said=said /></p>
+                <p class=state_class role="status"><SaidView said=said /></p>
             })}
             {move || details.get().map(details_view)}
             <Show when=move || adding.get() fallback=actions.clone()>
