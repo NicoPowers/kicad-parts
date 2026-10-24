@@ -49,7 +49,7 @@ The file on this computer that keeps one team's last-known parts between runs.
 _Avoid_: kept parts, cache file
 
 **Library repo**:
-The git repo that holds a team's own KiCad library, often a client's ad hoc one, on any git host. The person links a team to it from their own clone or its address. The app reaches it with the person's own git and SSH setup, and keeps a copy of its own. Teams that link one repo share that copy.
+The git repo that holds a team's own KiCad library, often a client's ad hoc one, on any git host. The person links a team to it from their own clone or its address. The app reaches it with the person's own git and SSH setup, and keeps a copy of its own. Teams that link one repo share that copy. Where the repo keeps its libraries is its library layout (see Library Sources).
 _Avoid_: client repo, remote, library source, git library
 
 **Team colour**:

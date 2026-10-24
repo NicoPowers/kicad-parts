@@ -7,7 +7,7 @@ Decisions for every context are in [docs/adr/](./docs/adr/), numbered in one lis
 ## Contexts
 
 - [Catalog](./docs/contexts/catalog/CONTEXT.md) — the parts a team designs with: what each one is, its number, how its details changed, and which exact CAD items it uses
-- **Library Sources** — where KiCad libraries come from, and how you install, switch and roll back their releases _(glossary not written yet)_
+- [Library Sources](./docs/contexts/library-sources/CONTEXT.md) — where KiCad libraries come from: our own libraries and each team's library repo, read through a library source profile, and how you install, switch and roll back releases
 - **KiCad Integration** — moving data between this product and KiCad: saved files in, library data and previews out _(glossary not written yet)_
 - [Collaboration](./docs/contexts/collaboration/CONTEXT.md) — the team, its members and roles, and the shared change history every context saves through
 - **KiCad Projects** — what saved KiCad projects use and need _(glossary not written yet)_
