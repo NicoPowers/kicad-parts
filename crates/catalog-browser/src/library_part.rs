@@ -69,8 +69,6 @@ pub(crate) struct Plan {
     findings: Vec<String>,
 }
 
-/// The library and name of `reference`, one of our libraries' symbols or
-/// footprints (`g-<library>:<name>`, plain names), or why it is not.
 /// The repo path of our library `library` of `kind`, through the default
 /// library source profile. `ours` checked the name first.
 fn own_path(kind: TableKind, library: &str) -> String {
@@ -79,6 +77,8 @@ fn own_path(kind: TableKind, library: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The library and name of `reference`, one of our libraries' symbols or
+/// footprints (`g-<library>:<name>`, plain names), or why it is not.
 fn ours(reference: &str) -> Result<(&str, &str), String> {
     reference
         .split_once(':')

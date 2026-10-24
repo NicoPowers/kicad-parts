@@ -26,7 +26,7 @@ use super::super::RepoFile;
 use catalog::download::model_links;
 use desktop_contract::{LayoutDoubt, LayoutLibrary, LayoutVariable, LibraryLayout};
 use kicad_integration::lib_table::{LibTable, TableKind};
-use kicad_integration::library_source::{join, parent};
+use kicad_integration::library_source::{join, parent, plain_path, resolve_path};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// The file extensions of 3D models KiCad opens.
@@ -430,11 +430,12 @@ fn folder_above(path: &str, rest: &str) -> Option<String> {
 fn row_target(uri: &str, folder: &str) -> Option<Target> {
     match variable_and_rest(uri) {
         Some((variable, rest)) if variable == "KIPRJMOD" => {
-            plain_path(&join(folder, rest)).map(Target::InRepo)
+            resolve_path(folder, rest).map(Target::InRepo)
         }
         Some((variable, rest)) => Some(Target::Variable(variable, plain_path(rest)?)),
-        None if uri.starts_with('$') || is_absolute(uri) => None,
-        None => plain_path(&join(folder, uri)).map(Target::InRepo),
+        None if uri.starts_with('$') => None,
+        // An absolute path, or one leaving the repo, is not the repo's.
+        None => resolve_path(folder, uri).map(Target::InRepo),
     }
 }
 
@@ -469,32 +470,6 @@ fn is_kicads_own(variable: &str) -> bool {
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
             digits > 0 && rest[digits..].starts_with('_')
         })
-}
-
-fn is_absolute(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    path.starts_with(['/', '\\'])
-        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
-}
-
-/// `path` with `\` read as `/`, and `.` and `..` worked out; `None` if it
-/// climbs above the repo or names a drive.
-fn plain_path(path: &str) -> Option<String> {
-    if is_absolute(path) {
-        return None;
-    }
-    let mut parts: Vec<&str> = Vec::new();
-    for part in path.split(['/', '\\']) {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            part if part.contains(':') => return None,
-            part => parts.push(part),
-        }
-    }
-    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 /// The library a symbol file belongs to: a `.kicad_sym` file, or the

@@ -14,7 +14,7 @@ use crate::hash::sha256_hex;
 use kicad_integration::footprint_choices;
 use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_file::{Sexp, SymbolLibrary};
-use kicad_integration::library_source::{SourceProfile, join};
+use kicad_integration::library_source::{SourceProfile, join, native_path};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -212,13 +212,13 @@ pub fn read_csv_references(
 
 /// The footprints outside `source`'s own libraries that the symbols name
 /// and that KiCad's data folder `share` has
-/// (`footprints/<library>.pretty/<name>.kicad_mod`, as our layout).
+/// (`footprints/<library>.pretty/<name>.kicad_mod`).
 pub fn kicad_footprints(
     share: &Path,
     source: &SourceProfile,
     libraries: &Libraries,
 ) -> BTreeSet<String> {
-    let kicad = SourceProfile::own();
+    let kicad = SourceProfile::kicad_installed();
     libraries
         .symbols
         .iter()
@@ -235,9 +235,7 @@ pub fn kicad_footprints(
             kicad
                 .library_path(TableKind::Footprint, library)
                 .is_some_and(|folder| {
-                    folder
-                        .split('/')
-                        .fold(share.to_path_buf(), |path, part| path.join(part))
+                    native_path(share, &folder)
                         .join(format!("{name}.kicad_mod"))
                         .is_file()
                 })

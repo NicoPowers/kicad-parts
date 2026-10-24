@@ -50,7 +50,7 @@ use crate::part::{
 };
 use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
-use kicad_integration::library_source::{ModelLink, SourceProfile, join, own};
+use kicad_integration::library_source::{ModelLink, SourceProfile, join, own, plain_path};
 use kicad_integration::{LibRef, LibraryResolver, ResolveError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1783,7 +1783,7 @@ pub(crate) fn classify_model_reference(reference: &str) -> ClassifiedModel {
         status: "unsafe-path",
         candidate: None,
     };
-    let local = |relative: &str| match safe_relative(relative) {
+    let local = |relative: &str| match plain_path(relative) {
         Some(clean) => ClassifiedModel {
             scope: "local",
             status: "missing",
@@ -1835,27 +1835,6 @@ pub(crate) fn classify_model_reference(reference: &str) -> ClassifiedModel {
         status: "unresolved",
         candidate: None,
     }
-}
-
-/// `relative` as a clean `/`-separated path, or `None` if it could escape.
-fn safe_relative(relative: &str) -> Option<String> {
-    let bytes = relative.as_bytes();
-    if relative.is_empty()
-        || relative.starts_with(['/', '\\'])
-        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
-    {
-        return None;
-    }
-    let mut parts = Vec::new();
-    for component in relative.split(['/', '\\']) {
-        match component {
-            "" | "." => {}
-            ".." => return None,
-            value if value.contains(':') => return None,
-            value => parts.push(value),
-        }
-    }
-    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@
 //! KiCad would. Then KiCad's bundled libraries are searched.
 
 use crate::lib_table::TableKind;
-use crate::library_source::SourceProfile;
+use crate::library_source::{SourceProfile, native_path};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -189,8 +189,7 @@ impl LibraryResolver {
         kind: TableKind,
         lib_ref: &LibRef,
     ) -> Result<(PathBuf, LibraryOrigin), ResolveError> {
-        // KiCad's data folder keeps its libraries as our layout does.
-        let bundled = SourceProfile::own();
+        let bundled = SourceProfile::kicad_installed();
         let candidates = [
             self.project
                 .as_ref()
@@ -232,12 +231,6 @@ fn exact_path(root: &Path, path: &str) -> Option<PathBuf> {
         .try_fold(root.to_path_buf(), |folder, name| {
             exact_entry(&folder, name)
         })
-}
-
-/// The repo path `path` under `root`, with this system's separators.
-fn native_path(root: &Path, path: &str) -> PathBuf {
-    path.split('/')
-        .fold(root.to_path_buf(), |folder, name| folder.join(name))
 }
 
 /// `dir/name` only if an entry with exactly that name exists. KiCad matches

@@ -25,6 +25,7 @@
 
 use crate::lib_table::TableKind;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// One library of a source: the nickname boards use, such as
 /// `Acme_Passives`, and its file or folder in the repo.
@@ -129,6 +130,25 @@ impl SourceProfile {
             database_libraries: Vec::new(),
             models_by_library: Some(own::MODEL_FOLDER.to_owned()),
             own_library_start: Some(own::LIBRARY_START.to_owned()),
+        }
+    }
+
+    /// KiCad's installed libraries in its data folder: every `.kicad_sym`
+    /// in `symbols/` and every `.pretty` in `footprints/`, named by file.
+    /// Not a library repo: only for finding KiCad's own libraries.
+    pub fn kicad_installed() -> Self {
+        Self {
+            symbols: LibraryList::EveryLibraryIn {
+                folder: "symbols".to_owned(),
+            },
+            footprints: LibraryList::EveryLibraryIn {
+                folder: "footprints".to_owned(),
+            },
+            model_folders: vec!["3dmodels".to_owned()],
+            path_variables: Vec::new(),
+            database_libraries: Vec::new(),
+            models_by_library: None,
+            own_library_start: None,
         }
     }
 
@@ -339,11 +359,44 @@ fn inside<'a>(path: &'a str, folder: &str) -> Option<&'a str> {
     }
 }
 
+/// The repo path `path` under `root`, with this system's separators. Pass
+/// only plain repo paths ([`is_plain_repo_path`], [`plain_path`]).
+pub fn native_path(root: &Path, path: &str) -> PathBuf {
+    path.split('/')
+        .filter(|part| !part.is_empty())
+        .fold(root.to_path_buf(), |at, part| at.join(part))
+}
+
+/// `relative`, a path written in a file of the repo folder `folder` (such
+/// as a lib table row's), as a repo path: a backslash read as `/`, and `.` and `..`
+/// worked out. `None` if it climbs above the repo, starts with a slash or
+/// drive, or a part holds `:`.
+pub fn resolve_path(folder: &str, relative: &str) -> Option<String> {
+    let bytes = relative.as_bytes();
+    if relative.starts_with(['/', '\\'])
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+    {
+        return None;
+    }
+    let mut parts: Vec<&str> = folder.split('/').filter(|part| !part.is_empty()).collect();
+    for part in relative.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part if part.contains(':') => return None,
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
 /// `relative` as a plain `/`-separated path, or `None` if it could leave
 /// its folder: empty, starting with a slash or drive, or holding `..` or
-/// `:`. Empty and `.` parts inside are dropped. The same rule as the
-/// import's (`safe_relative` in the catalog crate).
-fn plain_path(relative: &str) -> Option<String> {
+/// `:`. Empty and `.` parts inside are dropped. The import reads our model
+/// links with this rule too.
+pub fn plain_path(relative: &str) -> Option<String> {
     let bytes = relative.as_bytes();
     if relative.is_empty()
         || relative.starts_with(['/', '\\'])
@@ -562,6 +615,24 @@ mod tests {
         );
         assert_eq!(source.link_to("other/R.step"), None);
         assert_eq!(source.own_model_folder("Acme_FP"), None);
+    }
+
+    #[test]
+    fn table_paths_may_climb_inside_the_repo_but_never_out() {
+        assert_eq!(
+            resolve_path("kicad", "../lib/A.kicad_sym").as_deref(),
+            Some("lib/A.kicad_sym")
+        );
+        assert_eq!(resolve_path("", r"a\.\b").as_deref(), Some("a/b"));
+        for out in ["../x", "/x", "C:/x", "a/c:x"] {
+            assert_eq!(resolve_path("", out), None, "{out}");
+        }
+        // A model link never climbs, even inside the repo.
+        assert_eq!(plain_path("sub/../x.step"), None);
+        assert_eq!(
+            native_path(Path::new("root"), "a/b"),
+            Path::new("root").join("a").join("b")
+        );
     }
 
     #[test]

@@ -27,7 +27,9 @@ use desktop_contract::{LibraryGroup, LibraryKey, LibraryTeam, PreviewKind};
 use kicad_integration::lib_table::{
     LibTable, PathVariables, TableKind, VariableSources, is_inside, read_tables,
 };
-use kicad_integration::library_source::{LibraryList, SourceProfile, is_plain_repo_path, join};
+use kicad_integration::library_source::{
+    LibraryList, SourceProfile, is_plain_repo_path, join, native_path,
+};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -170,7 +172,7 @@ fn team_libraries(team: &TeamLibraries, sources: &mut Vec<Source>) {
                 },
                 kind,
                 description: String::new(),
-                path: native(&team.folder, &library.path),
+                path: native_path(&team.folder, &library.path),
                 format: format_of(kind, &library.path),
                 problem: None,
                 strict_links: true,
@@ -188,7 +190,7 @@ fn ours(root: &Path, sources: &mut Vec<Source>) {
         (PreviewKind::Footprint, TableKind::Footprint),
     ] {
         for relative in own.library_folders(table) {
-            let folder = native(root, &relative);
+            let folder = native_path(root, &relative);
             if is_link(&folder, true) {
                 continue;
             }
@@ -224,14 +226,6 @@ fn format_of(kind: PreviewKind, name: &str) -> Format {
         PreviewKind::Symbol if name.ends_with(".kicad_symdir") => Format::SymbolFolder,
         PreviewKind::Symbol => Format::SymbolFile,
     }
-}
-
-/// The repo path `relative` under `root`, with this system's separators.
-fn native(root: &Path, relative: &str) -> PathBuf {
-    relative
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
 fn kicad(share: &Path, sources: &mut Vec<Source>) {
@@ -326,7 +320,7 @@ fn installed(places: &Places, config: &Path, sources: &mut Vec<Source>, notes: &
     let mut listed: Vec<PathBuf> = [TableKind::Symbol, TableKind::Footprint]
         .into_iter()
         .flat_map(|table| own.library_folders(table))
-        .map(|folder| native(&places.catalog_root, &folder))
+        .map(|folder| native_path(&places.catalog_root, &folder))
         .collect();
     if let Some(share) = &places.share {
         listed.push(share.join("symbols"));

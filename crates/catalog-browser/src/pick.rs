@@ -34,7 +34,7 @@ use desktop_contract::{
 };
 use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup, symbol_properties};
-use kicad_integration::library_source::{SourceProfile, join};
+use kicad_integration::library_source::{SourceProfile, join, native_path};
 use std::path::PathBuf;
 
 /// The largest 3D model copied with a footprint: what one save can send of
@@ -502,10 +502,7 @@ impl CatalogBrowser {
                 CadItemKind::Footprint => (
                     own.library_path(TableKind::Footprint, library)
                         .is_some_and(|path| {
-                            join(&path, &format!("{name}.kicad_mod"))
-                                .split('/')
-                                .fold(root.to_path_buf(), |at, part| at.join(part))
-                                .is_file()
+                            native_path(root, &join(&path, &format!("{name}.kicad_mod"))).is_file()
                         }),
                     TeamLibraryChoice {
                         symbol: None,

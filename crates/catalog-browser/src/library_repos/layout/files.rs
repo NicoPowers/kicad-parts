@@ -10,7 +10,9 @@
 use super::super::{LibraryRepo, RepoFile};
 use desktop_contract::RepoProblem;
 use kicad_integration::lib_table::TableKind;
-use kicad_integration::library_source::{LibraryList, SourceProfile, is_plain_repo_path};
+use kicad_integration::library_source::{
+    LibraryList, SourceProfile, is_plain_repo_path, native_path,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -39,7 +41,7 @@ pub(crate) fn library_files(
         super::super::repo::remove_folder(&partial)?;
         for (path, bytes) in paths.iter().zip(bytes) {
             let Some(bytes) = bytes else { continue };
-            let file = native(&partial, path);
+            let file = native_path(&partial, path);
             if let Some(parent) = file.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -95,12 +97,4 @@ fn wanted(listed: &[RepoFile], profile: &SourceProfile) -> Vec<String> {
         })
         .map(|file| file.path.clone())
         .collect()
-}
-
-/// The repo path `path` under `folder`, with this system's separators.
-/// Paths come from git, so each part is a name, never `..`.
-pub(crate) fn native(folder: &Path, path: &str) -> PathBuf {
-    path.split('/')
-        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
-        .fold(folder.to_path_buf(), |at, part| at.join(part))
 }
