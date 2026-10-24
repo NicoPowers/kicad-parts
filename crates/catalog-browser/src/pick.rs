@@ -32,7 +32,9 @@ use desktop_contract::{
     FileKind, InstalledFile, LibraryGroup, LibraryKey, OurLibraries, PickUse, PreviewKind,
     TeamFile, TeamLibraryChoice, TeamPick, TeamPickRequest,
 };
+use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup, symbol_properties};
+use kicad_integration::library_source::{SourceProfile, join};
 use std::path::PathBuf;
 
 /// The largest 3D model copied with a footprint: what one save can send of
@@ -472,28 +474,31 @@ impl CatalogBrowser {
             let Some((library, name)) = reference.split_once(':') else {
                 continue;
             };
-            if !library.starts_with("g-") || !is_plain_name(library) || !is_plain_name(name) {
+            let own = SourceProfile::own();
+            if !own.is_own_name(library) || !is_plain_name(library) || !is_plain_name(name) {
                 continue;
             }
             let (in_folder, choice) = match kind {
                 CadItemKind::Symbol => (
-                    catalog::library_check::read::read_library_file(
-                        root,
-                        &format!("symbols/{library}.kicad_sym"),
-                    )
-                    .ok()
-                    .and_then(|file| SymbolLibrary::parse(&file).ok())
-                    .is_some_and(|parsed| matches!(parsed.find(name), SymbolLookup::Found(_))),
+                    own.library_path(TableKind::Symbol, library)
+                        .and_then(|path| {
+                            catalog::library_check::read::read_library_file(root, &path).ok()
+                        })
+                        .and_then(|file| SymbolLibrary::parse(&file).ok())
+                        .is_some_and(|parsed| matches!(parsed.find(name), SymbolLookup::Found(_))),
                     TeamLibraryChoice {
                         symbol: Some(reference.clone()),
                         footprint: None,
                     },
                 ),
                 CadItemKind::Footprint => (
-                    root.join("footprints")
-                        .join(format!("{library}.pretty"))
-                        .join(format!("{name}.kicad_mod"))
-                        .is_file(),
+                    own.library_path(TableKind::Footprint, library)
+                        .is_some_and(|path| {
+                            join(&path, &format!("{name}.kicad_mod"))
+                                .split('/')
+                                .fold(root.to_path_buf(), |at, part| at.join(part))
+                                .is_file()
+                        }),
                     TeamLibraryChoice {
                         symbol: None,
                         footprint: Some(reference.clone()),

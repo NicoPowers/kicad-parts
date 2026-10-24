@@ -261,7 +261,7 @@ fn every_kind_of_3d_model_link_is_judged() {
         footprints: libraries
             .footprints
             .iter()
-            .map(|f| (f.file(), f.sha256.clone()))
+            .map(|f| (f.file.clone(), f.sha256.clone()))
             .collect(),
         csv_files: ["database/g-ics.csv".to_owned()].into(),
     };

@@ -1,6 +1,7 @@
 //! The library check (kicad-parts-da65): compares the CSV catalog's own
 //! libraries (`symbols/g-*.kicad_sym`, `footprints/g-*.pretty`,
-//! `3d-models/**`) with the Catalog, and says what is in them but not in the
+//! `3d-models/**`, read through the default library source profile,
+//! [`SourceProfile::own`]) with the Catalog, and says what is in them but not in the
 //! Catalog yet (made by hand in KiCad), which symbols name a footprint
 //! nobody has, and which 3D model links work only on one computer or name a
 //! missing file.
@@ -48,8 +49,9 @@ pub use baseline::{Today, today};
 mod tests;
 
 use crate::cad_item::CadItemKind;
-use crate::csv_import::classify_model_reference;
 use crate::ids::CadItemId;
+use kicad_integration::lib_table::TableKind;
+use kicad_integration::library_source::{self, SourceProfile};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// How much a finding matters.
@@ -306,6 +308,8 @@ pub struct Libraries {
 pub struct LibrarySymbol {
     /// Such as `g-ics`.
     pub library: String,
+    /// The library's repo path, such as `symbols/g-ics.kicad_sym`.
+    pub file: String,
     pub name: String,
     /// The symbol's own Footprint property, blank if it has none.
     pub footprint: String,
@@ -317,10 +321,6 @@ impl LibrarySymbol {
     pub fn reference(&self) -> String {
         format!("{}:{}", self.library, self.name)
     }
-
-    pub fn file(&self) -> String {
-        format!("symbols/{}.kicad_sym", self.library)
-    }
 }
 
 /// One footprint of a `footprints/g-*.pretty` library.
@@ -330,6 +330,9 @@ pub struct LibraryFootprint {
     pub library: String,
     /// The file's name without `.kicad_mod`.
     pub name: String,
+    /// The file's repo path, such as
+    /// `footprints/g-Crystal.pretty/Abracon_ABS07L.kicad_mod`.
+    pub file: String,
     /// The SHA-256 of the file's bytes.
     pub sha256: String,
     /// Every 3D model link, exactly as written, in file order.
@@ -339,10 +342,6 @@ pub struct LibraryFootprint {
 impl LibraryFootprint {
     pub fn reference(&self) -> String {
         format!("{}:{}", self.library, self.name)
-    }
-
-    pub fn file(&self) -> String {
-        format!("footprints/{}.pretty/{}.kicad_mod", self.library, self.name)
     }
 }
 
@@ -415,6 +414,7 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
         kicad_footprints,
         today,
     } = inputs;
+    let own = SourceProfile::own();
     let mut findings = Vec::new();
     // Each symbol and footprint the CSV files name, with the files.
     let mut used: BTreeMap<(CadItemKind, &str), BTreeSet<&str>> = BTreeMap::new();
@@ -437,11 +437,11 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
             && !used.contains_key(&(CadItemKind::Symbol, reference.as_str()))
             && !known.has(CadItemKind::Symbol, &reference)
         {
-            findings.push(not_in_catalog(&reference, symbol.file(), "part"));
+            findings.push(not_in_catalog(&reference, symbol.file.clone(), "part"));
         }
         let footprint = symbol.footprint.trim();
         if let Some((library, _)) = footprint.split_once(':') {
-            let ours = library.starts_with("g-");
+            let ours = own.is_own_name(library);
             let missing = if ours {
                 !footprint_names.contains(footprint)
             } else {
@@ -452,7 +452,7 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
                     severity: Severity::Warning,
                     kind: FindingKind::SymbolFootprint,
                     item: reference.clone(),
-                    file: symbol.file(),
+                    file: symbol.file.clone(),
                     message: format!(
                         "The symbol's own Footprint, {footprint}, is not in our libraries or KiCad's. Fix it in KiCad's Symbol Editor, or leave it blank."
                     ),
@@ -474,7 +474,7 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
         });
         // Still as today's CSV catalog had it, byte for byte, and used only
         // by today's CSV files: an old problem, not a new one.
-        let as_today = today.footprints.get(&footprint.file()) == Some(&footprint.sha256)
+        let as_today = today.footprints.get(&footprint.file) == Some(&footprint.sha256)
             && files.is_some_and(|files| files.iter().all(|file| today.csv_files.contains(*file)));
         let state = match known.bytes_of(CadItemKind::Footprint, &reference) {
             Some(bytes) if bytes.contains(&footprint.sha256) => FootprintState::Unchanged,
@@ -485,7 +485,7 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
             None => FootprintState::Unused,
         };
         if !in_csv && !known.has(CadItemKind::Footprint, &reference) {
-            findings.push(not_in_catalog(&reference, footprint.file(), "part"));
+            findings.push(not_in_catalog(&reference, footprint.file.clone(), "part"));
         }
         for link in &footprint.models {
             let judged = judge_model_link(&footprint.library, &footprint.name, link);
@@ -514,17 +514,20 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
         .collect();
     let mut suggested: BTreeSet<(&str, &str)> = BTreeSet::new();
     for reference in csv {
-        let (names, library_file) = match reference.kind {
-            CadItemKind::Symbol => (&symbol_names, "symbols/{library}.kicad_sym"),
-            CadItemKind::Footprint => (&footprint_names, "footprints/{library}.pretty"),
+        let (names, table) = match reference.kind {
+            CadItemKind::Symbol => (&symbol_names, TableKind::Symbol),
+            CadItemKind::Footprint => (&footprint_names, TableKind::Footprint),
             CadItemKind::Model3d => continue,
         };
         let Some((library, name)) = reference.reference.split_once(':') else {
             continue;
         };
-        if !library.starts_with("g-") || names.contains(&reference.reference) {
+        if !own.is_own_name(library) || names.contains(&reference.reference) {
             continue;
         }
+        let Some(library_file) = own.library_path(table, library) else {
+            continue;
+        };
         if !suggested.insert((reference.file.as_str(), reference.reference.as_str())) {
             continue;
         }
@@ -546,8 +549,7 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
                 message: format!(
                     "{} names the {kind} {}, which {} does not have. Did you mean {library}:{similar}?",
                     reference.file,
-                    reference.reference,
-                    library_file.replace("{library}", library)
+                    reference.reference, library_file
                 ),
             });
         }
@@ -634,25 +636,39 @@ impl ModelLink {
 }
 
 /// Judges one 3D model link of the footprint `name` in `library` (such as
-/// `g-Crystal`). Uses the CSV catalog fixture's classification of model
-/// references; only a `${GITPLM_PARTS}/3d-models/...` path counts as our
-/// library.
+/// `g-Crystal`), through our layout, the default library source profile:
+/// only a `${GITPLM_PARTS}/3d-models/...` path counts as our library, read
+/// as the import reads it.
 pub fn judge_model_link(library: &str, name: &str, link: &str) -> ModelLink {
+    judge_model_link_in(&SourceProfile::own(), library, name, link)
+}
+
+/// [`judge_model_link`] through the library source `source`: a link into
+/// one of its model folders is in its library, and a footprint's own model
+/// sits in its library's own model folder, named like the footprint.
+pub fn judge_model_link_in(
+    source: &SourceProfile,
+    library: &str,
+    name: &str,
+    link: &str,
+) -> ModelLink {
     if link.starts_with("kicad-embed://") {
         return ModelLink::Embedded;
     }
     if is_kicad_model_link(link) {
         return ModelLink::Kicad;
     }
-    let ours = link
-        .strip_prefix("${GITPLM_PARTS}")
-        .is_some_and(|rest| rest.starts_with(['/', '\\']));
-    let classified = classify_model_reference(link);
-    match classified.candidate {
-        Some(path) if ours => {
-            let folder = format!("3d-models/{library}.3dshapes/");
-            let own = path.strip_prefix(&folder).is_some_and(|file| {
-                !file.contains('/') && file.rsplit_once('.').is_some_and(|(stem, _)| stem == name)
+    match source.model_link(link) {
+        library_source::ModelLink::InRepo {
+            path,
+            in_model_folder: true,
+        } => {
+            let own = source.own_model_folder(library).is_some_and(|folder| {
+                path.strip_prefix(&format!("{folder}/"))
+                    .is_some_and(|file| {
+                        !file.contains('/')
+                            && file.rsplit_once('.').is_some_and(|(stem, _)| stem == name)
+                    })
             });
             if own {
                 ModelLink::Own { path }
@@ -682,7 +698,20 @@ fn is_kicad_model_link(link: &str) -> bool {
 /// The link a footprint's own 3D model should have, such as
 /// `${GITPLM_PARTS}/3d-models/g-Crystal.3dshapes/Abracon_ABS07L.step`.
 pub fn own_model_link(library: &str, name: &str) -> String {
-    format!("${{GITPLM_PARTS}}/3d-models/{library}.3dshapes/{name}.step")
+    let own = SourceProfile::own();
+    own.link_to(&library_source::join(
+        &own_model_folder(library),
+        &format!("{name}.step"),
+    ))
+    .unwrap_or_default()
+}
+
+/// The repo folder of a footprint library's own 3D models in our layout,
+/// such as `3d-models/g-Crystal.3dshapes`.
+pub fn own_model_folder(library: &str) -> String {
+    SourceProfile::own()
+        .own_model_folder(library)
+        .unwrap_or_default()
 }
 
 fn model_finding(
@@ -708,7 +737,7 @@ fn model_finding(
                 severity: Severity::SoftWarning,
                 kind: FindingKind::SharedModel,
                 item: footprint.reference(),
-                file: footprint.file(),
+                file: footprint.file.clone(),
                 message: format!(
                     "The footprint uses the 3D model {path}, which is named for another footprint. That is fine if they share it; check that it fits."
                 ),
@@ -717,8 +746,8 @@ fn model_finding(
         ModelLink::Outside => (
             FindingKind::ModelOutside,
             format!(
-                "The footprint links the 3D model {link}, which is outside our library, so it only works on one computer. Put the file in 3d-models/{}.3dshapes/ and link it as {}.",
-                footprint.library,
+                "The footprint links the 3D model {link}, which is outside our library, so it only works on one computer. Put the file in {}/ and link it as {}.",
+                own_model_folder(&footprint.library),
                 own_model_link(&footprint.library, &footprint.name)
             ),
         ),
@@ -750,7 +779,7 @@ fn model_finding(
         severity,
         kind,
         item: footprint.reference(),
-        file: footprint.file(),
+        file: footprint.file.clone(),
         message,
     })
 }

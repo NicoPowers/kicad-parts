@@ -24,7 +24,9 @@ use catalog::library_check::{FindingKind, LibraryCheck, Severity, judge_model_li
 use catalog::pocketbase::{CadUpload, LibrarySource};
 use catalog::sha256_hex;
 use desktop_contract::TeamLibraryChoice;
+use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
+use kicad_integration::library_source::{SourceProfile, join};
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::Path;
@@ -69,11 +71,19 @@ pub(crate) struct Plan {
 
 /// The library and name of `reference`, one of our libraries' symbols or
 /// footprints (`g-<library>:<name>`, plain names), or why it is not.
+/// The repo path of our library `library` of `kind`, through the default
+/// library source profile. `ours` checked the name first.
+fn own_path(kind: TableKind, library: &str) -> String {
+    SourceProfile::own()
+        .library_path(kind, library)
+        .unwrap_or_default()
+}
+
 fn ours(reference: &str) -> Result<(&str, &str), String> {
     reference
         .split_once(':')
         .filter(|(library, name)| {
-            library.starts_with("g-")
+            SourceProfile::own().is_own_name(library)
                 && library.len() > 2
                 && is_plain_name(library)
                 && is_plain_name(name)
@@ -87,7 +97,7 @@ fn ours(reference: &str) -> Result<(&str, &str), String> {
 
 fn read_symbol(root: &Path, reference: &str) -> Result<Symbol, String> {
     let (library, name) = ours(reference)?;
-    let path = format!("symbols/{library}.kicad_sym");
+    let path = own_path(TableKind::Symbol, library);
     let file = read_library_file(root, &path)?;
     let parsed = SymbolLibrary::parse(&file)
         .map_err(|error| format!("{path} is not a KiCad symbol library: {error}."))?;
@@ -109,7 +119,10 @@ fn read_symbol(root: &Path, reference: &str) -> Result<Symbol, String> {
 
 fn read_footprint(root: &Path, reference: &str) -> Result<File, String> {
     let (library, name) = ours(reference)?;
-    let path = format!("footprints/{library}.pretty/{name}.kicad_mod");
+    let path = join(
+        &own_path(TableKind::Footprint, library),
+        &format!("{name}.kicad_mod"),
+    );
     let bytes = read_library_file(root, &path)?;
     Ok(File {
         reference: reference.to_owned(),

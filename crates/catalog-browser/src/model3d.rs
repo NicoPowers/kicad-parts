@@ -38,6 +38,7 @@ use desktop_contract::{
 };
 use kicad_integration::board::{ModelBlock, ModelUse, model_blocks, one_footprint_board};
 use kicad_integration::lib_table::{PathVariables, VariableSources};
+use kicad_integration::library_source::own;
 use kicad_integration::{
     BoardExport, CacheOutcome, Discovery, KicadInstall, PreviewError, SUPPORTED_MAJOR,
     preview::MODEL_COMPLAINTS as CLI_COMPLAINTS, sha256_hex,
@@ -412,7 +413,10 @@ fn leading_value_is_unusual(link: &str, variables: &PathVariables) -> bool {
 /// as `3d-models/g-Package_SO.3dshapes/SOIC-8.step`. Each part must be a
 /// plain name, so it can never leave `3d-models/`.
 fn our_key(link: &str) -> Option<String> {
-    let rest = ["${GITPLM_PARTS}/3d-models", "${GITPLM_3DMODELS}"]
+    // Our layout's variable and model folder, and the folder's older
+    // variable name.
+    let ours = format!("${{{}}}/{}", own::VARIABLE, own::MODEL_FOLDER);
+    let rest = [ours.as_str(), "${GITPLM_3DMODELS}"]
         .iter()
         .find_map(|prefix| link.strip_prefix(prefix))?
         .strip_prefix(['/', '\\'])?;
@@ -420,7 +424,7 @@ fn our_key(link: &str) -> Option<String> {
     parts
         .iter()
         .all(|part| is_plain_name(part))
-        .then(|| format!("3d-models/{}", parts.join("/")))
+        .then(|| format!("{}/{}", own::MODEL_FOLDER, parts.join("/")))
 }
 
 /// The path below KiCad's 3D models folder of a `${KICAD<n>_3DMODEL_DIR}`

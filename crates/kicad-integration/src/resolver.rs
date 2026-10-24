@@ -3,14 +3,14 @@
 //! libraries live and in which order they are searched.
 //!
 //! A reference's nickname is looked up in a library source profile
-//! ([`LibrarySource`]): our own layout by default, or a client repo's,
+//! ([`SourceProfile`]): our own layout by default, or a client repo's,
 //! whose libraries come from the repo's own lib tables (kicad-parts-e9a3,
 //! which took over kicad-parts-e83f). So a nickname that differs from its
 //! file name, such as `Acme_FP` for `lib/Acme.pretty`, finds the library
 //! KiCad would. Then KiCad's bundled libraries are searched.
 
 use crate::lib_table::TableKind;
-use crate::library_source::LibrarySource;
+use crate::library_source::SourceProfile;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -124,7 +124,7 @@ impl std::error::Error for ResolveError {}
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LibraryResolver {
     /// The project's folder and where its libraries are in it.
-    project: Option<(PathBuf, LibrarySource)>,
+    project: Option<(PathBuf, SourceProfile)>,
     kicad_share: Option<PathBuf>,
 }
 
@@ -134,14 +134,14 @@ impl LibraryResolver {
     /// directory, if known.
     pub fn new(project_root: Option<PathBuf>, kicad_share: Option<PathBuf>) -> Self {
         Self {
-            project: project_root.map(|root| (root, LibrarySource::own())),
+            project: project_root.map(|root| (root, SourceProfile::own())),
             kicad_share,
         }
     }
 
     /// Resolves through `source`, the layout of the library repo files in
     /// `root`, before KiCad's bundled libraries in `kicad_share`.
-    pub fn with_source(root: PathBuf, source: LibrarySource, kicad_share: Option<PathBuf>) -> Self {
+    pub fn with_source(root: PathBuf, source: SourceProfile, kicad_share: Option<PathBuf>) -> Self {
         Self {
             project: Some((root, source)),
             kicad_share,
@@ -190,7 +190,7 @@ impl LibraryResolver {
         lib_ref: &LibRef,
     ) -> Result<(PathBuf, LibraryOrigin), ResolveError> {
         // KiCad's data folder keeps its libraries as our layout does.
-        let bundled = LibrarySource::own();
+        let bundled = SourceProfile::own();
         let candidates = [
             self.project
                 .as_ref()
@@ -336,14 +336,14 @@ mod tests {
         fs::create_dir_all(&pretty).unwrap();
         fs::write(pretty.join("R_0603.kicad_mod"), b"").unwrap();
         // As the repo's fp-lib-table names it: a nickname unlike the folder.
-        let source = LibrarySource {
+        let source = SourceProfile {
             footprints: LibraryList::Listed {
                 libraries: vec![SourceLibrary {
                     nickname: "Acme_FP".into(),
                     path: "lib/Acme.pretty".into(),
                 }],
             },
-            ..LibrarySource::own()
+            ..SourceProfile::own()
         };
         let resolver = LibraryResolver::with_source(repo.path().to_path_buf(), source, None);
         let found = resolver.footprint("Acme_FP:R_0603").unwrap();

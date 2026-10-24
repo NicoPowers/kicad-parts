@@ -1,6 +1,9 @@
 //! Gathers the library check's inputs: the CSV catalog's own libraries and
 //! the symbols and footprints its CSV files name, from a CSV catalog
 //! folder, and the footprints KiCad's own libraries have. Only reads.
+//!
+//! Libraries are found through a library source profile: our own layout,
+//! [`SourceProfile::own`], for the CSV catalog folder.
 
 use super::{CheckInputs, CsvReference, KnownCad, Libraries, LibraryCheck, LibraryFootprint};
 use super::{LibrarySymbol, Today, check};
@@ -9,7 +12,9 @@ use crate::csv_import::{is_link, parse_csv};
 use crate::download::model_links;
 use crate::hash::sha256_hex;
 use kicad_integration::footprint_choices;
+use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_file::{Sexp, SymbolLibrary};
+use kicad_integration::library_source::{SourceProfile, join};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,9 +38,10 @@ pub fn check_folder_with(
     kicad_share: Option<&Path>,
     today: &Today,
 ) -> Result<LibraryCheck, String> {
-    let mut libraries = read_libraries(root);
+    let source = SourceProfile::own();
+    let mut libraries = read_source_libraries(root, &source);
     let csv = read_csv_references(root, &mut libraries.unreadable);
-    let kicad = kicad_share.map(|share| kicad_footprints(share, &libraries));
+    let kicad = kicad_share.map(|share| kicad_footprints(share, &source, &libraries));
     Ok(check(CheckInputs {
         libraries: &libraries,
         known,
@@ -55,17 +61,35 @@ const LINK: &str =
 /// link (never followed, as the import refuses links), is listed in
 /// [`Libraries::unreadable`].
 pub fn read_libraries(root: &Path) -> Libraries {
+    read_source_libraries(root, &SourceProfile::own())
+}
+
+/// Reads the libraries `source` names under `root` whose names the app
+/// made for it (such as our `g-` libraries): every symbol of each
+/// `.kicad_sym` symbol library, every footprint of each footprint library,
+/// and the name of every file in its model folders. A missing folder has
+/// nothing in it; a file that cannot be read, and a link (never followed,
+/// as the import refuses links), is listed in [`Libraries::unreadable`].
+pub fn read_source_libraries(root: &Path, source: &SourceProfile) -> Libraries {
     let mut libraries = Libraries::default();
     let unreadable = &mut libraries.unreadable;
-    for (path, file) in entries(root, "symbols", unreadable) {
-        let Some(library) = file_name(&path)
-            .strip_suffix(".kicad_sym")
-            .filter(|name| name.starts_with("g-"))
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        if !path.is_file() {
+    let found = |kind: TableKind, unreadable: &mut Vec<(String, String)>| {
+        let mut found = Vec::new();
+        for folder in source.library_folders(kind) {
+            for (path, file) in entries(root, &folder, unreadable) {
+                let library = source
+                    .nickname_of(kind, &file)
+                    .filter(|library| source.is_own_name(library));
+                if let Some(library) = library {
+                    found.push((path, file, library));
+                }
+            }
+        }
+        found
+    };
+    for (path, file, library) in found(TableKind::Symbol, unreadable) {
+        // A KiCad 10 `.kicad_symdir` folder is not checked yet.
+        if !file.ends_with(".kicad_sym") || !path.is_file() {
             continue;
         }
         let parsed = fs::read(&path)
@@ -88,6 +112,7 @@ pub fn read_libraries(root: &Path) -> Libraries {
                         Sexp::parse(text).is_ok_and(|tree| tree.children("power").next().is_some());
                     libraries.symbols.push(LibrarySymbol {
                         library: library.clone(),
+                        file: file.clone(),
                         name: entry.name,
                         footprint,
                         power,
@@ -97,14 +122,7 @@ pub fn read_libraries(root: &Path) -> Libraries {
             Err(why) => unreadable.push((file, why)),
         }
     }
-    for (folder, folder_file) in entries(root, "footprints", unreadable) {
-        let Some(library) = file_name(&folder)
-            .strip_suffix(".pretty")
-            .filter(|name| name.starts_with("g-"))
-            .map(str::to_owned)
-        else {
-            continue;
-        };
+    for (folder, folder_file, library) in found(TableKind::Footprint, unreadable) {
         if !folder.is_dir() {
             continue;
         }
@@ -126,6 +144,7 @@ pub fn read_libraries(root: &Path) -> Libraries {
                     libraries.footprints.push(LibraryFootprint {
                         library: library.clone(),
                         name,
+                        file: file.clone(),
                         sha256: sha256_hex(&bytes),
                         models,
                     });
@@ -135,7 +154,9 @@ pub fn read_libraries(root: &Path) -> Libraries {
         }
     }
     let mut models = Vec::new();
-    files_under(root, "3d-models", &mut models, unreadable);
+    for folder in &source.model_folders {
+        files_under(root, folder, &mut models, unreadable);
+    }
     libraries.models = models.into_iter().collect();
     libraries
 }
@@ -189,9 +210,15 @@ pub fn read_csv_references(
     references.into_iter().collect()
 }
 
-/// The footprints outside our libraries that the symbols name and that
-/// KiCad's data folder `share` has (`footprints/<library>.pretty/<name>.kicad_mod`).
-pub fn kicad_footprints(share: &Path, libraries: &Libraries) -> BTreeSet<String> {
+/// The footprints outside `source`'s own libraries that the symbols name
+/// and that KiCad's data folder `share` has
+/// (`footprints/<library>.pretty/<name>.kicad_mod`, as our layout).
+pub fn kicad_footprints(
+    share: &Path,
+    source: &SourceProfile,
+    libraries: &Libraries,
+) -> BTreeSet<String> {
+    let kicad = SourceProfile::own();
     libraries
         .symbols
         .iter()
@@ -201,15 +228,19 @@ pub fn kicad_footprints(share: &Path, libraries: &Libraries) -> BTreeSet<String>
             let plain = |part: &str| {
                 !part.is_empty() && part != "." && part != ".." && !part.contains(['/', '\\'])
             };
-            (!library.starts_with("g-") && plain(library) && plain(name))
+            (!source.is_own_name(library) && plain(library) && plain(name))
                 .then_some((footprint, library, name))
         })
         .filter(|(_, library, name)| {
-            share
-                .join("footprints")
-                .join(format!("{library}.pretty"))
-                .join(format!("{name}.kicad_mod"))
-                .is_file()
+            kicad
+                .library_path(TableKind::Footprint, library)
+                .is_some_and(|folder| {
+                    folder
+                        .split('/')
+                        .fold(share.to_path_buf(), |path, part| path.join(part))
+                        .join(format!("{name}.kicad_mod"))
+                        .is_file()
+                })
         })
         .map(|(footprint, _, _)| footprint.to_owned())
         .collect()
@@ -270,7 +301,7 @@ fn entries(
     let mut paths: Vec<(PathBuf, String)> = Vec::new();
     for entry in read.flatten() {
         let path = entry.path();
-        let file = format!("{relative}/{}", file_name(&path));
+        let file = join(relative, file_name(&path));
         match fs::symlink_metadata(&path) {
             Ok(metadata) if is_link(&metadata) => unreadable.push((file, LINK.to_owned())),
             Ok(_) => paths.push((path, file)),

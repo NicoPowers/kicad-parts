@@ -19,14 +19,16 @@ use catalog::download::{
     next_free_ipn, pad_count, pad_signature, pin_count, remove_model_links, symbol_fields,
 };
 use catalog::guess::{Clues, ExamplePart, RememberedMatch, best_guess, guess_category};
-use catalog::library_check::{ModelLink, judge_model_link};
+use catalog::library_check::{ModelLink, judge_model_link, own_model_folder};
 use catalog::pocketbase::{CadUpload, EDIT_BODY_LIMIT};
 use catalog::{CategoryDetails, PartDetails, PartRevision};
 use desktop_contract::{
     Field, FileKind, TeamDownload, TeamDownloadRequest, TeamFile, TeamGuess, TeamKnownFootprint,
     TeamNewCategory, TeamNewPartRequest, TeamSameMpn,
 };
+use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_file::{SymbolLibrary, symbol_reference};
+use kicad_integration::library_source::{SourceProfile, join};
 use kicad_integration::{LibraryResolver, footprint_choices};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -58,23 +60,26 @@ pub(crate) struct LocalFootprint {
     pub pads: Option<BTreeSet<PadKey>>,
 }
 
-/// Every footprint of the CSV catalog under `root`, with its pads.
+/// Every footprint of the CSV catalog under `root`, with its pads, found
+/// through our layout, the default library source profile.
 pub(crate) fn local_footprints(root: &Path) -> Vec<LocalFootprint> {
+    let own = SourceProfile::own();
     let mut found = Vec::new();
-    let Ok(libraries) = std::fs::read_dir(root.join("footprints")) else {
-        return found;
-    };
-    let mut libraries: Vec<PathBuf> = libraries.flatten().map(|entry| entry.path()).collect();
-    libraries.sort();
-    for library in libraries {
-        let Some(name) = library
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_suffix(".pretty"))
-            .map(str::to_owned)
-        else {
+    let mut libraries: Vec<(PathBuf, String)> = Vec::new();
+    for folder in own.library_folders(TableKind::Footprint) {
+        let Ok(entries) = std::fs::read_dir(root.join(&folder)) else {
             continue;
         };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file = join(&folder, &entry.file_name().to_string_lossy());
+            if let Some(name) = own.nickname_of(TableKind::Footprint, &file) {
+                libraries.push((path, name));
+            }
+        }
+    }
+    libraries.sort();
+    for (library, name) in libraries {
         let Ok(files) = std::fs::read_dir(&library) else {
             continue;
         };
@@ -776,15 +781,15 @@ pub(crate) fn uploads(request: &TeamNewPartRequest) -> Result<Vec<CadUpload>, St
                     "The 3D model's file name {name:?} cannot be used: a name cannot be . or .., start with -, or hold / \\ : or control characters."
                 ));
             }
-            let key = format!("3d-models/{library}.3dshapes/{name}");
+            let key = join(&own_model_folder(library), &name);
             if !is_catalog_model_key(&key) {
                 return Err("Give the footprint one of the Catalog's libraries, such as g-Package_SO, so its 3D model has a place.".to_owned());
             }
             let text = String::from_utf8(bytes).map_err(|_| {
                 "The footprint file is not text, so it is not a file KiCad saved.".to_owned()
             })?;
-            bytes = link_model(&text, &format!("${{GITPLM_PARTS}}/{key}"), &model.file_name)
-                .into_bytes();
+            let link = SourceProfile::own().link_to(&key).unwrap_or_default();
+            bytes = link_model(&text, &link, &model.file_name).into_bytes();
             uploads.push(model_upload(&decoded(model)?, &key, &source(model))?);
             linked = true;
         }
@@ -922,7 +927,7 @@ fn copied_footprint_uploads(
                     "The 3D model's file name {file_name:?} cannot be used: a name cannot be . or .., start with -, or hold / \\ : or control characters."
                 ));
             }
-            let key = format!("3d-models/{library}.3dshapes/{file_name}");
+            let key = join(&own_model_folder(library), &file_name);
             if !is_catalog_model_key(&key) {
                 return Err(
                     "Choose one of our libraries for the footprint, so its 3D model has a place."
@@ -939,7 +944,8 @@ fn copied_footprint_uploads(
                 ));
             }
             placed.push((link.clone(), key.clone()));
-            text = download::relink_model(&text, &link, &format!("${{GITPLM_PARTS}}/{key}"));
+            let own_link = SourceProfile::own().link_to(&key).unwrap_or_default();
+            text = download::relink_model(&text, &link, &own_link);
             if !uploads.iter().any(|upload| upload.reference == key) {
                 let bytes = crate::team::decoded(&model.base64, &model.file_name)?;
                 let mut upload = model_upload(&bytes, &key, &source(model))?;

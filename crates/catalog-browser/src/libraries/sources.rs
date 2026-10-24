@@ -23,6 +23,7 @@ use desktop_contract::{LibraryGroup, LibraryKey, PreviewKind};
 use kicad_integration::lib_table::{
     LibTable, PathVariables, TableKind, VariableSources, is_inside, read_tables,
 };
+use kicad_integration::library_source::{SourceProfile, join};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -119,45 +120,58 @@ pub(crate) fn find_sources(places: &Places) -> Found {
     }
 }
 
+/// Our libraries under `root`, found through our layout, the default
+/// library source profile.
 fn ours(root: &Path, sources: &mut Vec<Source>) {
-    for (kind, folder) in [
-        (PreviewKind::Symbol, "symbols"),
-        (PreviewKind::Footprint, "footprints"),
+    let own = SourceProfile::own();
+    for (kind, table) in [
+        (PreviewKind::Symbol, TableKind::Symbol),
+        (PreviewKind::Footprint, TableKind::Footprint),
     ] {
-        let folder = root.join(folder);
-        if is_link(&folder, true) {
-            continue;
-        }
-        for (path, name) in plain_entries(&folder, true).0 {
-            let found = match kind {
-                PreviewKind::Symbol => name
-                    .strip_suffix(".kicad_sym")
-                    .map(|nick| (nick, Format::SymbolFile))
-                    .or_else(|| {
-                        name.strip_suffix(".kicad_symdir")
-                            .map(|nick| (nick, Format::SymbolFolder))
-                    }),
-                PreviewKind::Footprint => name
-                    .strip_suffix(".pretty")
-                    .map(|nick| (nick, Format::Footprints)),
-            };
-            let Some((nickname, format)) = found.filter(|(nick, _)| nick.starts_with("g-")) else {
+        for relative in own.library_folders(table) {
+            let folder = native(root, &relative);
+            if is_link(&folder, true) {
                 continue;
-            };
-            sources.push(Source {
-                key: LibraryKey {
-                    group: LibraryGroup::Ours,
-                    nickname: nickname.to_owned(),
-                },
-                kind,
-                description: String::new(),
-                path,
-                format,
-                problem: None,
-                strict_links: true,
-            });
+            }
+            for (path, name) in plain_entries(&folder, true).0 {
+                let Some(nickname) = own
+                    .nickname_of(table, &join(&relative, &name))
+                    .filter(|nickname| own.is_own_name(nickname))
+                else {
+                    continue;
+                };
+                sources.push(Source {
+                    key: LibraryKey {
+                        group: LibraryGroup::Ours,
+                        nickname,
+                    },
+                    kind,
+                    description: String::new(),
+                    format: format_of(kind, &name),
+                    path,
+                    problem: None,
+                    strict_links: true,
+                });
+            }
         }
     }
+}
+
+/// How a library is stored, by its file or folder name.
+fn format_of(kind: PreviewKind, name: &str) -> Format {
+    match kind {
+        PreviewKind::Footprint => Format::Footprints,
+        PreviewKind::Symbol if name.ends_with(".kicad_symdir") => Format::SymbolFolder,
+        PreviewKind::Symbol => Format::SymbolFile,
+    }
+}
+
+/// The repo path `relative` under `root`, with this system's separators.
+fn native(root: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
 fn kicad(share: &Path, sources: &mut Vec<Source>) {
@@ -247,10 +261,12 @@ fn installed(places: &Places, config: &Path, sources: &mut Vec<Source>, notes: &
     let (vars, problem) = path_variables(places, config);
     notes.extend(problem);
     // Already listed under Ours or KiCad.
-    let mut listed: Vec<PathBuf> = vec![
-        places.catalog_root.join("symbols"),
-        places.catalog_root.join("footprints"),
-    ];
+    let own = SourceProfile::own();
+    let mut listed: Vec<PathBuf> = [TableKind::Symbol, TableKind::Footprint]
+        .into_iter()
+        .flat_map(|table| own.library_folders(table))
+        .map(|folder| native(&places.catalog_root, &folder))
+        .collect();
     if let Some(share) = &places.share {
         listed.push(share.join("symbols"));
         listed.push(share.join("footprints"));

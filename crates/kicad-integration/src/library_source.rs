@@ -18,7 +18,7 @@
 //! is only for the app (ADR 0022).
 //!
 //! Our own repo's layout (`symbols/`, `footprints/`, `3d-models/` and
-//! `${GITPLM_PARTS}`) is the default profile, [`LibrarySource::own`]. The
+//! `${GITPLM_PARTS}`) is the default profile, [`SourceProfile::own`]. The
 //! library check, the import, Add part, the Libraries browser and the
 //! resolver read our libraries through it.
 //!
@@ -60,7 +60,7 @@ pub struct SourceVariable {
 
 /// Where one library repo keeps its KiCad libraries.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct LibrarySource {
+pub struct SourceProfile {
     /// Tells this source apart inside the app, such as `AC`. Never part of
     /// a name KiCad or a board sees, except for libraries the app makes.
     pub prefix: String,
@@ -108,7 +108,7 @@ pub enum ModelLink {
     Elsewhere,
 }
 
-impl LibrarySource {
+impl SourceProfile {
     /// Our own repo's layout: the default profile.
     ///
     /// Symbol libraries are every `.kicad_sym` file in `symbols/`,
@@ -286,7 +286,7 @@ impl LibrarySource {
             .filter_map(|variable| {
                 let folder = variable.folder.as_deref()?;
                 let rest = inside(path, folder)?;
-                (!rest.is_empty()).then(|| (folder.len(), &variable.name, rest))
+                (!rest.is_empty()).then_some((folder.len(), &variable.name, rest))
             })
             .max_by_key(|(depth, _, _)| *depth)
             .map(|(_, name, rest)| format!("${{{name}}}/{rest}"))
@@ -358,8 +358,8 @@ fn plain_path(relative: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn client() -> LibrarySource {
-        LibrarySource {
+    fn client() -> SourceProfile {
+        SourceProfile {
             prefix: "AC".into(),
             symbols: LibraryList::Listed {
                 libraries: vec![SourceLibrary {
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn our_layout_names_libraries_by_their_file_names() {
-        let own = LibrarySource::own();
+        let own = SourceProfile::own();
         assert_eq!(
             own.library_path(TableKind::Symbol, "g-res").as_deref(),
             Some("symbols/g-res.kicad_sym")
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn our_model_links_read_as_the_import_reads_them() {
-        let own = LibrarySource::own();
+        let own = SourceProfile::own();
         let in_models = |path: &str| ModelLink::InRepo {
             path: path.into(),
             in_model_folder: true,
@@ -556,10 +556,10 @@ mod tests {
 
     #[test]
     fn a_profile_reads_back_the_same() {
-        for source in [LibrarySource::own(), client()] {
+        for source in [SourceProfile::own(), client()] {
             let json = serde_json::to_string(&source).unwrap();
             assert_eq!(
-                serde_json::from_str::<LibrarySource>(&json).unwrap(),
+                serde_json::from_str::<SourceProfile>(&json).unwrap(),
                 source
             );
         }

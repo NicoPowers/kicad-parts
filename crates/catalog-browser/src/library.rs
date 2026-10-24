@@ -6,6 +6,7 @@
 use crate::team::TeamCatalog;
 use catalog::library_check::{Group, KnownCad, LibraryCheck, read::check_folder};
 use desktop_contract::{LibraryCheckGroup, LibraryCheckItem, LibraryCheckView};
+use kicad_integration::library_source::own;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -91,7 +92,12 @@ fn fingerprint(root: &Path) -> Fingerprint {
             .unwrap_or_default();
         found.head = format!("{}\n{}", head.trim(), branch.trim());
     }
-    for folder in ["database", "symbols", "footprints", "3d-models"] {
+    for folder in [
+        "database",
+        own::SYMBOL_FOLDER,
+        own::FOOTPRINT_FOLDER,
+        own::MODEL_FOLDER,
+    ] {
         add_files(&root.join(folder), &mut found);
     }
     found

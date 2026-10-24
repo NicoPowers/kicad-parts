@@ -48,7 +48,9 @@ use crate::part::{
     CAD_COLUMNS, CadReference, CadReferenceRole, CadReferenceTarget, DetailField, ManufacturerPart,
     PART_DETAILS_SCHEMA, PART_REVISION_SCHEMA, PartDetails, PartRevision,
 };
+use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
+use kicad_integration::library_source::{ModelLink, SourceProfile, join, own};
 use kicad_integration::{LibRef, LibraryResolver, ResolveError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1502,15 +1504,16 @@ impl<'a> Planner<'a> {
                 if let (ResolveError::LibraryNotFound { .. }, Ok(lib_ref)) =
                     (&error, LibRef::parse(reference))
                 {
-                    self.missing_inputs
-                        .insert(format!("symbols/{}.kicad_sym", lib_ref.library));
+                    self.missing_inputs.extend(
+                        SourceProfile::own().library_path(TableKind::Symbol, &lib_ref.library),
+                    );
                 }
                 return Ok(CadItemOutcome::Unresolved(Self::unresolved_reference(
                     reference, &error,
                 )));
             }
         };
-        let path = format!("symbols/{}.kicad_sym", resolved.lib_ref.library);
+        let path = own_file(TableKind::Symbol, &resolved.lib_ref.library, None);
         let (bytes, file_sha) = self.read_source("symbol-library", &path)?;
         let library = SymbolLibrary::parse(&bytes)
             .map_err(|error| ImportError(format!("cannot read `{path}`: {error}")))?;
@@ -1555,7 +1558,7 @@ impl<'a> Planner<'a> {
             .unwrap_or_default();
         if let Ok(LibRef { library, item }) = LibRef::parse(first) {
             self.missing_inputs
-                .insert(format!("footprints/{library}.pretty/{item}.kicad_mod"));
+                .insert(own_file(TableKind::Footprint, &library, Some(&item)));
         }
     }
 
@@ -1577,7 +1580,7 @@ impl<'a> Planner<'a> {
             }
         };
         let LibRef { library, item } = &resolved.lib_ref;
-        let path = format!("footprints/{library}.pretty/{item}.kicad_mod");
+        let path = own_file(TableKind::Footprint, library, Some(item));
         let (bytes, file_sha) = self.read_source("footprint", &path)?;
         let footprint = FootprintFile::parse(&bytes)
             .map_err(|error| ImportError(format!("cannot read `{path}`: {error}")))?;
@@ -1743,6 +1746,20 @@ impl<'a> Planner<'a> {
     }
 }
 
+/// The repo path of the library `library` of `kind` in our layout, the
+/// default library source profile, or of the footprint `item` in it, such
+/// as `footprints/g-SO.pretty/SOIC-8.kicad_mod`. References are parsed
+/// first, so every nickname has a path.
+fn own_file(kind: TableKind, library: &str, item: Option<&str>) -> String {
+    let path = SourceProfile::own()
+        .library_path(kind, library)
+        .unwrap_or_default();
+    match item {
+        Some(item) => format!("{path}/{item}.kicad_mod"),
+        None => path,
+    }
+}
+
 pub(crate) struct ClassifiedModel {
     pub(crate) scope: &'static str,
     pub(crate) status: &'static str,
@@ -1753,18 +1770,24 @@ pub(crate) struct ClassifiedModel {
 /// The oracle's lexical, host-independent classification of a 3D model
 /// reference (`tooling/csv-catalog-fixture`). The team server's
 /// catalog_lib.js classifyModelReference reads uploaded footprints the same
-/// way.
+/// way. Links through our path variable are read by our layout, the
+/// default library source profile.
 pub(crate) fn classify_model_reference(reference: &str) -> ClassifiedModel {
     let strip = |variable: &str| {
         reference
             .strip_prefix(variable)
             .and_then(|rest| rest.strip_prefix('/').or_else(|| rest.strip_prefix('\\')))
     };
+    let unsafe_path = ClassifiedModel {
+        scope: "local",
+        status: "unsafe-path",
+        candidate: None,
+    };
     let local = |relative: &str| match safe_relative(relative) {
         Some(clean) => ClassifiedModel {
             scope: "local",
             status: "missing",
-            candidate: Some(format!("3d-models/{clean}")),
+            candidate: Some(join(own::MODEL_FOLDER, &clean)),
         },
         None => ClassifiedModel {
             scope: "local",
@@ -1772,19 +1795,21 @@ pub(crate) fn classify_model_reference(reference: &str) -> ClassifiedModel {
             candidate: None,
         },
     };
-    if let Some(rest) = strip("${GITPLM_PARTS}") {
-        return match rest
-            .strip_prefix("3d-models")
-            .and_then(|rest| rest.strip_prefix('/').or_else(|| rest.strip_prefix('\\')))
-        {
-            Some(model) => local(model),
-            None => ClassifiedModel {
+    match SourceProfile::own().model_link(reference) {
+        ModelLink::InRepo {
+            path,
+            in_model_folder: true,
+        } => {
+            return ClassifiedModel {
                 scope: "local",
-                status: "unsafe-path",
-                candidate: None,
-            },
-        };
+                status: "missing",
+                candidate: Some(path),
+            };
+        }
+        ModelLink::InRepo { .. } | ModelLink::Unsafe => return unsafe_path,
+        ModelLink::Elsewhere => {}
     }
+    // An older name for our model folder, which the oracle still reads.
     if let Some(rest) = strip("${GITPLM_3DMODELS}") {
         return local(rest);
     }
