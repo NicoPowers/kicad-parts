@@ -165,6 +165,8 @@ impl StoredCad {
     /// The revision, as a footprint's 3D view asks for its stored models.
     pub fn footprint(&self) -> StoredFootprint {
         StoredFootprint {
+            // The list of teams knows the address; see `stored_in`.
+            team: String::new(),
             cad_item: self.cad_item.clone(),
             number: self.number,
             snapshot_sha256: self.snapshot_sha256.clone(),

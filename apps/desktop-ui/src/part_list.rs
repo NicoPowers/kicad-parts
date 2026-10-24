@@ -360,6 +360,8 @@ pub(crate) fn ResultList(
     selected: RwSignal<Option<String>>,
     adding: RwSignal<bool>,
     checking: RwSignal<bool>,
+    /// The team whose parts the list shows, by server address.
+    team: Signal<String>,
 ) -> impl IntoView {
     let open = RwSignal::new(OpenSections::default());
     let loaded = RwSignal::new(Loaded::default());
@@ -392,8 +394,10 @@ pub(crate) fn ResultList(
         };
         let key = loaded.with_untracked(|loaded| loaded.key.clone());
         loaded.update(|loaded| loaded.start_load(&category));
+        let team = team.get_untracked();
         spawn_local(async move {
             let answer = backend::search(
+                &team,
                 searched.response.query.clone(),
                 SECTION_ROWS,
                 selected.get_untracked(),

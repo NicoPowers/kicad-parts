@@ -49,10 +49,11 @@ pub(crate) fn noun(kind: PreviewKind) -> &'static str {
 /// A drawing being made or made, as [`crate::team::FilePreview`] shows it.
 pub(crate) type Drawing = RwSignal<Option<Result<PreviewOutcome, String>>>;
 
-/// Draws the library item `pick` into `drawing`, as the Catalog has it
-/// when `catalog`; only the newest drawing asked for through `draws` is
-/// shown.
+/// Draws the library item `pick` into `drawing`, as the Catalog of the
+/// team at `team` has it when `catalog`; only the newest drawing asked for
+/// through `draws` is shown.
 pub(crate) fn draw_item(
+    team: String,
     pick: &TeamPickRequest,
     catalog: bool,
     drawing: Drawing,
@@ -70,7 +71,7 @@ pub(crate) fn draw_item(
     };
     spawn_local(async move {
         let result = if catalog {
-            backend::team_item_preview(request).await
+            backend::team_item_preview(&team, request).await
         } else {
             backend::library_preview(request).await
         };

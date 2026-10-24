@@ -238,6 +238,22 @@ pub enum PreviewOutcome {
     Problem(PreviewProblem),
 }
 
+impl PreviewOutcome {
+    /// The outcome with each footprint drawn from a Catalog revision naming
+    /// `team`, the server address of the team that stores it. So its 3D
+    /// view asks that team for the models.
+    pub fn stored_in(mut self, team: &str) -> Self {
+        if let PreviewOutcome::Ready(set) = &mut self {
+            for image in &mut set.images {
+                if let Some(stored) = &mut image.stored_footprint {
+                    stored.team = team.to_owned();
+                }
+            }
+        }
+        self
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PreviewSet {
     pub kind: PreviewKind,

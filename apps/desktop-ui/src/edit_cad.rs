@@ -344,8 +344,9 @@ pub(crate) fn CadFields(ui: TeamUi, ipn: String, before: Vec<(String, String)>) 
             };
             let file = file.clone();
             let ipn = ipn.clone();
+            let team = ui.team.get_untracked();
             spawn_local(async move {
-                let fresh = backend::team_pick(request).await.ok();
+                let fresh = backend::team_pick(&team, request).await.ok();
                 let (copy, no_models) = restored_copy(&file, fresh, rows.kind);
                 read_file(
                     ui,
@@ -444,8 +445,9 @@ fn read_file(
     };
     let reading = ui.reading_files;
     reading.update(|count| *count += 1);
+    let team = ui.team.get_untracked();
     spawn_local(async move {
-        let result = backend::team_read_file(request).await;
+        let result = backend::team_read_file(&team, request).await;
         reading.update(|count| *count = count.saturating_sub(1));
         let found = match result {
             Ok(found) => found,
@@ -558,8 +560,9 @@ fn choose(
 ) {
     let reading = ui.reading_files;
     reading.update(|count| *count += 1);
+    let team = ui.team.get_untracked();
     spawn_local(async move {
-        let result = backend::team_pick(pick).await;
+        let result = backend::team_pick(&team, pick).await;
         reading.update(|count| *count = count.saturating_sub(1));
         let pick = match result {
             Ok(pick) => pick,
@@ -648,6 +651,7 @@ fn RowView(
                 drawing_busy.set(false);
             }
             Change::Pick(pick) => draw_item(
+                ui.team.get_untracked(),
                 &TeamPickRequest {
                     kind,
                     library: pick.library.clone(),

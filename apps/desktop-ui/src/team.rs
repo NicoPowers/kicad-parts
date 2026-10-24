@@ -1,5 +1,5 @@
-//! The team catalog in the desktop UI: for a part the shown team's catalog
-//! has, its details and current revision, history, edits and conflicts in
+//! The team catalog in the desktop UI: for a part a team's catalog has,
+//! its details and current revision, history, edits and conflicts in
 //! the right-hand column of the part panel. The Teams menu in the header is
 //! in `teams.rs`.
 //!
@@ -67,6 +67,9 @@ pub struct Draft {
 /// part is selected.
 #[derive(Clone, Copy)]
 pub struct TeamUi {
+    /// The server address of the team whose part the column shows. Every
+    /// save names it, so it reaches that part's own team.
+    pub team: RwSignal<String>,
     pub tab: RwSignal<Tab>,
     /// Some while the edit form is open; a new number re-renders it.
     pub editing: RwSignal<Option<u32>>,
@@ -168,6 +171,7 @@ impl Default for TeamUi {
 impl TeamUi {
     pub fn new() -> Self {
         Self {
+            team: RwSignal::new(String::new()),
             tab: RwSignal::new(Tab::Details),
             editing: RwSignal::new(None),
             draft: StoredValue::new(Draft::default()),
@@ -461,8 +465,9 @@ fn save_edit(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamEditRequ
     request.correlation_id = None;
     request.correlation_id = Some(ui.edit_attempt.id_for(request.clone()));
     ui.busy.set(true);
+    let team = ui.team.get_untracked();
     spawn_local(async move {
-        let result = backend::team_edit(request).await;
+        let result = backend::team_edit(&team, request).await;
         published(ui, part, result);
     });
 }
@@ -2083,6 +2088,7 @@ fn save_csv_review(
     let took = requests.iter().any(|request| !request.accept.is_empty());
     let kinds: Vec<bool> = changes.iter().map(|changes| changes.cad).collect();
     ui.busy.set(true);
+    let team = ui.team.get_untracked();
     spawn_local(async move {
         let mut details_saved = false;
         let mut revision = None;
@@ -2095,7 +2101,7 @@ fn save_csv_review(
         let mut unsure = false;
         for (request, cad) in requests.into_iter().zip(kinds) {
             let problem = request.problem.clone();
-            let result = backend::team_csv_review(request).await;
+            let result = backend::team_csv_review(&team, request).await;
             // The group leaves the form, with its ticks.
             let done = |ui: TeamUi| {
                 ui.reviewing.update(|open| {
@@ -2210,8 +2216,9 @@ fn save_archive(ui: TeamUi, part: RwSignal<Option<TeamPart>>, request: TeamArchi
     request.correlation_id = None;
     request.correlation_id = Some(ui.archive_attempt.id_for(request.clone()));
     ui.busy.set(true);
+    let team = ui.team.get_untracked();
     spawn_local(async move {
-        let result = backend::team_archive(request).await;
+        let result = backend::team_archive(&team, request).await;
         published(ui, part, result);
     });
 }

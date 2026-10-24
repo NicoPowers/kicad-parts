@@ -7,6 +7,7 @@
 mod sign_ins;
 
 use catalog_browser::kicad_libraries::KicadLibraries;
+use catalog_browser::team::TeamCatalog;
 use catalog_browser::teams::Teams;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
@@ -266,12 +267,17 @@ async fn set_kicad_override(
 #[tauri::command]
 async fn search_parts(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: SearchRequest,
 ) -> Result<SearchResponse, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let (browser, team) = (
+        browser.inner().clone(),
+        maybe_team_at(&teams, &team)?.unwrap_or_default(),
+    );
     // Parts the team catalog has are found by, and shown with, its current
-    // details, as the part header shows them.
+    // details, as the part header shows them. With no team named, only the
+    // CSV catalog is searched.
     // The list is grouped by the team catalog's category names.
     blocking(move || {
         browser.search_request(&request, &team.current_values(), &team.category_names())
@@ -279,20 +285,38 @@ async fn search_parts(
     .await
 }
 
+/// The team at `server_url` in the person's list. Every request about a
+/// team's parts names its team by server address, never "the shown team",
+/// so a request always reaches the team the person meant.
+fn team_at(teams: &Teams, server_url: &str) -> Result<Arc<TeamCatalog>, String> {
+    teams.team(server_url)
+}
+
+/// The team at `server_url`, or none for a blank address: a part only the
+/// CSV catalog has belongs to no team.
+fn maybe_team_at(teams: &Teams, server_url: &str) -> Result<Option<Arc<TeamCatalog>>, String> {
+    if server_url.is_empty() {
+        return Ok(None);
+    }
+    team_at(teams, server_url).map(Some)
+}
+
 #[tauri::command]
 async fn part_detail(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     ipn: String,
 ) -> Result<Option<PartDetail>, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let (browser, team) = (browser.inner().clone(), maybe_team_at(&teams, &team)?);
     // A part only the team catalog has, such as one added in the app, is
     // found there.
     // The team catalog's values are read only when the CSV catalog lacks it.
     blocking(move || {
-        browser
-            .part(&ipn)
-            .or_else(|| browser.part_with(&ipn, &team.current_values()))
+        browser.part(&ipn).or_else(|| {
+            team.as_ref()
+                .and_then(|team| browser.part_with(&ipn, &team.current_values()))
+        })
     })
     .await
 }
@@ -300,13 +324,20 @@ async fn part_detail(
 #[tauri::command]
 async fn part_preview(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: PreviewRequest,
 ) -> Result<PreviewOutcome, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let browser = browser.inner().clone();
+    let catalog = maybe_team_at(&teams, &team)?;
     // Team parts are drawn from the stored bytes of the exact CAD item
     // revision they use.
-    blocking(move || browser.preview_request(&request, Some(&team))).await
+    blocking(move || {
+        browser
+            .preview_request(&request, catalog.as_deref())
+            .stored_in(&team)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -322,10 +353,14 @@ async fn footprint_drawing(
 #[tauri::command]
 async fn footprint_3d(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
     request: Footprint3dRequest,
 ) -> Result<Footprint3dView, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let browser = browser.inner().clone();
+    // A footprint drawn from a Catalog revision names the team that stores
+    // its models; any other footprint needs no team.
+    let stored_in = request.stored.as_ref().map_or("", |stored| &stored.team);
+    let team = maybe_team_at(&teams, stored_in)?.unwrap_or_default();
     // Made only when the person turns 3D on, because it takes seconds.
     blocking(move || browser.footprint_3d(&request, &team)).await
 }
@@ -423,41 +458,50 @@ async fn team_show(
 #[tauri::command]
 async fn team_part(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     ipn: String,
 ) -> Result<Option<TeamPart>, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
     blocking(move || browser.team_part(&ipn, &team)).await?
 }
 
 #[tauri::command]
 async fn team_edit(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: TeamEditRequest,
 ) -> Result<PublishResult, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
     blocking(move || browser.edit(request, &team)).await?
 }
 
 #[tauri::command]
 async fn team_pick(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: TeamPickRequest,
 ) -> Result<TeamPick, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
     blocking(move || browser.pick(&request, &team)).await?
 }
 
 #[tauri::command]
 async fn team_item_preview(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: LibraryItemRequest,
 ) -> Result<PreviewOutcome, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
-    blocking(move || browser.catalog_item_preview(&request, &team)).await
+    let (browser, catalog) = (browser.inner().clone(), team_at(&teams, &team)?);
+    blocking(move || {
+        browser
+            .catalog_item_preview(&request, &catalog)
+            .stored_in(&team)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -468,28 +512,31 @@ async fn our_libraries(browser: State<'_, Browser>) -> Result<OurLibraries, Stri
 
 #[tauri::command]
 async fn team_archive(
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: TeamArchiveRequest,
 ) -> Result<PublishResult, String> {
-    let team = team.shown();
+    let team = team_at(&teams, &team)?;
     blocking(move || team.archive(request)).await?
 }
 
 #[tauri::command]
 async fn team_csv_review(
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: TeamCsvReviewRequest,
 ) -> Result<PublishResult, String> {
-    let team = team.shown();
+    let team = team_at(&teams, &team)?;
     blocking(move || team.csv_review(request)).await?
 }
 
 #[tauri::command]
 async fn team_read_file(
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: TeamFileRequest,
 ) -> Result<TeamFileReading, String> {
-    let team = team.shown();
+    let team = team_at(&teams, &team)?;
     blocking(move || team.read_file(request)).await?
 }
 
@@ -505,48 +552,53 @@ async fn team_preview_file(
 #[tauri::command]
 async fn team_read_download(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: TeamDownloadRequest,
 ) -> Result<TeamDownload, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
     blocking(move || browser.read_download(&request, &team)).await?
 }
 
 #[tauri::command]
 async fn team_check_ipn(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: TeamIpnRequest,
 ) -> Result<TeamIpnCheck, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
     blocking(move || browser.check_ipn(&request.ipn, &request.prefix, &team)).await
 }
 
 #[tauri::command]
 async fn team_check_mpn(
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: TeamMpnRequest,
 ) -> Result<Vec<TeamSameMpn>, String> {
-    let team = team.shown();
+    let team = team_at(&teams, &team)?;
     blocking(move || team.same_mpn(&request.mpn, &request.manufacturer)).await
 }
 
 #[tauri::command]
 async fn team_add_part(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: TeamNewPartRequest,
 ) -> Result<PublishResult, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
     blocking(move || browser.add_part(request, &team)).await?
 }
 
 #[tauri::command]
 async fn team_library_check(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
 ) -> Result<Option<LibraryCheckView>, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
     // Worked out again only when the team catalog changed.
     blocking(move || browser.library_check(&team)).await?
 }
@@ -561,20 +613,28 @@ async fn libraries(browser: State<'_, Browser>, refresh: bool) -> Result<Librari
 #[tauri::command]
 async fn library_items(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: LibraryItemsRequest,
 ) -> Result<LibraryItems, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let (browser, team) = (
+        browser.inner().clone(),
+        maybe_team_at(&teams, &team)?.unwrap_or_default(),
+    );
     blocking(move || browser.library_items(&request, &team.current_values())).await
 }
 
 #[tauri::command]
 async fn library_item(
     browser: State<'_, Browser>,
-    team: State<'_, Team>,
+    teams: State<'_, Team>,
+    team: String,
     request: LibraryItemRequest,
 ) -> Result<Option<LibraryItemDetail>, String> {
-    let (browser, team) = (browser.inner().clone(), team.shown());
+    let (browser, team) = (
+        browser.inner().clone(),
+        maybe_team_at(&teams, &team)?.unwrap_or_default(),
+    );
     blocking(move || browser.library_item(&request, &team.current_values())).await
 }
 
@@ -590,18 +650,20 @@ async fn library_preview(
 #[tauri::command]
 async fn kicad_libraries_status(
     libraries: State<'_, Libraries>,
+    team: String,
 ) -> Result<KicadLibrariesStatus, String> {
     let libraries = libraries.inner().clone();
-    blocking(move || libraries.status()).await
+    blocking(move || libraries.status(&team)).await
 }
 
 #[tauri::command]
 async fn kicad_libraries_update(
     libraries: State<'_, Libraries>,
+    team: String,
 ) -> Result<KicadLibrariesStatus, String> {
     let libraries = libraries.inner().clone();
     // Runs on the libraries' own thread; this only asks for it.
-    blocking(move || libraries.update_now()).await
+    blocking(move || libraries.update_now(&team)).await
 }
 
 /// The person copied the setup text for `kind` (`symbols` or
@@ -609,29 +671,32 @@ async fn kicad_libraries_update(
 #[tauri::command]
 async fn kicad_libraries_copied(
     libraries: State<'_, Libraries>,
+    team: String,
     kind: String,
 ) -> Result<KicadLibrariesStatus, String> {
     let libraries = libraries.inner().clone();
-    blocking(move || libraries.copied(&kind)).await
+    blocking(move || libraries.copied(&team, &kind)).await
 }
 
 #[tauri::command]
 async fn team_code_check(
     libraries: State<'_, Libraries>,
+    team: String,
     code: String,
 ) -> Result<TeamCodeCheck, String> {
     let libraries = libraries.inner().clone();
-    blocking(move || libraries.check_code(&code)).await
+    blocking(move || libraries.check_code(&team, &code)).await
 }
 
 /// Chooses the team's code on the team server, once.
 #[tauri::command]
 async fn team_code_set(
     libraries: State<'_, Libraries>,
+    team: String,
     code: String,
 ) -> Result<KicadLibrariesStatus, String> {
     let libraries = libraries.inner().clone();
-    blocking(move || libraries.set_code(&code)).await?
+    blocking(move || libraries.set_code(&team, &code)).await?
 }
 
 /// The person said a team moved to its server, so its KiCad libraries,
@@ -652,8 +717,11 @@ async fn kicad_libraries_use_new_server(
 
 /// Shows the KiCad libraries folder in the system's file manager.
 #[tauri::command]
-async fn kicad_libraries_open_folder(libraries: State<'_, Libraries>) -> Result<(), String> {
-    let folder = libraries.inner().folder();
+async fn kicad_libraries_open_folder(
+    libraries: State<'_, Libraries>,
+    team: String,
+) -> Result<(), String> {
+    let folder = libraries.inner().folder(&team);
     blocking(move || {
         std::fs::create_dir_all(&folder)
             .map_err(|error| format!("Could not make {}: {error}", folder.display()))?;

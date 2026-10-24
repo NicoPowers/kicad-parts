@@ -50,6 +50,9 @@ pub(crate) struct BrowseFor {
 /// What the browser can do outside itself.
 #[derive(Clone, Copy)]
 pub(crate) struct BrowserActions {
+    /// The team whose parts mark the items they use, by server address;
+    /// blank for none.
+    pub team: Signal<String>,
     /// Whether the person may start Add part.
     pub can_add: Memo<bool>,
     pub add_from: Callback<TeamLibraryChoice>,
@@ -233,7 +236,8 @@ pub(crate) fn LibrariesDialog(
             selection: None,
         };
         spawn_local(async move {
-            if let Ok(Some(_)) = backend::library_item(request).await {
+            let team = actions.team.get_untracked();
+            if let Ok(Some(_)) = backend::library_item(&team, request).await {
                 if selected.try_get_untracked().flatten().is_none() {
                     selected.set(Some(LibraryItemRow {
                         library: key,
@@ -268,8 +272,9 @@ pub(crate) fn LibrariesDialog(
                 if items_seq.try_get_value() != Some(seq) {
                     return;
                 }
+                let team = actions.team.get_untracked();
                 spawn_local(async move {
-                    let result = backend::library_items(request).await;
+                    let result = backend::library_items(&team, request).await;
                     if items_seq.try_get_value() == Some(seq) {
                         items.set(into_load(result));
                         busy.set(false);
@@ -302,8 +307,9 @@ pub(crate) fn LibrariesDialog(
             selection: Some(this_selection),
         };
         let for_detail = request.clone();
+        let team = actions.team.get_untracked();
         spawn_local(async move {
-            let result = backend::library_item(for_detail).await;
+            let result = backend::library_item(&team, for_detail).await;
             if detail_seq.try_get_value() == Some(seq) {
                 detail.set(Some(into_load(result)));
             }

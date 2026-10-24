@@ -40,6 +40,22 @@ struct OverrideArgs {
     path: Option<String>,
 }
 
+/// A request to one team, named by its server address (blank for none),
+/// with the command's own arguments beside it. Every request about a
+/// team's parts names its team, so it never depends on which team the
+/// view shows.
+#[derive(Serialize)]
+struct ForTeam<'a, A: Serialize> {
+    team: &'a str,
+    #[serde(flatten)]
+    args: A,
+}
+
+/// `args` for the team at `team`.
+fn for_team<A: Serialize>(team: &str, args: A) -> ForTeam<'_, A> {
+    ForTeam { team, args }
+}
+
 #[derive(Serialize)]
 struct SearchArgs {
     request: SearchRequest,
@@ -68,6 +84,7 @@ pub async fn set_kicad_override(path: Option<String>) -> Result<AppStatus, Strin
 }
 
 pub async fn search(
+    team: &str,
     query: String,
     limit: usize,
     selected: Option<String>,
@@ -76,26 +93,35 @@ pub async fn search(
 ) -> Result<SearchResponse, String> {
     call(
         command::SEARCH_PARTS,
-        &SearchArgs {
-            request: SearchRequest {
-                query,
-                limit,
-                selected,
-                category,
-                uses,
+        &for_team(
+            team,
+            SearchArgs {
+                request: SearchRequest {
+                    query,
+                    limit,
+                    selected,
+                    category,
+                    uses,
+                },
             },
-        },
+        ),
     )
     .await
 }
 
-pub async fn part_detail(ipn: &str) -> Result<Option<PartDetail>, String> {
-    call(command::PART_DETAIL, &DetailArgs { ipn }).await
+/// A part of the team at `team`, or of the CSV catalog alone for a blank
+/// `team`.
+pub async fn part_detail(team: &str, ipn: &str) -> Result<Option<PartDetail>, String> {
+    call(command::PART_DETAIL, &for_team(team, DetailArgs { ipn })).await
 }
 
 /// Asks for a part's symbol or footprint preview; see [`PreviewRequest`].
-pub async fn preview(request: PreviewRequest) -> Result<PreviewOutcome, String> {
-    call(command::PART_PREVIEW, &PreviewArgs { request }).await
+pub async fn preview(team: &str, request: PreviewRequest) -> Result<PreviewOutcome, String> {
+    call(
+        command::PART_PREVIEW,
+        &for_team(team, PreviewArgs { request }),
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -122,16 +148,20 @@ pub async fn team_status() -> Result<TeamsStatus, String> {
     call(command::TEAM_STATUS, &NoArgs {}).await
 }
 
-pub async fn kicad_libraries_status() -> Result<KicadLibrariesStatus, String> {
-    call(command::KICAD_LIBRARIES_STATUS, &NoArgs {}).await
+pub async fn kicad_libraries_status(team: &str) -> Result<KicadLibrariesStatus, String> {
+    call(command::KICAD_LIBRARIES_STATUS, &for_team(team, NoArgs {})).await
 }
 
-pub async fn kicad_libraries_update() -> Result<KicadLibrariesStatus, String> {
-    call(command::KICAD_LIBRARIES_UPDATE, &NoArgs {}).await
+pub async fn kicad_libraries_update(team: &str) -> Result<KicadLibrariesStatus, String> {
+    call(command::KICAD_LIBRARIES_UPDATE, &for_team(team, NoArgs {})).await
 }
 
-pub async fn kicad_libraries_open_folder() -> Result<(), String> {
-    call(command::KICAD_LIBRARIES_OPEN_FOLDER, &NoArgs {}).await
+pub async fn kicad_libraries_open_folder(team: &str) -> Result<(), String> {
+    call(
+        command::KICAD_LIBRARIES_OPEN_FOLDER,
+        &for_team(team, NoArgs {}),
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -139,8 +169,15 @@ struct KindArgs<'a> {
     kind: &'a str,
 }
 
-pub async fn kicad_libraries_copied(kind: &str) -> Result<KicadLibrariesStatus, String> {
-    call(command::KICAD_LIBRARIES_COPIED, &KindArgs { kind }).await
+pub async fn kicad_libraries_copied(
+    team: &str,
+    kind: &str,
+) -> Result<KicadLibrariesStatus, String> {
+    call(
+        command::KICAD_LIBRARIES_COPIED,
+        &for_team(team, KindArgs { kind }),
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -148,12 +185,15 @@ struct CodeArgs<'a> {
     code: &'a str,
 }
 
-pub async fn team_code_check(code: &str) -> Result<desktop_contract::TeamCodeCheck, String> {
-    call(command::TEAM_CODE_CHECK, &CodeArgs { code }).await
+pub async fn team_code_check(
+    team: &str,
+    code: &str,
+) -> Result<desktop_contract::TeamCodeCheck, String> {
+    call(command::TEAM_CODE_CHECK, &for_team(team, CodeArgs { code })).await
 }
 
-pub async fn team_code_set(code: &str) -> Result<KicadLibrariesStatus, String> {
-    call(command::TEAM_CODE_SET, &CodeArgs { code }).await
+pub async fn team_code_set(team: &str, code: &str) -> Result<KicadLibrariesStatus, String> {
+    call(command::TEAM_CODE_SET, &for_team(team, CodeArgs { code })).await
 }
 
 pub async fn team_sign_in(request: SignInRequest) -> Result<TeamsStatus, String> {
@@ -197,20 +237,34 @@ pub async fn kicad_libraries_use_new_server(
     .await
 }
 
-pub async fn team_part(ipn: &str) -> Result<Option<TeamPart>, String> {
-    call(command::TEAM_PART, &DetailArgs { ipn }).await
+pub async fn team_part(team: &str, ipn: &str) -> Result<Option<TeamPart>, String> {
+    call(command::TEAM_PART, &for_team(team, DetailArgs { ipn })).await
 }
 
-pub async fn team_edit(request: TeamEditRequest) -> Result<PublishResult, String> {
-    call(command::TEAM_EDIT, &EditArgs { request }).await
+pub async fn team_edit(team: &str, request: TeamEditRequest) -> Result<PublishResult, String> {
+    call(command::TEAM_EDIT, &for_team(team, EditArgs { request })).await
 }
 
-pub async fn team_archive(request: TeamArchiveRequest) -> Result<PublishResult, String> {
-    call(command::TEAM_ARCHIVE, &ArchiveArgs { request }).await
+pub async fn team_archive(
+    team: &str,
+    request: TeamArchiveRequest,
+) -> Result<PublishResult, String> {
+    call(
+        command::TEAM_ARCHIVE,
+        &for_team(team, ArchiveArgs { request }),
+    )
+    .await
 }
 
-pub async fn team_csv_review(request: TeamCsvReviewRequest) -> Result<PublishResult, String> {
-    call(command::TEAM_CSV_REVIEW, &CsvReviewArgs { request }).await
+pub async fn team_csv_review(
+    team: &str,
+    request: TeamCsvReviewRequest,
+) -> Result<PublishResult, String> {
+    call(
+        command::TEAM_CSV_REVIEW,
+        &for_team(team, CsvReviewArgs { request }),
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -224,8 +278,15 @@ struct PreviewFileArgs {
 }
 
 /// Reads a symbol library or footprint file chosen in Edit part.
-pub async fn team_read_file(request: TeamFileRequest) -> Result<TeamFileReading, String> {
-    call(command::TEAM_READ_FILE, &ReadFileArgs { request }).await
+pub async fn team_read_file(
+    team: &str,
+    request: TeamFileRequest,
+) -> Result<TeamFileReading, String> {
+    call(
+        command::TEAM_READ_FILE,
+        &for_team(team, ReadFileArgs { request }),
+    )
+    .await
 }
 
 /// Draws a chosen symbol or footprint file before it is saved.
@@ -249,24 +310,45 @@ struct NewPartArgs {
 }
 
 /// Reads the files chosen for Add part.
-pub async fn team_read_download(request: TeamDownloadRequest) -> Result<TeamDownload, String> {
-    call(command::TEAM_READ_DOWNLOAD, &DownloadArgs { request }).await
-}
-
-/// Whether an IPN can be a new part's.
-pub async fn team_check_ipn(ipn: String, prefix: String) -> Result<TeamIpnCheck, String> {
+pub async fn team_read_download(
+    team: &str,
+    request: TeamDownloadRequest,
+) -> Result<TeamDownload, String> {
     call(
-        command::TEAM_CHECK_IPN,
-        &IpnArgs {
-            request: TeamIpnRequest { ipn, prefix },
-        },
+        command::TEAM_READ_DOWNLOAD,
+        &for_team(team, DownloadArgs { request }),
     )
     .await
 }
 
-/// Saves a new part.
-pub async fn team_add_part(request: TeamNewPartRequest) -> Result<PublishResult, String> {
-    call(command::TEAM_ADD_PART, &NewPartArgs { request }).await
+/// Whether an IPN can be a new part's in the team at `team`.
+pub async fn team_check_ipn(
+    team: &str,
+    ipn: String,
+    prefix: String,
+) -> Result<TeamIpnCheck, String> {
+    call(
+        command::TEAM_CHECK_IPN,
+        &for_team(
+            team,
+            IpnArgs {
+                request: TeamIpnRequest { ipn, prefix },
+            },
+        ),
+    )
+    .await
+}
+
+/// Saves a new part in the team at `team`.
+pub async fn team_add_part(
+    team: &str,
+    request: TeamNewPartRequest,
+) -> Result<PublishResult, String> {
+    call(
+        command::TEAM_ADD_PART,
+        &for_team(team, NewPartArgs { request }),
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -274,22 +356,29 @@ struct MpnArgs {
     request: TeamMpnRequest,
 }
 
-/// The parts that already have an MPN.
-pub async fn team_check_mpn(mpn: String, manufacturer: String) -> Result<Vec<TeamSameMpn>, String> {
+/// The parts of the team at `team` that already have an MPN.
+pub async fn team_check_mpn(
+    team: &str,
+    mpn: String,
+    manufacturer: String,
+) -> Result<Vec<TeamSameMpn>, String> {
     call(
         command::TEAM_CHECK_MPN,
-        &MpnArgs {
-            request: TeamMpnRequest { mpn, manufacturer },
-        },
+        &for_team(
+            team,
+            MpnArgs {
+                request: TeamMpnRequest { mpn, manufacturer },
+            },
+        ),
     )
     .await
 }
 
-/// What the library check found, for someone who can edit; `None` for
-/// anyone else. The app works it out again only when the team catalog
-/// changed.
-pub async fn team_library_check() -> Result<Option<LibraryCheckView>, String> {
-    call(command::TEAM_LIBRARY_CHECK, &NoArgs {}).await
+/// What the library check against the team at `team` found, for someone
+/// who can edit there; `None` for anyone else. The app works it out again
+/// only when that team's catalog changed.
+pub async fn team_library_check(team: &str) -> Result<Option<LibraryCheckView>, String> {
+    call(command::TEAM_LIBRARY_CHECK, &for_team(team, NoArgs {})).await
 }
 
 #[derive(Serialize)]
@@ -313,16 +402,30 @@ pub async fn libraries(refresh: bool) -> Result<LibrariesView, String> {
     call(command::LIBRARIES, &LibrariesArgs { refresh }).await
 }
 
-/// The browser's list of symbols or footprints.
-pub async fn library_items(request: LibraryItemsRequest) -> Result<LibraryItems, String> {
-    call(command::LIBRARY_ITEMS, &LibraryItemsArgs { request }).await
+/// The browser's list of symbols or footprints, marking those the parts
+/// of the team at `team` use.
+pub async fn library_items(
+    team: &str,
+    request: LibraryItemsRequest,
+) -> Result<LibraryItems, String> {
+    call(
+        command::LIBRARY_ITEMS,
+        &for_team(team, LibraryItemsArgs { request }),
+    )
+    .await
 }
 
-/// One library item's details.
+/// One library item's details, with the parts of the team at `team` that
+/// use it.
 pub async fn library_item(
+    team: &str,
     request: LibraryItemRequest,
 ) -> Result<Option<LibraryItemDetail>, String> {
-    call(command::LIBRARY_ITEM, &LibraryItemArgs { request }).await
+    call(
+        command::LIBRARY_ITEM,
+        &for_team(team, LibraryItemArgs { request }),
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -374,14 +477,22 @@ struct PickArgs {
     request: TeamPickRequest,
 }
 
-/// What choosing an item in the Libraries browser does for a part.
-pub async fn team_pick(request: TeamPickRequest) -> Result<TeamPick, String> {
-    call(command::TEAM_PICK, &PickArgs { request }).await
+/// What choosing an item in the Libraries browser does for a part of the
+/// team at `team`.
+pub async fn team_pick(team: &str, request: TeamPickRequest) -> Result<TeamPick, String> {
+    call(command::TEAM_PICK, &for_team(team, PickArgs { request })).await
 }
 
-/// One of our items drawn as the Catalog has it.
-pub async fn team_item_preview(request: LibraryItemRequest) -> Result<PreviewOutcome, String> {
-    call(command::TEAM_ITEM_PREVIEW, &LibraryItemArgs { request }).await
+/// One of our items drawn as the Catalog of the team at `team` has it.
+pub async fn team_item_preview(
+    team: &str,
+    request: LibraryItemRequest,
+) -> Result<PreviewOutcome, String> {
+    call(
+        command::TEAM_ITEM_PREVIEW,
+        &for_team(team, LibraryItemArgs { request }),
+    )
+    .await
 }
 
 /// Our libraries' nicknames, by role.

@@ -4,8 +4,8 @@
 //! its own folder, and a folder that belongs to another team is never
 //! written.
 //!
-//! The KiCad settings panel shows one team at a time: the team the catalog
-//! view shows ([`Teams::shown`]).
+//! The KiCad settings panel shows one team at a time, and every request
+//! from it names that team by server address.
 
 mod team;
 
@@ -29,7 +29,7 @@ const POLL: Duration = Duration::from_millis(250);
 pub struct KicadLibraries {
     teams: Arc<Teams>,
     shared: Arc<Shared>,
-    /// What the panel shows while no team is shown: nothing is updated.
+    /// What the panel shows while no team is chosen: nothing is updated.
     idle: TeamLibraries,
 }
 
@@ -65,42 +65,38 @@ impl KicadLibraries {
         }
     }
 
-    /// The shown team's libraries, if it has started them.
-    fn shown(&self) -> Option<Arc<TeamLibraries>> {
-        let shown = self.teams.shown();
-        self.shared
-            .lock()
-            .iter()
-            .find(|(_, libraries)| Arc::ptr_eq(libraries.team(), &shown))
-            .map(|(_, libraries)| libraries.clone())
-    }
-
-    fn with_shown<T>(&self, work: impl FnOnce(&TeamLibraries) -> T) -> T {
-        match self.shown() {
+    /// Runs `work` on the libraries of the team at `server_url`, or on idle
+    /// libraries that update nothing when that team is not in the list (or
+    /// `server_url` is blank, as before any team is chosen).
+    fn with_team<T>(&self, server_url: &str, work: impl FnOnce(&TeamLibraries) -> T) -> T {
+        match self.of(server_url) {
             Some(libraries) => work(&libraries),
             None => work(&self.idle),
         }
     }
 
-    /// The shown team's folder, or the folder of every team's libraries
-    /// while it has no code.
-    pub fn folder(&self) -> PathBuf {
-        self.with_shown(TeamLibraries::folder)
+    /// The folder of the libraries of the team at `server_url`, or the
+    /// folder of every team's libraries while it has no code.
+    pub fn folder(&self, server_url: &str) -> PathBuf {
+        self.with_team(server_url, TeamLibraries::folder)
     }
 
-    /// The status `work` gives for the shown team's libraries, with what
-    /// only the list of teams knows ([`Self::with_list`]). Every status the
-    /// KiCad settings panel gets comes through here or `set_code`.
-    fn shown_status(
+    /// The status `work` gives for the libraries of the team at
+    /// `server_url`, with what only the list of teams knows
+    /// ([`Self::with_list`]). Every status the KiCad settings panel gets
+    /// comes through here or `set_code`.
+    fn team_status(
         &self,
+        server_url: &str,
         work: impl FnOnce(&TeamLibraries) -> KicadLibrariesStatus,
     ) -> KicadLibrariesStatus {
-        self.with_list(self.with_shown(work))
+        self.with_list(self.with_team(server_url, work))
     }
 
-    /// The shown team's libraries, as the KiCad settings panel shows them.
-    pub fn status(&self) -> KicadLibrariesStatus {
-        self.shown_status(TeamLibraries::status)
+    /// The libraries of the team at `server_url`, as the KiCad settings
+    /// panel shows them.
+    pub fn status(&self, server_url: &str) -> KicadLibrariesStatus {
+        self.team_status(server_url, TeamLibraries::status)
     }
 
     /// Whether `server` is in the person's list of teams.
@@ -132,12 +128,6 @@ impl KicadLibraries {
             .iter()
             .find(|(server, _)| server == server_url)
             .map(|(_, libraries)| libraries.clone())
-    }
-
-    /// The status of the libraries of the team at `server_url`, if it is in
-    /// the list.
-    pub fn status_of(&self, server_url: &str) -> Option<KicadLibrariesStatus> {
-        Some(self.with_list(self.of(server_url)?.status()))
     }
 
     /// Notes, on each team in `status`, whether its libraries come from
@@ -182,24 +172,26 @@ impl KicadLibraries {
         }
     }
 
-    /// Asks for an update of the shown team's libraries now.
-    pub fn update_now(&self) -> KicadLibrariesStatus {
-        self.shown_status(TeamLibraries::update_now)
+    /// Asks for an update of the libraries of the team at `server_url` now.
+    pub fn update_now(&self, server_url: &str) -> KicadLibrariesStatus {
+        self.team_status(server_url, TeamLibraries::update_now)
     }
 
-    /// The person copied the shown team's setup text for `kind`.
-    pub fn copied(&self, kind: &str) -> KicadLibrariesStatus {
-        self.shown_status(|libraries| libraries.copied(kind))
+    /// The person copied the setup text for `kind` of the team at
+    /// `server_url`.
+    pub fn copied(&self, server_url: &str, kind: &str) -> KicadLibrariesStatus {
+        self.team_status(server_url, |libraries| libraries.copied(kind))
     }
 
-    /// What choosing `code` for the shown team would do.
-    pub fn check_code(&self, code: &str) -> TeamCodeCheck {
-        self.with_shown(|libraries| libraries.check_code(code))
+    /// What choosing `code` for the team at `server_url` would do.
+    pub fn check_code(&self, server_url: &str, code: &str) -> TeamCodeCheck {
+        self.with_team(server_url, |libraries| libraries.check_code(code))
     }
 
-    /// Chooses the shown team's code on its team server, once.
-    pub fn set_code(&self, code: &str) -> Result<KicadLibrariesStatus, String> {
-        self.with_shown(|libraries| libraries.set_code(code))
+    /// Chooses the code of the team at `server_url` on its team server,
+    /// once.
+    pub fn set_code(&self, server_url: &str, code: &str) -> Result<KicadLibrariesStatus, String> {
+        self.with_team(server_url, |libraries| libraries.set_code(code))
             .map(|status| self.with_list(status))
     }
 }

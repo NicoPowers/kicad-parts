@@ -112,6 +112,9 @@ fn footprint_reference(reading: &TeamDownload, library: &str, known: Option<&str
 /// still the app's own, never one the engineer typed or chose.
 #[derive(Clone, Copy)]
 pub struct Form {
+    /// The server address of the team the new part goes into. Every
+    /// request the form makes names it.
+    pub team: RwSignal<String>,
     reading: RwSignal<Option<TeamDownload>>,
     downloads: StoredValue<Vec<DownloadedFile>>,
     reading_files: RwSignal<bool>,
@@ -191,6 +194,7 @@ impl Default for Form {
 impl Form {
     pub fn new() -> Self {
         Self {
+            team: RwSignal::new(String::new()),
             reading: RwSignal::new(None),
             downloads: StoredValue::new(Vec::new()),
             reading_files: RwSignal::new(false),
@@ -351,8 +355,11 @@ impl Form {
                 }
                 let mpn = form.mpn.get_untracked();
                 let manufacturer = form.manufacturer.get_untracked();
+                let team = form.team.get_untracked();
                 spawn_local(async move {
-                    if let Ok(parts) = backend::team_check_mpn(mpn.clone(), manufacturer).await {
+                    if let Ok(parts) =
+                        backend::team_check_mpn(&team, mpn.clone(), manufacturer).await
+                    {
                         if form.mpn.get_untracked() == mpn {
                             form.mpn_shown.set_value(mpn);
                             form.same_mpn.set(parts);
@@ -388,8 +395,9 @@ impl Form {
             .category(&form.category.get_untracked())
             .map(|category| category.ipn_prefix)
             .unwrap_or_default();
+        let team = form.team.get_untracked();
         spawn_local(async move {
-            let answer = backend::team_check_ipn(ipn.trim().to_owned(), prefix).await;
+            let answer = backend::team_check_ipn(&team, ipn.trim().to_owned(), prefix).await;
             if form.ipn.get_untracked() == ipn {
                 form.ipn_problem.set(match answer {
                     Ok(check) => check.problem,
@@ -617,6 +625,7 @@ pub fn AddPartView(
             found.symbol_file.clone(),
         ) {
             (Some(pick), _) => draw_item(
+                form.team.get_untracked(),
                 &TeamPickRequest {
                     kind: PreviewKind::Symbol,
                     library: pick.library.clone(),
@@ -643,13 +652,17 @@ pub fn AddPartView(
                 let asked = footprint_draws.get_value();
                 footprint_busy.set(true);
                 spawn_local(async move {
-                    let result = backend::preview(PreviewRequest {
-                        ipn: "new part".into(),
-                        kind: PreviewKind::Footprint,
-                        field: Some(reference),
-                        team_revision: None,
-                        selection: None,
-                    })
+                    // Drawn from the library on this computer: no team.
+                    let result = backend::preview(
+                        "",
+                        PreviewRequest {
+                            ipn: "new part".into(),
+                            kind: PreviewKind::Footprint,
+                            field: Some(reference),
+                            team_revision: None,
+                            selection: None,
+                        },
+                    )
                     .await;
                     if footprint_draws.get_value() == asked {
                         footprint_busy.set(false);
@@ -658,6 +671,7 @@ pub fn AddPartView(
                 });
             }
             (None, Some(pick), _) => draw_item(
+                form.team.get_untracked(),
                 &TeamPickRequest {
                     kind: PreviewKind::Footprint,
                     library: pick.library.clone(),
@@ -696,8 +710,9 @@ pub fn AddPartView(
             without_models: !first,
             picks: form.picks.get_untracked(),
         };
+        let team = form.team.get_untracked();
         spawn_local(async move {
-            let result = backend::team_read_download(request).await;
+            let result = backend::team_read_download(&team, request).await;
             reading_files.set(false);
             let mut found = match result {
                 Ok(found) => found,
@@ -951,13 +966,14 @@ pub fn AddPartView(
         saving.set(true);
         problem.set(None);
         form.already.set(None);
+        let team = form.team.get_untracked();
         spawn_local(async move {
             // Once more just before saving: a part with this MPN may be new,
             // or the MPN typed was not checked yet. Saving again goes on.
             let mpn = form.mpn.get_untracked().trim().to_owned();
             if !mpn.is_empty() && form.mpn_shown.get_value().trim() != mpn {
                 let manufacturer = form.manufacturer.get_untracked();
-                if let Ok(parts) = backend::team_check_mpn(mpn.clone(), manufacturer).await {
+                if let Ok(parts) = backend::team_check_mpn(&team, mpn.clone(), manufacturer).await {
                     form.mpn_shown.set_value(mpn.clone());
                     if !parts.is_empty() {
                         form.same_mpn.set(parts);
@@ -970,7 +986,7 @@ pub fn AddPartView(
                     form.same_mpn.set(parts);
                 }
             }
-            let result = backend::team_add_part(request).await;
+            let result = backend::team_add_part(&team, request).await;
             saving.set(false);
             match result {
                 Ok(PublishResult::Added { part }) => {
@@ -1743,8 +1759,9 @@ fn DownloadForm(
         read.run((symbol, None));
     });
     let add_extra = Callback::new(move |pick: TeamPickRequest| {
+        let team = form.team.get_untracked();
         spawn_local(async move {
-            match backend::team_pick(pick).await {
+            match backend::team_pick(&team, pick).await {
                 Ok(pick) => {
                     form.extra_keys.update_value(|key| *key += 1);
                     let key = form.extra_keys.get_value();

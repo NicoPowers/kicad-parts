@@ -293,6 +293,16 @@ impl Teams {
             .unwrap_or_else(|| self.nobody.clone())
     }
 
+    /// The team at `server_url`, signed in or not. Every request about a
+    /// team's parts names its team this way, by server address, so it
+    /// always reaches the team the person meant.
+    pub fn team(&self, server_url: &str) -> Result<Arc<TeamCatalog>, String> {
+        self.lock()
+            .find(server_url)
+            .map(|team| team.catalog.clone())
+            .ok_or_else(|| format!("The team at {server_url} is no longer in your teams."))
+    }
+
     /// Every team in the list, signed in or not, by server address, in
     /// list order.
     pub fn every(&self) -> Vec<(String, Arc<TeamCatalog>)> {

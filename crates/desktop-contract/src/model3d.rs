@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 /// revisions it uses.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StoredFootprint {
+    /// The server address of the team that stores it, which its 3D view
+    /// asks for the models.
+    #[serde(default)]
+    pub team: String,
     /// The CAD item's ID.
     pub cad_item: String,
     pub number: u32,

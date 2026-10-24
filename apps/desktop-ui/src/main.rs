@@ -90,6 +90,16 @@ fn App() -> impl IntoView {
                 .and_then(|status| status.shown_team().cloned())
         })
     });
+    // The server address of the shown team, blank while none is: every
+    // request to a team names it.
+    let shown_team = Memo::new(move |_| {
+        team.with(|status| {
+            status
+                .as_ref()
+                .map(|status| status.server_url.clone())
+                .unwrap_or_default()
+        })
+    });
     // True while the Add part form is open in the part panel.
     let adding = RwSignal::new(false);
     let can_add = Memo::new(move |_| {
@@ -145,8 +155,9 @@ fn App() -> impl IntoView {
     set_interval(refresh_team, TEAM_POLL);
     let kicad_libraries = RwSignal::new(None::<desktop_contract::KicadLibrariesStatus>);
     let refresh_libraries = move || {
+        let team = shown_team.get_untracked();
         spawn_local(async move {
-            if let Ok(latest) = backend::kicad_libraries_status().await {
+            if let Ok(latest) = backend::kicad_libraries_status(&team).await {
                 if kicad_libraries.with_untracked(|known| known.as_ref() != Some(&latest)) {
                     kicad_libraries.set(Some(latest));
                 }
@@ -191,8 +202,9 @@ fn App() -> impl IntoView {
             checked_at.set(None);
             return;
         };
+        let team = shown_team.get_untracked();
         spawn_local(async move {
-            let result = backend::team_library_check().await;
+            let result = backend::team_library_check(&team).await;
             // Only the answer for the latest position is kept; the last
             // one stays shown while a newer one is worked out.
             if check_position.get_untracked().as_ref() != Some(&position) {
@@ -247,6 +259,7 @@ fn App() -> impl IntoView {
         // The answer says which section holds the selected part, and
         // always includes it there.
         let chosen = selected.get();
+        let team = shown_team.get();
         let seq = search_seq.get_value() + 1;
         search_seq.set_value(seq);
         set_timeout(
@@ -263,7 +276,7 @@ fn App() -> impl IntoView {
                         SEARCH_ROWS
                     };
                     let response =
-                        backend::search(text, limit, chosen.clone(), None, only_using).await;
+                        backend::search(&team, text, limit, chosen.clone(), None, only_using).await;
                     // Ignore answers to queries the user has already replaced.
                     if search_seq.get_value() == seq {
                         results.set(into_load(response).map(|response| Searched {
@@ -298,6 +311,7 @@ fn App() -> impl IntoView {
                     kicad_epoch=kicad_epoch
                     override_input=override_input
                     libraries=kicad_libraries
+                    libraries_team=shown_team.into()
                 />
             </header>
             <KicadProblem status=status kicad_epoch=kicad_epoch override_input=override_input />
@@ -360,7 +374,13 @@ fn App() -> impl IntoView {
                             refresh_check();
                         })
                     />
-                    <ResultList results=results selected=selected adding=adding checking=checking />
+                    <ResultList
+                        results=results
+                        selected=selected
+                        adding=adding
+                        checking=checking
+                        team=shown_team.into()
+                    />
                 </section>
                 <PartPanel
                     selected=selected
@@ -377,6 +397,7 @@ fn App() -> impl IntoView {
                     open=libraries_open
                     library_check=library_check
                     actions=BrowserActions {
+                        team: shown_team.into(),
                         can_add,
                         add_from: Callback::new(move |choice| library_add.set(Some(choice))),
                         show_parts: Callback::new(move |reference: String| {
@@ -473,6 +494,8 @@ fn KicadBadge(
     kicad_epoch: RwSignal<u32>,
     override_input: RwSignal<String>,
     libraries: RwSignal<Option<desktop_contract::KicadLibrariesStatus>>,
+    /// The team whose KiCad libraries the panel shows.
+    libraries_team: Signal<String>,
 ) -> impl IntoView {
     move || match status.get() {
         Load::Loading => view! { <p class="kicad-badge">"Looking for KiCad…"</p> }.into_any(),
@@ -509,7 +532,7 @@ fn KicadBadge(
                                 saved=app.kicad_override.is_some()
                                 rejected=app.override_rejected.clone()
                             />
-                            <KicadLibrariesSection status=libraries />
+                            <KicadLibrariesSection status=libraries team=libraries_team />
                         </div>
                     </details>
                 }
@@ -787,6 +810,20 @@ fn PartPanel(
             )
         })
     });
+    // The team every request names: the shown one.
+    let team_url = Memo::new(move |_| {
+        team.with(|status| {
+            status
+                .as_ref()
+                .map(|status| status.server_url.clone())
+                .unwrap_or_default()
+        })
+    });
+    Effect::new(move |_| {
+        let url = team_url.get();
+        ui.team.set(url.clone());
+        add_form.team.set(url);
+    });
     // For a part the team catalog has: the revision shown, whose exact CAD
     // item revisions the previews are drawn from, and its Symbol and
     // Footprint in case those cannot be fetched. Otherwise the CSV catalog's.
@@ -813,8 +850,9 @@ fn PartPanel(
         if let Some(message) = pending_notice.try_update_value(Option::take).flatten() {
             ui.notice.set(Some(Notice::Done(message)));
         }
+        let team = team_url.get_untracked();
         spawn_local(async move {
-            let result = backend::part_detail(&ipn).await;
+            let result = backend::part_detail(&team, &ipn).await;
             if seq.get_value() == current {
                 detail.set(Some(into_load(result)));
             }
@@ -833,8 +871,9 @@ fn PartPanel(
         }
         let current = team_seq.get_value() + 1;
         team_seq.set_value(current);
+        let team = team_url.get_untracked();
         spawn_local(async move {
-            let result = backend::team_part(&ipn).await;
+            let result = backend::team_part(&team, &ipn).await;
             if team_seq.get_value() == current && selected.get_untracked().as_deref() == Some(&ipn)
             {
                 // Keep showing the last good view if a refresh fails, and a
@@ -921,6 +960,7 @@ fn PartPanel(
                 team_revision,
                 selection: Some(this_selection),
             };
+            let team = team_url.get_untracked();
             spawn_local(async move {
                 let replaced = |result: &Result<PreviewOutcome, String>| {
                     matches!(
@@ -929,7 +969,7 @@ fn PartPanel(
                             if problem.reason == PreviewProblemReason::Replaced
                     )
                 };
-                let mut result = backend::preview(request.clone()).await;
+                let mut result = backend::preview(&team, request.clone()).await;
                 // Only the newest selection's answer is shown, even if an
                 // older export finishes later.
                 if preview_seq.get_value() != current {
@@ -941,10 +981,13 @@ fn PartPanel(
                 // selection, which is never replaced, rather than loading
                 // forever.
                 if replaced(&result) {
-                    result = backend::preview(PreviewRequest {
-                        selection: None,
-                        ..request
-                    })
+                    result = backend::preview(
+                        &team,
+                        PreviewRequest {
+                            selection: None,
+                            ..request
+                        },
+                    )
                     .await;
                 }
                 if preview_seq.get_value() == current {

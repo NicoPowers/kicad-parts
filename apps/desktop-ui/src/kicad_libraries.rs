@@ -47,7 +47,11 @@ fn listed(items: &[String]) -> String {
 }
 
 #[component]
-pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> impl IntoView {
+pub fn KicadLibrariesSection(
+    status: RwSignal<Option<KicadLibrariesStatus>>,
+    /// The team whose libraries the panel shows, by server address.
+    team: Signal<String>,
+) -> impl IntoView {
     let asked = RwSignal::new(false);
     // Which Copy button just copied, and what the live region says.
     let copied = RwSignal::new(None::<&'static str>);
@@ -55,19 +59,22 @@ pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> 
     let copy_failed = RwSignal::new(false);
     let update_now = move |_| {
         asked.set(true);
+        let team = team.get_untracked();
         spawn_local(async move {
-            if let Ok(latest) = backend::kicad_libraries_update().await {
+            if let Ok(latest) = backend::kicad_libraries_update(&team).await {
                 status.set(Some(latest));
             }
             asked.set(false);
         });
     };
     let open_folder = move |_| {
+        let team = team.get_untracked();
         spawn_local(async move {
-            let _ = backend::kicad_libraries_open_folder().await;
+            let _ = backend::kicad_libraries_open_folder(&team).await;
         });
     };
     let copy = move |which: &'static str, what: &'static str, text: String| {
+        let team = team.get_untracked();
         spawn_local(async move {
             let worked = write_text(&text).await.is_ok();
             copy_failed.set(!worked);
@@ -83,7 +90,7 @@ pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> 
                 } else {
                     "footprints"
                 };
-                if let Ok(latest) = backend::kicad_libraries_copied(kind).await {
+                if let Ok(latest) = backend::kicad_libraries_copied(&team, kind).await {
                     status.set(Some(latest));
                 }
             }
@@ -394,7 +401,7 @@ pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> 
                 </code>
                 "."
             </p>
-            <TeamCodeChoice status=status />
+            <TeamCodeChoice status=status team=team />
             {state_line}
             {new_libraries}
             <div class="override-row">
@@ -424,7 +431,11 @@ pub fn KicadLibrariesSection(status: RwSignal<Option<KicadLibrariesStatus>>) -> 
 /// The team code: read-only once chosen; otherwise a short form for people
 /// who can edit, with a confirmation, or who to ask.
 #[component]
-fn TeamCodeChoice(status: RwSignal<Option<KicadLibrariesStatus>>) -> impl IntoView {
+fn TeamCodeChoice(
+    status: RwSignal<Option<KicadLibrariesStatus>>,
+    /// The team the code is for, by server address.
+    team: Signal<String>,
+) -> impl IntoView {
     let typed = RwSignal::new(String::new());
     // The code waiting for confirmation, and any warning about it.
     let confirming = RwSignal::new(None::<(String, Option<String>)>);
@@ -433,8 +444,9 @@ fn TeamCodeChoice(status: RwSignal<Option<KicadLibrariesStatus>>) -> impl IntoVi
     let check = move || {
         let code = typed.get_untracked().trim().to_uppercase();
         busy.set(true);
+        let team = team.get_untracked();
         spawn_local(async move {
-            match backend::team_code_check(&code).await {
+            match backend::team_code_check(&team, &code).await {
                 Ok(found) => match found.problem {
                     Some(why) => problem.set(Some(why)),
                     None => {
@@ -450,8 +462,9 @@ fn TeamCodeChoice(status: RwSignal<Option<KicadLibrariesStatus>>) -> impl IntoVi
     };
     let save = move |code: String| {
         busy.set(true);
+        let team = team.get_untracked();
         spawn_local(async move {
-            match backend::team_code_set(&code).await {
+            match backend::team_code_set(&team, &code).await {
                 Ok(latest) => {
                     confirming.set(None);
                     problem.set(None);

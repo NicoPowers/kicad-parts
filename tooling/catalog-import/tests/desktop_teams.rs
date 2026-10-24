@@ -249,9 +249,10 @@ fn two_teams_are_followed_side_by_side_and_stay_signed_in() {
 
     // Both teams' KiCad libraries are made, each in its own folder.
     let up_to_date = |client: &Client| {
-        libraries
-            .status_of(&client.url)
-            .is_some_and(|status| matches!(status.state, KicadLibrariesState::UpToDate { .. }))
+        matches!(
+            libraries.status(&client.url).state,
+            KicadLibrariesState::UpToDate { .. }
+        )
     };
     wait_until("both teams' libraries", || {
         up_to_date(&acme) && up_to_date(&beta)
@@ -364,10 +365,10 @@ fn a_second_server_claiming_a_team_cannot_write_its_libraries_until_confirmed() 
         None,
     ));
     let libraries = KicadLibraries::start(folder.clone(), teams.clone());
-    let state_of = |client: &Client| libraries.status_of(&client.url).map(|status| status.state);
+    let state_of = |client: &Client| libraries.status(&client.url).state;
     teams.sign_in(acme.sign_in()).unwrap();
     wait_until("acme's libraries", || {
-        matches!(state_of(&acme), Some(KicadLibrariesState::UpToDate { .. }))
+        matches!(state_of(&acme), KicadLibrariesState::UpToDate { .. })
     });
     let recorded = kicad_libraries::read_state(&folder.join("AC")).unwrap();
     assert_eq!(recorded.server, acme.url);
@@ -384,15 +385,13 @@ fn a_second_server_claiming_a_team_cannot_write_its_libraries_until_confirmed() 
         recorded_server_in_your_teams: true,
     };
     wait_until("the claimer's libraries to wait", || {
-        state_of(&claimer) == Some(both_listed.clone())
+        state_of(&claimer) == both_listed
     });
-    // Asking for an update changes nothing: the claimer is shown, so
-    // Update now is for it.
-    assert_eq!(teams.status().shown, claimer.url);
-    // The status Update now gives says so too, as every panel status does.
-    assert_eq!(libraries.update_now().state, both_listed);
+    // Asking the claimer's libraries for an update changes nothing. The
+    // status Update now gives says so too, as every panel status does.
+    assert_eq!(libraries.update_now(&claimer.url).state, both_listed);
     std::thread::sleep(Duration::from_secs(1));
-    assert_eq!(state_of(&claimer), Some(both_listed));
+    assert_eq!(state_of(&claimer), both_listed);
     let unchanged = || {
         assert_eq!(
             kicad_libraries::read_state(&folder.join("AC")).unwrap(),
@@ -448,10 +447,7 @@ fn a_second_server_claiming_a_team_cannot_write_its_libraries_until_confirmed() 
     // and the new server's update runs.
     libraries.use_new_server(&answer(&claimer, &acme)).unwrap();
     wait_until("the libraries to update from the new server", || {
-        matches!(
-            state_of(&claimer),
-            Some(KicadLibrariesState::UpToDate { .. })
-        )
+        matches!(state_of(&claimer), KicadLibrariesState::UpToDate { .. })
     });
     assert_eq!(
         kicad_libraries::read_state(&folder.join("AC"))
