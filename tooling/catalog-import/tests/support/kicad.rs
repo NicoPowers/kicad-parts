@@ -401,6 +401,24 @@ pub fn draw_every_footprint(
     (footprints, with_model)
 }
 
+/// Makes kicad-cli load libraries one at a time, in the order of the
+/// symbol library table.
+///
+/// KiCad 10.0.7 builds every database library entry as the database
+/// library loads (KiCad issue 25870). An entry whose symbol library is
+/// still loading on another thread gets an empty symbol, so ERC says it
+/// "doesn't match copy in library". KiCad's own Device library is large,
+/// so its entries lost that race on most runs. With one thread, every
+/// library listed before the database library has loaded before it. Our
+/// setup text and these tests list them first. Earlier KiCad 10 versions
+/// read each entry when asked, so this changes nothing there.
+fn load_libraries_in_table_order(kicad: &KicadInstall, settings: &CliSettingsFolder) {
+    let version = format!("{}.{}", kicad.version.major, kicad.version.minor);
+    let config = settings.path().join("config").join(version);
+    fs::create_dir_all(&config).unwrap();
+    fs::write(config.join("kicad_advanced"), "MaximumThreads=1\n").unwrap();
+}
+
 /// Runs KiCad's electrical rules check on `sheet` and returns its
 /// violations as (type, description).
 pub fn erc(
@@ -408,6 +426,7 @@ pub fn erc(
     settings: &CliSettingsFolder,
     sheet: &Path,
 ) -> Vec<(String, String)> {
+    load_libraries_in_table_order(kicad, settings);
     let report_file = sheet.with_extension("erc.json");
     let _ = fs::remove_file(&report_file);
     let output = run_kicad_cli(

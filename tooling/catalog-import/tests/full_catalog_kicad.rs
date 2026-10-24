@@ -131,7 +131,8 @@ fn kicad_finds_every_entry_of_the_whole_catalog() {
     assert!(!missing.is_empty());
 
     // A project whose symbol library table is the setup text, plus each of
-    // KiCad's own libraries an entry uses.
+    // KiCad's own libraries an entry uses, first, before the database
+    // library that draws from them.
     let project = folder.join("project");
     fs::create_dir_all(&project).unwrap();
     let ours: BTreeSet<&str> = outcome

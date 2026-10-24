@@ -138,7 +138,8 @@ fn kicad_loads_every_generated_library_and_resolves_every_entry() {
     check_model_found(&kicad, &settings, &folder, &moved, &footprint_link);
 
     // A project whose symbol library table is the setup text, plus KiCad's
-    // Device library for the revisions that use KiCad's own symbols.
+    // Device library for the revisions that use KiCad's own symbols. Device
+    // goes first, before the database library that draws from it.
     let project = folder.join("project");
     fs::create_dir_all(&project).unwrap();
     let device = share.join("symbols").join("Device.kicad_sym");
