@@ -277,6 +277,34 @@ fn the_selected_part_is_found_in_its_own_team() {
 }
 
 #[test]
+fn a_part_selected_while_signed_out_becomes_the_first_teams_part() {
+    let catalog = csv(&[("RES-1", "R1", "g-res"), ("RES-2", "R2", "g-res")]);
+    let ac = team(AC, "AC", &[("RES-1", "R1", "res")]);
+    let ma = team(MA, "MA", &[("RES-1", "R1", "res")]);
+    let asked = |ipn: &str| SearchRequest {
+        selected: Some(PartKey {
+            team: String::new(),
+            ipn: ipn.into(),
+        }),
+        ..request("")
+    };
+    let found = search(&catalog, &[ac.clone(), ma], &asked("RES-1"));
+    assert_eq!(
+        found.selected_part,
+        Some(PartKey {
+            team: AC.into(),
+            ipn: "RES-1".into()
+        })
+    );
+    // A part still only in the CSV files stays as it is.
+    let found = search(&catalog, &[ac], &asked("RES-2"));
+    assert_eq!(
+        found.selected_part.map(|part| part.team),
+        Some(String::new())
+    );
+}
+
+#[test]
 fn a_team_with_new_parts_makes_its_rows_again_and_others_keep_theirs() {
     let catalog = csv(&[]);
     let at = csv_rows_by_ipn(Some(&catalog));

@@ -189,6 +189,11 @@ pub struct SearchResponse {
     /// matches it.
     #[serde(default)]
     pub selected: Option<String>,
+    /// The part taken as the selected one: the part asked for, or, for a
+    /// part only the CSV catalog had, the first team's part with its IPN
+    /// once a team has it (such as after signing in).
+    #[serde(default)]
+    pub selected_part: Option<PartKey>,
     pub elapsed_micros: u64,
 }
 

@@ -1305,6 +1305,7 @@ mod tests {
             total: 0,
             sections: Vec::new(),
             selected: None,
+            selected_part: None,
             elapsed_micros: 0,
         };
         assert_eq!(search_key(&response(" r ", None)), "r");
@@ -1322,6 +1323,7 @@ mod tests {
             total,
             sections: Vec::new(),
             selected: None,
+            selected_part: None,
             elapsed_micros: 0,
         };
         assert_eq!(count_text(&response(0)), "No parts match.");

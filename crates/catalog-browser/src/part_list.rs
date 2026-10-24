@@ -356,11 +356,19 @@ fn answer(sources: &Sources<'_>, request: &SearchRequest) -> SearchResponse {
     // each rank.
     ranked.sort_by_key(|(rank, _)| *rank);
     let total = ranked.len();
+    // A part only the CSV catalog had moves to the first team that has
+    // its IPN now, so it stays selected after signing in.
     let selected_row = request.selected.as_ref().and_then(|selected| {
-        ranked
-            .iter()
-            .map(|(_, row)| *row)
+        let rows = || ranked.iter().map(|(_, row)| *row);
+        rows()
             .find(|row| sources.key(*row) == *selected)
+            .or_else(|| {
+                rows().find(|row| {
+                    selected.team.is_empty()
+                        && sources.part(*row).ipn == selected.ipn
+                        && !matches!(row, Row::Csv(_))
+                })
+            })
     });
     let names = sources.category_names();
     let team_sections = sources.team_sections();
@@ -406,6 +414,7 @@ fn answer(sources: &Sources<'_>, request: &SearchRequest) -> SearchResponse {
             })
             .collect(),
         selected: selected_row.map(|row| sources.section(row, request.group_by)),
+        selected_part: selected_row.map(|row| sources.key(row)),
         elapsed_micros: 0,
     }
 }

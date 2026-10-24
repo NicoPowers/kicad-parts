@@ -369,6 +369,17 @@ fn App() -> impl IntoView {
                     let response = backend::search(request.clone()).await;
                     // Ignore answers to queries the user has already replaced.
                     if search_seq.get_value() == seq {
+                        // A part only the CSV files had, selected before
+                        // signing in, follows its IPN to the team's part.
+                        let moved = response.as_ref().ok().and_then(|response| {
+                            let now = response.selected_part.clone()?;
+                            let asked = request.selected.as_ref()?;
+                            (asked.team.is_empty() && *asked != now).then_some(now)
+                        });
+                        if let Some(part) = moved {
+                            selected.set(Some(part));
+                            return;
+                        }
                         results.set(into_load(response).map(|response| Searched {
                             response,
                             request,
