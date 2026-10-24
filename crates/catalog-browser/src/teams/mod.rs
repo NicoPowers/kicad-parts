@@ -141,6 +141,8 @@ impl Teams {
             let _ = saved::write(&list_file, &saved);
         }
         let kept = Arc::new(Mutex::new(sign_ins.kept.clone()));
+        // Before any writer starts, so no write in progress is cleared.
+        parts_file::clear_leftovers(&parts_folder);
         let teams: Vec<Team> = saved
             .teams
             .into_iter()

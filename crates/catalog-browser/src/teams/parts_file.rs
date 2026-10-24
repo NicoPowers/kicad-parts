@@ -3,14 +3,16 @@
 //! (kicad-parts-ed46, ADR 0020).
 //!
 //! One file per team, in the folder the app gives the list of teams: a
-//! `parts-files` folder in its local data folder. A file holds what the part list needs (each part's values and
-//! the category names), the server address it came from, and when it last
-//! matched the server. It never holds a password or a token.
+//! `parts-files` folder in its local data folder. A file holds what the
+//! part list needs (each part's values and the category names), the server
+//! address it came from, and when it last matched the server. It never
+//! holds a password or a token.
 //!
 //! A file is written to a temporary file in the same folder, flushed to
 //! disk, then put in place of the old one. So a crash or a power cut
-//! leaves the old file or the new one, never half of one. A file that cannot be read, has another version, or
-//! names another server is ignored: the next catch-up writes a new one.
+//! leaves the old file or the new one, never half of one. A file that
+//! cannot be read, has another version, or names another server is
+//! ignored: the next catch-up writes a new one.
 
 use crate::PartValues;
 use crate::team::PartsFile;
@@ -101,12 +103,33 @@ pub(super) fn write(folder: &Path, parts: &PartsFile) -> Result<(), String> {
     };
     let json = serde_json::to_vec(&on_disk).map_err(|e| e.to_string())?;
     let file = file_for(folder, &parts.server_url);
-    let mut temp = tempfile::NamedTempFile::new_in(folder).map_err(|e| e.to_string())?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(TEMPORARY)
+        .tempfile_in(folder)
+        .map_err(|e| e.to_string())?;
     temp.write_all(&json).map_err(|e| e.to_string())?;
     temp.as_file().sync_all().map_err(|e| e.to_string())?;
     temp.persist(&file).map_err(|e| e.error.to_string())?;
     Ok(())
 }
+
+/// Deletes the temporary files a write left in `folder` when the app
+/// stopped in the middle of it. Call it at start, before any write. Files
+/// that can't be deleted, such as one another copy of the app is writing,
+/// are left for the next start.
+pub(super) fn clear_leftovers(folder: &Path) {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(TEMPORARY) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// How the temporary files of a write start (`tempfile`'s default).
+const TEMPORARY: &str = ".tmp";
 
 /// Deletes the parts file of the team at `server_url`. No file is fine.
 pub(super) fn delete(folder: &Path, server_url: &str) -> Result<(), String> {
@@ -239,6 +262,21 @@ mod tests {
             fs::write(&file, &bad).unwrap();
             assert_eq!(read(dir.path(), ACME), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn temporary_files_left_by_a_stopped_write_are_cleared() {
+        let dir = folder();
+        write(dir.path(), &parts("47")).unwrap();
+        fs::write(dir.path().join(".tmpAb12Cd"), "half a file").unwrap();
+        clear_leftovers(dir.path());
+        let left: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(left, [file_for(dir.path(), ACME)]);
+        // No folder yet: nothing to do.
+        clear_leftovers(&dir.path().join("missing"));
     }
 
     #[test]
