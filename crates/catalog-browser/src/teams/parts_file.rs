@@ -7,8 +7,9 @@
 //! the category names), the server address it came from, and when it last
 //! matched the server. It never holds a password or a token.
 //!
-//! A file is written whole, through a temporary file, so a crash never
-//! leaves half a file. A file that cannot be read, has another version, or
+//! A file is written to a temporary file in the same folder, flushed to
+//! disk, then put in place of the old one. So a crash or a power cut
+//! leaves the old file or the new one, never half of one. A file that cannot be read, has another version, or
 //! names another server is ignored: the next catch-up writes a new one.
 
 use crate::PartValues;
@@ -16,6 +17,7 @@ use crate::team::PartsFile;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The file layout. A file with another version is ignored, never read in
@@ -83,9 +85,10 @@ pub(super) fn read(folder: &Path, server_url: &str) -> Option<PartsFile> {
     })
 }
 
-/// Writes `parts` to its team's file, through a temporary file, so a crash
-/// or a full disk never leaves half a file: the old file stays until the
-/// new one is whole.
+/// Writes `parts` to its team's file. The bytes go to a new temporary
+/// file in the same folder, with its own name, so two copies of the app
+/// never share one. They reach the disk before that file replaces the old
+/// one, so a full disk, a crash or a power cut leaves the old file whole.
 pub(super) fn write(folder: &Path, parts: &PartsFile) -> Result<(), String> {
     fs::create_dir_all(folder).map_err(|e| e.to_string())?;
     let on_disk = OnDisk {
@@ -97,9 +100,11 @@ pub(super) fn write(folder: &Path, parts: &PartsFile) -> Result<(), String> {
     };
     let json = serde_json::to_vec(&on_disk).map_err(|e| e.to_string())?;
     let file = file_for(folder, &parts.server_url);
-    let temp = file.with_extension("json.tmp");
-    fs::write(&temp, json).map_err(|e| e.to_string())?;
-    fs::rename(&temp, &file).map_err(|e| e.to_string())
+    let mut temp = tempfile::NamedTempFile::new_in(folder).map_err(|e| e.to_string())?;
+    temp.write_all(&json).map_err(|e| e.to_string())?;
+    temp.as_file().sync_all().map_err(|e| e.to_string())?;
+    temp.persist(&file).map_err(|e| e.error.to_string())?;
+    Ok(())
 }
 
 /// Deletes the parts file of the team at `server_url`. No file is fine.
@@ -175,12 +180,22 @@ mod tests {
     fn a_failed_write_leaves_the_old_file_whole() {
         let dir = folder();
         write(dir.path(), &parts("47")).unwrap();
-        // A folder where the temporary file goes makes the write fail, as
-        // a full disk would.
-        let temp = file_for(dir.path(), ACME).with_extension("json.tmp");
-        fs::create_dir_all(&temp).unwrap();
+        // The write fails, as on a full disk: on Windows the old file can't
+        // be replaced; elsewhere no temporary file can be made.
+        let file = file_for(dir.path(), ACME);
+        set_read_only(if cfg!(windows) { &file } else { dir.path() }, true);
         assert!(write(dir.path(), &parts("47R")).is_err());
+        set_read_only(if cfg!(windows) { &file } else { dir.path() }, false);
         assert_eq!(read(dir.path(), ACME), Some(parts("47")));
+        // No temporary file is left behind.
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn set_read_only(path: &Path, read_only: bool) {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(read_only);
+        fs::set_permissions(path, permissions).unwrap();
     }
 
     #[test]
