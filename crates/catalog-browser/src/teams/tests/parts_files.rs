@@ -1,4 +1,4 @@
-//! Each team's last-known parts, kept on disk (kicad-parts-ed46): when the
+//! Each team's parts file (kicad-parts-ed46): when the
 //! list of teams shows them, and when it deletes them. The stand-in server
 //! never catches up, so these tests write the file themselves; the
 //! desktop_teams test in tooling/catalog-import has the app write it,
@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::PartValues;
-use crate::team::KeptParts;
-use crate::teams::kept_parts as disk;
+use crate::team::PartsFile;
+use crate::teams::parts_file as disk;
 use std::collections::BTreeMap;
 
 const AS_OF_MS: u64 = 1_790_000_000_000;
@@ -20,26 +20,25 @@ fn data_folder() -> tempfile::TempDir {
     tempfile::tempdir_in(target).unwrap()
 }
 
-/// One part with `value`, as kept for `server`.
-fn kept(server: &FakeServer, value: &str) -> KeptParts {
+/// A parts file with one part with `value`, from `server`.
+fn parts_file(server: &FakeServer, value: &str) -> PartsFile {
     let values = PartValues {
         fields: Some(vec![("Value".into(), value.into())]),
         ..PartValues::default()
     };
-    KeptParts {
+    PartsFile {
         server_url: server.url.clone(),
-        code: "AC".into(),
         as_of_ms: AS_OF_MS,
         values: [("RES-0000-0470".to_owned(), values)].into(),
         category_names: BTreeMap::new(),
     }
 }
 
-fn keep(file: &Path, parts: &KeptParts) {
+fn write_file(file: &Path, parts: &PartsFile) {
     disk::write(&parts_folder_of(file), parts).unwrap();
 }
 
-fn is_kept(file: &Path, server: &FakeServer) -> bool {
+fn has_file(file: &Path, server: &FakeServer) -> bool {
     disk::file_for(&parts_folder_of(file), &server.url).is_file()
 }
 
@@ -73,13 +72,13 @@ fn signed_in_before(file: &Path, store: &Arc<MemorySignIns>, server: &FakeServer
 }
 
 #[test]
-fn a_team_whose_server_is_down_at_start_shows_its_kept_parts_offline() {
+fn a_team_whose_server_is_down_at_start_shows_its_parts_file_offline() {
     let server = FakeServer::start();
     let store = store();
     let dir = data_folder();
     let file = dir.path().join("team.json");
     signed_in_before(&file, &store, &server);
-    keep(&file, &kept(&server, "47"));
+    write_file(&file, &parts_file(&server, "47"));
     server.set_down(true);
     let teams = Teams::open(file, kept_in(&store), None, None);
     wait_until("the server to be found unreachable", || {
@@ -91,12 +90,12 @@ fn a_team_whose_server_is_down_at_start_shows_its_kept_parts_offline() {
 }
 
 #[test]
-fn a_team_with_no_kept_sign_in_shows_no_kept_parts() {
+fn a_team_with_no_kept_sign_in_shows_no_parts_file() {
     let server = FakeServer::start();
     let dir = data_folder();
     let file = dir.path().join("team.json");
     signed_in_before(&file, &store(), &server);
-    keep(&file, &kept(&server, "47"));
+    write_file(&file, &parts_file(&server, "47"));
     // A new store: as on a computer whose password store lost the sign-in.
     let teams = Teams::open(file.clone(), memory(), None, None);
     wait_until("the keeper to find no sign-in", || {
@@ -105,18 +104,18 @@ fn a_team_with_no_kept_sign_in_shows_no_kept_parts() {
     assert!(teams.known_parts().is_empty());
     assert_eq!(parts_as_of(&teams, &server), None);
     // The file stays: it is deleted only by signing out or removing.
-    assert!(is_kept(&file, &server));
+    assert!(has_file(&file, &server));
 }
 
 #[test]
-fn parts_kept_from_another_server_are_never_shown() {
+fn a_parts_file_from_another_server_is_never_shown() {
     let (server, other) = (FakeServer::start(), FakeServer::start());
     let store = store();
     let dir = data_folder();
     let file = dir.path().join("team.json");
     signed_in_before(&file, &store, &server);
     // A file in the team's place, holding another server's parts.
-    keep(&file, &kept(&other, "47"));
+    write_file(&file, &parts_file(&other, "47"));
     let folder = parts_folder_of(&file);
     std::fs::rename(
         disk::file_for(&folder, &other.url),
@@ -132,20 +131,20 @@ fn parts_kept_from_another_server_are_never_shown() {
 }
 
 #[test]
-fn signing_out_and_removing_delete_the_kept_parts() {
+fn signing_out_and_removing_delete_the_parts_file() {
     let (acme, beta) = (FakeServer::start(), FakeServer::start());
     let dir = data_folder();
     let file = dir.path().join("team.json");
     let teams = Teams::open(file.clone(), memory(), None, None);
     teams.sign_in(request(&acme)).unwrap();
     teams.sign_in(request(&beta)).unwrap();
-    keep(&file, &kept(&acme, "47"));
-    keep(&file, &kept(&beta, "47"));
+    write_file(&file, &parts_file(&acme, "47"));
+    write_file(&file, &parts_file(&beta, "47"));
     teams.sign_out(&acme.url);
-    assert!(!is_kept(&file, &acme));
-    assert!(is_kept(&file, &beta), "only that team's");
+    assert!(!has_file(&file, &acme));
+    assert!(has_file(&file, &beta), "only that team's");
     teams.remove(&beta.url);
-    assert!(!is_kept(&file, &beta));
+    assert!(!has_file(&file, &beta));
 }
 
 #[test]
@@ -155,7 +154,7 @@ fn a_team_asked_to_sign_in_again_shows_none_but_keeps_them_for_the_sign_in() {
     let dir = data_folder();
     let file = dir.path().join("team.json");
     signed_in_before(&file, &store, &server);
-    keep(&file, &kept(&server, "47"));
+    write_file(&file, &parts_file(&server, "47"));
     // The password changed while the app was closed.
     server.reject_all();
     let teams = Teams::open(file.clone(), kept_in(&store), None, None);
@@ -164,7 +163,7 @@ fn a_team_asked_to_sign_in_again_shows_none_but_keeps_them_for_the_sign_in() {
     });
     assert!(teams.known_parts().is_empty());
     assert_eq!(parts_as_of(&teams, &server), None);
-    assert!(is_kept(&file, &server));
+    assert!(has_file(&file, &server));
     // Signing in again shows them at once, before the first catch-up.
     teams.sign_in(request(&server)).unwrap();
     assert_eq!(shown_values(&teams, &server), ["47"]);

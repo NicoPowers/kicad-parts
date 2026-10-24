@@ -14,16 +14,16 @@
 //! operating system's credential store in the app), and each team's
 //! [`keeper`] carries it on at start and renews it while in use.
 //!
-//! Each team's last-known parts are kept between runs too, in a file next
-//! to the list ([`kept_parts`]), written by the team's [`parts_writer`]. A
-//! team that has a kept sign-in shows them at start, marked offline, until
-//! its first catch-up replaces them. Signing out and removing the team
-//! delete them. A team asked to sign in again shows none, but keeps the
+//! Each team's last-known parts are kept between runs too, in its parts
+//! file ([`parts_file`]), written by the team's [`parts_writer`]. A team
+//! that has a kept sign-in shows them at start, marked offline, until its
+//! first catch-up replaces them. Signing out and removing the team delete
+//! the file. A team asked to sign in again shows no parts, but keeps the
 //! file, so signing in again shows its parts at once.
 
 mod colours;
 mod keeper;
-mod kept_parts;
+mod parts_file;
 mod parts_writer;
 mod saved;
 mod sign_ins;
@@ -152,8 +152,8 @@ impl Teams {
                 if look_for_kept {
                     // Shown while its kept sign-in is carried on. The
                     // keeper stops showing them if there is none.
-                    if let Some(parts) = kept_parts::read(&parts_folder, &saved.server_url) {
-                        catalog.show_kept(parts);
+                    if let Some(parts) = parts_file::read(&parts_folder, &saved.server_url) {
+                        catalog.show_parts_file(parts);
                     }
                 }
                 let keeper = keeper_for(&saved, &catalog, &sign_ins, &kept, look_for_kept);
@@ -222,9 +222,9 @@ impl Teams {
             // The password replaces any kept sign-in still being carried on.
             keeper.signed_in();
         }
-        // Parts kept from before show at once, until the catch-up ends.
-        if let Some(parts) = kept_parts::read(&self.parts_folder, &server_url) {
-            catalog.show_kept(parts);
+        // The parts file shows at once, until the catch-up ends.
+        if let Some(parts) = parts_file::read(&self.parts_folder, &server_url) {
+            catalog.show_parts_file(parts);
         }
         let mut list = self.lock();
         // A team keeps its colour; a new one gets the next free colour.
@@ -275,7 +275,7 @@ impl Teams {
     /// Signs out of one team and forgets its kept sign-in. It stays in the
     /// list, marked signed out, so signing in again needs only the
     /// password, and the next start never carries on a sign-in the store
-    /// could not forget. Its kept parts are deleted.
+    /// could not forget. Its parts file is deleted.
     pub fn sign_out(&self, server_url: &str) {
         let (keeper, writer) = {
             let mut list = self.lock();
@@ -297,7 +297,7 @@ impl Teams {
         };
         let forgotten = keeper.sign_out();
         // Once the session has ended, so no later write brings them back.
-        delete_kept_parts(&writer, server_url);
+        delete_parts_file(&writer, server_url);
         if let Err(problem) = forgotten {
             let mut list = self.lock();
             if let Some(team) = list
@@ -330,7 +330,7 @@ impl Teams {
         };
         // Outside the list's lock, so status polling never waits.
         let forgotten = keeper.sign_out();
-        delete_kept_parts(&writer, server_url);
+        delete_parts_file(&writer, server_url);
         let mut list = self.lock();
         list.teams
             .retain(|team| team.saved.server_url != server_url);
@@ -510,7 +510,7 @@ fn parts_folder_of(list_file: &Path) -> PathBuf {
     list_file
         .parent()
         .unwrap_or(Path::new("."))
-        .join(kept_parts::FOLDER)
+        .join(parts_file::FOLDER)
 }
 
 fn writer_for(folder: &Path, saved: &SavedTeam, catalog: &Arc<TeamCatalog>) -> Arc<PartsWriter> {
@@ -521,13 +521,13 @@ fn writer_for(folder: &Path, saved: &SavedTeam, catalog: &Arc<TeamCatalog>) -> A
     }))
 }
 
-/// Deletes a team's kept parts, once its session has ended. A file that
+/// Deletes a team's parts file, once its session has ended. A file that
 /// cannot be deleted is logged, not shown: a team signed out or off the
 /// list shows no parts anyway, and never reads the file again.
-fn delete_kept_parts(writer: &PartsWriter, server_url: &str) {
+fn delete_parts_file(writer: &PartsWriter, server_url: &str) {
     if let Err(problem) = writer.delete() {
         eprintln!(
-            "kicad-parts-desktop: could not delete the kept parts of {server_url} ({problem})."
+            "kicad-parts-desktop: could not delete the parts file of {server_url} ({problem})."
         );
     }
 }

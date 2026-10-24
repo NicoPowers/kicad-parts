@@ -699,7 +699,7 @@ fn a_team_down_at_start_shows_its_kept_parts_until_its_server_is_back() {
     std::fs::create_dir_all(&scratch).unwrap();
     let config = tempfile::tempdir_in(&scratch).unwrap();
     let list_file = config.path().join("team.json");
-    let kept_folder = config.path().join("known-parts");
+    let kept_folder = config.path().join("parts-files");
     let cache = tempfile::tempdir_in(&scratch).unwrap();
     let browser = CatalogBrowser::open(BrowserConfig {
         catalog_root: root.clone(),

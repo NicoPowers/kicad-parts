@@ -284,12 +284,12 @@ fn keep(shared: &Shared, look_for_kept: bool) {
 }
 
 /// The team has no kept sign-in to carry on, so it is signed out: it stops
-/// showing the parts kept on disk, which only a team being signed in shows.
+/// showing its parts file, which only a team being signed in shows.
 fn no_sign_in_to_carry_on(shared: &Shared) {
     let _turn = shared.turn();
     *shared.reaching() = None;
     if !shared.task.catalog.is_signed_in() {
-        shared.task.catalog.forget_kept();
+        shared.task.catalog.forget_parts_file();
     }
 }
 

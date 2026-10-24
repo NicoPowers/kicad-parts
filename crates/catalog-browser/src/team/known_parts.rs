@@ -7,10 +7,10 @@
 //! - **The session's copy** of the team catalog, kept in step with the
 //!   server, once this run's first catch-up has finished. A team whose
 //!   server then drops keeps these parts, marked offline.
-//! - **The parts an earlier run kept on disk** ([`KeptParts`],
-//!   kicad-parts-ed46), until then. So a team whose server cannot be
+//! - **The team's parts file** ([`PartsFile`], kicad-parts-ed46), which an
+//!   earlier run wrote, until then. So a team whose server cannot be
 //!   reached at start still shows its parts, marked offline and read-only.
-//!   The list of teams reads and writes the files (`teams::kept_parts`).
+//!   The list of teams reads and writes the files (`teams::parts_file`).
 
 use super::TeamCatalog;
 use crate::PartValues;
@@ -53,15 +53,13 @@ impl KnownParts {
     }
 }
 
-/// A team's last-known parts as kept on disk between runs. It holds no
-/// password or token.
+/// What a team's parts file holds: its last-known parts as an earlier run
+/// wrote them to disk. It holds no password or token.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct KeptParts {
+pub struct PartsFile {
     /// The team server the parts came from. Parts are only ever shown for
     /// this server (kicad-parts-092b).
     pub server_url: String,
-    /// The team's code, such as `MA`; blank if it had none yet.
-    pub code: String,
     /// When the parts last matched the team server, in milliseconds since
     /// 1970.
     pub as_of_ms: u64,
@@ -71,20 +69,20 @@ pub struct KeptParts {
     pub category_names: BTreeMap<String, String>,
 }
 
-/// The parts kept on disk that a team shows until its first catch-up.
+/// The parts file a team shows until its first catch-up, if any.
 #[derive(Default)]
-pub(super) struct Kept {
-    /// Counts each set of kept parts shown, so each has its own version.
+pub(super) struct FromFile {
+    /// Counts each parts file shown, so each has its own version.
     shown: u64,
-    parts: Option<KeptParts>,
+    parts: Option<Arc<PartsFile>>,
 }
 
 /// Where a team's last-known parts come from now.
 enum Source {
     /// None to show: signed out, or asked to sign in again.
     Nothing,
-    /// The parts kept on disk; the number tells one kept set from another.
-    Kept(u64),
+    /// The team's parts file, the `shown`th one.
+    File { shown: u64, parts: Arc<PartsFile> },
     /// The session's copy, at this version.
     Session((u64, u64, u64)),
 }
@@ -99,12 +97,17 @@ impl TeamCatalog {
     /// only when the team catalog moved on (a new Change, a finished import
     /// or another session), and reading them makes no request.
     pub fn last_known_parts(&self, team: &str, label: &str) -> Option<Arc<KnownParts>> {
+        let source = self.source();
         // The version is read before the values: values newer than their
         // version are made again at the next change, never kept stale.
-        let version = match self.source() {
+        // Session versions start at 1, so a file's never matches one.
+        let version = match &source {
             Source::Nothing => return None,
-            Source::Kept(number) => (0, number, 0),
-            Source::Session(version) => version,
+            Source::File { shown, .. } => (0, *shown, 0),
+            Source::Session(version) => {
+                self.forget_parts_file_once_caught_up();
+                *version
+            }
         };
         let cached = self.known_parts.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(known) = cached
@@ -114,13 +117,9 @@ impl TeamCatalog {
             return Some(known.clone());
         }
         drop(cached);
-        let (values, category_names) = if version.0 == 0 {
-            // Kept parts: they may have been forgotten since `source`.
-            let kept = self.lock_kept();
-            let kept = kept.parts.as_ref()?;
-            (kept.values.clone(), kept.category_names.clone())
-        } else {
-            (self.current_values(), self.category_names())
+        let (values, category_names) = match source {
+            Source::File { parts, .. } => (parts.values.clone(), parts.category_names.clone()),
+            _ => (self.current_values(), self.category_names()),
         };
         let known = Arc::new(KnownParts {
             team: team.to_owned(),
@@ -133,35 +132,40 @@ impl TeamCatalog {
         Some(known)
     }
 
-    /// Shows `kept`, the parts an earlier run kept on disk, until this
-    /// run's first catch-up. The list of teams calls it only for parts
-    /// from this team's own server.
-    pub(crate) fn show_kept(&self, kept: KeptParts) {
-        let mut slot = self.lock_kept();
-        slot.shown += 1;
-        slot.parts = Some(kept);
+    /// Shows `parts`, from the team's parts file, until this run's first
+    /// catch-up. The list of teams calls it only for a file from this
+    /// team's own server.
+    pub(crate) fn show_parts_file(&self, parts: PartsFile) {
+        let mut from_file = self.lock_from_file();
+        from_file.shown += 1;
+        from_file.parts = Some(Arc::new(parts));
     }
 
-    /// Stops showing parts kept on disk, such as after signing out or when
-    /// the team asks for its password again. The file is the list of
+    /// Stops showing the parts file, such as after signing out or when the
+    /// team asks for its password again. The file itself is the list of
     /// teams' business.
-    pub(crate) fn forget_kept(&self) {
-        self.lock_kept().parts = None;
+    pub(crate) fn forget_parts_file(&self) {
+        self.lock_from_file().parts = None;
     }
 
     /// When the parts shown last matched the team server, in milliseconds
-    /// since 1970, while they may be out of date: they are kept from an
-    /// earlier run, or the server dropped. `None` while they are current,
-    /// or while none are shown. `session` is the session's state, if one
-    /// runs: its live updates, its count of catch-ups and imports, and
-    /// when it was last in step.
+    /// since 1970, while they may be out of date: they come from the parts
+    /// file, or the server dropped. `None` while they are current, or while
+    /// none are shown. `session` is the session's state, if one runs: its
+    /// live updates, its count of catch-ups and imports, and when it was
+    /// last in step.
     pub(super) fn parts_as_of(&self, session: Option<(&LiveUpdates, u64, u64)>) -> Option<u64> {
-        let kept_at = || self.lock_kept().parts.as_ref().map(|kept| kept.as_of_ms);
+        let file_at = || {
+            self.lock_from_file()
+                .parts
+                .as_ref()
+                .map(|file| file.as_of_ms)
+        };
         match session {
-            None => kept_at(),
+            None => file_at(),
             Some((LiveUpdates::SignInAgain { .. }, _, _)) => None,
-            // Not caught up yet: the kept parts show, if any.
-            Some((_, 0, _)) => kept_at(),
+            // Not caught up yet: the parts file shows, if any.
+            Some((_, 0, _)) => file_at(),
             Some((LiveUpdates::Reconnecting { .. }, _, in_step_at)) => Some(in_step_at),
             Some(_) => None,
         }
@@ -169,7 +173,7 @@ impl TeamCatalog {
 
     /// The version of the session's parts while they match the team server
     /// now: the session is live and has caught up. Only then are they worth
-    /// keeping on disk.
+    /// writing to the parts file.
     pub(crate) fn version_in_step(&self) -> Option<(u64, u64, u64)> {
         let state = self.lock();
         let session = state.session.as_ref()?;
@@ -177,30 +181,42 @@ impl TeamCatalog {
         (live == LiveUpdates::Live && imports > 0).then_some((state.number, checkpoint, imports))
     }
 
+    /// Where the team's last-known parts come from now. Changes nothing.
     fn source(&self) -> Source {
         let state = self.lock();
-        let mut kept = self.lock_kept();
-        let shown = kept.parts.as_ref().map(|_| Source::Kept(kept.shown));
+        let from_file = self.lock_from_file();
+        let file = from_file.parts.clone().map(|parts| Source::File {
+            shown: from_file.shown,
+            parts,
+        });
         let Some(session) = state.session.as_ref() else {
-            return shown.unwrap_or(Source::Nothing);
+            return file.unwrap_or(Source::Nothing);
         };
         let (live, checkpoint, imports) = session.follower.snapshot();
         if matches!(live, LiveUpdates::SignInAgain { .. }) {
             return Source::Nothing;
         }
-        if imports == 0 {
-            // Not caught up yet: the kept parts, if any, show until then.
-            if let Some(shown) = shown {
-                return shown;
-            }
-        } else {
-            // Caught up: the kept parts are no longer needed in memory.
-            kept.parts = None;
+        match file {
+            // Not caught up yet: the parts file shows until then.
+            Some(file) if imports == 0 => file,
+            _ => Source::Session((state.number, checkpoint, imports)),
         }
-        Source::Session((state.number, checkpoint, imports))
     }
 
-    fn lock_kept(&self) -> std::sync::MutexGuard<'_, Kept> {
-        self.kept.lock().unwrap_or_else(|e| e.into_inner())
+    /// Frees the parts file once the session has caught up: from then on
+    /// the session's copy shows.
+    fn forget_parts_file_once_caught_up(&self) {
+        let state = self.lock();
+        let caught_up = state
+            .session
+            .as_ref()
+            .is_some_and(|session| session.follower.snapshot().2 > 0);
+        if caught_up {
+            self.lock_from_file().parts = None;
+        }
+    }
+
+    fn lock_from_file(&self) -> std::sync::MutexGuard<'_, FromFile> {
+        self.from_file.lock().unwrap_or_else(|e| e.into_inner())
     }
 }

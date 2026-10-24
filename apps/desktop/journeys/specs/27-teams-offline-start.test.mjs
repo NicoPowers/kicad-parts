@@ -91,7 +91,7 @@ describe('a team server down when the app starts', () => {
 
   /** The kept-parts files the app wrote, one per team. */
   const keptFiles = () => {
-    const folder = path.join(dataDir, 'config', 'known-parts');
+    const folder = path.join(dataDir, 'config', 'parts-files');
     return fs.existsSync(folder) ? fs.readdirSync(folder).filter((name) => name.endsWith('.json')) : [];
   };
 

@@ -17,7 +17,7 @@
 mod known_parts;
 mod session;
 
-pub use known_parts::{KeptParts, KnownParts};
+pub use known_parts::{KnownParts, PartsFile};
 
 use crate::PartValues;
 use crate::csv_ipns::IpnsInCsv;
@@ -119,9 +119,9 @@ pub struct TeamCatalog {
     known: Mutex<KnownRevisions>,
     /// The parts last made for the part list (see `last_known_parts`).
     known_parts: Mutex<Option<Arc<KnownParts>>>,
-    /// Parts an earlier run kept on disk, shown until this run's first
-    /// catch-up (see `last_known_parts`).
-    kept: Mutex<known_parts::Kept>,
+    /// The team's parts file, shown until this run's first catch-up (see
+    /// `last_known_parts`).
+    from_file: Mutex<known_parts::FromFile>,
 }
 
 impl Default for TeamCatalog {
@@ -237,7 +237,7 @@ impl TeamCatalog {
             }),
             known: Mutex::new(KnownRevisions::default()),
             known_parts: Mutex::new(None),
-            kept: Mutex::default(),
+            from_file: Mutex::default(),
             code: Mutex::new(String::new()),
         }
     }
@@ -357,7 +357,7 @@ impl TeamCatalog {
 
     pub fn sign_out(&self) -> TeamStatus {
         self.forget_known();
-        self.forget_kept();
+        self.forget_parts_file();
         let earlier = {
             let mut state = self.lock();
             state.problem = None;
@@ -452,7 +452,7 @@ impl TeamCatalog {
         self.forget_known();
         // Old parts are never shown in place of a sign-in. The list of
         // teams keeps their file, so signing in again shows them at once.
-        self.forget_kept();
+        self.forget_parts_file();
         true
     }
 

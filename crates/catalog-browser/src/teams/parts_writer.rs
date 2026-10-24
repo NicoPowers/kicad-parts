@@ -1,4 +1,4 @@
-//! Keeps one team's last-known parts on disk (see [`super::kept_parts`]),
+//! Writes one team's parts file (see [`super::parts_file`]),
 //! in the background, so a team whose server is down at the next start
 //! still shows them.
 //!
@@ -14,8 +14,8 @@
 //! is still in step. So a write never brings back a file the person just
 //! deleted.
 
-use super::kept_parts;
-use crate::team::{KeptParts, TeamCatalog};
+use super::parts_file;
+use crate::team::{PartsFile, TeamCatalog};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -61,13 +61,13 @@ impl PartsWriter {
         Self { shared }
     }
 
-    /// Deletes the team's kept parts. Call it once the team's session has
+    /// Deletes the team's parts file. Call it once the team's session has
     /// ended, so no later write can bring them back. An error says why the
     /// file could not be deleted.
     pub(super) fn delete(&self) -> Result<(), String> {
         let _turn = self.shared.turn();
         let task = &self.shared.task;
-        kept_parts::delete(&task.folder, &task.server_url)
+        parts_file::delete(&task.folder, &task.server_url)
     }
 }
 
@@ -90,14 +90,13 @@ impl Shared {
         if self.stop.load(Ordering::SeqCst) || task.catalog.version_in_step().is_none() {
             return false;
         }
-        let kept = KeptParts {
+        let kept = PartsFile {
             server_url: task.server_url.clone(),
-            code: task.catalog.code(),
             as_of_ms: crate::team::now_ms(),
             values: task.catalog.current_values(),
             category_names: task.catalog.category_names(),
         };
-        if let Err(problem) = kept_parts::write(&task.folder, &kept) {
+        if let Err(problem) = parts_file::write(&task.folder, &kept) {
             // Not shown: the app works on, and only an offline start
             // would miss these parts. The next change tries again.
             eprintln!(
