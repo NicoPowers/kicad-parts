@@ -144,6 +144,13 @@ pub(crate) fn doubt_groups(doubts: &[LayoutDoubt]) -> Vec<DoubtGroup> {
                     counted(*links, "link", "links")
                 ),
             ),
+            LayoutDoubt::TooLargeToCheck { path } => (
+                10,
+                "Files too large to check",
+                format!(
+                    "{path} is larger than 4 MB, so the app did not read its 3D model links or library rows."
+                ),
+            ),
             LayoutDoubt::PathNotUsable { path } => (
                 6,
                 "File names Windows can't use",

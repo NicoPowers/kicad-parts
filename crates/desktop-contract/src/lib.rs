@@ -636,6 +636,9 @@ pub enum LayoutDoubt {
     /// Links through one of KiCad's own folders other than its 3D models,
     /// such as `KICAD8_3RD_PARTY`: they point into each person's KiCad.
     KicadVariable { name: String, links: usize },
+    /// A footprint or lib table too large for the app to read, so its
+    /// links or rows are not checked.
+    TooLargeToCheck { path: String },
 }
 
 /// What the person changed in a scanned layout: only what the scan got

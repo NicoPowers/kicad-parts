@@ -3,8 +3,11 @@
 //! and `.kicad_dbl` files are. It works on the file list of the app's own
 //! copy and the bytes of a few files, never on a person's checkout.
 //!
-//! [`files_to_read`] says which files the scan needs; [`scan`] is one pure
-//! function over the list and those bytes, so tests pass made-up repos.
+//! [`read_contents`] reads what the scan needs from a few files, in
+//! batches, keeping only lib tables and footprints' model links, so a
+//! library with many thousands of footprints never sits in memory whole.
+//! [`scan`] is one pure function over the file list and those contents, so
+//! tests pass made-up repos.
 //!
 //! - **Libraries** are found by file type: `.kicad_sym` files,
 //!   `.kicad_symdir` folders and `.pretty` folders.
@@ -44,6 +47,74 @@ const LFS_POINTER: &[u8] = b"version https://git-lfs.github.com/spec/";
 /// Git LFS pointer files are about 130 bytes; larger files are never one.
 const LFS_POINTER_MAX: u64 = 1024;
 
+/// The largest footprint or lib table read for the scan. KiCad's own
+/// footprints are under 1 MB; a larger file is left unread and said.
+const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
+
+/// How many bytes one batch read asks git for at most.
+const BATCH_BYTES: u64 = 16 * 1024 * 1024;
+
+/// What the scan needs from the files it reads.
+#[derive(Debug, Default)]
+pub(crate) struct Contents {
+    /// Each lib table's bytes, by path.
+    tables: BTreeMap<String, Vec<u8>>,
+    /// Each footprint's 3D model links, as written, by path.
+    links: BTreeMap<String, Vec<String>>,
+    /// Files that are Git LFS pointers.
+    lfs: BTreeSet<String>,
+    /// Footprints and tables too large to read.
+    too_large: BTreeSet<String>,
+}
+
+/// Reads [`files_to_read`] through `read`, in batches of at most
+/// [`BATCH_BYTES`], keeping only what the scan needs. `read` gives each
+/// path's bytes, or `None` for a path the commit does not hold.
+pub(crate) fn read_contents<E>(
+    files: &[RepoFile],
+    mut read: impl FnMut(&[&str]) -> Result<Vec<Option<Vec<u8>>>, E>,
+) -> Result<Contents, E> {
+    let mut contents = Contents::default();
+    let mut batch: Vec<&str> = Vec::new();
+    let mut batch_bytes = 0;
+    let wanted: BTreeSet<&str> = files_to_read(files).into_iter().collect();
+    let mut flush = |batch: &mut Vec<&str>, contents: &mut Contents| -> Result<(), E> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        for (path, bytes) in batch.iter().zip(read(batch)?) {
+            let Some(bytes) = bytes else { continue };
+            if bytes.starts_with(LFS_POINTER) {
+                contents.lfs.insert((*path).to_owned());
+            } else if table_kind(path).is_some() {
+                contents.tables.insert((*path).to_owned(), bytes);
+            } else if has_extension(path, "kicad_mod") {
+                let links = model_links(&String::from_utf8_lossy(&bytes));
+                contents.links.insert((*path).to_owned(), links);
+            }
+        }
+        batch.clear();
+        Ok(())
+    };
+    for file in files
+        .iter()
+        .filter(|file| wanted.contains(file.path.as_str()))
+    {
+        if file.size > MAX_READ_BYTES {
+            contents.too_large.insert(file.path.clone());
+            continue;
+        }
+        if batch_bytes + file.size > BATCH_BYTES {
+            flush(&mut batch, &mut contents)?;
+            batch_bytes = 0;
+        }
+        batch.push(&file.path);
+        batch_bytes += file.size;
+    }
+    flush(&mut batch, &mut contents)?;
+    Ok(contents)
+}
+
 /// The files the scan reads: every lib table and footprint, and every small
 /// 3D model or library file, which may be a Git LFS pointer.
 pub(crate) fn files_to_read(files: &[RepoFile]) -> Vec<&str> {
@@ -59,23 +130,20 @@ pub(crate) fn files_to_read(files: &[RepoFile]) -> Vec<&str> {
         .collect()
 }
 
-/// Scans the repo at `commit`, whose files are `files`, with the bytes of
-/// [`files_to_read`] in `read` by path.
-pub(crate) fn scan(
-    commit: &str,
-    files: &[RepoFile],
-    read: &HashMap<String, Vec<u8>>,
-) -> LibraryLayout {
+/// Scans the repo at `commit`, whose files are `files`, with what
+/// [`read_contents`] read from them.
+pub(crate) fn scan(commit: &str, files: &[RepoFile], contents: &Contents) -> LibraryLayout {
     let mut doubts: BTreeSet<LayoutDoubt> = BTreeSet::new();
     let paths: BTreeSet<&str> = files.iter().map(|file| file.path.as_str()).collect();
     let lowercase: HashMap<String, &str> = paths
         .iter()
         .map(|path| (path.to_ascii_lowercase(), *path))
         .collect();
-    for (path, bytes) in read {
-        if bytes.starts_with(LFS_POINTER) {
-            doubts.insert(LayoutDoubt::GitLfs { path: path.clone() });
-        }
+    for path in &contents.lfs {
+        doubts.insert(LayoutDoubt::GitLfs { path: path.clone() });
+    }
+    for path in &contents.too_large {
+        doubts.insert(LayoutDoubt::TooLargeToCheck { path: path.clone() });
     }
 
     // Libraries and models, by file type.
@@ -131,12 +199,9 @@ pub(crate) fn scan(
         let Some(kind) = table_kind(table) else {
             continue;
         };
-        let Some(bytes) = read.get(*table) else {
+        let Some(bytes) = contents.tables.get(*table) else {
             continue;
         };
-        if bytes.starts_with(LFS_POINTER) {
-            continue;
-        }
         match LibTable::parse(bytes, kind) {
             Ok(parsed) => {
                 for row in parsed.rows {
@@ -166,15 +231,9 @@ pub(crate) fn scan(
     // this repo; its own 3D models are fine, anything else is a doubt.
     let mut links: Vec<Link> = Vec::new();
     let mut kicads: BTreeMap<String, usize> = BTreeMap::new();
-    for path in &paths {
-        if !has_extension(path, "kicad_mod") {
-            continue;
-        }
-        let Some(bytes) = read.get(*path) else {
-            continue;
-        };
-        for link in model_links(&String::from_utf8_lossy(bytes)) {
-            let Some((variable, rest)) = through_variable(&link) else {
+    for (path, footprint_links) in &contents.links {
+        for link in footprint_links {
+            let Some((variable, rest)) = through_variable(link) else {
                 continue;
             };
             if is_kicads_own(&variable) {
@@ -185,7 +244,7 @@ pub(crate) fn scan(
                 // ${KIPRJMOD} is a project's folder, which a library repo
                 // can't know.
                 links.push(Link {
-                    footprint: (*path).to_owned(),
+                    footprint: path.clone(),
                     text: link.clone(),
                     variable,
                     rest,

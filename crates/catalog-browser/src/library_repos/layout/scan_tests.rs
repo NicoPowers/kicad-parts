@@ -3,8 +3,9 @@
 
 use super::*;
 
-/// A repo's files and their bytes, as the app's copy lists them.
-fn repo(files: &[(&str, &str)]) -> (Vec<RepoFile>, HashMap<String, Vec<u8>>) {
+/// A repo's files and what the scan reads of them, as the app's copy
+/// lists them.
+fn repo(files: &[(&str, &str)]) -> (Vec<RepoFile>, Contents) {
     let listed: Vec<RepoFile> = files
         .iter()
         .map(|(path, text)| RepoFile {
@@ -13,13 +14,17 @@ fn repo(files: &[(&str, &str)]) -> (Vec<RepoFile>, HashMap<String, Vec<u8>>) {
             blob: format!("{:040x}", path.len()),
         })
         .collect();
-    let wanted: BTreeSet<&str> = files_to_read(&listed).into_iter().collect();
-    let read = files
-        .iter()
-        .filter(|(path, _)| wanted.contains(path))
-        .map(|(path, text)| ((*path).to_owned(), text.as_bytes().to_vec()))
-        .collect();
-    (listed, read)
+    let bytes: HashMap<&str, &str> = files.iter().copied().collect();
+    let contents = read_contents(&listed, |paths| {
+        Ok::<_, ()>(
+            paths
+                .iter()
+                .map(|path| bytes.get(path).map(|text| text.as_bytes().to_vec()))
+                .collect(),
+        )
+    })
+    .unwrap();
+    (listed, contents)
 }
 
 fn scanned(files: &[(&str, &str)]) -> LibraryLayout {
@@ -401,5 +406,43 @@ fn what_kicad_cannot_use_as_a_library_is_said_not_skipped() {
                 links: 2
             },
         ]
+    );
+}
+
+#[test]
+fn files_are_read_in_batches_and_a_huge_footprint_is_left_unread() {
+    let big = RepoFile {
+        path: "Acme.pretty/Logo.kicad_mod".into(),
+        size: MAX_READ_BYTES + 1,
+        blob: "b".repeat(40),
+    };
+    let many: Vec<RepoFile> = (0..5)
+        .map(|n| RepoFile {
+            path: format!("Acme.pretty/F{n}.kicad_mod"),
+            size: MAX_READ_BYTES,
+            blob: "a".repeat(40),
+        })
+        .chain([big])
+        .collect();
+    let mut batches = Vec::new();
+    let contents = read_contents(&many, |paths| {
+        batches.push(paths.len());
+        Ok::<_, ()>(
+            paths
+                .iter()
+                .map(|_| Some(b"(footprint)".to_vec()))
+                .collect(),
+        )
+    })
+    .unwrap();
+    // Four files of a quarter of a batch each fill one read.
+    assert_eq!(BATCH_BYTES, 4 * MAX_READ_BYTES);
+    assert_eq!(batches, [4, 1]);
+    let layout = scan(COMMIT, &many, &contents);
+    assert_eq!(
+        layout.doubts,
+        [LayoutDoubt::TooLargeToCheck {
+            path: "Acme.pretty/Logo.kicad_mod".into()
+        }]
     );
 }

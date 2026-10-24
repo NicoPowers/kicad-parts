@@ -19,7 +19,7 @@ use desktop_contract::{
 };
 use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_source::{LibraryList, SourceProfile};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
@@ -57,14 +57,8 @@ impl Layouts {
 
     fn scan_at(repo: &LibraryRepo, commit: &str) -> Result<LibraryLayout, RepoProblem> {
         let listed = repo.list_files(commit)?;
-        let wanted = scan::files_to_read(&listed);
-        let bytes = repo.read_files(commit, &wanted)?;
-        let read: HashMap<String, Vec<u8>> = wanted
-            .iter()
-            .zip(bytes)
-            .filter_map(|(path, bytes)| Some(((*path).to_owned(), bytes?)))
-            .collect();
-        Ok(scan::scan(commit, &listed, &read))
+        let contents = scan::read_contents(&listed, |paths| repo.read_files(commit, paths))?;
+        Ok(scan::scan(commit, &listed, &contents))
     }
 
     /// What the team's row says about the layout of the repo whose copy is
