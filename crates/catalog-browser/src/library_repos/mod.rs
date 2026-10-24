@@ -57,8 +57,8 @@ struct Shared {
     teams: Arc<Teams>,
     /// What the app knows about each repo in this run, by key.
     known: Mutex<HashMap<String, Known>>,
-    /// One lock per repo, by key, held while its copy changes, so a check
-    /// and a deletion of the same copy never overlap.
+    /// One lock per copy, by its folder name, held while the copy
+    /// changes, so a check and a deletion of the same copy never overlap.
     disk: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
