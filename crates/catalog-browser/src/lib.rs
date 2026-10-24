@@ -7,6 +7,7 @@
 mod add_part;
 pub mod csv_ipns;
 pub mod drawing;
+mod file_safe;
 mod git;
 mod git_program;
 pub mod kicad_libraries;

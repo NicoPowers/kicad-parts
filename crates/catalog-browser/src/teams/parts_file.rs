@@ -15,6 +15,7 @@
 //! ignored: the next catch-up writes a new one.
 
 use crate::PartValues;
+use crate::file_safe::file_safe;
 use crate::team::PartsFile;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -40,22 +41,11 @@ struct OnDisk {
     parts: BTreeMap<String, PartValues>,
 }
 
-/// The parts file of the team at `server_url`, in `folder`. Every
-/// character but small letters, digits, `.` and `-` is written as its
-/// code, capitals too. So two addresses never share a file, even where
-/// file names ignore case, and every system accepts the name.
+/// The parts file of the team at `server_url`, in `folder`, named by
+/// [`file_safe`]: two addresses never share a file, even where file names
+/// ignore case.
 pub(super) fn file_for(folder: &Path, server_url: &str) -> PathBuf {
-    let name: String = server_url
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '-' {
-                ch.to_string()
-            } else {
-                format!("_{:x}_", u32::from(ch))
-            }
-        })
-        .collect();
-    folder.join(format!("{name}.json"))
+    folder.join(format!("{}.json", file_safe(server_url)))
 }
 
 /// The parts file of the team at `server_url`, or `None` if there is none
