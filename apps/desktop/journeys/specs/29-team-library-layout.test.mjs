@@ -211,6 +211,12 @@ describe('a client library repo laid out its own way', () => {
       [...document.querySelectorAll('#library-items .library-item-name')].map((n) => n.textContent),
     );
     assert.deepEqual(rows, ['Acme_R']);
+    // KiCad's own libraries take a while to read; the progress line goes
+    // once every library is read, so the screenshot is the same each run.
+    await browser.waitUntil(
+      async () => browser.execute(() => document.querySelector('.libraries-progress')?.dataset.state === 'ready'),
+      { timeout: 240_000, interval: 250, timeoutMsg: 'the libraries were never all read' },
+    );
     await screenshot(browser, '109-libraries-team-repo');
     await assertAccessible(browser, '109-libraries-team-repo');
     await (await browser.$('#libraries-close')).click();
