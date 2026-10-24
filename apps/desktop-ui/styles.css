@@ -1520,6 +1520,20 @@ a {
   overflow-wrap: anywhere;
 }
 
+.team-repo-remotes legend {
+  padding: 0 0.25rem;
+  font-weight: 600;
+}
+
+.team-repo-remote-address {
+  color: var(--muted);
+}
+
+.kicad-settings-body .team-repo-remote-refused {
+  margin: 0;
+  color: var(--muted);
+}
+
 /* With teams listed above it, the sign-in form starts under a line. */
 .team-list ~ .team-sign-in {
   padding-top: 0.75rem;

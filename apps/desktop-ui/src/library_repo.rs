@@ -146,9 +146,7 @@ pub(crate) fn library_repo_part(
             view! {
                 <div class="team-actions">
                     <button type="button" on:click=move |_| check(false)>"Check again"</button>
-                    <button type="button" aria-label="Remove the library repo" on:click=move |_| remove(true)>
-                        "Remove"
-                    </button>
+                    <button type="button" on:click=move |_| remove(true)>"Remove repo"</button>
                 </div>
             }
             .into_any()
@@ -202,10 +200,24 @@ pub(crate) fn library_repo_part(
                                         .map(|remote| {
                                             let remote_link = remote_link.clone();
                                             let address = remote.address.clone();
-                                            view! {
-                                                <button type="button" on:click=move |_| remote_link(address.clone())>
-                                                    {format!("{}: {}", remote.name, remote.address)}
-                                                </button>
+                                            // A refused remote is said, not offered: its
+                                            // address may hold a token, so it is never shown.
+                                            match remote.refused {
+                                                Some(why) => view! {
+                                                    <p class="team-repo-remote-refused">
+                                                        <strong>{remote.name}</strong>
+                                                        {format!(": {why}")}
+                                                    </p>
+                                                }
+                                                .into_any(),
+                                                None => view! {
+                                                    <button type="button" on:click=move |_| remote_link(address.clone())>
+                                                        <strong>{remote.name}</strong>
+                                                        " "
+                                                        <span class="team-repo-remote-address">{remote.address}</span>
+                                                    </button>
+                                                }
+                                                .into_any(),
                                             }
                                         })
                                         .collect_view()}
@@ -290,9 +302,11 @@ pub(crate) fn access_words(repo: &LibraryRepoStatus) -> Said {
             "Can read. The repo has no commits yet, so the app can't try a push.".to_owned(),
         ),
         RepoAccess::CanReadOnly { problem } => Said::plain(problem.summary.clone()),
+        // Offline with a copy: reading goes on from the copy, so the line
+        // says that instead of "Can't read the repo".
         RepoAccess::CannotRead { problem } => match repo.copied_at {
             Some(at) if problem.offline => Said {
-                before: format!("{} Until then, the app reads its copy from ", problem.summary),
+                before: format!("Can't reach {}. The app uses its copy from ", repo.host),
                 as_of_ms: Some(at),
                 after: ". Choose Check again when you're online.".to_owned(),
             },
@@ -388,7 +402,7 @@ mod tests {
                 },
                 Some(AS_OF)
             )),
-            "Can't read the repo: can't reach gitlab.com. Check your internet connection, or try again later. Until then, the app reads its copy from 09:12. Choose Check again when you're online."
+            "Can't reach gitlab.com. The app uses its copy from 09:12. Choose Check again when you're online."
         );
         // With no copy yet, there is nothing to read meanwhile.
         assert_eq!(
