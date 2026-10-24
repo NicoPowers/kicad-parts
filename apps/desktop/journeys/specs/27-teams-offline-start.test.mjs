@@ -135,7 +135,7 @@ describe('a team server down when the app starts', () => {
     });
     assert.match(
       await rowText('BE'),
-      /^Offline\. Parts as of \d\d:\d\d\. The app keeps trying, and signs you in when it is back\. Last problem: /,
+      /^Offline\. Parts as of \d\d:\d\d\. The app reconnects by itself. Last problem: /,
     );
     assert.equal(
       await browser.execute(() =>
