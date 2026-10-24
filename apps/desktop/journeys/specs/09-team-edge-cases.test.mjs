@@ -291,7 +291,15 @@ describe('team catalog: edge cases', () => {
     await server.stop();
     await clickButton(COLUMN, 'Edit part');
     await waitForText(browser, '#edit-heading', 'Edit part');
-    await (await fieldInput('Tolerance')).setValue('0.5%');
+    // The form may be drawn again with the saved value once the app sees
+    // the server has stopped; typing again then gives the same text.
+    await browser.waitUntil(
+      async () => {
+        await (await fieldInput('Tolerance')).setValue('0.5%');
+        return (await (await fieldInput('Tolerance')).getValue()) === '0.5%';
+      },
+      { timeout: 10_000, interval: 300, timeoutMsg: 'the Tolerance field never took 0.5%' },
+    );
     await (await browser.$('#edit-reason')).setValue('Tighter tolerance');
     await clickButton('.edit-form', 'Save');
     await waitForText(
