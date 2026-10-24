@@ -1060,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn a_team_showing_kept_parts_counts_as_a_team_showing_parts() {
+    fn a_team_showing_its_parts_file_counts_as_a_team_showing_parts() {
         let ma = team("MA", signed_in(LiveUpdates::Live));
         let mut be = team(
             "BE",
@@ -1082,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn a_team_unreachable_at_start_says_when_its_kept_parts_are_from() {
+    fn a_team_unreachable_at_start_says_when_its_parts_file_is_from() {
         let mut reaching = team(
             "MA",
             TeamSession::Reaching {

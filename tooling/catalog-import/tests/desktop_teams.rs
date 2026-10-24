@@ -709,7 +709,7 @@ fn parts_file_holds(folder: &Path, text: &str) -> bool {
 /// last matched the server (kicad-parts-ed46). When the server is back,
 /// the catch-up replaces them, and edits work again.
 #[test]
-fn a_team_down_at_start_shows_its_kept_parts_until_its_server_is_back() {
+fn a_team_down_at_start_shows_its_parts_file_until_its_server_is_back() {
     let root = services::repository_root();
     let mut acme = Client::start(&root, "AC");
     let store = Arc::new(MemorySignIns::default());
@@ -758,7 +758,7 @@ fn a_team_down_at_start_shows_its_kept_parts_until_its_server_is_back() {
     acme.someone_else_edits("47.0");
     let stopped = acme.server.take().unwrap().stop_for_a_while();
 
-    // The next start shows the kept parts, offline, as of the first run.
+    // The next start shows the parts file, offline, as of the first run.
     let teams = Teams::open(
         list_file.clone(),
         parts_folder.clone(),
@@ -784,10 +784,10 @@ fn a_team_down_at_start_shows_its_kept_parts_until_its_server_is_back() {
     assert!(catalog_of(&teams, &acme).part(IPN).is_err());
 
     // The server is back: the kept sign-in carries on, and the catch-up
-    // replaces the kept parts with the server's.
+    // replaces the parts file with the server's.
     acme.start_again(stopped);
     wait_until("acme to be live again", || live(&teams, &acme).is_some());
-    wait_until("the catch-up to replace the kept parts", || {
+    wait_until("the catch-up to replace the parts file", || {
         row(&list(&browser, &teams, IPN), &acme).value == "47.0"
     });
     assert_eq!(team(&teams.status().teams, &acme).parts_as_of, None);

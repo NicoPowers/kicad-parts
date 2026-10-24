@@ -112,7 +112,7 @@ describe('a team server down when the app starts', () => {
     });
   });
 
-  it('shows the kept parts of a team whose server is down at start, marked offline', async () => {
+  it('shows the parts file of a team whose server is down at start, marked offline', async () => {
     await browser.deleteSession();
     await beta.stop();
     await launch();
