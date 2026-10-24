@@ -170,6 +170,28 @@ pub struct PocketBaseServer {
     process: ServiceProcess,
     url: String,
     options: PocketBaseOptions,
+    binary: PathBuf,
+    port: u16,
+}
+
+/// A PocketBase server stopped for a while, as a team server that goes
+/// down: its data and port are kept, so it comes back at the same
+/// address.
+pub struct StoppedPocketBase {
+    binary: PathBuf,
+    options: PocketBaseOptions,
+    port: u16,
+}
+
+impl StoppedPocketBase {
+    /// Starts the server again, on the same port with the same data.
+    /// Its superuser is in the data already.
+    pub fn start_again(self) -> ServiceResult<PocketBaseServer> {
+        PocketBaseServer::serve(&self.binary, &self.options, self.port).map_err(|failure| {
+            let (ServeFailure::PortTaken(why) | ServeFailure::Other(why)) = failure;
+            error(format!("PocketBase did not start again: {why}"))
+        })
+    }
 }
 
 impl PocketBaseServer {
@@ -191,39 +213,51 @@ impl PocketBaseServer {
         upsert_superuser(binary, options, superuser)?;
         let mut last_failure = String::new();
         for _ in 0..3 {
-            let port = free_loopback_port()?;
-            let mut command = Command::new(binary);
-            command.arg("serve").arg(format!("--http=127.0.0.1:{port}"));
-            options.common_args(&mut command);
-            command.arg("--hooksWatch=false").arg(format!(
-                "--publicDir={}",
-                options.data_dir.with_file_name("pb_public").display()
-            ));
-            let process = ServiceProcess::spawn("pocketbase", command, &options.log_file)?;
-            let url = format!("http://127.0.0.1:{port}");
-            let mut server = Self {
-                process,
-                url,
-                options: options.clone(),
-            };
-            match wait_until_ready(&mut server.process, START_TIMEOUT, |log| {
-                pocketbase_is_ready(port, log)
-            }) {
-                Ok(()) => {
-                    server.check_no_installer()?;
-                    return Ok(server);
-                }
-                Err(failure) => {
-                    last_failure = failure.0;
-                    // Something else took the port before we bound it: try
-                    // another port. Any other failure is real.
-                    if !server.process.log_tail().contains("bind") {
-                        break;
-                    }
+            match Self::serve(binary, options, free_loopback_port()?) {
+                Ok(server) => return Ok(server),
+                Err(ServeFailure::PortTaken(failure)) => last_failure = failure,
+                Err(ServeFailure::Other(failure)) => {
+                    last_failure = failure;
+                    break;
                 }
             }
         }
         Err(error(format!("PocketBase did not start: {last_failure}")))
+    }
+
+    /// Starts `serve` on `port` and waits until it is ready.
+    fn serve(binary: &Path, options: &PocketBaseOptions, port: u16) -> Result<Self, ServeFailure> {
+        let mut command = Command::new(binary);
+        command.arg("serve").arg(format!("--http=127.0.0.1:{port}"));
+        options.common_args(&mut command);
+        command.arg("--hooksWatch=false").arg(format!(
+            "--publicDir={}",
+            options.data_dir.with_file_name("pb_public").display()
+        ));
+        let process = ServiceProcess::spawn("pocketbase", command, &options.log_file)
+            .map_err(|failure| ServeFailure::Other(failure.to_string()))?;
+        let mut server = Self {
+            process,
+            url: format!("http://127.0.0.1:{port}"),
+            options: options.clone(),
+            binary: binary.to_owned(),
+            port,
+        };
+        match wait_until_ready(&mut server.process, START_TIMEOUT, |log| {
+            pocketbase_is_ready(port, log)
+        }) {
+            Ok(()) => {
+                server
+                    .check_no_installer()
+                    .map_err(|failure| ServeFailure::Other(failure.to_string()))?;
+                Ok(server)
+            }
+            // Something else took the port before we bound it.
+            Err(failure) if server.process.log_tail().contains("bind") => {
+                Err(ServeFailure::PortTaken(failure.0))
+            }
+            Err(failure) => Err(ServeFailure::Other(failure.0)),
+        }
     }
 
     /// Fails if the log shows the installer banner.
@@ -257,6 +291,25 @@ impl PocketBaseServer {
     pub fn stop(mut self) {
         self.process.stop();
     }
+
+    /// Stops the server as [`Self::stop`] does, but keeps what it needs to
+    /// start again at the same address, as a team server that goes down
+    /// for a while.
+    pub fn stop_for_a_while(mut self) -> StoppedPocketBase {
+        self.process.stop();
+        StoppedPocketBase {
+            binary: self.binary,
+            options: self.options,
+            port: self.port,
+        }
+    }
+}
+
+/// Why `serve` did not start.
+enum ServeFailure {
+    /// Something else took the port first: another port may work.
+    PortTaken(String),
+    Other(String),
 }
 
 #[cfg(test)]

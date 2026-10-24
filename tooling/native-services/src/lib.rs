@@ -33,8 +33,8 @@ pub use fetch::{Cache, sha256_file, sha256_hex};
 pub use minio::{MinioServer, minio_binary};
 pub use pins::{GoToolchain, MinioSource, NativePins, PinnedAsset, Platform};
 pub use pocketbase::{
-    PocketBaseOptions, PocketBaseServer, Superuser, pocketbase_binary, shows_installer_banner,
-    upsert_superuser,
+    PocketBaseOptions, PocketBaseServer, StoppedPocketBase, Superuser, pocketbase_binary,
+    shows_installer_banner, upsert_superuser,
 };
 pub use process::{ServiceProcess, free_loopback_port, run_hidden, run_hidden_with_input};
 

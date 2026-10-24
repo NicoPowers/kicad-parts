@@ -14,6 +14,9 @@
 //! leaving its rows in the list, marked offline, while the other team can
 //! still be edited.
 //!
+//! A team whose server is down at start shows the parts the last run kept
+//! on disk, offline, until its server is back (kicad-parts-ed46).
+//!
 //! The kept tokens live in a store in memory, never the system's
 //! credential store.
 
@@ -29,7 +32,7 @@ use desktop_contract::{
     SearchRequest, SignInRequest, TeamEditRequest, TeamSession, TeamStatus, UseNewServerRequest,
     two_servers_claim_a_team,
 };
-use native_services::PocketBaseServer;
+use native_services::{PocketBaseServer, StoppedPocketBase, Superuser};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -51,6 +54,7 @@ struct Client {
     server: Option<PocketBaseServer>,
     url: String,
     admin: PocketBaseClient,
+    superuser: Superuser,
     ada: services::Member,
     _state: tempfile::TempDir,
 }
@@ -58,7 +62,7 @@ struct Client {
 impl Client {
     fn start(root: &Path, code: &str) -> Self {
         let state = tempfile::tempdir().unwrap();
-        let (server, admin, _superuser) = services::start(root, state.path()).unwrap();
+        let (server, admin, superuser) = services::start(root, state.path()).unwrap();
         let import = services::plan(root, "g-res").unwrap();
         submit_import(
             &admin,
@@ -76,9 +80,24 @@ impl Client {
             server: Some(server),
             url,
             admin,
+            superuser,
             ada,
             _state: state,
         }
+    }
+
+    /// Starts the server stopped by `stop_for_a_while` again, at the same
+    /// address. The superuser signs in afresh: its old connections went
+    /// with the old process.
+    fn start_again(&mut self, stopped: StoppedPocketBase) {
+        self.server = Some(stopped.start_again().unwrap());
+        self.admin = PocketBaseClient::new(&self.url)
+            .authenticate(
+                "_superusers",
+                &self.superuser.email,
+                &self.superuser.password,
+            )
+            .unwrap();
     }
 
     fn sign_in(&self) -> SignInRequest {
@@ -646,4 +665,109 @@ fn one_list_holds_both_teams_and_each_edit_goes_to_its_own_server() {
     wait_until("beta's row to show the edit while acme is offline", || {
         row(&list(&browser, &teams, IPN), &beta).value == "47R0"
     });
+}
+
+/// The time now, in milliseconds since 1970.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+/// Whether a kept-parts file in `folder` holds `text`.
+fn kept_file_holds(folder: &Path, text: &str) -> bool {
+    std::fs::read_dir(folder).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            std::fs::read_to_string(entry.path()).is_ok_and(|json| json.contains(text))
+        })
+    })
+}
+
+/// A team whose server is down when the app starts shows the parts the
+/// last run kept on disk, marked offline and read-only, with when they
+/// last matched the server (kicad-parts-ed46). When the server is back,
+/// the catch-up replaces them, and edits work again.
+#[test]
+fn a_team_down_at_start_shows_its_kept_parts_until_its_server_is_back() {
+    let root = services::repository_root();
+    let mut acme = Client::start(&root, "AC");
+    let store = Arc::new(MemorySignIns::default());
+    let kept_in = || SignIns::kept_in(store.clone());
+    // Never the person's own data folder.
+    let scratch = root.join("target").join("test-folders");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let config = tempfile::tempdir_in(&scratch).unwrap();
+    let list_file = config.path().join("team.json");
+    let kept_folder = config.path().join("known-parts");
+    let cache = tempfile::tempdir_in(&scratch).unwrap();
+    let browser = CatalogBrowser::open(BrowserConfig {
+        catalog_root: root.clone(),
+        cache_dir: cache.path().join("cache"),
+        settings_file: cache.path().join("settings.json"),
+        kicad_locations: kicad_integration::SearchLocations::Only(Vec::new()),
+        kicad_config_dir: None,
+        kicad_documents_dir: None,
+    });
+
+    // The first run catches up, follows a teammate's save, and keeps the
+    // parts on disk once they stay the same for a few seconds.
+    let first_run_at = now_ms();
+    let teams = Teams::open(list_file.clone(), kept_in(), None, None);
+    teams.sign_in(acme.sign_in()).unwrap();
+    wait_until("acme to be live", || live(&teams, &acme).is_some());
+    acme.someone_else_edits("47R");
+    wait_until("the teammate's save to be kept on disk", || {
+        kept_file_holds(&kept_folder, "\"47R\"")
+    });
+    wait_until("the sign-in to be kept", || {
+        store.read(&acme.url).unwrap().is_some()
+    });
+    drop(teams);
+    let closed_at = now_ms();
+
+    // While the app is closed, another save, then the server goes down.
+    acme.someone_else_edits("47.0");
+    let stopped = acme.server.take().unwrap().stop_for_a_while();
+
+    // The next start shows the kept parts, offline, as of the first run.
+    let teams = Teams::open(list_file.clone(), kept_in(), None, None);
+    wait_until("acme to be found unreachable", || {
+        matches!(teams.reaching(&acme.url), Some(Some(_)))
+    });
+    let status = team(&teams.status().teams, &acme).clone();
+    assert!(
+        matches!(status.session, TeamSession::Reaching { problem: Some(_) }),
+        "{status:?}"
+    );
+    let as_of = status.parts_as_of.expect("says when the parts are from");
+    assert!(
+        (first_run_at..=closed_at).contains(&as_of),
+        "{as_of} is not between {first_run_at} and {closed_at}"
+    );
+    assert_eq!(row(&list(&browser, &teams, IPN), &acme).value, "47R");
+    // Read-only: no session, so nothing can be saved to acme meanwhile.
+    assert!(catalog_of(&teams, &acme).part(IPN).is_err());
+
+    // The server is back: the kept sign-in carries on, and the catch-up
+    // replaces the kept parts with the server's.
+    acme.start_again(stopped);
+    wait_until("acme to be live again", || live(&teams, &acme).is_some());
+    wait_until("the catch-up to replace the kept parts", || {
+        row(&list(&browser, &teams, IPN), &acme).value == "47.0"
+    });
+    assert_eq!(team(&teams.status().teams, &acme).parts_as_of, None);
+    // Edits work again, and the kept file follows.
+    assert!(matches!(
+        value_edit(&catalog_of(&teams, &acme), "47 ohm"),
+        PublishResult::Saved { .. }
+    ));
+    assert_eq!(acme.value_on_server(), "47 ohm");
+    wait_until("the edit to be kept on disk", || {
+        kept_file_holds(&kept_folder, "\"47 ohm\"")
+    });
+
+    // Signing out deletes the kept parts.
+    teams.sign_out(&acme.url);
+    assert!(!kept_file_holds(&kept_folder, "47"));
 }
