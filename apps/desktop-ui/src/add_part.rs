@@ -37,7 +37,7 @@ use desktop_contract::{
     DownloadedFile, Field, FileKind, FilePreviewRequest, LibraryGroup, LibraryKey,
     ManufacturerPart, PickUse, PreviewKind, PreviewRequest, PublishResult, TeamDownload,
     TeamDownloadRequest, TeamFile, TeamLibraryChoice, TeamNewCategory, TeamNewPartRequest,
-    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus, feature,
+    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus, feature, team_label,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -641,16 +641,20 @@ pub fn AddPartView(
         let mut options = list_teams.add_part.options.get();
         let team = form.team.get();
         if !team.is_empty() && !options.iter().any(|(server, _)| *server == team) {
+            // A team taken off the list is named by its address.
             let label = list_teams.status.with(|status| {
-                status.as_ref().and_then(|status| {
-                    status
-                        .teams
-                        .iter()
-                        .find(|listed| listed.server_url == team)
-                        .map(|listed| listed.label())
-                })
+                status
+                    .as_ref()
+                    .and_then(|status| {
+                        status
+                            .teams
+                            .iter()
+                            .find(|listed| listed.server_url == team)
+                            .map(|listed| listed.label())
+                    })
+                    .unwrap_or_else(|| team_label("", &team))
             });
-            options.push((team, label.unwrap_or_default()));
+            options.push((team, label));
         }
         options
     });
@@ -774,11 +778,16 @@ pub fn AddPartView(
             let team = form.team.get_untracked();
             spawn_local(async move {
                 let result = backend::team_read_download(&team, request).await;
-                // An answer for another team, or an older reading, is dropped.
-                if form.reads.get_value() != asked || form.team.get_untracked() != team {
+                // An older reading's answer is dropped; the newer one says
+                // when reading ends.
+                if form.reads.get_value() != asked {
                     return;
                 }
                 reading_files.set(false);
+                // So is an answer for a team the form no longer has.
+                if form.team.get_untracked() != team {
+                    return;
+                }
                 let mut found = match result {
                     Ok(found) => found,
                     Err(message) => {
@@ -1237,6 +1246,12 @@ pub fn AddPartView(
                                 // stays.
                                 if let Some(found) = form.reading.get_untracked() {
                                     read_with(found.symbol, found.footprint, false, true);
+                                } else if !downloads.with_value(Vec::is_empty)
+                                    || !form.picks.with_untracked(Vec::is_empty)
+                                {
+                                    // Chosen but not read yet: read them for the
+                                    // new team; nothing is typed yet.
+                                    read(None, None, true);
                                 }
                             })
                         />
