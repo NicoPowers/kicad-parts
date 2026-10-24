@@ -737,3 +737,31 @@ fn adding_a_team_back_waits_until_its_removal_forgot_the_old_sign_in() {
     );
     assert!(is_signed_in(&teams, &server));
 }
+
+#[test]
+fn signing_in_again_keeps_the_teams_code_until_its_settings_are_read() {
+    // The stand-in server never says its code, as a real one does only
+    // after signing in.
+    let server = FakeServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("team.json");
+    saved::write(
+        &file,
+        &SavedList {
+            teams: vec![SavedTeam {
+                server_url: server.url.clone(),
+                email: EMAIL.into(),
+                code: "AC".into(),
+                colour: "blue".into(),
+                signed_out: true,
+            }],
+            choices: TeamChoices::default(),
+        },
+    )
+    .unwrap();
+    let teams = Teams::open(file.clone(), memory(), None, None);
+    teams.sign_in(request(&server)).unwrap();
+    assert_eq!(teams.status().teams[0].label(), "AC");
+    assert_eq!(saved::read(&file).teams[0].code, "AC");
+    assert_eq!(teams.known_parts()[0].label, "AC");
+}

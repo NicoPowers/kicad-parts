@@ -473,7 +473,9 @@ fn list_version(status: &TeamsStatus) -> Option<u64> {
     // list at once.
     for team in status.teams.iter().filter(|team| shows_parts(team)) {
         if let TeamSession::SignedIn { checkpoint, .. } = &team.session {
-            (&team.server_url, checkpoint).hash(&mut hasher);
+            // The code too: a team named once its code is known shows its
+            // name at once.
+            (&team.server_url, &team.code, checkpoint).hash(&mut hasher);
             any = true;
         }
     }

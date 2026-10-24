@@ -202,10 +202,17 @@ impl Teams {
             Some(team) => team.saved.colour.clone(),
             None => colours::next_colour(list.teams.iter().map(|team| team.saved.colour.as_str())),
         };
+        // The code is read from the team's settings after signing in, so a
+        // code known from before is kept until then: the team keeps its
+        // name in the meantime.
+        let code = Some(catalog.code())
+            .filter(|code| !code.is_empty())
+            .or_else(|| list.find(&server_url).map(|team| team.saved.code.clone()))
+            .unwrap_or_default();
         let saved = SavedTeam {
             server_url: server_url.clone(),
             email,
-            code: catalog.code(),
+            code,
             colour,
             signed_out: false,
         };
