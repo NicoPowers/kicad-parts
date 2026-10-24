@@ -53,17 +53,30 @@ pub fn libraries(folder: &Path, plan: &Plan<'_>, naming: &Naming) -> Vec<Library
     libraries
 }
 
-/// The symbol library table text: the database library, shown in KiCad's
-/// chooser, and the team symbol libraries it draws from, hidden there so
-/// people pick whole parts.
+/// The symbol library table text: the team symbol libraries, hidden in
+/// KiCad's chooser so people pick whole parts, then the database library
+/// that draws from them.
+///
+/// The symbol libraries come first because KiCad 10.0.7 loads libraries in
+/// table order and builds every database entry as the database library
+/// loads. An entry whose symbol library has not loaded yet gets an empty
+/// symbol, which ERC calls "doesn't match copy in library" (KiCad issue
+/// 25870).
 pub fn symbol_table(libraries: &[Library]) -> String {
     let parts = libraries
         .iter()
         .find(|library| library.kind == LibraryKind::Parts)
         .map(|library| library.nickname.as_str())
         .unwrap_or("the database library");
-    let rows = libraries
+    let sources_first = libraries
         .iter()
+        .filter(|library| library.kind == LibraryKind::Symbols)
+        .chain(
+            libraries
+                .iter()
+                .filter(|library| library.kind == LibraryKind::Parts),
+        );
+    let rows = sources_first
         .filter_map(|library| match library.kind {
             LibraryKind::Parts => Some(LibTableRow {
                 name: library.nickname.clone(),
@@ -108,4 +121,35 @@ pub fn footprint_table(libraries: &[Library]) -> String {
         rows,
     }
     .format(TableKind::Footprint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn library(kind: LibraryKind, nickname: &str) -> Library {
+        Library {
+            kind,
+            nickname: nickname.into(),
+            path: format!("/libraries/{nickname}"),
+        }
+    }
+
+    #[test]
+    fn the_symbol_table_lists_the_symbol_libraries_before_the_database_library() {
+        let libraries = [
+            library(LibraryKind::Parts, "MA-Parts"),
+            library(LibraryKind::Symbols, "MA-ind-20241209"),
+            library(LibraryKind::Symbols, "MA-res-20241209"),
+            library(LibraryKind::Footprints, "MA-Resistor_SMD"),
+        ];
+        let table = symbol_table(&libraries);
+        let names: Vec<&str> = table
+            .lines()
+            .filter_map(|line| line.split("(name \"").nth(1))
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert_eq!(names, ["MA-ind-20241209", "MA-res-20241209", "MA-Parts"]);
+        assert!(table.contains("(descr \"Team symbols that MA-Parts uses\")(hidden))"));
+    }
 }
