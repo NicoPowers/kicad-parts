@@ -7,18 +7,19 @@
 mod sign_ins;
 
 use catalog_browser::kicad_libraries::KicadLibraries;
+use catalog_browser::library_repos::{LibraryRepos, Linked};
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::teams::Teams;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
     AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, FootprintDrawing,
     KicadLibrariesStatus, LibrariesView, LibraryCheckView, LibraryItemDetail, LibraryItemRequest,
-    LibraryItems, LibraryItemsRequest, OurLibraries, PartDetail, PartKey, PreviewOutcome,
-    PreviewRequest, PublishResult, SearchRequest, SearchResponse, SignInRequest,
-    TeamArchiveRequest, TeamChoices, TeamCodeCheck, TeamCsvReviewRequest, TeamDownload,
-    TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest, TeamIpnCheck,
-    TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest,
-    TeamSameMpn, TeamsStatus, UseNewServerRequest,
+    LibraryItems, LibraryItemsRequest, LibraryRepoLinking, LibraryRepoRequest, OurLibraries,
+    PartDetail, PartKey, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
+    SearchResponse, SignInRequest, TeamArchiveRequest, TeamChoices, TeamCodeCheck,
+    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
+    TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
+    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus, UseNewServerRequest,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -29,6 +30,7 @@ use tauri::{Manager, PhysicalSize, State};
 type Browser = Arc<CatalogBrowser>;
 type Team = Arc<Teams>;
 type Libraries = Arc<KicadLibraries>;
+type Repos = Arc<LibraryRepos>;
 
 /// Launch options. Every option exists so tests and unusual installs can run
 /// the app without touching the user's settings or KiCad search.
@@ -363,10 +365,11 @@ async fn footprint_glb(
 }
 
 /// Every team in the list, each with whether its KiCad libraries wait
-/// for the person to confirm a new server address.
-fn teams_status(teams: &Teams, libraries: &KicadLibraries) -> TeamsStatus {
+/// for the person to confirm a new server address, and its library repo.
+fn teams_status(teams: &Teams, libraries: &KicadLibraries, repos: &LibraryRepos) -> TeamsStatus {
     let mut status = teams.status();
     libraries.note_other_servers(&mut status);
+    repos.note_status(&mut status);
     status
 }
 
@@ -374,9 +377,14 @@ fn teams_status(teams: &Teams, libraries: &KicadLibraries) -> TeamsStatus {
 async fn team_status(
     team: State<'_, Team>,
     libraries: State<'_, Libraries>,
+    repos: State<'_, Repos>,
 ) -> Result<TeamsStatus, String> {
-    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
-    blocking(move || teams_status(&teams, &libraries)).await
+    let (teams, libraries, repos) = (
+        team.inner().clone(),
+        libraries.inner().clone(),
+        repos.inner().clone(),
+    );
+    blocking(move || teams_status(&teams, &libraries, &repos)).await
 }
 
 /// Signs in to one team, adding it to the list; other teams stay signed
@@ -385,12 +393,17 @@ async fn team_status(
 async fn team_sign_in(
     team: State<'_, Team>,
     libraries: State<'_, Libraries>,
+    repos: State<'_, Repos>,
     request: SignInRequest,
 ) -> Result<TeamsStatus, String> {
-    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
+    let (teams, libraries, repos) = (
+        team.inner().clone(),
+        libraries.inner().clone(),
+        repos.inner().clone(),
+    );
     blocking(move || {
         let _ = teams.sign_in(request);
-        teams_status(&teams, &libraries)
+        teams_status(&teams, &libraries, &repos)
     })
     .await
 }
@@ -399,12 +412,17 @@ async fn team_sign_in(
 async fn team_sign_out(
     team: State<'_, Team>,
     libraries: State<'_, Libraries>,
+    repos: State<'_, Repos>,
     server_url: String,
 ) -> Result<TeamsStatus, String> {
-    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
+    let (teams, libraries, repos) = (
+        team.inner().clone(),
+        libraries.inner().clone(),
+        repos.inner().clone(),
+    );
     blocking(move || {
         teams.sign_out(&server_url);
-        teams_status(&teams, &libraries)
+        teams_status(&teams, &libraries, &repos)
     })
     .await
 }
@@ -413,12 +431,17 @@ async fn team_sign_out(
 async fn team_remove(
     team: State<'_, Team>,
     libraries: State<'_, Libraries>,
+    repos: State<'_, Repos>,
     server_url: String,
 ) -> Result<TeamsStatus, String> {
-    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
+    let (teams, libraries, repos) = (
+        team.inner().clone(),
+        libraries.inner().clone(),
+        repos.inner().clone(),
+    );
     blocking(move || {
         teams.remove(&server_url);
-        teams_status(&teams, &libraries)
+        teams_status(&teams, &libraries, &repos)
     })
     .await
 }
@@ -429,12 +452,17 @@ async fn team_remove(
 async fn team_choose(
     team: State<'_, Team>,
     libraries: State<'_, Libraries>,
+    repos: State<'_, Repos>,
     choices: TeamChoices,
 ) -> Result<TeamsStatus, String> {
-    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
+    let (teams, libraries, repos) = (
+        team.inner().clone(),
+        libraries.inner().clone(),
+        repos.inner().clone(),
+    );
     blocking(move || {
         teams.choose(choices);
-        teams_status(&teams, &libraries)
+        teams_status(&teams, &libraries, &repos)
     })
     .await
 }
@@ -697,12 +725,85 @@ async fn team_code_set(
 async fn kicad_libraries_use_new_server(
     team: State<'_, Team>,
     libraries: State<'_, Libraries>,
+    repos: State<'_, Repos>,
     request: UseNewServerRequest,
 ) -> Result<TeamsStatus, String> {
-    let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
+    let (teams, libraries, repos) = (
+        team.inner().clone(),
+        libraries.inner().clone(),
+        repos.inner().clone(),
+    );
     blocking(move || {
         libraries.use_new_server(&request)?;
-        Ok(teams_status(&teams, &libraries))
+        Ok(teams_status(&teams, &libraries, &repos))
+    })
+    .await?
+}
+
+/// Links a team to its library repo, from a folder with the person's
+/// clone or from the repo's address. The app then copies the repo and
+/// checks write access in the background.
+#[tauri::command]
+async fn library_repo_link(
+    team: State<'_, Team>,
+    libraries: State<'_, Libraries>,
+    repos: State<'_, Repos>,
+    request: LibraryRepoRequest,
+) -> Result<LibraryRepoLinking, String> {
+    let (teams, libraries, repos) = (
+        team.inner().clone(),
+        libraries.inner().clone(),
+        repos.inner().clone(),
+    );
+    blocking(
+        move || match repos.link(&request.server_url, &request.place) {
+            Ok(Linked::Done) => LibraryRepoLinking::Linked {
+                teams: teams_status(&teams, &libraries, &repos),
+            },
+            Ok(Linked::ChooseRemote(remotes)) => LibraryRepoLinking::ChooseRemote { remotes },
+            Err(problem) => LibraryRepoLinking::Refused { problem },
+        },
+    )
+    .await
+}
+
+/// Checks a team's library repo again, in the background.
+#[tauri::command]
+async fn library_repo_check(
+    team: State<'_, Team>,
+    libraries: State<'_, Libraries>,
+    repos: State<'_, Repos>,
+    server_url: String,
+) -> Result<TeamsStatus, String> {
+    let (teams, libraries, repos) = (
+        team.inner().clone(),
+        libraries.inner().clone(),
+        repos.inner().clone(),
+    );
+    blocking(move || {
+        repos.check_again(&server_url);
+        teams_status(&teams, &libraries, &repos)
+    })
+    .await
+}
+
+/// Unlinks a team from its library repo. The app's copy goes unless
+/// another team links the same repo.
+#[tauri::command]
+async fn library_repo_unlink(
+    team: State<'_, Team>,
+    libraries: State<'_, Libraries>,
+    repos: State<'_, Repos>,
+    server_url: String,
+) -> Result<TeamsStatus, String> {
+    let (teams, libraries, repos) = (
+        team.inner().clone(),
+        libraries.inner().clone(),
+        repos.inner().clone(),
+    );
+    blocking(move || {
+        repos.unlink(&server_url)?;
+        Ok(teams_status(&teams, &libraries, &repos))
     })
     .await?
 }
@@ -777,6 +878,13 @@ fn main() {
                 Some(dir) => dir.join("parts-files"),
                 None => app.path().app_local_data_dir()?.join("parts-files"),
             };
+            // The app's own copy of each team's library repo: local (never
+            // roaming), and not in the cache, which the system may clear. A
+            // library with 3D models may be large (kicad-parts-ab30).
+            let repos_folder = match &options.data_dir {
+                Some(dir) => dir.join("library-repos"),
+                None => app.path().app_local_data_dir()?.join("library-repos"),
+            };
             let (config_dir, cache_dir) = match &options.data_dir {
                 Some(dir) => (dir.join("config"), dir.join("cache")),
                 None => {
@@ -826,6 +934,7 @@ fn main() {
                 options.team_email.clone(),
             ));
             app.manage(teams.clone());
+            app.manage(Arc::new(LibraryRepos::start(repos_folder, teams.clone())));
             app.manage(Arc::new(KicadLibraries::start(libraries_dir, teams)));
             Ok(())
         })
@@ -869,6 +978,9 @@ fn main() {
             team_code_check,
             team_code_set,
             kicad_libraries_use_new_server,
+            library_repo_link,
+            library_repo_check,
+            library_repo_unlink,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -1002,6 +1114,9 @@ mod tests {
             command::TEAM_CODE_CHECK,
             command::TEAM_CODE_SET,
             command::KICAD_LIBRARIES_USE_NEW_SERVER,
+            command::LIBRARY_REPO_LINK,
+            command::LIBRARY_REPO_CHECK,
+            command::LIBRARY_REPO_UNLINK,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),
