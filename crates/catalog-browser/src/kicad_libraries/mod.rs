@@ -90,7 +90,9 @@ impl KicadLibraries {
         server_url: &str,
         work: impl FnOnce(&TeamLibraries) -> KicadLibrariesStatus,
     ) -> KicadLibrariesStatus {
-        self.with_list(self.with_team(server_url, work))
+        let mut status = self.with_list(self.with_team(server_url, work));
+        status.team = server_url.to_owned();
+        status
     }
 
     /// The libraries of the team at `server_url`, as the KiCad settings
@@ -192,7 +194,11 @@ impl KicadLibraries {
     /// once.
     pub fn set_code(&self, server_url: &str, code: &str) -> Result<KicadLibrariesStatus, String> {
         self.with_team(server_url, |libraries| libraries.set_code(code))
-            .map(|status| self.with_list(status))
+            .map(|status| {
+                let mut status = self.with_list(status);
+                status.team = server_url.to_owned();
+                status
+            })
     }
 }
 

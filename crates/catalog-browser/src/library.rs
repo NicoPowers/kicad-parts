@@ -150,6 +150,8 @@ pub(crate) fn view_of(check: &LibraryCheck) -> LibraryCheckView {
         })
         .collect();
     LibraryCheckView {
+        // The desktop names the team it asked for.
+        team: String::new(),
         to_fix: check.count(Group::ToFix),
         not_in_catalog: check.count(Group::NotInCatalog),
         worth_a_look: check.count(Group::WorthALook),

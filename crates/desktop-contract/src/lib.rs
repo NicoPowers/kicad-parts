@@ -1256,6 +1256,10 @@ pub struct TeamKnownFootprint {
 /// libraries compared with the team catalog. Shown to people who can edit.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LibraryCheckView {
+    /// The server address of the team checked, so an answer for another
+    /// team is never shown, and Add part from it adds to this team.
+    #[serde(default)]
+    pub team: String,
     /// Errors: they stop an import, and Add part or Edit part with them.
     pub to_fix: usize,
     /// Symbols, footprints and 3D models no part uses and the Catalog does
@@ -1683,6 +1687,11 @@ pub struct LibraryItemDetail {
 /// The KiCad libraries, as the KiCad settings panel shows them.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KicadLibrariesStatus {
+    /// The server address of the team whose libraries these are, so an
+    /// answer for another team is never shown, and the panel's buttons act
+    /// on this team.
+    #[serde(default)]
+    pub team: String,
     pub state: KicadLibrariesState,
     /// The signed-in team's code, which names its libraries.
     pub team_code: TeamCode,

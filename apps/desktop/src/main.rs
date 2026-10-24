@@ -581,9 +581,19 @@ async fn team_library_check(
     teams: State<'_, Team>,
     team: String,
 ) -> Result<Option<LibraryCheckView>, String> {
-    let (browser, team) = (browser.inner().clone(), teams.team(&team)?);
-    // Worked out again only when the team catalog changed.
-    blocking(move || browser.library_check(&team)).await?
+    let (browser, server) = (browser.inner().clone(), team);
+    let team = teams.team(&server)?;
+    // Worked out again only when the team catalog changed. The answer
+    // names the team checked.
+    blocking(move || {
+        browser.library_check(&team).map(|found| {
+            found.map(|mut view| {
+                view.team = server;
+                view
+            })
+        })
+    })
+    .await?
 }
 
 #[tauri::command]

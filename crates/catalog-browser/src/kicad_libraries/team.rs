@@ -171,6 +171,8 @@ impl TeamLibraries {
             })
             .collect();
         KicadLibrariesStatus {
+            // KicadLibraries names the team it was asked about.
+            team: String::new(),
             state: known.state.clone(),
             team_code,
             folder: folder.display().to_string(),
