@@ -406,17 +406,23 @@ pub fn draw_every_footprint(
 ///
 /// KiCad 10.0.7 builds every database library entry as the database
 /// library loads (KiCad issue 25870). An entry whose symbol library is
-/// still loading on another thread gets an empty symbol, so ERC says it
-/// "doesn't match copy in library". KiCad's own Device library is large,
-/// so its entries lost that race on most runs. With one thread, every
-/// library listed before the database library has loaded before it. Our
-/// setup text and these tests list them first. Earlier KiCad 10 versions
+/// still loading gets an empty symbol, so ERC says it "doesn't match copy
+/// in library". KiCad's own Device library is large, so its entries lost
+/// that race on most runs. With one thread, every library listed before
+/// the database library has loaded before it. Earlier KiCad 10 versions
 /// read each entry when asked, so this changes nothing there.
+///
+/// Our setup text lists only the team libraries first. KiCad puts pasted
+/// rows above its own libraries, so in a real setup the database library
+/// loads before Device. These tests check the best case instead: KiCad's
+/// libraries first and one thread, which no pasted setup has.
+///
+/// Remove when KiCad fixes issue 25870 (open; not fixed in 10.0.8-rc1):
+/// https://gitlab.com/kicad/code/kicad/-/work_items/25870
 fn load_libraries_in_table_order(kicad: &KicadInstall, settings: &CliSettingsFolder) {
-    let version = format!("{}.{}", kicad.version.major, kicad.version.minor);
-    let config = settings.path().join("config").join(version);
-    fs::create_dir_all(&config).unwrap();
-    fs::write(config.join("kicad_advanced"), "MaximumThreads=1\n").unwrap();
+    let folder = settings.settings_for(&kicad.version);
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("kicad_advanced"), "MaximumThreads=1\n").unwrap();
 }
 
 /// Runs KiCad's electrical rules check on `sheet` and returns its
