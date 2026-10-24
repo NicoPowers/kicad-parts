@@ -83,30 +83,10 @@ pub async fn set_kicad_override(path: Option<String>) -> Result<AppStatus, Strin
     call(command::SET_KICAD_OVERRIDE, &OverrideArgs { path }).await
 }
 
-pub async fn search(
-    team: &str,
-    query: String,
-    limit: usize,
-    selected: Option<String>,
-    category: Option<String>,
-    uses: Option<String>,
-) -> Result<SearchResponse, String> {
-    call(
-        command::SEARCH_PARTS,
-        &for_team(
-            team,
-            SearchArgs {
-                request: SearchRequest {
-                    query,
-                    limit,
-                    selected,
-                    category,
-                    uses,
-                },
-            },
-        ),
-    )
-    .await
+/// The part list's search over every signed-in team, or the one team the
+/// request names.
+pub async fn search(request: SearchRequest) -> Result<SearchResponse, String> {
+    call(command::SEARCH_PARTS, &SearchArgs { request }).await
 }
 
 /// A part of the team at `team`, or of the CSV catalog alone for a blank
@@ -402,28 +382,43 @@ pub async fn libraries(refresh: bool) -> Result<LibrariesView, String> {
     call(command::LIBRARIES, &LibrariesArgs { refresh }).await
 }
 
-/// The browser's list of symbols or footprints, marking those the parts
-/// of the team at `team` use.
+/// The Libraries browser's items. One team's parts mark the items they use
+/// when `team` names it, else every signed-in team's parts.
+#[derive(Serialize)]
+struct LibraryArgs<'a, A: Serialize> {
+    team: Option<&'a str>,
+    #[serde(flatten)]
+    args: A,
+}
+
+/// The browser's list of symbols or footprints, marking those the parts of
+/// `team` use (every team's when `None`).
 pub async fn library_items(
-    team: &str,
+    team: Option<&str>,
     request: LibraryItemsRequest,
 ) -> Result<LibraryItems, String> {
     call(
         command::LIBRARY_ITEMS,
-        &for_team(team, LibraryItemsArgs { request }),
+        &LibraryArgs {
+            team,
+            args: LibraryItemsArgs { request },
+        },
     )
     .await
 }
 
-/// One library item's details, with the parts of the team at `team` that
-/// use it.
+/// One library item's details, with the parts of `team` that use it
+/// (every team's when `None`).
 pub async fn library_item(
-    team: &str,
+    team: Option<&str>,
     request: LibraryItemRequest,
 ) -> Result<Option<LibraryItemDetail>, String> {
     call(
         command::LIBRARY_ITEM,
-        &for_team(team, LibraryItemArgs { request }),
+        &LibraryArgs {
+            team,
+            args: LibraryItemArgs { request },
+        },
     )
     .await
 }

@@ -11,7 +11,9 @@ use desktop_contract::{
     PreviewKind, PreviewOutcome, PreviewProblemReason,
 };
 use kicad_integration::SearchLocations;
+use catalog_browser::team::KnownParts;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -221,7 +223,7 @@ fn request(kind: PreviewKind) -> LibraryItemsRequest {
 
 fn names(browser: &CatalogBrowser, request: &LibraryItemsRequest) -> Vec<String> {
     browser
-        .library_items(request, &BTreeMap::new())
+        .library_items(request, &[], None)
         .rows
         .into_iter()
         .map(|row| row.reference())
@@ -341,7 +343,7 @@ fn searches_and_filters_symbols() {
     // Rows are capped, with the count of every match.
     let mut capped = all.clone();
     capped.limit = 2;
-    let items = browser.library_items(&capped, &BTreeMap::new());
+    let items = browser.library_items(&capped, &[], None);
     assert_eq!((items.total, items.rows.len()), (7, 2));
     assert!(!items.reading);
 }
@@ -365,7 +367,7 @@ fn filters_footprints_for_a_symbol_like_kicad() {
     for_r.for_symbol = Some("Device:R".into());
     for_r.filters.match_footprint_filters = true;
     for_r.filters.match_pin_count = true;
-    let items = browser.library_items(&for_r, &BTreeMap::new());
+    let items = browser.library_items(&for_r, &[], None);
     let symbol = items.for_symbol.clone().unwrap();
     assert!(symbol.found);
     assert_eq!(
@@ -391,7 +393,7 @@ fn filters_footprints_for_a_symbol_like_kicad() {
     assert_eq!(names(&browser, &for_base), ["Package_TO_SOT_SMD:SOT-23"]);
     // A symbol that is not found filters nothing.
     for_base.for_symbol = Some("Nope:X".into());
-    let items = browser.library_items(&for_base, &BTreeMap::new());
+    let items = browser.library_items(&for_base, &[], None);
     assert!(!items.for_symbol.unwrap().found);
     assert_eq!(items.total, 6);
 }
@@ -400,7 +402,7 @@ fn filters_footprints_for_a_symbol_like_kicad() {
 fn marks_items_the_catalog_uses_and_lists_its_parts() {
     let fixture = fixture();
     let browser = indexed(&fixture);
-    let items = browser.library_items(&request(PreviewKind::Symbol), &BTreeMap::new());
+    let items = browser.library_items(&request(PreviewKind::Symbol), &[], None);
     let in_catalog: Vec<String> = items
         .rows
         .iter()
@@ -416,7 +418,8 @@ fn marks_items_the_catalog_uses_and_lists_its_parts() {
                 name: "R_US".into(),
                 selection: None,
             },
-            &BTreeMap::new(),
+            &[],
+            None,
         )
         .unwrap();
     assert_eq!(detail.reference, "g-pas:R_US");
@@ -434,7 +437,13 @@ fn marks_items_the_catalog_uses_and_lists_its_parts() {
             ..PartValues::default()
         },
     )]);
-    let items = browser.library_items(&request(PreviewKind::Symbol), &current);
+    let team = Arc::new(KnownParts::new(
+        "https://ma.example.com",
+        "MA",
+        current,
+        BTreeMap::new(),
+    ));
+    let items = browser.library_items(&request(PreviewKind::Symbol), &[team.clone()], None);
     let in_catalog: Vec<String> = items
         .rows
         .iter()
@@ -450,7 +459,8 @@ fn marks_items_the_catalog_uses_and_lists_its_parts() {
                 name: "R_Axial".into(),
                 selection: None,
             },
-            &BTreeMap::new(),
+            &[],
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -458,6 +468,32 @@ fn marks_items_the_catalog_uses_and_lists_its_parts() {
         ("Through-hole", 2)
     );
     assert!(footprint.used_by.is_empty());
+    // The part using Device:R now is the team's part: its team comes with it.
+    let device_r = browser
+        .library_item(
+            &LibraryItemRequest {
+                kind: PreviewKind::Symbol,
+                library: key(LibraryGroup::Kicad, "Device"),
+                name: "R".into(),
+                selection: None,
+            },
+            &[team.clone()],
+            None,
+        )
+        .unwrap();
+    let used: Vec<(&str, &str)> = device_r
+        .used_by
+        .iter()
+        .map(|part| (part.team.as_str(), part.ipn.as_str()))
+        .collect();
+    assert_eq!(used, [("https://ma.example.com", "RES-1")]);
+    // Another team chosen in the part list: MA's parts mark nothing.
+    let other = browser.library_items(
+        &request(PreviewKind::Symbol),
+        &[team],
+        Some("https://ac.example.com"),
+    );
+    assert!(other.rows.iter().all(|row| !row.in_catalog));
     // KiCad cannot run here, so nothing is drawn, plainly.
     let PreviewOutcome::Problem(problem) = browser.library_preview(&LibraryItemRequest {
         kind: PreviewKind::Symbol,
@@ -618,7 +654,7 @@ fn indexes_and_draws_kicads_own_libraries() {
     let started = Instant::now();
     let mut search = request(PreviewKind::Symbol);
     search.query = "op amp".into();
-    let found = warm.library_items(&search, &BTreeMap::new());
+    let found = warm.library_items(&search, &[], None);
     let searched = started.elapsed();
     assert!(found.total > 10, "{}", found.total);
     eprintln!(

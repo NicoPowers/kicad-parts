@@ -18,9 +18,9 @@ mod sign_ins;
 
 pub use sign_ins::{MemorySignIns, SignInStore, SignIns};
 
-use crate::team::TeamCatalog;
+use crate::team::{KnownParts, TeamCatalog};
 use collaboration::ServerAddress;
-use desktop_contract::{SignInRequest, SignInsKept, TeamSession, TeamsStatus};
+use desktop_contract::{SignInRequest, SignInsKept, TeamSession, TeamsStatus, team_label};
 use keeper::{Keeper, KeeperTask};
 use saved::{SavedList, SavedTeam};
 use std::path::PathBuf;
@@ -310,6 +310,35 @@ impl Teams {
             .teams
             .iter()
             .map(|team| (team.saved.server_url.clone(), team.catalog.clone()))
+            .collect()
+    }
+
+    /// Every team's last-known parts, in list order: what the part list
+    /// shows. A team with none to show, such as one signed out or asked to
+    /// sign in again, is left out.
+    pub fn known_parts(&self) -> Vec<Arc<KnownParts>> {
+        let teams: Vec<(String, String, Arc<TeamCatalog>)> = self
+            .lock()
+            .teams
+            .iter()
+            .map(|team| {
+                let code = Some(team.saved.code.clone())
+                    .filter(|code| !code.is_empty())
+                    .unwrap_or_else(|| team.catalog.code());
+                (
+                    team.saved.server_url.clone(),
+                    team_label(&code, &team.saved.server_url),
+                    team.catalog.clone(),
+                )
+            })
+            .collect();
+        // Outside the list's lock: making a team's parts may read its
+        // category names from its server.
+        teams
+            .into_iter()
+            .filter_map(|(server_url, label, catalog)| {
+                catalog.last_known_parts(&server_url, &label)
+            })
             .collect()
     }
 

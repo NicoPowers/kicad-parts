@@ -14,7 +14,10 @@
 //! run finishes (a run may find CSV changes without publishing a Change) or
 //! after catching up.
 
+mod known_parts;
 mod session;
+
+pub use known_parts::KnownParts;
 
 use crate::PartValues;
 use crate::csv_ipns::IpnsInCsv;
@@ -51,7 +54,7 @@ use kicad_integration::library_file::{
 };
 use kicad_integration::{LibRef, StoredItem, footprint_choices};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use session::{Session, sign_in};
@@ -113,6 +116,8 @@ pub struct TeamCatalog {
     /// Revisions never change, so what was fetched for previews is kept
     /// until the next sign-in or sign-out.
     known: Mutex<KnownRevisions>,
+    /// The parts last made for the part list (see `last_known_parts`).
+    known_parts: Mutex<Option<Arc<KnownParts>>>,
 }
 
 impl Default for TeamCatalog {
@@ -227,6 +232,7 @@ impl TeamCatalog {
                 number: 0,
             }),
             known: Mutex::new(KnownRevisions::default()),
+            known_parts: Mutex::new(None),
             code: Mutex::new(String::new()),
         }
     }

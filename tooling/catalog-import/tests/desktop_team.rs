@@ -314,10 +314,15 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         kicad_config_dir: None,
         kicad_documents_dir: None,
     });
-    let current = team.current_values();
-    let names = team.category_names();
-    assert_eq!(names.get("res").map(String::as_str), Some("Resistors"));
-    let found = browser.search_with("47R thick", 10, &current, &names);
+    // The part list reads the team's last-known parts.
+    let parts = [team
+        .last_known_parts(&team.status().server_url, "TE")
+        .unwrap()];
+    assert_eq!(
+        parts[0].category_names.get("res").map(String::as_str),
+        Some("Resistors")
+    );
+    let found = browser.search_with("47R thick", 10, &parts);
     assert_eq!(found.total, 1, "{:?}", found.sections);
     assert_eq!(found.sections[0].name, "Resistors");
     let hit = found.hits().next().unwrap();
@@ -334,7 +339,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     // Words only the CSV description has no longer find it.
     assert!(
         browser
-            .search_with("1/10W 47", 10, &current, &names)
+            .search_with("1/10W 47", 10, &parts)
             .hits()
             .all(|hit| hit.ipn != IPN)
     );

@@ -251,7 +251,9 @@ fn audit_every_catalog_preview() {
 #[test]
 fn search_groups_the_parts_by_category() {
     use catalog_browser::PartValues;
+    use catalog_browser::team::KnownParts;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     let dir = tempfile::tempdir().unwrap();
     let empty = tempfile::tempdir().unwrap();
     let browser = open_browser(
@@ -263,12 +265,12 @@ fn search_groups_the_parts_by_category() {
     // its parts; g-mec.csv has none, so 20 of the 21 make a section.
     let all = browser.search("", 500);
     assert_eq!((all.total, all.shown(), all.sections.len()), (178, 178, 20));
-    assert!(all.sections.iter().all(|s| s.category != "mec"));
+    assert!(all.sections.iter().all(|s| s.key != "mec"));
     let names: Vec<&str> = all.sections.iter().map(|s| s.name.as_str()).collect();
     let mut sorted = names.clone();
     sorted.sort_by_key(|name| name.to_lowercase());
     assert_eq!(names, sorted);
-    let resistors = all.sections.iter().find(|s| s.category == "res").unwrap();
+    let resistors = all.sections.iter().find(|s| s.key == "res").unwrap();
     assert_eq!(resistors.name, "Resistors");
     assert_eq!(resistors.total, resistors.hits.len());
     assert!(resistors.hits.iter().all(|hit| hit.csv_file == "g-res.csv"));
@@ -286,11 +288,7 @@ fn search_groups_the_parts_by_category() {
 
     // A section shows at most `limit` parts but counts every match.
     let limited = browser.search("", 2);
-    let resistors = limited
-        .sections
-        .iter()
-        .find(|s| s.category == "res")
-        .unwrap();
+    let resistors = limited.sections.iter().find(|s| s.key == "res").unwrap();
     assert_eq!(resistors.hits.len(), 2);
     assert!(resistors.total > 2);
 
@@ -316,7 +314,8 @@ fn search_groups_the_parts_by_category() {
     ]
     .into();
     let names: BTreeMap<String, String> = [("cap".to_owned(), "Capacitors (C)".to_owned())].into();
-    let team = browser.search_with("", 500, &current, &names);
+    let parts = KnownParts::new("https://ma.example.com", "MA", current, names);
+    let team = browser.search_with("", 500, &[Arc::new(parts)]);
     assert_eq!(team.total, 179);
     let section_of = |ipn: &str| {
         team.sections
@@ -330,26 +329,31 @@ fn search_groups_the_parts_by_category() {
 
 #[test]
 fn search_answers_one_section_or_counts_only_and_always_shows_the_selected_part() {
-    use desktop_contract::SearchRequest;
-    use std::collections::BTreeMap;
+    use desktop_contract::{GroupBy, PartKey, SearchRequest};
     let dir = tempfile::tempdir().unwrap();
     let empty = tempfile::tempdir().unwrap();
     let browser = open_browser(
         dir.path(),
         SearchLocations::Only(vec![empty.path().to_path_buf()]),
     );
-    let (none, no_names) = (BTreeMap::new(), BTreeMap::new());
+    let no_teams = [];
+    // A part only the CSV catalog has belongs to no team.
     let request =
-        |query: &str, limit: usize, selected: Option<&str>, category: Option<&str>| SearchRequest {
+        |query: &str, limit: usize, selected: Option<&str>, section: Option<&str>| SearchRequest {
             query: query.to_owned(),
             limit,
-            selected: selected.map(str::to_owned),
-            category: category.map(str::to_owned),
+            selected: selected.map(|ipn| PartKey {
+                team: String::new(),
+                ipn: ipn.to_owned(),
+            }),
+            section: section.map(str::to_owned),
             uses: None,
+            team: None,
+            group_by: GroupBy::Category,
         };
 
     // Counts only, as the empty search asks while every section is closed.
-    let counts = browser.search_request(&request("", 0, None, None), &none, &no_names);
+    let counts = browser.search_request(&request("", 0, None, None), &no_teams);
     assert_eq!(
         (counts.total, counts.shown(), counts.sections.len()),
         (178, 0, 20)
@@ -357,11 +361,11 @@ fn search_answers_one_section_or_counts_only_and_always_shows_the_selected_part(
     assert_eq!(counts.selected, None);
 
     // One section's parts, as opening it asks.
-    let resistors = browser.search_request(&request("", 200, None, Some("res")), &none, &no_names);
+    let resistors = browser.search_request(&request("", 200, None, Some("res")), &no_teams);
     assert_eq!(resistors.sections.len(), 1);
     let section = &resistors.sections[0];
     assert_eq!(
-        (section.category.as_str(), section.hits.len()),
+        (section.key.as_str(), section.hits.len()),
         ("res", section.total)
     );
     assert_eq!(
@@ -372,16 +376,12 @@ fn search_answers_one_section_or_counts_only_and_always_shows_the_selected_part(
     // The selected part is always among its section's parts, and the answer
     // says which section holds it.
     let last = section.hits.last().unwrap().ipn.clone();
-    let found = browser.search_request(&request("", 1, Some(&last), None), &none, &no_names);
+    let found = browser.search_request(&request("", 1, Some(&last), None), &no_teams);
     assert_eq!(found.selected.as_deref(), Some("res"));
-    let res = found.sections.iter().find(|s| s.category == "res").unwrap();
+    let res = found.sections.iter().find(|s| s.key == "res").unwrap();
     assert!(res.hits.iter().any(|hit| hit.ipn == last), "{:?}", res.hits);
     // A selected part the search does not match is in no section.
-    let hidden = browser.search_request(
-        &request("stm32h723", 25, Some(&last), None),
-        &none,
-        &no_names,
-    );
+    let hidden = browser.search_request(&request("stm32h723", 25, Some(&last), None), &no_teams);
     assert_eq!(hidden.selected, None);
 
     // A trailing space is the same search.
@@ -393,25 +393,26 @@ fn search_answers_one_section_or_counts_only_and_always_shows_the_selected_part(
 
 #[test]
 fn shows_only_the_parts_using_a_reference_exactly() {
-    use desktop_contract::SearchRequest;
-    use std::collections::BTreeMap;
+    use desktop_contract::{GroupBy, SearchRequest};
     let dir = tempfile::tempdir().unwrap();
     let empty = tempfile::tempdir().unwrap();
     let browser = open_browser(
         dir.path(),
         SearchLocations::Only(vec![empty.path().to_path_buf()]),
     );
-    let (none, no_names) = (BTreeMap::new(), BTreeMap::new());
-    let uses = |reference: &str, query: &str, category: Option<&str>| SearchRequest {
+    let none = [];
+    let uses = |reference: &str, query: &str, section: Option<&str>| SearchRequest {
         query: query.to_owned(),
         limit: 500,
         selected: None,
-        category: category.map(str::to_owned),
+        section: section.map(str::to_owned),
         uses: Some(reference.to_owned()),
+        team: None,
+        group_by: GroupBy::Category,
     };
     // A footprint: every part listing it as a choice, and no other.
     let footprint = "g-Resistor_SMD:R_0603_1608Metric";
-    let found = browser.search_request(&uses(footprint, "", None), &none, &no_names);
+    let found = browser.search_request(&uses(footprint, "", None), &none);
     assert_eq!(found.uses.as_deref(), Some(footprint));
     assert!(found.total > 10, "{}", found.total);
     assert_eq!(found.total, found.shown());
@@ -427,14 +428,14 @@ fn shows_only_the_parts_using_a_reference_exactly() {
     let text = browser.search("R_0603_1608Metric", 500);
     assert!(text.total >= found.total);
     // A near name finds nothing; a search narrows further; one section.
-    let near = browser.search_request(&uses("g-Resistor_SMD:R_0603", "", None), &none, &no_names);
+    let near = browser.search_request(&uses("g-Resistor_SMD:R_0603", "", None), &none);
     assert_eq!(near.total, 0);
-    let narrowed = browser.search_request(&uses(footprint, "47", None), &none, &no_names);
+    let narrowed = browser.search_request(&uses(footprint, "47", None), &none);
     assert!(narrowed.total >= 1 && narrowed.total < found.total);
-    let section = browser.search_request(&uses(footprint, "", Some("res")), &none, &no_names);
+    let section = browser.search_request(&uses(footprint, "", Some("res")), &none);
     assert_eq!(section.sections.len(), 1);
     // A symbol, compared exactly.
-    let symbol = browser.search_request(&uses("g-res:R_US", "", None), &none, &no_names);
+    let symbol = browser.search_request(&uses("g-res:R_US", "", None), &none);
     assert!(symbol.total > 10);
     for hit in symbol.hits() {
         assert_eq!(

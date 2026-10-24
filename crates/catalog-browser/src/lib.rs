@@ -13,11 +13,13 @@ mod libraries;
 mod library;
 mod library_part;
 mod model3d;
+mod part_list;
 mod pick;
 pub mod team;
 pub mod teams;
 
 pub use model3d::MAX_GLB_BYTES;
+pub use part_list::MAX_SEARCH_LIMIT;
 
 use base64::Engine;
 use csv_catalog::{CatalogPart, CsvCatalog};
@@ -25,7 +27,7 @@ use desktop_contract::{
     AppStatus, CatalogStatus, Field, FileKind, FilePreviewRequest, KicadStatus, LibraryCheckView,
     PartDetail, PartSummary, PreviewImage, PreviewKind, PreviewOutcome, PreviewProblem,
     PreviewProblemReason, PreviewRequest, PreviewSet, PublishResult, SearchRequest, SearchResponse,
-    SearchSection, TeamDownload, TeamDownloadRequest, TeamIpnCheck, TeamNewPartRequest,
+    TeamDownload, TeamDownloadRequest, TeamIpnCheck, TeamNewPartRequest,
 };
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use kicad_integration::{
@@ -37,12 +39,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
-use std::time::Instant;
+use std::sync::{Arc, OnceLock, RwLock};
 use team::{StoredCad, TeamCad, TeamCadError, TeamCatalog};
-
-/// Largest page of search results the UI may request.
-pub const MAX_SEARCH_LIMIT: usize = 500;
 
 #[derive(Clone, Debug)]
 pub struct BrowserConfig {
@@ -86,10 +84,12 @@ pub struct CatalogBrowser {
     /// The CSV catalog's footprints with their pads, read the first time
     /// Add part needs them.
     footprints: OnceLock<Vec<add_part::LocalFootprint>>,
-    /// The IPNs of the CSV catalog this app loaded when it opened (`catalog`),
-    /// read the first time they are needed. The part list uses them with
-    /// `catalog`, so both must come from the same reading.
-    loaded_csv_ipns: OnceLock<BTreeSet<String>>,
+    /// Where each IPN's first row is in `catalog`, worked out the first
+    /// time the part list needs it, from the same reading.
+    csv_rows_by_ipn: OnceLock<std::collections::HashMap<String, usize>>,
+    /// Each team's parts made into part list rows, kept until that team's
+    /// parts change.
+    listed_teams: part_list::ListedTeams,
     /// The IPNs the CSV catalog folder holds now, for giving a new part its
     /// IPN: read again when the files change (kicad-parts-3b72).
     csv_ipns: csv_ipns::CsvIpns,
@@ -116,7 +116,8 @@ impl CatalogBrowser {
         }
         Self {
             footprints: OnceLock::new(),
-            loaded_csv_ipns: OnceLock::new(),
+            csv_rows_by_ipn: OnceLock::new(),
+            listed_teams: part_list::ListedTeams::default(),
             csv_ipns: csv_ipns::CsvIpns::new(&config.catalog_root),
             library_check: library::Cached::default(),
             libraries: libraries::LibraryIndex::new(config.cache_dir.clone()),
@@ -199,192 +200,31 @@ impl CatalogBrowser {
         Ok(self.status())
     }
 
+    /// The CSV catalog's parts matching `query`, with no team: at most
+    /// `limit` per section.
     pub fn search(&self, query: &str, limit: usize) -> SearchResponse {
-        self.search_with(query, limit, &BTreeMap::new(), &BTreeMap::new())
+        self.search_with(query, limit, &[])
     }
 
-    /// Like [`Self::search`], but the parts in `current` (by IPN, such as
-    /// the team catalog's current details) are matched on and shown with
-    /// those values, so a search finds what the app shows. `names` are the
-    /// team catalog's category names by code; a category it does not name
-    /// gets its starting name.
+    /// The parts of `teams` (in team order) and the CSV catalog matching
+    /// `query`, at most `limit` per category section, as the part list
+    /// shows them.
     pub fn search_with(
         &self,
         query: &str,
         limit: usize,
-        current: &BTreeMap<String, PartValues>,
-        names: &BTreeMap<String, String>,
+        teams: &[Arc<team::KnownParts>],
     ) -> SearchResponse {
         let request = SearchRequest {
             query: query.to_owned(),
             limit,
             selected: None,
-            category: None,
+            section: None,
             uses: None,
+            team: None,
+            group_by: desktop_contract::GroupBy::Category,
         };
-        self.search_request(&request, current, names)
-    }
-
-    /// The search behind the part list. The matches are grouped by
-    /// category, one section each, with at most `request.limit` parts per
-    /// section (0 for counts only) plus the selected part. Without a
-    /// search the sections are in name order; while searching, the section
-    /// with the best match comes first. With `request.category`, only that
-    /// section is answered.
-    pub fn search_request(
-        &self,
-        request: &SearchRequest,
-        current: &BTreeMap<String, PartValues>,
-        names: &BTreeMap<String, String>,
-    ) -> SearchResponse {
-        let started = Instant::now();
-        let query = request.query.trim();
-        let replace = |part: &CatalogPart| current.get(&part.ipn).map(|values| values.apply(part));
-        let (total, sections, selected) = match &self.catalog {
-            Ok(catalog) => {
-                // Parts only the team catalog has, such as ones added in the
-                // app, are found too, after the CSV catalog's.
-                let extra = self.team_only_parts(current);
-                // Every match is ranked (positions only, which is cheap), so
-                // each section knows its own count.
-                let results = catalog.search_with_extra(query, usize::MAX, replace, &extra.parts);
-                let count = catalog.parts().len();
-                let ipn_at = |position: usize| match position.checked_sub(count) {
-                    Some(at) => &extra.parts[at].ipn,
-                    None => &catalog.parts()[position].ipn,
-                };
-                let category_of = |position: usize| match position.checked_sub(count) {
-                    Some(at) => extra.categories[at].clone(),
-                    None => {
-                        let part = &catalog.parts()[position];
-                        current
-                            .get(&part.ipn)
-                            .and_then(|values| values.category.clone())
-                            .unwrap_or_else(|| {
-                                catalog::category::category_code(&part.category).to_owned()
-                            })
-                    }
-                };
-                // Only the parts using the reference, compared exactly.
-                let uses = request
-                    .uses
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|reference| !reference.is_empty());
-                let part_at = |position: usize| match position.checked_sub(count) {
-                    Some(at) => extra.parts[at].clone(),
-                    None => {
-                        let part = &catalog.parts()[position];
-                        replace(part).unwrap_or_else(|| part.clone())
-                    }
-                };
-                let wanted = |position: usize| {
-                    uses.is_none_or(|reference| part_uses(&part_at(position), reference))
-                };
-                let total = results
-                    .hits
-                    .iter()
-                    .filter(|&&position| wanted(position))
-                    .count();
-                let selected_position = request.selected.as_deref().and_then(|selected| {
-                    results
-                        .hits
-                        .iter()
-                        .copied()
-                        .find(|&position| ipn_at(position) == selected && wanted(position))
-                });
-                let selected = selected_position.map(category_of);
-                let ranked = results
-                    .hits
-                    .iter()
-                    .zip(&results.ranks)
-                    .map(|(&position, &rank)| Ranked {
-                        category: category_of(position),
-                        position,
-                        rank,
-                    })
-                    .filter(|ranked| {
-                        request
-                            .category
-                            .as_ref()
-                            .is_none_or(|wanted| *wanted == ranked.category)
-                            && wanted(ranked.position)
-                    });
-                let groups = group_by_category(
-                    ranked,
-                    &Grouping {
-                        limit: request.limit.min(MAX_SEARCH_LIMIT),
-                        names,
-                        searching: !query.is_empty() || uses.is_some(),
-                        selected: selected_position,
-                    },
-                );
-                let sections = groups
-                    .into_iter()
-                    .map(|group| SearchSection {
-                        category: group.code,
-                        name: group.name,
-                        total: group.total,
-                        hits: group
-                            .positions
-                            .into_iter()
-                            .map(|position| match position.checked_sub(count) {
-                                Some(at) => summary(&extra.parts[at]),
-                                None => {
-                                    let part = &catalog.parts()[position];
-                                    summary(&replace(part).unwrap_or_else(|| part.clone()))
-                                }
-                            })
-                            .collect(),
-                    })
-                    .collect();
-                (total, sections, selected)
-            }
-            Err(_) => (0, Vec::new(), None),
-        };
-        SearchResponse {
-            query: request.query.clone(),
-            uses: request.uses.clone(),
-            total,
-            sections,
-            selected,
-            elapsed_micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-        }
-    }
-
-    /// The parts in `current` (the team catalog's) that the CSV catalog
-    /// does not have, in IPN order.
-    fn team_only_parts(&self, current: &BTreeMap<String, PartValues>) -> TeamOnlyParts {
-        let csv = self.loaded_csv_ipns();
-        let (parts, categories) = current
-            .iter()
-            .filter(|(ipn, _)| !csv.contains(*ipn))
-            .map(|(ipn, values)| {
-                (
-                    values.part(ipn),
-                    values.category.clone().unwrap_or_default(),
-                )
-            })
-            .unzip();
-        TeamOnlyParts { parts, categories }
-    }
-
-    /// Every IPN of the CSV catalog this app loaded when it opened, read
-    /// once. Only for showing parts with that same reading; a new part's IPN
-    /// is checked against the folder as it is now (`csv_ipns`).
-    fn loaded_csv_ipns(&self) -> &BTreeSet<String> {
-        self.loaded_csv_ipns.get_or_init(|| {
-            self.catalog
-                .as_ref()
-                .map(|catalog| {
-                    catalog
-                        .parts()
-                        .iter()
-                        .map(|part| part.ipn.clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
+        self.search_request(&request, teams)
     }
 
     /// Like [`Self::part`], but a part only the team catalog has (in
@@ -1359,105 +1199,11 @@ fn detail(part: &CatalogPart) -> PartDetail {
     }
 }
 
-/// The parts only the team catalog has, with the category code of each.
-struct TeamOnlyParts {
-    parts: Vec<CatalogPart>,
-    categories: Vec<String>,
-}
-
-/// One match of a search, with its category code and rank (see
-/// [`csv_catalog::SearchResults::ranks`]).
-#[derive(Clone, Debug)]
-struct Ranked {
-    category: String,
-    position: usize,
-    rank: u8,
-}
-
-/// How [`group_by_category`] groups.
-struct Grouping<'a> {
-    /// Most positions kept per section; 0 keeps none (counts only).
-    limit: usize,
-    /// The team catalog's category names, by code.
-    names: &'a BTreeMap<String, String>,
-    /// Whether this is a search, which orders sections by best match.
-    searching: bool,
-    /// The selected part's position, always kept in its section.
-    selected: Option<usize>,
-}
-
-/// The matches of one category, for one section of the part list.
-#[derive(Debug, Eq, PartialEq)]
-struct CategoryGroup {
-    code: String,
-    name: String,
-    /// Every match in this category.
-    total: usize,
-    /// The rank of its best match.
-    best_rank: u8,
-    /// The first `limit` of them, best first, and the selected part.
-    positions: Vec<usize>,
-}
-
-/// Groups ranked matches, given best first, into one group per category.
-/// Each group keeps the rank order and at most `limit` positions (plus the
-/// selected part), but counts every match. Groups are in name order; while
-/// searching, the group with the best match comes first, ties by name.
-/// "Other parts" (no category) is always last. A category without matches
-/// makes no section, so an empty CSV file (g-mec.csv) has none: 21 CSV
-/// files, 20 sections.
-fn group_by_category(
-    ranked: impl IntoIterator<Item = Ranked>,
-    how: &Grouping<'_>,
-) -> Vec<CategoryGroup> {
-    let mut groups: BTreeMap<String, CategoryGroup> = BTreeMap::new();
-    for Ranked {
-        category,
-        position,
-        rank,
-    } in ranked
-    {
-        let group = groups
-            .entry(category)
-            .or_insert_with_key(|code| CategoryGroup {
-                name: category_name(code, how.names),
-                code: code.clone(),
-                total: 0,
-                best_rank: rank,
-                positions: Vec::new(),
-            });
-        group.total += 1;
-        group.best_rank = group.best_rank.min(rank);
-        if group.positions.len() < how.limit || how.selected == Some(position) {
-            group.positions.push(position);
-        }
-    }
-    let mut groups: Vec<CategoryGroup> = groups.into_values().collect();
-    groups.sort_by(|a, b| {
-        let rank = |g: &CategoryGroup| if how.searching { g.best_rank } else { 0 };
-        (a.code.is_empty(), rank(a))
-            .cmp(&(b.code.is_empty(), rank(b)))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            .then_with(|| a.code.cmp(&b.code))
-    });
-    groups
-}
-
-/// A category's plain name: the team catalog's, else the one it starts
-/// with, else its code. A part without a category is in "Other parts".
-fn category_name(code: &str, names: &BTreeMap<String, String>) -> String {
-    if code.is_empty() {
-        return "Other parts".to_owned();
-    }
-    names
-        .get(code)
-        .cloned()
-        .or_else(|| catalog::category::starting_category(code).map(|start| start.name.to_owned()))
-        .unwrap_or_else(|| code.to_owned())
-}
-
+/// How the part list shows `part`, with no team; the part list names the
+/// team of each row.
 fn summary(part: &CatalogPart) -> PartSummary {
     PartSummary {
+        team: String::new(),
         ipn: part.ipn.clone(),
         // A part only the team catalog has comes from no CSV file.
         csv_file: if part.category.is_empty() {
@@ -1654,144 +1400,5 @@ mod tests {
         ] {
             assert_eq!(svg_view_box(bad), None, "{bad}");
         }
-    }
-
-    /// Ranked matches as (category, position, rank), best first.
-    fn ranked(items: &[(&str, usize, u8)]) -> Vec<Ranked> {
-        items
-            .iter()
-            .map(|(code, position, rank)| Ranked {
-                category: (*code).to_owned(),
-                position: *position,
-                rank: *rank,
-            })
-            .collect()
-    }
-
-    fn grouping(limit: usize, searching: bool) -> Grouping<'static> {
-        static NO_NAMES: BTreeMap<String, String> = BTreeMap::new();
-        Grouping {
-            limit,
-            names: &NO_NAMES,
-            searching,
-            selected: None,
-        }
-    }
-
-    fn summary_of(groups: &[CategoryGroup]) -> Vec<(&str, &str, usize, &[usize])> {
-        groups
-            .iter()
-            .map(|g| {
-                (
-                    g.code.as_str(),
-                    g.name.as_str(),
-                    g.total,
-                    g.positions.as_slice(),
-                )
-            })
-            .collect()
-    }
-
-    #[test]
-    fn without_a_search_sections_are_in_name_order_keeping_rank_order() {
-        let groups = group_by_category(
-            ranked(&[
-                ("res", 7, 2),
-                ("cap", 3, 2),
-                ("res", 1, 2),
-                ("ana", 9, 2),
-                ("cap", 0, 2),
-            ]),
-            &grouping(10, false),
-        );
-        assert_eq!(
-            summary_of(&groups),
-            [
-                ("ana", "Analog ICs", 1, &[9][..]),
-                ("cap", "Capacitors", 2, &[3, 0][..]),
-                ("res", "Resistors", 2, &[7, 1][..]),
-            ]
-        );
-    }
-
-    #[test]
-    fn while_searching_the_section_with_the_best_match_comes_first() {
-        // res holds the exact match (rank 0); cap and ana tie on rank 1,
-        // so they go by name; dio has only rank-2 matches.
-        let groups = group_by_category(
-            ranked(&[
-                ("res", 4, 0),
-                ("cap", 3, 1),
-                ("ana", 9, 1),
-                ("dio", 2, 2),
-                ("res", 1, 2),
-            ]),
-            &grouping(10, true),
-        );
-        let codes: Vec<&str> = groups.iter().map(|g| g.code.as_str()).collect();
-        assert_eq!(codes, ["res", "ana", "cap", "dio"]);
-    }
-
-    #[test]
-    fn other_parts_always_come_last() {
-        for searching in [false, true] {
-            let groups = group_by_category(
-                ranked(&[("", 0, 0), ("res", 1, 2), ("zzz", 2, 2)]),
-                &grouping(10, searching),
-            );
-            let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
-            assert_eq!(names.last(), Some(&"Other parts"), "searching: {searching}");
-        }
-    }
-
-    #[test]
-    fn each_section_shows_at_most_the_limit_but_counts_every_match() {
-        let many: Vec<Ranked> = (0..5)
-            .map(|n| Ranked {
-                category: "res".to_owned(),
-                position: n,
-                rank: 2,
-            })
-            .collect();
-        let groups = group_by_category(many.clone(), &grouping(2, false));
-        assert_eq!(
-            (groups[0].total, groups[0].positions.as_slice()),
-            (5, &[0, 1][..])
-        );
-        // Counts only: no parts at all.
-        let groups = group_by_category(many.clone(), &grouping(0, false));
-        assert_eq!((groups[0].total, groups[0].positions.len()), (5, 0));
-        // The selected part is always among its section's parts.
-        let groups = group_by_category(
-            many,
-            &Grouping {
-                selected: Some(4),
-                ..grouping(2, false)
-            },
-        );
-        assert_eq!(groups[0].positions, [0, 1, 4]);
-    }
-
-    #[test]
-    fn team_names_win_then_starting_names_then_the_code() {
-        let names: BTreeMap<String, String> =
-            [("res".to_owned(), "Fixed resistors".to_owned())].into();
-        let groups = group_by_category(
-            ranked(&[("res", 0, 2), ("cap", 1, 2), ("zzz", 2, 2), ("", 3, 2)]),
-            &Grouping {
-                names: &names,
-                ..grouping(10, false)
-            },
-        );
-        let shown: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(
-            shown,
-            ["Capacitors", "Fixed resistors", "zzz", "Other parts"]
-        );
-    }
-
-    #[test]
-    fn nothing_matching_makes_no_sections() {
-        assert!(group_by_category(Vec::new(), &grouping(10, true)).is_empty());
     }
 }

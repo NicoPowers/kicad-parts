@@ -18,6 +18,7 @@
 use crate::SEARCH_BOX;
 use crate::focus::{Scrolling, focus_now};
 use crate::part_list::{RESULTS, section_id};
+use desktop_contract::PartKey;
 use leptos::prelude::*;
 use leptos::web_sys::{Element, FocusEvent};
 use std::collections::BTreeMap;
@@ -26,20 +27,20 @@ use wasm_bindgen::JsCast;
 /// What has keyboard focus in the part list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Focused {
-    /// The row of part `ipn`, in the section of `category`.
-    Row { category: String, ipn: String },
-    /// The "Show all" button at the end of the section of `category`.
-    ShowAll { category: String },
-    /// The header button of the section of `category`.
-    Section { category: String },
+    /// The row of `part` (its team and IPN), in the section `section`.
+    Row { section: String, part: PartKey },
+    /// The "Show all" button at the end of the section `section`.
+    ShowAll { section: String },
+    /// The header button of the section `section`.
+    Section { section: String },
 }
 
 impl Focused {
-    fn category(&self) -> &str {
+    fn section(&self) -> &str {
         match self {
-            Focused::Row { category, .. }
-            | Focused::ShowAll { category }
-            | Focused::Section { category } => category,
+            Focused::Row { section, .. }
+            | Focused::ShowAll { section }
+            | Focused::Section { section } => section,
         }
     }
 }
@@ -49,8 +50,8 @@ impl Focused {
 pub(crate) struct DrawnSection {
     /// The section's plain name, such as "Resistors".
     pub(crate) name: String,
-    /// The IPNs of the rows drawn, in order; none while it is closed.
-    pub(crate) rows: Vec<String>,
+    /// The parts of the rows drawn, in order; none while it is closed.
+    pub(crate) rows: Vec<PartKey>,
     /// Whether it ends with a "Show all" button.
     pub(crate) show_all: bool,
 }
@@ -64,7 +65,7 @@ pub(crate) enum Restore {
 }
 
 /// Where focus goes when the list changed while `focused` had it.
-/// `sections` are the category codes shown before and now, in order.
+/// `sections` are the section keys shown before and now, in order.
 /// `drawn` is what the focused item's section drew before and now.
 ///
 /// Focus stays on `focused` while it is still drawn, even if it moved. A
@@ -79,37 +80,37 @@ pub(crate) fn restore_target(
 ) -> Restore {
     let (sections_before, sections_now) = sections;
     let (drawn_before, drawn_now) = drawn;
-    let category = focused.category().to_owned();
-    if !sections_now.iter().any(|now| *now == category) {
-        return match where_focus_goes(sections_before, sections_now, &category) {
-            Some(category) => Restore::To(Focused::Section {
-                category: category.to_owned(),
+    let section = focused.section().to_owned();
+    if !sections_now.iter().any(|now| *now == section) {
+        return match where_focus_goes(sections_before, sections_now, &section) {
+            Some(section) => Restore::To(Focused::Section {
+                section: section.to_owned(),
             }),
             None => Restore::SearchBox,
         };
     }
     let header = || Focused::Section {
-        category: category.clone(),
+        section: section.clone(),
     };
     let target = match focused {
         Focused::Section { .. } => header(),
-        Focused::Row { ipn, .. } => {
-            match where_focus_goes(&drawn_before.rows, &drawn_now.rows, ipn) {
-                Some(ipn) => Focused::Row {
-                    category: category.clone(),
-                    ipn: ipn.to_owned(),
+        Focused::Row { part, .. } => {
+            match where_focus_goes(&drawn_before.rows, &drawn_now.rows, part) {
+                Some(part) => Focused::Row {
+                    section: section.clone(),
+                    part: part.clone(),
                 },
                 None if drawn_now.show_all => Focused::ShowAll {
-                    category: category.clone(),
+                    section: section.clone(),
                 },
                 None => header(),
             }
         }
         Focused::ShowAll { .. } if drawn_now.show_all => focused.clone(),
         Focused::ShowAll { .. } => match drawn_now.rows.last() {
-            Some(ipn) => Focused::Row {
-                category: category.clone(),
-                ipn: ipn.clone(),
+            Some(part) => Focused::Row {
+                section: section.clone(),
+                part: part.clone(),
             },
             None => header(),
         },
@@ -123,23 +124,30 @@ pub(crate) fn restore_target(
 /// listed: the one that took its place. At the end of the list it goes to
 /// the last item before it. When nothing from `before` is left, it goes to
 /// the first item. `None` when `now` is empty.
-pub(crate) fn where_focus_goes<'a>(
-    before: &[String],
-    now: &'a [String],
-    focused: &str,
-) -> Option<&'a str> {
-    let listed = |item: &str| now.iter().find(|listed| listed.as_str() == item);
+pub(crate) fn where_focus_goes<'a, T, F>(before: &[T], now: &'a [T], focused: &F) -> Option<&'a T>
+where
+    T: PartialEq + std::borrow::Borrow<F>,
+    F: PartialEq + ?Sized,
+{
+    let listed = |item: &F| now.iter().find(|listed| (*listed).borrow() == item);
     if let Some(item) = listed(focused) {
         return Some(item);
     }
     let neighbour = before
         .iter()
-        .position(|item| item == focused)
+        .position(|item| item.borrow() == focused)
         .and_then(|at| {
-            let after = before[at + 1..].iter().find_map(|item| listed(item));
-            after.or_else(|| before[..at].iter().rev().find_map(|item| listed(item)))
+            let after = before[at + 1..]
+                .iter()
+                .find_map(|item| listed(item.borrow()));
+            after.or_else(|| {
+                before[..at]
+                    .iter()
+                    .rev()
+                    .find_map(|item| listed(item.borrow()))
+            })
         });
-    neighbour.or_else(|| now.first()).map(String::as_str)
+    neighbour.or_else(|| now.first())
 }
 
 /// The note for screen readers when focus moved from `from` to `to`
@@ -150,7 +158,7 @@ pub(crate) fn moved_note(from: &Focused, to: &Restore, section_name: &str) -> Op
         return None;
     }
     match from {
-        Focused::Row { ipn, .. } => Some(format!("{ipn} left the list.")),
+        Focused::Row { part, .. } => Some(format!("{} left the list.", part.ipn)),
         Focused::Section { .. } => Some(format!("{section_name} left the list.")),
         Focused::ShowAll { .. } => None,
     }
@@ -161,10 +169,10 @@ pub(crate) fn moved_note(from: &Focused, to: &Restore, section_name: &str) -> Op
 #[derive(Clone, Copy)]
 pub(crate) struct ListFocus {
     focused: StoredValue<Option<Focused>>,
-    /// The category codes of the sections shown, in order.
+    /// The keys of the sections shown, in order.
     sections: StoredValue<Vec<String>>,
-    /// What each section drew last, by category code. A section that is
-    /// gone keeps its entry, so its name is known when it leaves.
+    /// What each section drew last, by section key. A section that is gone
+    /// keeps its entry, so its name is known when it leaves.
     drawn: StoredValue<BTreeMap<String, DrawnSection>>,
     /// The note for screen readers, read out politely.
     pub(crate) note: RwSignal<String>,
@@ -217,22 +225,22 @@ impl ListFocus {
         }
     }
 
-    /// The sections shown are now `now` (category codes, in order).
+    /// The sections shown are now `now` (section keys, in order).
     pub(crate) fn sections_shown(&self, now: Vec<String>) {
         let before = self.sections.get_value();
         self.sections.set_value(now.clone());
         self.check(&before, &now, None);
     }
 
-    /// The section of `category` now draws `now`.
-    pub(crate) fn section_drawn(&self, category: &str, now: DrawnSection) {
+    /// The section `section` now draws `now`.
+    pub(crate) fn section_drawn(&self, section: &str, now: DrawnSection) {
         let before = self
             .drawn
-            .try_update_value(|drawn| drawn.insert(category.to_owned(), now))
+            .try_update_value(|drawn| drawn.insert(section.to_owned(), now))
             .flatten()
             .unwrap_or_default();
         let sections = self.sections.get_value();
-        self.check(&sections, &sections, Some((category, before)));
+        self.check(&sections, &sections, Some((section, before)));
     }
 
     /// Works out where focus goes after a change, and puts it there once
@@ -247,13 +255,13 @@ impl ListFocus {
         let Some(focused) = self.focused.get_value() else {
             return;
         };
-        let category = focused.category();
+        let section = focused.section();
         let drawn_now = self
             .drawn
-            .with_value(|drawn| drawn.get(category).cloned())
+            .with_value(|drawn| drawn.get(section).cloned())
             .unwrap_or_default();
         let drawn_before = match changed {
-            Some((changed, before)) if changed == category => before,
+            Some((changed, before)) if changed == section => before,
             _ => drawn_now.clone(),
         };
         let target = restore_target(
@@ -299,17 +307,18 @@ fn focus_is_lost() -> bool {
 fn element_for(target: &Restore) -> Option<Element> {
     let selector = match target {
         Restore::SearchBox => return document().get_element_by_id(SEARCH_BOX),
-        Restore::To(Focused::Section { category }) => format!(
+        Restore::To(Focused::Section { section }) => format!(
             "{RESULTS} .section-toggle[aria-controls={}]",
-            css_string(&section_id(category))
+            css_string(&section_id(section))
         ),
-        Restore::To(Focused::ShowAll { category }) => {
-            format!("#{} button.section-show-all", section_id(category))
+        Restore::To(Focused::ShowAll { section }) => {
+            format!("#{} button.section-show-all", section_id(section))
         }
-        Restore::To(Focused::Row { category, ipn }) => format!(
-            "#{} button.result[data-ipn={}]",
-            section_id(category),
-            css_string(ipn)
+        Restore::To(Focused::Row { section, part }) => format!(
+            "#{} button.result[data-team={}][data-ipn={}]",
+            section_id(section),
+            css_string(&part.team),
+            css_string(&part.ipn)
         ),
     };
     document().query_selector(&selector).ok().flatten()
@@ -342,30 +351,38 @@ mod tests {
         items.iter().map(|item| (*item).to_owned()).collect()
     }
 
-    fn drawn(rows: &[&str], show_all: bool) -> DrawnSection {
-        DrawnSection {
-            name: "Resistors".to_owned(),
-            rows: list(rows),
-            show_all,
-        }
-    }
-
-    fn row(category: &str, ipn: &str) -> Focused {
-        Focused::Row {
-            category: category.to_owned(),
+    /// The part `ipn` of team MA.
+    fn ma(ipn: &str) -> PartKey {
+        PartKey {
+            team: "https://ma.example.com".to_owned(),
             ipn: ipn.to_owned(),
         }
     }
 
-    fn header(category: &str) -> Focused {
-        Focused::Section {
-            category: category.to_owned(),
+    fn drawn(rows: &[&str], show_all: bool) -> DrawnSection {
+        DrawnSection {
+            name: "Resistors".to_owned(),
+            rows: rows.iter().map(|ipn| ma(ipn)).collect(),
+            show_all,
         }
     }
 
-    fn show_all(category: &str) -> Focused {
+    fn row(section: &str, ipn: &str) -> Focused {
+        Focused::Row {
+            section: section.to_owned(),
+            part: ma(ipn),
+        }
+    }
+
+    fn header(section: &str) -> Focused {
+        Focused::Section {
+            section: section.to_owned(),
+        }
+    }
+
+    fn show_all(section: &str) -> Focused {
         Focused::ShowAll {
-            category: category.to_owned(),
+            section: section.to_owned(),
         }
     }
 
@@ -492,15 +509,33 @@ mod tests {
     }
 
     #[test]
+    fn the_same_ipn_in_another_team_is_another_row() {
+        // MA's RES-1 left; AC's RES-1 is still listed, but it is not the
+        // row that had focus, so focus goes to the next row.
+        let ac = PartKey {
+            team: "https://ac.example.com".to_owned(),
+            ipn: "RES-1".to_owned(),
+        };
+        let before = [ma("RES-1"), ac.clone(), ma("RES-2")];
+        let now = [ac.clone(), ma("RES-2")];
+        assert_eq!(where_focus_goes(&before, &now, &ma("RES-1")), Some(&ac));
+        let now = [ma("RES-2")];
+        assert_eq!(
+            where_focus_goes(&before, &now, &ma("RES-1")),
+            Some(&ma("RES-2"))
+        );
+    }
+
+    #[test]
     fn focus_stays_on_an_item_still_listed_even_if_it_moved() {
         let before = list(&["A", "B", "C"]);
         assert_eq!(
             where_focus_goes(&before, &list(&["A", "B", "C", "D"]), "B"),
-            Some("B")
+            Some(&"B".to_owned())
         );
         assert_eq!(
             where_focus_goes(&before, &list(&["B", "A", "C"]), "B"),
-            Some("B")
+            Some(&"B".to_owned())
         );
     }
 
@@ -509,17 +544,17 @@ mod tests {
         let before = list(&["A", "B", "C", "D"]);
         assert_eq!(
             where_focus_goes(&before, &list(&["A", "C", "D"]), "B"),
-            Some("C")
+            Some(&"C".to_owned())
         );
         // The next one left, even when the one right after it went too.
         assert_eq!(
             where_focus_goes(&before, &list(&["A", "D"]), "B"),
-            Some("D")
+            Some(&"D".to_owned())
         );
         // A new item where it was is not "after it" in the old list.
         assert_eq!(
             where_focus_goes(&before, &list(&["A", "N", "C", "D"]), "B"),
-            Some("C")
+            Some(&"C".to_owned())
         );
     }
 
@@ -528,9 +563,12 @@ mod tests {
         let before = list(&["A", "B", "C"]);
         assert_eq!(
             where_focus_goes(&before, &list(&["A", "B"]), "C"),
-            Some("B")
+            Some(&"B".to_owned())
         );
-        assert_eq!(where_focus_goes(&before, &list(&["A"]), "C"), Some("A"));
+        assert_eq!(
+            where_focus_goes(&before, &list(&["A"]), "C"),
+            Some(&"A".to_owned())
+        );
     }
 
     #[test]
@@ -542,7 +580,7 @@ mod tests {
     fn an_item_not_seen_before_gives_focus_to_the_first_item() {
         assert_eq!(
             where_focus_goes(&list(&["A"]), &list(&["B", "C"]), "X"),
-            Some("B")
+            Some(&"B".to_owned())
         );
     }
 
@@ -550,7 +588,7 @@ mod tests {
     fn when_only_new_items_are_left_focus_goes_to_the_first() {
         assert_eq!(
             where_focus_goes(&list(&["A", "B"]), &list(&["N", "M"]), "A"),
-            Some("N")
+            Some(&"N".to_owned())
         );
     }
 }

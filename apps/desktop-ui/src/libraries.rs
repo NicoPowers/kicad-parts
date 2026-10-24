@@ -15,7 +15,7 @@ use crate::{Load, PreviewSection, backend, cad_reference, counted, grouped, into
 use desktop_contract::{
     LibrariesView, LibraryCheckView, LibraryEntry, LibraryFilters, LibraryGroup, LibraryItemDetail,
     LibraryItemRequest, LibraryItemRow, LibraryItems, LibraryItemsRequest, LibraryKey, MountFilter,
-    PreviewKind, PreviewOutcome, PreviewProblemReason, TeamLibraryChoice, TeamPickRequest,
+    PartKey, PreviewKind, PreviewOutcome, PreviewProblemReason, TeamLibraryChoice, TeamPickRequest,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -50,16 +50,16 @@ pub(crate) struct BrowseFor {
 /// What the browser can do outside itself.
 #[derive(Clone, Copy)]
 pub(crate) struct BrowserActions {
-    /// The team whose parts mark the items they use, by server address;
-    /// blank for none.
-    pub team: Signal<String>,
+    /// The team chosen in the part list, by server address: its parts mark
+    /// the items they use. `None` for every team's parts.
+    pub team: Signal<Option<String>>,
     /// Whether the person may start Add part.
     pub can_add: Memo<bool>,
     pub add_from: Callback<TeamLibraryChoice>,
     /// Searches the part list for a reference.
     pub show_parts: Callback<String>,
-    /// Opens a part by IPN.
-    pub open_part: Callback<String>,
+    /// Opens a part, named by its team and IPN.
+    pub open_part: Callback<PartKey>,
 }
 
 fn kind_noun(kind: PreviewKind, count: usize) -> &'static str {
@@ -237,7 +237,7 @@ pub(crate) fn LibrariesDialog(
         };
         spawn_local(async move {
             let team = actions.team.get_untracked();
-            if let Ok(Some(_)) = backend::library_item(&team, request).await {
+            if let Ok(Some(_)) = backend::library_item(team.as_deref(), request).await {
                 if selected.try_get_untracked().flatten().is_none() {
                     selected.set(Some(LibraryItemRow {
                         library: key,
@@ -274,7 +274,7 @@ pub(crate) fn LibrariesDialog(
                 }
                 let team = actions.team.get_untracked();
                 spawn_local(async move {
-                    let result = backend::library_items(&team, request).await;
+                    let result = backend::library_items(team.as_deref(), request).await;
                     if items_seq.try_get_value() == Some(seq) {
                         items.set(into_load(result));
                         busy.set(false);
@@ -309,7 +309,7 @@ pub(crate) fn LibrariesDialog(
         let for_detail = request.clone();
         let team = actions.team.get_untracked();
         spawn_local(async move {
-            let result = backend::library_item(&team, for_detail).await;
+            let result = backend::library_item(team.as_deref(), for_detail).await;
             if detail_seq.try_get_value() == Some(seq) {
                 detail.set(Some(into_load(result)));
             }
@@ -1261,15 +1261,18 @@ fn UsedBy(
                     .clone()
                     .into_iter()
                     .map(|part| {
-                        let ipn = part.ipn.clone();
+                        let key = PartKey {
+                            team: part.team.clone(),
+                            ipn: part.ipn.clone(),
+                        };
                         view! {
                             <li>
                                 <button
                                     type="button"
                                     class="link-button"
                                     on:click=move |_| {
-                                        let ipn = ipn.clone();
-                                        done_with.run(Box::new(move || actions.open_part.run(ipn)));
+                                        let key = key.clone();
+                                        done_with.run(Box::new(move || actions.open_part.run(key)));
                                     }
                                 >
                                     {part.ipn.clone()}

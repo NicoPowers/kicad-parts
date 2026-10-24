@@ -4,7 +4,8 @@
 use super::query::{self, SymbolOrFootprint, Uses};
 use super::read::{Links, MAX_SYMBOL_FILE_BYTES, read_limited};
 use super::sources::{Format, Places, is_link};
-use crate::{CatalogBrowser, Drawn, PartValues, export_problem, problem, ready};
+use crate::team::KnownParts;
+use crate::{CatalogBrowser, Drawn, export_problem, problem, ready};
 use desktop_contract::{
     LibrariesView, LibraryGroup, LibraryItemDetail, LibraryItemRequest, LibraryItems,
     LibraryItemsRequest, PartUse, PreviewKind, PreviewOutcome, PreviewProblemReason,
@@ -14,7 +15,7 @@ use kicad_integration::{
     Discovery, LibRef, LibraryOrigin, ResolvedFootprint, ResolvedSymbol, StoredItem,
     footprint_choices, installed_share_dir, sha256_hex,
 };
-use std::collections::BTreeMap;
+use std::sync::Arc;
 
 impl CatalogBrowser {
     /// The libraries and how far the background reading is. With
@@ -48,12 +49,14 @@ impl CatalogBrowser {
         self.libraries.wait_until_ready(timeout)
     }
 
-    /// The items `request` asks for. `current` holds the team catalog's
-    /// parts, which mark items In the Catalog with the CSV catalog's.
+    /// The items `request` asks for. The parts the part list shows for
+    /// `only` (a team's server address, or every team in `teams` when
+    /// `None`) mark the items they use as In the Catalog.
     pub fn library_items(
         &self,
         request: &LibraryItemsRequest,
-        current: &BTreeMap<String, PartValues>,
+        teams: &[Arc<KnownParts>],
+        only: Option<&str>,
     ) -> LibraryItems {
         if let Some(key) = &request.library {
             self.libraries.want(request.kind, key);
@@ -64,70 +67,55 @@ impl CatalogBrowser {
             PreviewKind::Symbol => Vec::new(),
             PreviewKind::Footprint => self.libraries.snapshot(PreviewKind::Symbol),
         };
-        query::items(&libraries, &symbols, request, &self.uses(current), reading)
+        let uses = self.uses(teams, only);
+        query::items(&libraries, &symbols, request, &uses, reading)
     }
 
-    /// One item's details, with the Catalog parts that use it.
+    /// One item's details, with the parts that use it among those the part
+    /// list shows for `only` (see [`Self::library_items`]).
     pub fn library_item(
         &self,
         request: &LibraryItemRequest,
-        current: &BTreeMap<String, PartValues>,
+        teams: &[Arc<KnownParts>],
+        only: Option<&str>,
     ) -> Option<LibraryItemDetail> {
         let libraries = self.libraries.snapshot(request.kind);
         query::detail(
             &libraries,
             &request.library,
             &request.name,
-            &self.uses(current),
+            &self.uses(teams, only),
         )
     }
 
-    /// Which Catalog parts use each reference: the CSV catalog's parts with
-    /// the team catalog's current values, and parts only the team catalog
-    /// has.
-    fn uses(&self, current: &BTreeMap<String, PartValues>) -> Uses {
+    /// Which parts use each reference: the parts the part list shows, each
+    /// with its team, so a part two teams have is listed for each.
+    fn uses(&self, teams: &[Arc<KnownParts>], only: Option<&str>) -> Uses {
         let mut uses = Uses::new();
-        let mut add =
-            |ipn: &str, description: &str, symbol: Option<&str>, footprint: Option<&str>| {
-                let references = symbol
-                    .into_iter()
-                    .chain(footprint.map(footprint_choices).unwrap_or_default());
-                for reference in references {
-                    let reference = reference.trim();
-                    if reference.is_empty() {
-                        continue;
-                    }
-                    let list = uses.entry(reference.to_owned()).or_default();
-                    if !list.iter().any(|known| known.ipn == ipn) {
-                        list.push(PartUse {
-                            ipn: ipn.to_owned(),
-                            description: description.to_owned(),
-                        });
-                    }
-                }
-            };
-        if let Ok(catalog) = &self.catalog {
-            for part in catalog.parts() {
-                let part = current
-                    .get(&part.ipn)
-                    .map(|values| values.apply(part))
-                    .unwrap_or_else(|| part.clone());
-                add(
-                    &part.ipn,
-                    &part.description,
-                    part.symbol.as_deref(),
-                    part.footprint.as_deref(),
-                );
-            }
-        }
-        let csv = self.loaded_csv_ipns();
-        for (ipn, values) in current.iter().filter(|(ipn, _)| !csv.contains(*ipn)) {
-            add(
-                ipn,
-                values.description.as_deref().unwrap_or_default(),
-                values.symbol.as_deref(),
-                values.footprint.as_deref(),
+        for (team, part) in self.listed_parts(teams, only) {
+            let references = part.symbol.as_deref().into_iter().chain(
+                part.footprint
+                    .as_deref()
+                    .map(footprint_choices)
+                    .unwrap_or_default(),
             );
+            for reference in references {
+                let reference = reference.trim();
+                if reference.is_empty() {
+                    continue;
+                }
+                let list = uses.entry(reference.to_owned()).or_default();
+                if !list
+                    .iter()
+                    .any(|known| known.ipn == part.ipn && known.team == team)
+                {
+                    list.push(PartUse {
+                        team: team.clone(),
+                        ipn: part.ipn.clone(),
+                        description: part.description.clone(),
+                    });
+                }
+            }
         }
         uses
     }

@@ -117,23 +117,59 @@ pub struct CatalogStatus {
     pub error: Option<String>,
 }
 
+/// One part in the part list: its team and its IPN. Two teams may both
+/// have RES-0000-0470, so an IPN alone does not name a part. Selection,
+/// previews, edits and every request about a part use this.
+#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct PartKey {
+    /// The server address of the part's team; blank for a part only the
+    /// CSV catalog has, which belongs to no team.
+    pub team: String,
+    pub ipn: String,
+}
+
+/// How the part list puts parts into sections.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupBy {
+    /// One section per category, such as Resistors.
+    #[default]
+    Category,
+    /// One section per team, in the order of the Teams menu.
+    Team,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SearchRequest {
     pub query: String,
-    /// Most parts shown per category section; 0 asks for counts only.
+    /// Most parts shown per section; 0 asks for counts only.
     pub limit: usize,
     /// The selected part, which is always among its section's parts when
     /// the search matches it.
     #[serde(default)]
-    pub selected: Option<String>,
-    /// Only this category's section, by code, as opening a section asks.
+    pub selected: Option<PartKey>,
+    /// Only this section, by its key, as opening a section asks.
     #[serde(default)]
-    pub category: Option<String>,
+    pub section: Option<String>,
     /// Only the parts using this symbol or footprint, such as
     /// `g-res:R_US`: their Symbol, or one of their Footprint choices, is
     /// exactly it.
     #[serde(default)]
     pub uses: Option<String>,
+    /// Only the parts of this team, by server address. `None` lists every
+    /// signed-in team's parts, and the CSV catalog's parts no team has.
+    #[serde(default)]
+    pub team: Option<String>,
+    #[serde(default)]
+    pub group_by: GroupBy,
+}
+
+/// The key of the part list's section of the team at `server_url`, when
+/// grouping by team: blank `server_url` for the parts only the CSV
+/// catalog has. Kept apart from category codes, so a section the person
+/// opened in one grouping never opens one in the other.
+pub fn team_section(server_url: &str) -> String {
+    format!("team:{server_url}")
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -144,11 +180,12 @@ pub struct SearchResponse {
     pub uses: Option<String>,
     /// Parts matching the query, in every section.
     pub total: usize,
-    /// One section per category that has matches: in name order, or
-    /// while searching the section with the best match first.
+    /// One section per category (or team) that has matches. Categories
+    /// are in name order, or while searching the section with the best
+    /// match comes first. Teams are in the order of the Teams menu.
     pub sections: Vec<SearchSection>,
-    /// The category code of the section holding the selected part, when
-    /// the search matches it.
+    /// The key of the section holding the selected part, when the search
+    /// matches it.
     #[serde(default)]
     pub selected: Option<String>,
     pub elapsed_micros: u64,
@@ -166,14 +203,16 @@ impl SearchResponse {
     }
 }
 
-/// The parts of one category that match a search.
+/// The parts of one category, or of one team, that match a search.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SearchSection {
-    /// The category's code, such as `res`.
-    pub category: String,
-    /// Its plain name, such as `Resistors`.
+    /// The category's code, such as `res`, or for a team the
+    /// [`team_section`] key.
+    pub key: String,
+    /// Its plain name, such as `Resistors`, or the team's code, such as
+    /// `MA`.
     pub name: String,
-    /// Parts of this category matching the query, before `limit`.
+    /// Parts of this section matching the query, before `limit`.
     pub total: usize,
     /// At most `limit` of them, best match first.
     pub hits: Vec<PartSummary>,
@@ -181,6 +220,10 @@ pub struct SearchSection {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PartSummary {
+    /// The server address of the part's team; blank for a part only the
+    /// CSV catalog has.
+    #[serde(default)]
+    pub team: String,
     pub ipn: String,
     /// The CSV file the part was read from, such as `g-res.csv`.
     pub csv_file: String,
@@ -188,6 +231,16 @@ pub struct PartSummary {
     pub manufacturer: String,
     pub description: String,
     pub value: String,
+}
+
+impl PartSummary {
+    /// The part's team and IPN, which name it.
+    pub fn key(&self) -> PartKey {
+        PartKey {
+            team: self.team.clone(),
+            ipn: self.ipn.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -437,14 +490,20 @@ impl TeamStatus {
     /// How the person knows the team: its code, or else its server address
     /// without `https://`.
     pub fn label(&self) -> String {
-        if self.code.is_empty() {
-            self.server_url
-                .split_once("://")
-                .map_or(self.server_url.as_str(), |(_, rest)| rest)
-                .to_owned()
-        } else {
-            self.code.clone()
-        }
+        team_label(&self.code, &self.server_url)
+    }
+}
+
+/// How the person knows a team: its `code`, such as `MA`, or before the
+/// code is known its server address without `https://`.
+pub fn team_label(code: &str, server_url: &str) -> String {
+    if code.is_empty() {
+        server_url
+            .split_once("://")
+            .map_or(server_url, |(_, rest)| rest)
+            .to_owned()
+    } else {
+        code.to_owned()
     }
 }
 
@@ -1552,6 +1611,10 @@ pub struct LibraryItemRequest {
 /// A part that uses an item.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PartUse {
+    /// The server address of the part's team; blank for a part only the
+    /// CSV catalog has.
+    #[serde(default)]
+    pub team: String,
     pub ipn: String,
     pub description: String,
 }

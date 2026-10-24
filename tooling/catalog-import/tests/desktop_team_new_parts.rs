@@ -350,7 +350,10 @@ fn the_desktop_adds_a_part_from_a_download() {
             && after.starts_with("CL10B104/KiCad/C_0603_New.kicad_mod in CL10B104.zip (3D model path set to the Catalog's)")),
         "{rows:?}"
     );
-    let found = browser.search_with(MPN, 10, &team.current_values(), &team.category_names());
+    let parts = [team
+        .last_known_parts("https://team.example.test", "TE")
+        .unwrap()];
+    let found = browser.search_with(MPN, 10, &parts);
     assert_eq!(found.total, 1, "{found:?}");
     // A part only the team catalog has is in its category's section.
     assert_eq!(found.sections[0].name, "Capacitors");

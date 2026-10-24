@@ -19,9 +19,9 @@ mod viewer;
 
 use add_part::AddPartView;
 use desktop_contract::{
-    AppStatus, KicadStatus, LibraryCheckView, ManufacturerPart, PartDetail, PreviewKind,
-    PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet, TeamPart,
-    TeamSession, TeamStatus, TeamsStatus, unit_label,
+    AppStatus, GroupBy, KicadStatus, LibraryCheckView, ManufacturerPart, PartDetail, PartKey,
+    PreviewKind, PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet,
+    SearchRequest, TeamPart, TeamSession, TeamStatus, TeamsStatus, unit_label,
 };
 use focus::focus_later;
 use kicad_libraries::KicadLibrariesSection;
@@ -67,7 +67,8 @@ fn App() -> impl IntoView {
     // Libraries browser; shown as a chip that removes it.
     let uses = RwSignal::new(None::<String>);
     let results = RwSignal::new(Load::<Searched>::Loading);
-    let selected = RwSignal::new(None::<String>);
+    // The selected part, named by its team and IPN.
+    let selected = RwSignal::new(None::<PartKey>);
     let search_seq = StoredValue::new(0u64);
     // The kicad-cli path being typed; kept here so it survives the panel
     // re-rendering when a path is rejected.
@@ -98,6 +99,26 @@ fn App() -> impl IntoView {
                 .as_ref()
                 .map(|status| status.server_url.clone())
                 .unwrap_or_default()
+        })
+    });
+    // The selected part's team, while it has one and it is in the list.
+    let part_team = Memo::new(move |_| {
+        let team = selected.with(|part| part.as_ref().map(|part| part.team.clone()))?;
+        teams.with(|status| {
+            status
+                .as_ref()?
+                .teams
+                .iter()
+                .find(|listed| !team.is_empty() && listed.server_url == team)
+                .cloned()
+        })
+    });
+    // Whether any team shows parts: signed in, or offline after it was.
+    let any_team = Memo::new(move |_| {
+        teams.with(|status| {
+            status
+                .as_ref()
+                .is_some_and(|status| status.teams.iter().any(|team| team.session.is_signed_in()))
         })
     });
     // True while the Add part form is open in the part panel.
@@ -132,16 +153,8 @@ fn App() -> impl IntoView {
             checking.set(false);
         }
     });
-    let team_changes = Memo::new(move |_| {
-        team.with(|status| match status {
-            Some(TeamStatus {
-                server_url,
-                session: TeamSession::SignedIn { checkpoint, .. },
-                ..
-            }) => Some(position_number(server_url, *checkpoint)),
-            _ => None,
-        })
-    });
+    let team_changes =
+        Memo::new(move |_| teams.with(|status| status.as_ref().and_then(list_version)));
     let refresh_team = move || {
         spawn_local(async move {
             if let Ok(latest) = backend::team_status().await {
@@ -259,7 +272,6 @@ fn App() -> impl IntoView {
         // The answer says which section holds the selected part, and
         // always includes it there.
         let chosen = selected.get();
-        let team = shown_team.get();
         let seq = search_seq.get_value() + 1;
         search_seq.set_value(seq);
         set_timeout(
@@ -275,13 +287,21 @@ fn App() -> impl IntoView {
                     } else {
                         SEARCH_ROWS
                     };
-                    let response =
-                        backend::search(&team, text, limit, chosen.clone(), None, only_using).await;
+                    let request = SearchRequest {
+                        query: text,
+                        limit,
+                        selected: chosen,
+                        section: None,
+                        uses: only_using,
+                        team: None,
+                        group_by: GroupBy::Category,
+                    };
+                    let response = backend::search(request.clone()).await;
                     // Ignore answers to queries the user has already replaced.
                     if search_seq.get_value() == seq {
                         results.set(into_load(response).map(|response| Searched {
                             response,
-                            selected: chosen,
+                            request,
                             version,
                         }));
                     }
@@ -374,18 +394,14 @@ fn App() -> impl IntoView {
                             refresh_check();
                         })
                     />
-                    <ResultList
-                        results=results
-                        selected=selected
-                        adding=adding
-                        checking=checking
-                        team=shown_team.into()
-                    />
+                    <ResultList results=results selected=selected adding=adding checking=checking />
                 </section>
                 <PartPanel
                     selected=selected
                     kicad_epoch=kicad_epoch
-                    team=team
+                    team=part_team
+                    any_team=any_team
+                    add_team=shown_team
                     adding=adding
                     checking=checking
                     library_check=library_check
@@ -397,7 +413,7 @@ fn App() -> impl IntoView {
                     open=libraries_open
                     library_check=library_check
                     actions=BrowserActions {
-                        team: shown_team.into(),
+                        team: Signal::derive(|| None),
                         can_add,
                         add_from: Callback::new(move |choice| library_add.set(Some(choice))),
                         show_parts: Callback::new(move |reference: String| {
@@ -405,10 +421,10 @@ fn App() -> impl IntoView {
                             uses.set(Some(reference));
                             focus_later(SEARCH_BOX);
                         }),
-                        open_part: Callback::new(move |ipn: String| {
+                        open_part: Callback::new(move |part: PartKey| {
                             checking.set(false);
                             adding.set(false);
-                            selected.set(Some(ipn));
+                            selected.set(Some(part));
                         }),
                     }
                 />
@@ -417,14 +433,21 @@ fn App() -> impl IntoView {
     }
 }
 
-/// One number for the shown team and how far the app has followed it, so
-/// the search runs again on a new Change or on switching teams: two teams
-/// may share a checkpoint.
-fn position_number(server_url: &str, checkpoint: u64) -> u64 {
+/// One number for how far the app has followed every team that shows
+/// parts, so the search runs again when anyone saves a Change on any team,
+/// or a team signs in or out. `None` while no team shows parts. Each team's
+/// address goes in too: two teams may share a checkpoint.
+fn list_version(status: &TeamsStatus) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (server_url, checkpoint).hash(&mut hasher);
-    hasher.finish()
+    let mut any = false;
+    for team in &status.teams {
+        if let TeamSession::SignedIn { checkpoint, .. } = &team.session {
+            (&team.server_url, checkpoint).hash(&mut hasher);
+            any = true;
+        }
+    }
+    any.then(|| hasher.finish())
 }
 
 /// `20000` as `20,000`.
@@ -733,10 +756,16 @@ fn SettingsProblem(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
 }
 
 #[component]
+#[allow(clippy::too_many_arguments)]
 fn PartPanel(
-    selected: RwSignal<Option<String>>,
+    selected: RwSignal<Option<PartKey>>,
     kicad_epoch: RwSignal<u32>,
+    /// The selected part's team, if it has one.
     team: Memo<Option<TeamStatus>>,
+    /// Whether any team shows parts.
+    any_team: Memo<bool>,
+    /// The team a new part goes into.
+    add_team: Memo<String>,
     adding: RwSignal<bool>,
     checking: RwSignal<bool>,
     library_check: RwSignal<Option<LibraryCheckView>>,
@@ -810,20 +839,16 @@ fn PartPanel(
             )
         })
     });
-    // The team every request names: the shown one.
+    // The selected part's team, which every request about it names.
     let team_url = Memo::new(move |_| {
-        team.with(|status| {
-            status
-                .as_ref()
-                .map(|status| status.server_url.clone())
+        selected.with(|part| {
+            part.as_ref()
+                .map(|part| part.team.clone())
                 .unwrap_or_default()
         })
     });
-    Effect::new(move |_| {
-        let url = team_url.get();
-        ui.team.set(url.clone());
-        add_form.team.set(url);
-    });
+    Effect::new(move |_| ui.team.set(team_url.get()));
+    Effect::new(move |_| add_form.team.set(add_team.get()));
     // For a part the team catalog has: the revision shown, whose exact CAD
     // item revisions the previews are drawn from, and its Symbol and
     // Footprint in case those cannot be fetched. Otherwise the CSV catalog's.
@@ -837,7 +862,7 @@ fn PartPanel(
     });
 
     Effect::new(move |_| {
-        let Some(ipn) = selected.get() else {
+        let Some(PartKey { team, ipn }) = selected.get() else {
             detail.set(None);
             return;
         };
@@ -850,7 +875,6 @@ fn PartPanel(
         if let Some(message) = pending_notice.try_update_value(Option::take).flatten() {
             ui.notice.set(Some(Notice::Done(message)));
         }
-        let team = team_url.get_untracked();
         spawn_local(async move {
             let result = backend::part_detail(&team, &ipn).await;
             if seq.get_value() == current {
@@ -861,7 +885,7 @@ fn PartPanel(
 
     Effect::new(move |_| {
         let signed_in = team_checkpoint.get().is_some();
-        let Some(ipn) = selected.get() else {
+        let Some(PartKey { team, ipn }) = selected.get() else {
             return;
         };
         if !signed_in {
@@ -871,11 +895,13 @@ fn PartPanel(
         }
         let current = team_seq.get_value() + 1;
         team_seq.set_value(current);
-        let team = team_url.get_untracked();
+        let asked = PartKey {
+            team: team.clone(),
+            ipn: ipn.clone(),
+        };
         spawn_local(async move {
             let result = backend::team_part(&team, &ipn).await;
-            if team_seq.get_value() == current && selected.get_untracked().as_deref() == Some(&ipn)
-            {
+            if team_seq.get_value() == current && selected.get_untracked() == Some(asked) {
                 // Keep showing the last good view if a refresh fails, and a
                 // newer one than this answer: a refresh started before a
                 // save of this app's own can arrive after the save's own
@@ -935,7 +961,7 @@ fn PartPanel(
         // this symbol" card from the signed-out moment never stays.
         signed_in_as.track();
         let source = preview_source.get();
-        let Some(ipn) = selected.get() else {
+        let Some(PartKey { team, ipn }) = selected.get() else {
             return;
         };
         let current = preview_seq.get_value() + 1;
@@ -960,7 +986,7 @@ fn PartPanel(
                 team_revision,
                 selection: Some(this_selection),
             };
-            let team = team_url.get_untracked();
+            let team = team.clone();
             spawn_local(async move {
                 let replaced = |result: &Result<PreviewOutcome, String>| {
                     matches!(
@@ -1005,7 +1031,10 @@ fn PartPanel(
     let added = Callback::new(move |ipn: String| {
         pending_notice.set_value(Some(format!("Added {ipn} as revision 1.")));
         adding.set(false);
-        selected.set(Some(ipn));
+        selected.set(Some(PartKey {
+            team: add_form.team.get_untracked(),
+            ipn,
+        }));
     });
     // The Library check's Add part from it: Add part opens with the symbol
     // or footprint chosen in our libraries.
@@ -1021,10 +1050,14 @@ fn PartPanel(
             add_from.run(choice);
         }
     });
+    // A part of the team Add part was adding to.
     let open_part = Callback::new(move |(ipn, part): (String, Option<ManufacturerPart>)| {
         pending_part.set_value(part.map(|part| (ipn.clone(), part)));
         adding.set(false);
-        selected.set(Some(ipn));
+        selected.set(Some(PartKey {
+            team: add_form.team.get_untracked(),
+            ipn,
+        }));
     });
     view! {
         <section
@@ -1070,7 +1103,9 @@ fn PartPanel(
                         footprint=footprint
                         team_part=team_part
                         team_checked=team_checked
-                        signed_in=Signal::derive(move || team_checkpoint.get().is_some())
+                        in_no_team=Signal::derive(move || {
+                            any_team.get() && team_url.with(String::is_empty)
+                        })
                         can_edit=can_edit
                         ui=ui
                     />
@@ -1089,7 +1124,8 @@ fn PartView(
     footprint: RwSignal<Load<PreviewOutcome>>,
     team_part: RwSignal<Option<TeamPart>>,
     team_checked: RwSignal<bool>,
-    signed_in: Signal<bool>,
+    /// The part is only in the CSV files while a team shows parts.
+    in_no_team: Signal<bool>,
     can_edit: Memo<bool>,
     ui: TeamUi,
 ) -> impl IntoView {
@@ -1191,7 +1227,7 @@ fn PartView(
                             .into_any();
                         }
                         let fields = fields.clone();
-                        let not_in_team = signed_in.get() && team_checked.get();
+                        let not_in_team = in_no_team.get() || team_checked.get();
                         view! {
                             <h3 id="fields-heading">{format!("Catalog fields ({field_count})")}</h3>
                             {not_in_team.then(|| view! {

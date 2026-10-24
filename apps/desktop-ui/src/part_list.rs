@@ -1,5 +1,7 @@
-//! The part list on the left: the search results, one section per category
-//! that opens and closes (an accordion).
+//! The part list on the left: the search results over every signed-in
+//! team, one section per category (or per team) that opens and closes (an
+//! accordion). A part is named by its team and IPN ([`PartKey`]): two
+//! teams may both have RES-0000-0470, and each is its own row.
 //!
 //! With an empty search every section starts closed and keeps what the
 //! person opened and closed; a section's parts are loaded when it opens.
@@ -15,7 +17,7 @@
 use crate::focus::{Scrolling, focus_found_later};
 use crate::list_focus::{DrawnSection, Focused, ListFocus};
 use crate::{Load, backend, grouped};
-use desktop_contract::{PartSummary, SearchResponse};
+use desktop_contract::{PartKey, PartSummary, SearchRequest, SearchResponse};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,9 +35,10 @@ pub(crate) const SECTION_ROWS: usize = 200;
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Searched {
     pub(crate) response: SearchResponse,
-    /// The part that was selected when the search was asked for.
-    pub(crate) selected: Option<String>,
-    /// The team catalog's position then. After a change in the same
+    /// The search asked for, with the part that was selected then. Opening
+    /// a section asks the same, for that section alone.
+    pub(crate) request: SearchRequest,
+    /// Where the teams' catalogs stood then. After a change in the same
     /// search, open sections keep their parts and load again.
     pub(crate) version: Option<u64>,
 }
@@ -47,7 +50,7 @@ fn searching(query: &str) -> bool {
 
 /// What the list's open sections and loaded parts are kept for: the
 /// search, and the reference the parts are limited to, if any. Not empty
-/// whenever either is given, so a limited list counts as a search.
+/// whenever a reference is given, so a limited list counts as a search.
 pub(crate) fn search_key(response: &SearchResponse) -> String {
     let query = response.query.trim();
     match response.uses.as_deref() {
@@ -56,11 +59,23 @@ pub(crate) fn search_key(response: &SearchResponse) -> String {
     }
 }
 
+/// What the loaded parts are kept for: the search, the team chosen and how
+/// the list is grouped. Another team or grouping loads every open section
+/// afresh, as another search does.
+fn loaded_key(searched: &Searched) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{:?}",
+        search_key(&searched.response),
+        searched.request.team.as_deref().unwrap_or_default(),
+        searched.request.group_by
+    )
+}
+
 /// Which sections are open.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct OpenSections {
-    /// The sections the person has open while not searching, by category
-    /// code. Kept for the session.
+    /// The sections the person has open while not searching, by section
+    /// key. Kept for the session.
     opened: BTreeSet<String>,
     /// While searching, the sections the person opened or closed by hand,
     /// and the search (trimmed) they did it in. A new search forgets them.
@@ -68,7 +83,7 @@ pub(crate) struct OpenSections {
 }
 
 impl OpenSections {
-    /// Whether `category`'s section is open in the results for `query`.
+    /// Whether the section `category` is open in the results for `query`.
     pub(crate) fn is_open(&self, category: &str, query: &str) -> bool {
         let query = query.trim();
         if query.is_empty() {
@@ -121,14 +136,14 @@ struct Reveals {
     /// A part just selected, and the search (trimmed) shown then, until a
     /// result set holds it; typing another search forgets it, but clearing
     /// the search does not.
-    pending: Option<(String, String)>,
+    pending: Option<(PartKey, String)>,
     /// The part last revealed and the section it was in.
-    revealed: Option<(String, String)>,
+    revealed: Option<(PartKey, String)>,
 }
 
 impl Reveals {
-    fn select(&mut self, ipn: Option<String>, shown_query: &str) {
-        self.pending = ipn.map(|ipn| (ipn, shown_query.trim().to_owned()));
+    fn select(&mut self, part: Option<PartKey>, shown_query: &str) {
+        self.pending = part.map(|part| (part, shown_query.trim().to_owned()));
     }
 
     /// For results of `query` asked for while `selected` was selected,
@@ -137,7 +152,7 @@ impl Reveals {
     /// section (a team catalog change).
     fn results(
         &mut self,
-        selected: Option<&str>,
+        selected: Option<&PartKey>,
         category: Option<&str>,
         query: &str,
     ) -> Option<String> {
@@ -206,10 +221,10 @@ enum SectionEnd {
 /// While `reloading`, the loaded parts are from before a team catalog
 /// change and may not match the new count, so nothing ends them.
 ///
-/// Each IPN shows once, as the first row with it. The CSV catalog can
-/// repeat an IPN (the team import flags it as duplicate-ipn and keeps the
-/// first row). Rows are keyed by IPN, and two rows with one key would
-/// break the list.
+/// Each part shows once, as the first row with its team and IPN. The CSV
+/// catalog can repeat an IPN (the team import flags it as duplicate-ipn
+/// and keeps the first row). Rows are keyed by team and IPN, and two rows
+/// with one key would break the list.
 fn section_rows(
     searching: bool,
     loaded: Option<&Load<Vec<PartSummary>>>,
@@ -228,7 +243,7 @@ fn section_rows(
     let loaded_all = matches!(loaded, Some(Load::Ready(_)));
     rows.extend(hits.iter().cloned());
     let mut seen = BTreeSet::new();
-    rows.retain(|row| seen.insert(row.ipn.clone()));
+    rows.retain(|row| seen.insert(row.key()));
     let end = end.unwrap_or(if total <= rows.len() {
         SectionEnd::Nothing
     } else if loaded_all {
@@ -260,10 +275,10 @@ pub(crate) fn section_id(category: &str) -> String {
     format!("parts-in-{safe}")
 }
 
-/// The IPNs of `rows`, in order. A section draws one row per IPN and keeps
-/// it while the part is listed, so a changed part updates in place.
-fn row_ipns(rows: &[PartSummary]) -> Vec<String> {
-    rows.iter().map(|row| row.ipn.clone()).collect()
+/// The parts of `rows`, in order. A section draws one row per part and
+/// keeps it while the part is listed, so a changed part updates in place.
+fn row_keys(rows: &[PartSummary]) -> Vec<PartKey> {
+    rows.iter().map(PartSummary::key).collect()
 }
 
 /// A row's title and the text beside it. Parts without an MPN are titled
@@ -276,8 +291,8 @@ fn row_labels(part: &PartSummary) -> (String, String) {
     }
 }
 
-/// The parts loaded for open sections, for one search and team catalog
-/// position. After a team catalog change in the same search, open
+/// The parts loaded for open sections, for one search and the teams'
+/// positions. After a team catalog change in the same search, open
 /// sections keep their parts while they load again.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Loaded {
@@ -301,7 +316,7 @@ impl Loaded {
         &self,
         key: (String, Option<u64>),
         is_open: impl Fn(&str) -> bool,
-        selected: Option<&str>,
+        selected: Option<&PartKey>,
         selected_in: Option<&str>,
     ) -> (Loaded, BTreeSet<String>) {
         if self.key.0 != key.0 {
@@ -319,9 +334,9 @@ impl Loaded {
             .filter(|(category, rows)| matches!(rows, Load::Ready(_)) && is_open(category))
             .map(|(category, rows)| {
                 let mut rows = rows.clone();
-                if let (Some(ipn), Load::Ready(rows)) = (selected, &mut rows) {
+                if let (Some(part), Load::Ready(rows)) = (selected, &mut rows) {
                     if selected_in != Some(category.as_str()) {
-                        rows.retain(|row| row.ipn != ipn);
+                        rows.retain(|row| row.key() != *part);
                     }
                 }
                 (category.clone(), rows)
@@ -357,11 +372,9 @@ impl Loaded {
 #[component]
 pub(crate) fn ResultList(
     results: RwSignal<Load<Searched>>,
-    selected: RwSignal<Option<String>>,
+    selected: RwSignal<Option<PartKey>>,
     adding: RwSignal<bool>,
     checking: RwSignal<bool>,
-    /// The team whose parts the list shows, by server address.
-    team: Signal<String>,
 ) -> impl IntoView {
     let open = RwSignal::new(OpenSections::default());
     let loaded = RwSignal::new(Loaded::default());
@@ -394,17 +407,14 @@ pub(crate) fn ResultList(
         };
         let key = loaded.with_untracked(|loaded| loaded.key.clone());
         loaded.update(|loaded| loaded.start_load(&category));
-        let team = team.get_untracked();
+        let request = SearchRequest {
+            limit: SECTION_ROWS,
+            selected: selected.get_untracked(),
+            section: Some(category.clone()),
+            ..searched.request.clone()
+        };
         spawn_local(async move {
-            let answer = backend::search(
-                &team,
-                searched.response.query.clone(),
-                SECTION_ROWS,
-                selected.get_untracked(),
-                Some(category.clone()),
-                searched.response.uses.clone(),
-            )
-            .await;
+            let answer = backend::search(request).await;
             let rows = match answer {
                 Ok(response) => Load::Ready(
                     response
@@ -438,28 +448,28 @@ pub(crate) fn ResultList(
             }
         });
     };
-    Effect::new(move |previous: Option<Option<String>>| {
+    Effect::new(move |previous: Option<Option<PartKey>>| {
         let now = selected.get();
         if previous.as_ref() != Some(&now) {
             let shown = shown_query.get_value().unwrap_or_default();
             reveals.update_value(|reveals| reveals.select(now.clone(), &shown));
             // A part already in the shown results (clicked in the list) is
             // revealed at once, without waiting for the next answer.
-            let found = now.as_deref().and_then(|ipn| {
+            let found = now.as_ref().and_then(|part| {
                 results.with_untracked(|results| match results {
                     Load::Ready(searched) => searched
                         .response
                         .sections
                         .iter()
-                        .find(|section| section.hits.iter().any(|hit| hit.ipn == ipn))
-                        .map(|section| (section.category.clone(), search_key(&searched.response))),
+                        .find(|section| section.hits.iter().any(|hit| hit.key() == *part))
+                        .map(|section| (section.key.clone(), search_key(&searched.response))),
                     _ => None,
                 })
             });
             if let Some((category, query)) = found {
                 let reveal = reveals
                     .try_update_value(|reveals| {
-                        reveals.results(now.as_deref(), Some(&category), &query)
+                        reveals.results(now.as_ref(), Some(&category), &query)
                     })
                     .flatten();
                 if let Some(category) = reveal {
@@ -472,25 +482,28 @@ pub(crate) fn ResultList(
         now
     });
     Effect::new(move |_| {
-        let Some((query, asked_for, category, version)) = results.with(|results| match results {
-            Load::Ready(searched) => Some((
-                search_key(&searched.response),
-                searched.selected.clone(),
-                searched.response.selected.clone(),
-                searched.version,
-            )),
-            _ => None,
-        }) else {
+        let Some((query, loaded_for, asked_for, category, version)) =
+            results.with(|results| match results {
+                Load::Ready(searched) => Some((
+                    search_key(&searched.response),
+                    loaded_key(searched),
+                    searched.request.selected.clone(),
+                    searched.response.selected.clone(),
+                    searched.version,
+                )),
+                _ => None,
+            })
+        else {
             return;
         };
-        let key = (query.clone(), version);
+        let key = (loaded_for, version);
         if loaded.with_untracked(|loaded| loaded.key != key) {
             let (next, reload) = loaded.with_untracked(|loaded| {
                 open.with_untracked(|open| {
                     loaded.next(
                         key,
                         |category| open.is_open(category, &query),
-                        asked_for.as_deref(),
+                        asked_for.as_ref(),
                         category.as_deref(),
                     )
                 })
@@ -505,7 +518,7 @@ pub(crate) fn ResultList(
         let reveal = if asked_for == selected.get_untracked() {
             reveals
                 .try_update_value(|reveals| {
-                    reveals.results(asked_for.as_deref(), category.as_deref(), &query)
+                    reveals.results(asked_for.as_ref(), category.as_deref(), &query)
                 })
                 .flatten()
         } else {
@@ -529,25 +542,25 @@ pub(crate) fn ResultList(
         try_scroll();
     });
 
-    // The sections shown, by category code, in order. ListFocus puts focus
-    // back when a section that left or moved took it with it.
+    // The sections shown, by key, in order. ListFocus puts focus back when
+    // a section that left or moved took it with it.
     let shown_sections = Memo::new(move |_| {
         results.with(|results| match results {
             Load::Ready(searched) => searched
                 .response
                 .sections
                 .iter()
-                .map(|section| section.category.clone())
+                .map(|section| section.key.clone())
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
         })
     });
     Effect::new(move |_| focus.sections_shown(shown_sections.get()));
 
-    let choose = move |ipn: String| {
+    let choose = move |part: PartKey| {
         adding.set(false);
         checking.set(false);
-        selected.set(Some(ipn));
+        selected.set(Some(part));
     };
     let toggled = move || want_scroll.set_value(false);
     view! {
@@ -573,8 +586,8 @@ pub(crate) fn ResultList(
                 _ => None,
             })
         >
-            // One section per category, kept while the search stays the
-            // same. A new answer, such as one after a teammate's save,
+            // One section per category (or team), kept while the search
+            // stays the same. A new answer, such as one after a teammate's save,
             // updates its contents in place, so focus, open sections and
             // scroll stay put. The team catalog's position is not part of
             // the key: after a team change, Loaded::next loads the open
@@ -588,7 +601,7 @@ pub(crate) fn ResultList(
                             .response
                             .sections
                             .iter()
-                            .map(|section| (query.clone(), section.category.clone()))
+                            .map(|section| (query.clone(), section.key.clone()))
                             .collect::<Vec<_>>()
                     }
                     _ => Vec::new(),
@@ -622,8 +635,8 @@ fn Section(
     query: String,
     open: RwSignal<OpenSections>,
     loaded: RwSignal<Loaded>,
-    selected: RwSignal<Option<String>>,
-    choose: impl Fn(String) + Copy + Send + Sync + 'static,
+    selected: RwSignal<Option<PartKey>>,
+    choose: impl Fn(PartKey) + Copy + Send + Sync + 'static,
     load: impl Fn(String) + Copy + Send + Sync + 'static,
     toggled: impl Fn() + Copy + Send + Sync + 'static,
     focus_after_load: StoredValue<Option<String>>,
@@ -639,7 +652,7 @@ fn Section(
                     .response
                     .sections
                     .iter()
-                    .find(|section| section.category == category)
+                    .find(|section| section.key == category)
                     .cloned(),
                 _ => None,
             })
@@ -681,10 +694,10 @@ fn Section(
             })
         })
     });
-    // The rows drawn, by IPN.
+    // The rows drawn, by part.
     let drawn = Memo::new(move |_| {
         if is_open.get() {
-            shown.with(|(rows, _)| row_ipns(rows))
+            shown.with(|(rows, _)| row_keys(rows))
         } else {
             Vec::new()
         }
@@ -730,7 +743,7 @@ fn Section(
                 aria-controls=id.clone()
                 on:focus={
                     let category = category.clone();
-                    move |_| focus.took(Focused::Section { category: category.clone() })
+                    move |_| focus.took(Focused::Section { section: category.clone() })
                 }
                 on:click={
                     let category = category.clone();
@@ -761,17 +774,17 @@ fn Section(
                     let category = category.clone();
                     let row_category = category.clone();
                     view! {
-                        // One row per part, keyed by IPN. A part that
-                        // changes updates its row in place, so a focused
-                        // row keeps focus.
+                        // One row per part, keyed by its team and IPN. A
+                        // part that changes updates its row in place, so a
+                        // focused row keeps focus.
                         <For
                             each=move || drawn.get()
-                            key=|ipn| ipn.clone()
-                            children=move |ipn| {
-                                let part = row_part(shown, ipn.clone());
+                            key=|part| part.clone()
+                            children=move |key| {
+                                let part = row_part(shown, key.clone());
                                 view! {
                                     <PartRow
-                                        ipn=ipn
+                                        part_key=key
                                         part=part
                                         category=row_category.clone()
                                         selected=selected
@@ -792,7 +805,7 @@ fn Section(
                                             class="section-show-all"
                                             on:focus={
                                                 let category = category.clone();
-                                                move |_| focus.took(Focused::ShowAll { category: category.clone() })
+                                                move |_| focus.took(Focused::ShowAll { section: category.clone() })
                                             }
                                             on:click=move |_| show_all()
                                         >
@@ -828,45 +841,50 @@ fn Section(
     }
 }
 
-/// What the row of `ipn` shows: its part in the section's latest rows.
+/// What the row of `key` shows: its part in the section's latest rows.
 /// While the row is being removed, it keeps the last part it had.
-fn row_part(shown: Memo<(Vec<PartSummary>, SectionEnd)>, ipn: String) -> Memo<Option<PartSummary>> {
+fn row_part(
+    shown: Memo<(Vec<PartSummary>, SectionEnd)>,
+    key: PartKey,
+) -> Memo<Option<PartSummary>> {
     Memo::new(move |before: Option<&Option<PartSummary>>| {
         shown
-            .with(|(rows, _)| rows.iter().find(|row| row.ipn == ipn).cloned())
+            .with(|(rows, _)| rows.iter().find(|row| row.key() == key).cloned())
             .or_else(|| before.cloned().flatten())
     })
 }
 
 #[component]
 fn PartRow(
-    ipn: String,
+    part_key: PartKey,
     part: Memo<Option<PartSummary>>,
     category: String,
-    selected: RwSignal<Option<String>>,
-    choose: impl Fn(String) + Copy + Send + Sync + 'static,
+    selected: RwSignal<Option<PartKey>>,
+    choose: impl Fn(PartKey) + Copy + Send + Sync + 'static,
     focus: ListFocus,
 ) -> impl IntoView {
+    let key = part_key;
     let is_selected = {
-        let ipn = ipn.clone();
-        move || selected.with(|current| current.as_deref() == Some(&ipn))
+        let key = key.clone();
+        move || selected.with(|current| current.as_ref() == Some(&key))
     };
     let labels =
         Memo::new(move |_| part.with(|part| part.as_ref().map(row_labels).unwrap_or_default()));
     let description = move || part.with(|part| part.as_ref().map(|part| part.description.clone()));
     let focused = Focused::Row {
-        category,
-        ipn: ipn.clone(),
+        section: category,
+        part: key.clone(),
     };
     view! {
         <li>
             <button
                 type="button"
                 class="result"
-                data-ipn=ipn.clone()
+                data-team=key.team.clone()
+                data-ipn=key.ipn.clone()
                 aria-current=move || is_selected().then_some("true")
                 on:focus=move |_| focus.took(focused.clone())
-                on:click=move |_| choose(ipn.clone())
+                on:click=move |_| choose(key.clone())
             >
                 <span class="result-title">{move || labels.with(|(title, _)| title.clone())}</span>
                 <span class="result-ipn">{move || labels.with(|(_, aside)| aside.clone())}</span>
@@ -934,6 +952,14 @@ fn scroll_list_to_top() {
 mod tests {
     use super::*;
 
+    /// The part `ipn` of team MA.
+    fn part(ipn: &str) -> PartKey {
+        PartKey {
+            team: "https://ma.example.com".into(),
+            ipn: ipn.into(),
+        }
+    }
+
     #[test]
     fn every_section_starts_closed_and_keeps_what_the_person_opened() {
         let mut open = OpenSections::default();
@@ -991,26 +1017,29 @@ mod tests {
     #[test]
     fn a_selected_part_is_revealed_once_its_section_is_known() {
         let mut reveals = Reveals::default();
-        reveals.select(Some("RES-1".into()), "");
+        reveals.select(Some(part("RES-1")), "");
         // An answer that does not hold it yet (a new part not in the team
         // catalog's results yet) keeps waiting.
-        assert_eq!(reveals.results(Some("RES-1"), None, ""), None);
+        assert_eq!(reveals.results(Some(&part("RES-1")), None, ""), None);
         assert_eq!(
-            reveals.results(Some("RES-1"), Some("res"), ""),
+            reveals.results(Some(&part("RES-1")), Some("res"), ""),
             Some("res".into())
         );
         // Once only: later answers, such as a team change, do not reopen it.
-        assert_eq!(reveals.results(Some("RES-1"), Some("res"), ""), None);
-        assert_eq!(reveals.results(Some("RES-1"), Some("res"), "10k"), None);
+        assert_eq!(reveals.results(Some(&part("RES-1")), Some("res"), ""), None);
+        assert_eq!(
+            reveals.results(Some(&part("RES-1")), Some("res"), "10k"),
+            None
+        );
     }
 
     #[test]
     fn clearing_the_search_reveals_a_part_it_hid() {
         let mut reveals = Reveals::default();
-        reveals.select(Some("CAP-1".into()), "100n ");
-        assert_eq!(reveals.results(Some("CAP-1"), None, "100n"), None);
+        reveals.select(Some(part("CAP-1")), "100n ");
+        assert_eq!(reveals.results(Some(&part("CAP-1")), None, "100n"), None);
         assert_eq!(
-            reveals.results(Some("CAP-1"), Some("cap"), ""),
+            reveals.results(Some(&part("CAP-1")), Some("cap"), ""),
             Some("cap".into())
         );
     }
@@ -1018,24 +1047,27 @@ mod tests {
     #[test]
     fn typing_another_search_forgets_a_part_it_does_not_hold() {
         let mut reveals = Reveals::default();
-        reveals.select(Some("CAP-1".into()), "100n");
-        assert_eq!(reveals.results(Some("CAP-1"), None, "100n 0603"), None);
-        assert_eq!(reveals.results(Some("CAP-1"), Some("cap"), ""), None);
+        reveals.select(Some(part("CAP-1")), "100n");
+        assert_eq!(
+            reveals.results(Some(&part("CAP-1")), None, "100n 0603"),
+            None
+        );
+        assert_eq!(reveals.results(Some(&part("CAP-1")), Some("cap"), ""), None);
     }
 
     #[test]
     fn a_part_moved_to_another_category_is_revealed_again() {
         let mut reveals = Reveals::default();
-        reveals.select(Some("RES-1".into()), "");
+        reveals.select(Some(part("RES-1")), "");
         assert_eq!(
-            reveals.results(Some("RES-1"), Some("res"), ""),
+            reveals.results(Some(&part("RES-1")), Some("res"), ""),
             Some("res".into())
         );
         assert_eq!(
-            reveals.results(Some("RES-1"), Some("cap"), ""),
+            reveals.results(Some(&part("RES-1")), Some("cap"), ""),
             Some("cap".into())
         );
-        assert_eq!(reveals.results(Some("RES-1"), Some("cap"), ""), None);
+        assert_eq!(reveals.results(Some(&part("RES-1")), Some("cap"), ""), None);
     }
 
     #[test]
@@ -1049,6 +1081,7 @@ mod tests {
 
     fn hit(ipn: &str) -> PartSummary {
         PartSummary {
+            team: "https://ma.example.com".into(),
             ipn: ipn.into(),
             csv_file: "g-res.csv".into(),
             mpn: String::new(),
@@ -1176,7 +1209,7 @@ mod tests {
         let (next, _) = before.next(
             (String::new(), Some(2)),
             |_| true,
-            Some("CAP-2"),
+            Some(&part("CAP-2")),
             Some("res"),
         );
         let kept = |category: &str| match &next.sections[category] {

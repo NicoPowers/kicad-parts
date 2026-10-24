@@ -264,25 +264,18 @@ async fn set_kicad_override(
     blocking(move || browser.set_kicad_override(path)).await?
 }
 
+/// The part list: one search over every signed-in team's parts and the
+/// CSV catalog, or one team's parts when the request names it.
 #[tauri::command]
 async fn search_parts(
     browser: State<'_, Browser>,
     teams: State<'_, Team>,
-    team: String,
     request: SearchRequest,
 ) -> Result<SearchResponse, String> {
-    let (browser, team) = (
-        browser.inner().clone(),
-        maybe_team_at(&teams, &team)?.unwrap_or_default(),
-    );
-    // Parts the team catalog has are found by, and shown with, its current
-    // details, as the part header shows them. With no team named, only the
-    // CSV catalog is searched.
-    // The list is grouped by the team catalog's category names.
-    blocking(move || {
-        browser.search_request(&request, &team.current_values(), &team.category_names())
-    })
-    .await
+    let (browser, teams) = (browser.inner().clone(), teams.inner().clone());
+    // Each team's parts are found by, and shown with, its current details,
+    // as the part header shows them. Searching makes no request.
+    blocking(move || browser.search_request(&request, &teams.known_parts())).await
 }
 
 /// The team at `server_url` in the person's list. Every request about a
@@ -610,32 +603,30 @@ async fn libraries(browser: State<'_, Browser>, refresh: bool) -> Result<Librari
     blocking(move || browser.libraries(refresh)).await
 }
 
+/// The Libraries browser's items. The parts the part list shows mark the
+/// items they use: `team`'s parts when the person chose one team, else
+/// every team's.
 #[tauri::command]
 async fn library_items(
     browser: State<'_, Browser>,
     teams: State<'_, Team>,
-    team: String,
+    team: Option<String>,
     request: LibraryItemsRequest,
 ) -> Result<LibraryItems, String> {
-    let (browser, team) = (
-        browser.inner().clone(),
-        maybe_team_at(&teams, &team)?.unwrap_or_default(),
-    );
-    blocking(move || browser.library_items(&request, &team.current_values())).await
+    let (browser, teams) = (browser.inner().clone(), teams.inner().clone());
+    blocking(move || browser.library_items(&request, &teams.known_parts(), team.as_deref())).await
 }
 
+/// One library item, with the parts that use it (see `library_items`).
 #[tauri::command]
 async fn library_item(
     browser: State<'_, Browser>,
     teams: State<'_, Team>,
-    team: String,
+    team: Option<String>,
     request: LibraryItemRequest,
 ) -> Result<Option<LibraryItemDetail>, String> {
-    let (browser, team) = (
-        browser.inner().clone(),
-        maybe_team_at(&teams, &team)?.unwrap_or_default(),
-    );
-    blocking(move || browser.library_item(&request, &team.current_values())).await
+    let (browser, teams) = (browser.inner().clone(), teams.inner().clone());
+    blocking(move || browser.library_item(&request, &teams.known_parts(), team.as_deref())).await
 }
 
 #[tauri::command]
