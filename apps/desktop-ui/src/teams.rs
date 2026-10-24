@@ -807,9 +807,7 @@ fn words_without_time(team: &TeamStatus) -> String {
         }
         TeamSession::Reaching {
             problem: Some(problem),
-        } => format!(
-            "Offline: the team server could not be reached. The app keeps trying, and signs you in when it is back. Last problem: {problem}"
-        ),
+        } => format!("Offline. The app reconnects by itself. Last problem: {problem}"),
         TeamSession::SignedOut {
             problem: Some(problem),
         } => problem.clone(),
@@ -1090,7 +1088,11 @@ mod tests {
             },
         );
         let words = |team: &TeamStatus| state_words(team).text(AS_OF + 60_000);
-        assert!(words(&reaching).starts_with("Offline: the team server could not be reached."));
+        // With no parts file, the same words, with no time.
+        assert_eq!(
+            words(&reaching),
+            "Offline. The app reconnects by itself. Last problem: The team server could not be reached."
+        );
         reaching.parts_as_of = Some(AS_OF);
         // The same words as a team that drops during a run.
         assert_eq!(
