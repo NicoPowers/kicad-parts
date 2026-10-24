@@ -16,7 +16,7 @@
 
 use crate::focus::{Scrolling, focus_found_later};
 use crate::list_focus::{DrawnSection, Focused, ListFocus};
-use crate::team_marks::{CsvChip, TeamChip, TeamMarks};
+use crate::team_marks::{CsvChip, ListTeams, TeamChip};
 use crate::{Load, backend, grouped};
 use desktop_contract::{PartKey, PartSummary, SearchRequest, SearchResponse};
 use leptos::prelude::*;
@@ -878,7 +878,7 @@ fn PartRow(
         Memo::new(move |_| part.with(|part| part.as_ref().map(row_labels).unwrap_or_default()));
     // The part's team, as text in the team's colour, while two teams or
     // more show parts; "CSV" for a part only the CSV files have.
-    let marks = use_context::<Memo<TeamMarks>>();
+    let marks = use_context::<ListTeams>().map(|list| list.marks);
     // Inside a team's own section the section names the team, so its rows
     // need no mark.
     let in_team_section = category.starts_with("team:");

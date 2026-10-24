@@ -115,7 +115,6 @@ fn App() -> impl IntoView {
         remember_team(teams, feature, &team)
     });
     provide_context(list_teams);
-    provide_context(list_teams.marks);
     let ListTeams {
         filter,
         group_by,
@@ -540,7 +539,7 @@ fn catalog_words(csv_parts: usize, csv_files: usize, teams: usize) -> String {
 
 #[component]
 fn CatalogBadge(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
-    let marks = use_context::<Memo<team_marks::TeamMarks>>();
+    let marks = use_context::<ListTeams>().map(|list| list.marks);
     let teams = move || {
         marks
             .map(|marks| marks.with(|marks| if marks.shown { marks.by_team.len() } else { 0 }))

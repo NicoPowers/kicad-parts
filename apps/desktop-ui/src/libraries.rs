@@ -11,7 +11,7 @@
 //! one role, the current item selected, and a callback for the choice.
 
 use crate::focus::focus_later;
-use crate::team_marks::{CsvChip, TeamChip, TeamMarks};
+use crate::team_marks::{CsvChip, ListTeams, TeamChip};
 use crate::{Load, PreviewSection, backend, cad_reference, counted, grouped, into_load};
 use desktop_contract::{
     LibrariesView, LibraryCheckView, LibraryEntry, LibraryFilters, LibraryGroup, LibraryItemDetail,
@@ -1252,8 +1252,8 @@ fn UsedBy(
     let used = !detail.used_by.is_empty();
     // Each part's team mark, while two teams or more show parts, as in the
     // part list: the same IPN may be in two teams.
-    let marks = use_context::<Memo<TeamMarks>>()
-        .map(|marks| marks.get_untracked())
+    let marks = use_context::<ListTeams>()
+        .map(|list| list.marks.get_untracked())
         .unwrap_or_default();
     used.then(|| {
         let count = detail.used_by.len();
