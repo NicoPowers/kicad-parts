@@ -1,7 +1,16 @@
 //! Turns a catalog library reference such as `g-res:R_US` into a concrete
 //! library on disk. Callers pass the reference; this module owns where
 //! libraries live and in which order they are searched.
+//!
+//! A reference's nickname is looked up in a library source profile
+//! ([`LibrarySource`]): our own layout by default, or a client repo's,
+//! whose libraries come from the repo's own lib tables (kicad-parts-e9a3,
+//! which took over kicad-parts-e83f). So a nickname that differs from its
+//! file name, such as `Acme_FP` for `lib/Acme.pretty`, finds the library
+//! KiCad would. Then KiCad's bundled libraries are searched.
 
+use crate::lib_table::TableKind;
+use crate::library_source::LibrarySource;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,7 +53,8 @@ impl fmt::Display for LibRef {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LibraryOrigin {
-    /// A library stored in this repository (`symbols/`, `footprints/`).
+    /// A library of the project's library source: by default this
+    /// repository's own (`symbols/`, `footprints/`).
     Project,
     /// A library bundled with the installed KiCad.
     KicadBundled,
@@ -109,27 +119,38 @@ impl fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
-/// Searches project libraries first, then KiCad's bundled libraries.
+/// Searches the project's library source first, then KiCad's bundled
+/// libraries.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LibraryResolver {
-    project_root: Option<PathBuf>,
+    /// The project's folder and where its libraries are in it.
+    project: Option<(PathBuf, LibrarySource)>,
     kicad_share: Option<PathBuf>,
 }
 
 impl LibraryResolver {
-    /// `project_root` holds `symbols/` and `footprints/`; `kicad_share` is
-    /// the installed KiCad data directory, if known.
+    /// `project_root` holds our own layout (`symbols/`, `footprints/`, the
+    /// default profile); `kicad_share` is the installed KiCad data
+    /// directory, if known.
     pub fn new(project_root: Option<PathBuf>, kicad_share: Option<PathBuf>) -> Self {
         Self {
-            project_root,
+            project: project_root.map(|root| (root, LibrarySource::own())),
+            kicad_share,
+        }
+    }
+
+    /// Resolves through `source`, the layout of the library repo files in
+    /// `root`, before KiCad's bundled libraries in `kicad_share`.
+    pub fn with_source(root: PathBuf, source: LibrarySource, kicad_share: Option<PathBuf>) -> Self {
+        Self {
+            project: Some((root, source)),
             kicad_share,
         }
     }
 
     pub fn symbol(&self, reference: &str) -> Result<ResolvedSymbol, ResolveError> {
         let lib_ref = LibRef::parse(reference)?;
-        let file_name = format!("{}.kicad_sym", lib_ref.library);
-        let (library, origin) = self.find_library("symbols", &file_name, &lib_ref)?;
+        let (library, origin) = self.find_library(TableKind::Symbol, &lib_ref)?;
         Ok(ResolvedSymbol {
             lib_ref,
             library,
@@ -146,8 +167,7 @@ impl LibraryResolver {
             .next()
             .unwrap_or_default();
         let lib_ref = LibRef::parse(reference)?;
-        let dir_name = format!("{}.pretty", lib_ref.library);
-        let (library, origin) = self.find_library("footprints", &dir_name, &lib_ref)?;
+        let (library, origin) = self.find_library(TableKind::Footprint, &lib_ref)?;
         let Some(file) = exact_entry(&library, &format!("{}.kicad_mod", lib_ref.item))
             .filter(|file| file.is_file())
         else {
@@ -166,22 +186,28 @@ impl LibraryResolver {
 
     fn find_library(
         &self,
-        kind: &str,
-        name: &str,
+        kind: TableKind,
         lib_ref: &LibRef,
     ) -> Result<(PathBuf, LibraryOrigin), ResolveError> {
+        // KiCad's data folder keeps its libraries as our layout does.
+        let bundled = LibrarySource::own();
         let candidates = [
-            (self.project_root.as_deref(), LibraryOrigin::Project),
-            (self.kicad_share.as_deref(), LibraryOrigin::KicadBundled),
+            self.project
+                .as_ref()
+                .map(|(root, source)| (root.as_path(), source, LibraryOrigin::Project)),
+            self.kicad_share
+                .as_deref()
+                .map(|share| (share, &bundled, LibraryOrigin::KicadBundled)),
         ];
         let mut searched = Vec::new();
-        for (root, origin) in candidates {
-            let Some(root) = root else { continue };
-            let dir = root.join(kind);
-            if let Some(path) = exact_entry(&dir, name) {
-                return Ok((path, origin));
+        for (root, source, origin) in candidates.into_iter().flatten() {
+            let Some(path) = source.library_path(kind, &lib_ref.library) else {
+                continue;
+            };
+            if let Some(found) = exact_path(root, &path) {
+                return Ok((found, origin));
             }
-            searched.push(dir.join(name));
+            searched.push(native_path(root, &path));
         }
         Err(ResolveError::LibraryNotFound {
             lib_ref: lib_ref.to_string(),
@@ -197,6 +223,21 @@ pub fn footprint_choices(field: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|choice| !choice.is_empty())
         .collect()
+}
+
+/// The repo path `path` under `root`, only if every part of it exists with
+/// exactly that name (see [`exact_entry`]).
+fn exact_path(root: &Path, path: &str) -> Option<PathBuf> {
+    path.split('/')
+        .try_fold(root.to_path_buf(), |folder, name| {
+            exact_entry(&folder, name)
+        })
+}
+
+/// The repo path `path` under `root`, with this system's separators.
+fn native_path(root: &Path, path: &str) -> PathBuf {
+    path.split('/')
+        .fold(root.to_path_buf(), |folder, name| folder.join(name))
 }
 
 /// `dir/name` only if an entry with exactly that name exists. KiCad matches
@@ -284,6 +325,40 @@ mod tests {
         assert!(matches!(
             resolver.footprint("g-Resistor_SMD:R_0402"),
             Err(ResolveError::FootprintNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn a_client_source_resolves_nicknames_through_its_lib_tables() {
+        use crate::library_source::{LibraryList, SourceLibrary};
+        let repo = tempfile::tempdir().unwrap();
+        let pretty = repo.path().join("lib").join("Acme.pretty");
+        fs::create_dir_all(&pretty).unwrap();
+        fs::write(pretty.join("R_0603.kicad_mod"), b"").unwrap();
+        // As the repo's fp-lib-table names it: a nickname unlike the folder.
+        let source = LibrarySource {
+            footprints: LibraryList::Listed {
+                libraries: vec![SourceLibrary {
+                    nickname: "Acme_FP".into(),
+                    path: "lib/Acme.pretty".into(),
+                }],
+            },
+            ..LibrarySource::own()
+        };
+        let resolver = LibraryResolver::with_source(repo.path().to_path_buf(), source, None);
+        let found = resolver.footprint("Acme_FP:R_0603").unwrap();
+        assert_eq!(found.file, pretty.join("R_0603.kicad_mod"));
+        assert_eq!(found.origin, LibraryOrigin::Project);
+        // The file name is no nickname, and a table row's path matches
+        // with exact case, even where the file system does not.
+        assert!(matches!(
+            resolver.footprint("Acme:R_0603"),
+            Err(ResolveError::LibraryNotFound { .. })
+        ));
+        fs::rename(&pretty, repo.path().join("lib").join("acme.pretty")).unwrap();
+        assert!(matches!(
+            resolver.footprint("Acme_FP:R_0603"),
+            Err(ResolveError::LibraryNotFound { .. })
         ));
     }
 }

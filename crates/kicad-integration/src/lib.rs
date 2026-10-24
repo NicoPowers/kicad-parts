@@ -4,8 +4,12 @@
 //! - [`discovery`] finds kicad-cli (standard locations or a user override)
 //!   and records its version. Every kicad-cli run keeps its settings in a
 //!   [`CliSettingsFolder`] of our own, never in the person's KiCad folders.
+//! - [`library_source`] says where one library repo keeps its libraries,
+//!   3D models and path variables: a library source profile. Our own
+//!   layout is the default profile.
 //! - [`resolver`] turns catalog references such as `g-res:R_US` into library
-//!   files, searching project libraries before KiCad's bundled ones.
+//!   files, through a library source profile first, then KiCad's bundled
+//!   libraries.
 //! - [`preview`] exports symbol and footprint SVGs with kicad-cli, from
 //!   library files or from a CAD item revision's stored bytes, and caches
 //!   them by content hash and KiCad version.
@@ -24,6 +28,7 @@ pub mod discovery;
 pub mod footprint_filter;
 pub mod lib_table;
 pub mod library_file;
+pub mod library_source;
 pub mod library_summary;
 pub mod preview;
 mod process;
