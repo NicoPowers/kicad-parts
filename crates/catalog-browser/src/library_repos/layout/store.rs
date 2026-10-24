@@ -34,6 +34,17 @@ pub(crate) struct Reviewed {
     /// A newer commit scanned differently.
     #[serde(default)]
     pub changed: bool,
+    /// The newest commit scanned to follow the main branch, so a fetch
+    /// that brings nothing new scans nothing.
+    #[serde(default)]
+    pub scanned: Option<String>,
+}
+
+impl Reviewed {
+    /// Whether `commit` was already followed: reviewed, or scanned since.
+    pub(crate) fn has_followed(&self, commit: &str) -> bool {
+        self.commit == commit || self.scanned.as_deref() == Some(commit)
+    }
 }
 
 /// What the person reviews, and so what must stay the same for a newer
@@ -205,6 +216,7 @@ pub(crate) fn follow(reviewed: &mut Reviewed, latest: &LibraryLayout) -> Followe
     if reviewed.commit == latest.commit {
         return Followed::Same;
     }
+    reviewed.scanned = Some(latest.commit.clone());
     if fingerprint(latest) == reviewed.fingerprint {
         reviewed.commit = latest.commit.clone();
         reviewed.changed = false;
@@ -402,6 +414,7 @@ mod tests {
             profile: profile_of(&first, &choices),
             choices,
             changed: false,
+            scanned: None,
         };
         assert_eq!(follow(&mut reviewed, &first), Followed::Same);
         // More 3D models and links, and a doubt about one of them: the
@@ -427,6 +440,9 @@ mod tests {
         assert_eq!(follow(&mut reviewed, &new_library), Followed::Changed);
         assert!(reviewed.changed);
         assert_eq!(reviewed.commit, "b");
+        // A fetch that brings nothing newer scans nothing.
+        assert!(reviewed.has_followed("c"));
+        assert!(!reviewed.has_followed("d"));
         // Taken back out: the same as reviewed again.
         assert_eq!(follow(&mut reviewed, &layout("d")), Followed::Moved);
         assert!(!reviewed.changed);
@@ -445,6 +461,7 @@ mod tests {
             profile: profile_of(&first, &choices),
             choices,
             changed: true,
+            scanned: None,
         };
         store.write("repo", &reviewed).unwrap();
         assert_eq!(store.read("repo"), Some(reviewed));

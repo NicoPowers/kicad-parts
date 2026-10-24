@@ -31,6 +31,9 @@ pub(crate) struct Layouts {
     /// Held while a repo's file is read and written again, so a fetch
     /// that follows a new commit never undoes a review saved meanwhile.
     writing: Mutex<()>,
+    /// The last scan shown for review, by the repo's copy name, so "Use
+    /// this layout" does not scan the same commit again.
+    last_review: Mutex<Option<(String, LibraryLayout)>>,
 }
 
 impl Layouts {
@@ -38,6 +41,7 @@ impl Layouts {
         Self {
             store: Store::new(folder),
             writing: Mutex::new(()),
+            last_review: Mutex::new(None),
         }
     }
 
@@ -89,7 +93,7 @@ impl Layouts {
         let Ok(Some(commit)) = repo.latest_commit() else {
             return;
         };
-        if commit == reviewed.commit {
+        if reviewed.has_followed(&commit) {
             return;
         }
         let Ok(latest) = Self::scan_at(repo, &commit) else {
@@ -110,7 +114,9 @@ impl Layouts {
         note: Option<String>,
     ) -> Result<LibraryLayoutReview, RepoProblem> {
         let layout = Self::scan_latest(repo)?;
-        let reviewed = self.store.read(&repo.address().folder_name());
+        let name = repo.address().folder_name();
+        *lock(&self.last_review) = Some((name.clone(), layout.clone()));
+        let reviewed = self.store.read(&name);
         let repo_name = repo.address().name();
         let first = store::first_choices(&layout);
         let choices = match &reviewed {
@@ -141,7 +147,14 @@ impl Layouts {
         commit: &str,
         choices: LayoutChoices,
     ) -> Result<(), String> {
-        let layout = Self::scan_at(repo, commit).map_err(|problem| problem.summary)?;
+        let name = repo.address().folder_name();
+        let shown = lock(&self.last_review)
+            .clone()
+            .filter(|(shown, layout)| *shown == name && layout.commit == commit);
+        let layout = match shown {
+            Some((_, layout)) => layout,
+            None => Self::scan_at(repo, commit).map_err(|problem| problem.summary)?,
+        };
         let choices = store::checked(&layout, choices)?;
         let reviewed = Reviewed {
             commit: commit.to_owned(),
@@ -149,8 +162,8 @@ impl Layouts {
             profile: store::profile_of(&layout, &choices),
             choices,
             changed: false,
+            scanned: None,
         };
-        let name = repo.address().folder_name();
         let _writing = self.writing();
         self.store.write(&name, &reviewed).map_err(|error| {
             format!(
@@ -215,6 +228,11 @@ impl Layouts {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
     }
+}
+
+/// `mutex`'s value, even after a thread panicked holding it.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 /// How many libraries of `kind` a profile has.
