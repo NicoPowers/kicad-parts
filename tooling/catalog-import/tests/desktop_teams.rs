@@ -801,7 +801,30 @@ fn a_team_down_at_start_shows_its_kept_parts_until_its_server_is_back() {
         parts_file_holds(&parts_folder, "\"47 ohm\"")
     });
 
-    // Signing out deletes the kept parts.
+    // Signing out deletes the parts file, and no late write brings it
+    // back, even after the writer's quiet time.
     teams.sign_out(&acme.url);
     assert!(!parts_file_holds(&parts_folder, "47"));
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(!parts_file_holds(&parts_folder, "47"), "it stays gone");
+
+    // Removing the team deletes the file too. Added back at the same
+    // address, the team starts afresh, and its new session writes again.
+    teams.sign_in(acme.sign_in()).unwrap();
+    wait_until("acme to be live after signing in again", || {
+        live(&teams, &acme).is_some()
+    });
+    wait_until("the new session's parts to be written", || {
+        parts_file_holds(&parts_folder, "\"47 ohm\"")
+    });
+    teams.remove(&acme.url);
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(
+        !parts_file_holds(&parts_folder, "47"),
+        "removed with the team"
+    );
+    teams.sign_in(acme.sign_in()).unwrap();
+    wait_until("the team added back to write its parts file", || {
+        parts_file_holds(&parts_folder, "\"47 ohm\"")
+    });
 }

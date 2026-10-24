@@ -171,6 +171,21 @@ fn signing_out_and_removing_delete_the_parts_file() {
 }
 
 #[test]
+fn a_team_removed_and_added_back_shows_no_old_parts() {
+    let server = FakeServer::start();
+    let dir = data_folder();
+    let file = dir.path().join("team.json");
+    let teams = Teams::open(file.clone(), parts_folder(&file), memory(), None, None);
+    teams.sign_in(request(&server)).unwrap();
+    write_file(&file, &parts_file(&server, "47"));
+    teams.remove(&server.url);
+    // Added back at the same address: a new team, with no parts file.
+    teams.sign_in(request(&server)).unwrap();
+    assert!(!has_file(&file, &server));
+    assert!(shown_values(&teams, &server).is_empty());
+}
+
+#[test]
 fn a_team_asked_to_sign_in_again_shows_none_but_keeps_them_for_the_sign_in() {
     let server = FakeServer::start();
     let store = store();
