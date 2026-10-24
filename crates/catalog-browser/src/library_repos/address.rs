@@ -51,8 +51,13 @@ impl RepoAddress {
         if url.is_empty() {
             return Err("Enter the repo's address, or a folder with a clone of it.".to_owned());
         }
-        // git would read it as an option, never as an address.
-        if url.starts_with('-') {
+        // git would read the first as an option, and the second as a
+        // helper program to run (`ext::`, `fd::`), never as an address.
+        let helper = url
+            .split('/')
+            .next()
+            .is_some_and(|start| start.contains("::"));
+        if url.starts_with('-') || helper {
             return Err(format!("{url} is not a repo address."));
         }
         let place = if let Some((scheme, rest)) = url.split_once("://") {
@@ -325,6 +330,8 @@ mod tests {
         assert!(refused("").starts_with("Enter the repo's address"));
         assert!(refused("kicad-library").contains("is not a repo address or a whole folder path"));
         assert!(refused("--upload-pack=evil").contains("is not a repo address"));
+        assert!(refused("ext::sh -c touch% /tmp/x").contains("is not a repo address"));
+        assert!(refused("fd::3").contains("is not a repo address"));
         assert!(refused("ftp://host/x").contains("by ssh or https, not ftp://"));
         assert!(refused("git@gitlab.com:").contains("needs the repo's path on gitlab.com"));
         assert!(refused("https://gitlab.com/").contains("needs the repo's path"));
