@@ -27,7 +27,7 @@ use desktop_contract::{LibraryGroup, LibraryKey, LibraryTeam, PreviewKind};
 use kicad_integration::lib_table::{
     LibTable, PathVariables, TableKind, VariableSources, is_inside, read_tables,
 };
-use kicad_integration::library_source::{LibraryList, SourceProfile, join};
+use kicad_integration::library_source::{LibraryList, SourceProfile, is_plain_repo_path, join};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -160,7 +160,8 @@ fn team_libraries(team: &TeamLibraries, sources: &mut Vec<Source>) {
         let LibraryList::Listed { libraries } = team.profile.libraries(table) else {
             continue;
         };
-        for library in libraries {
+        // Only a plain repo path can stay inside the team's folder.
+        for library in libraries.iter().filter(|l| is_plain_repo_path(&l.path)) {
             sources.push(Source {
                 key: LibraryKey {
                     group: LibraryGroup::Team,

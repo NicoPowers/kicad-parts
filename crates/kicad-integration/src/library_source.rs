@@ -302,6 +302,16 @@ impl SourceProfile {
     }
 }
 
+/// Whether `path` is a plain repo path: parts that are names, never empty,
+/// `.` or `..`, and never holding `:` or a backslash. Only such a path may become
+/// a file on this computer: on Windows, a part such as `C:` would leave
+/// the folder it is joined to.
+pub fn is_plain_repo_path(path: &str) -> bool {
+    path.split('/').all(|part| {
+        !part.is_empty() && part != "." && part != ".." && !part.contains([':', '\\', '\0'])
+    })
+}
+
 /// `folder/name`, or `name` alone for the top folder.
 pub fn join(folder: &str, name: &str) -> String {
     if folder.is_empty() {
@@ -552,6 +562,14 @@ mod tests {
         );
         assert_eq!(source.link_to("other/R.step"), None);
         assert_eq!(source.own_model_folder("Acme_FP"), None);
+    }
+
+    #[test]
+    fn only_plain_repo_paths_become_files() {
+        assert!(is_plain_repo_path("lib/Acme.pretty/R 0603.kicad_mod"));
+        for bad in ["", "a//b", "./a", "a/../b", "C:/x", "lib/c:x", "a\\b", "/a"] {
+            assert!(!is_plain_repo_path(bad), "{bad}");
+        }
     }
 
     #[test]

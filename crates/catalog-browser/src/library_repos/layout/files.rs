@@ -10,7 +10,7 @@
 use super::super::{LibraryRepo, RepoFile};
 use desktop_contract::RepoProblem;
 use kicad_integration::lib_table::TableKind;
-use kicad_integration::library_source::{LibraryList, SourceProfile};
+use kicad_integration::library_source::{LibraryList, SourceProfile, is_plain_repo_path};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -83,6 +83,7 @@ fn wanted(listed: &[RepoFile], profile: &SourceProfile) -> Vec<String> {
         .collect();
     listed
         .iter()
+        .filter(|file| is_plain_repo_path(&file.path))
         .filter(|file| {
             libraries.iter().any(|library| {
                 file.path == *library
