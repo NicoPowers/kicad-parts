@@ -473,14 +473,17 @@ fn list_version(status: &TeamsStatus) -> Option<u64> {
     // Only teams that show parts: one asked to sign in again leaves the
     // list at once.
     for team in status.teams.iter().filter(|team| shows_parts(team)) {
+        // A team with no session shows parts kept from an earlier run
+        // (kicad-parts-ed46). Its catch-up moves the checkpoint on, so the
+        // list changes when the server's parts replace them. Going offline
+        // during a run changes nothing in the list.
         let checkpoint = match &team.session {
-            TeamSession::SignedIn { checkpoint, .. } => *checkpoint,
-            _ => 0,
+            TeamSession::SignedIn { checkpoint, .. } => Some(*checkpoint),
+            _ => None,
         };
         // The code too: a team named once its code is known shows its name
-        // at once. And whether its parts are kept from an earlier run, so
-        // the list changes when the first catch-up replaces them.
-        (&team.server_url, &team.code, checkpoint, team.parts_as_of).hash(&mut hasher);
+        // at once.
+        (&team.server_url, &team.code, checkpoint).hash(&mut hasher);
         any = true;
     }
     any.then(|| hasher.finish())
