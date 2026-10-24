@@ -14,6 +14,7 @@ pub mod kicad_libraries;
 mod libraries;
 mod library;
 mod library_part;
+pub mod library_repos;
 mod model3d;
 mod part_list;
 mod pick;

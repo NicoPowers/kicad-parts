@@ -220,7 +220,7 @@ fn git(program: &str, root: &Path, args: &[&str]) -> Result<Result<String, Strin
             "git was not found, so the app cannot tell which commit the files came from. Install git, then try again.".to_owned()
         })?;
     Ok(if ran.succeeded {
-        Ok(ran.stdout.trim_end().to_owned())
+        Ok(ran.stdout_text().trim_end().to_owned())
     } else if ran.timed_out {
         Err("it did not finish in time".to_owned())
     } else {

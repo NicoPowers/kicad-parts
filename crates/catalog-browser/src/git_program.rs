@@ -11,6 +11,10 @@
 //! - a time limit: a run that takes longer is stopped, together with every
 //!   program it started, such as `ssh` waiting on a question nobody can
 //!   see.
+//!
+//! Steps that reach another computer also get [`Git::run_network`]'s SSH
+//! settings, so SSH fails at once rather than asking about a passphrase or
+//! a new host key.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -19,6 +23,14 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// The SSH command used when the person has not chosen one of their own.
+/// `BatchMode=yes` makes ssh fail at once instead of asking for a
+/// passphrase or about a host it has not met. Keys in an SSH agent (such as
+/// the macOS Keychain's, 1Password's or Pageant's) still work, because
+/// using them asks nothing. `ConnectTimeout` gives a host that does not
+/// answer a clear "timed out" well inside the app's own time limit.
+const BATCH_SSH: &str = "ssh -o BatchMode=yes -o ConnectTimeout=20";
 
 /// How long git may take to say what it said after it ended or was
 /// stopped. Only a program git started that holds on to its output, and
@@ -42,11 +54,18 @@ pub(crate) struct Ran {
     pub(crate) succeeded: bool,
     /// git took longer than its time limit and was stopped.
     pub(crate) timed_out: bool,
-    pub(crate) stdout: String,
+    /// What git wrote to its standard output, as bytes: a file read from
+    /// a repo may be a 3D model, not text.
+    pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: String,
 }
 
 impl Ran {
+    /// git's standard output as text.
+    pub(crate) fn stdout_text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+
     /// The first line git wrote about what went wrong, or "it gave no
     /// reason".
     pub(crate) fn first_problem_line(&self) -> &str {
@@ -64,6 +83,11 @@ impl Ran {
 pub(crate) struct NotInstalled;
 
 impl Git {
+    /// The git program on the system's search path, as the person runs it.
+    pub(crate) fn system() -> Self {
+        Self::named("git")
+    }
+
     /// The git program `program`, such as a full path, or a name that
     /// does not exist in a test of "git is not installed".
     pub(crate) fn named(program: impl Into<OsString>) -> Self {
@@ -99,7 +123,7 @@ impl Git {
         if !config.exists() {
             std::fs::write(config, "").unwrap();
         }
-        Self::named("git")
+        Self::system()
             .with_env("GIT_CONFIG_GLOBAL", config)
             .with_env("GIT_CONFIG_NOSYSTEM", "1")
             .without_env("GIT_SSH_COMMAND")
@@ -125,6 +149,64 @@ impl Git {
         let mut command = self.command(dir);
         command.args(args);
         run_with_limit(command, limit)
+    }
+
+    /// Like [`Git::run`], for a step that reaches another computer, such as
+    /// `ls-remote`, `clone`, `fetch` or `push`.
+    ///
+    /// SSH must fail rather than ask. So when the person has not chosen an
+    /// SSH command of their own, the app runs [`BATCH_SSH`]. A command of
+    /// their own (`GIT_SSH_COMMAND`, `GIT_SSH` or `core.sshCommand`, for
+    /// example Windows' own OpenSSH for 1Password or the Windows agent, or
+    /// PuTTY's plink for Pageant) is left exactly as it is: changing it
+    /// would break their agent. Such a command that asks something still
+    /// cannot wait for ever, because the time limit stops it.
+    ///
+    /// git's messages are read in English (`LC_ALL=C`), so the app can
+    /// tell what went wrong and say it in plain words.
+    pub(crate) fn run_network<I, S>(
+        &self,
+        dir: Option<&Path>,
+        args: I,
+        limit: Duration,
+    ) -> Result<Ran, NotInstalled>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = self.command(dir);
+        command.env("LC_ALL", "C");
+        if !self.has_own_ssh_command(dir)? {
+            command.env("GIT_SSH_COMMAND", BATCH_SSH);
+        }
+        command.args(args);
+        run_with_limit(command, limit)
+    }
+
+    /// Whether the person chose an SSH command of their own, in the
+    /// environment or in git's settings as seen from `dir`.
+    fn has_own_ssh_command(&self, dir: Option<&Path>) -> Result<bool, NotInstalled> {
+        if ["GIT_SSH_COMMAND", "GIT_SSH"]
+            .iter()
+            .any(|name| self.env_var(name).is_some_and(|value| !value.is_empty()))
+        {
+            return Ok(true);
+        }
+        let ran = self.run(
+            dir,
+            ["config", "--get", "core.sshCommand"],
+            Duration::from_secs(30),
+        )?;
+        Ok(ran.succeeded && !ran.stdout_text().trim().is_empty())
+    }
+
+    /// `name` in git's environment: this git's own settings first, then
+    /// the app's environment.
+    fn env_var(&self, name: &str) -> Option<OsString> {
+        match self.env.iter().rev().find(|(set, _)| set == name) {
+            Some((_, value)) => value.clone(),
+            None => std::env::var_os(name),
+        }
     }
 
     fn command(&self, dir: Option<&Path>) -> Command {
@@ -174,14 +256,13 @@ fn run_with_limit(mut command: Command, limit: Duration) -> Result<Ran, NotInsta
     let collect = |output: Option<mpsc::Receiver<Vec<u8>>>| {
         output
             .and_then(|output| output.recv_timeout(OUTPUT_WAIT).ok())
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default()
     };
     Ok(Ran {
         succeeded: succeeded && !timed_out,
         timed_out,
         stdout: collect(stdout),
-        stderr: collect(stderr),
+        stderr: String::from_utf8_lossy(&collect(stderr)).into_owned(),
     })
 }
 
@@ -260,7 +341,7 @@ mod tests {
             .run(None, ["--version"], Duration::from_secs(30))
             .unwrap();
         assert!(
-            ran.succeeded && ran.stdout.starts_with("git version"),
+            ran.succeeded && ran.stdout_text().starts_with("git version"),
             "{ran:?}"
         );
         let ran = git
@@ -298,7 +379,7 @@ mod tests {
         });
         let started = Instant::now();
         let ran = test_git(dir.path())
-            .run(
+            .run_network(
                 None,
                 ["ls-remote", &format!("git://127.0.0.1:{port}/library.git")],
                 Duration::from_secs(2),
@@ -310,5 +391,25 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn the_person_s_own_ssh_command_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = test_git(dir.path());
+        assert_eq!(git.has_own_ssh_command(None), Ok(false));
+        let own = git
+            .clone()
+            .with_env("GIT_SSH_COMMAND", "C:/Windows/System32/OpenSSH/ssh.exe");
+        assert_eq!(own.has_own_ssh_command(None), Ok(true));
+        let plink = git.clone().with_env("GIT_SSH", "plink.exe");
+        assert_eq!(plink.has_own_ssh_command(None), Ok(true));
+        // Set in git's settings, as Windows' OpenSSH for 1Password often is.
+        std::fs::write(
+            dir.path().join("gitconfig"),
+            "[core]\n\tsshCommand = C:/Windows/System32/OpenSSH/ssh.exe\n",
+        )
+        .unwrap();
+        assert_eq!(git.has_own_ssh_command(None), Ok(true));
     }
 }
