@@ -89,8 +89,8 @@ describe('a team server down when the app starts', () => {
     }, name);
   }
 
-  /** The kept-parts files the app wrote, one per team. */
-  const keptFiles = () => {
+  /** The parts files the app wrote, one per team. */
+  const partsFiles = () => {
     const folder = path.join(dataDir, 'parts-files');
     return fs.existsSync(folder) ? fs.readdirSync(folder).filter((name) => name.endsWith('.json')) : [];
   };
@@ -106,9 +106,9 @@ describe('a team server down when the app starts', () => {
     await waitForText(browser, BADGE, 'Teams · 2 live');
     await waitForLiveUpdates(browser);
     // Written a few seconds after each catch-up, once the parts stay the same.
-    await browser.waitUntil(async () => keptFiles().length === 2, {
+    await browser.waitUntil(async () => partsFiles().length === 2, {
       timeout: 30_000,
-      timeoutMsg: `the app kept ${keptFiles().length} teams' parts, not 2`,
+      timeoutMsg: `the app wrote ${partsFiles().length} parts files, not 2`,
     });
   });
 
@@ -150,11 +150,11 @@ describe('a team server down when the app starts', () => {
     await setMenuOpen(false);
   });
 
-  it('shows a kept part read-only, with when it was last up to date', async () => {
+  it('shows a part from its parts file read-only, with when it was last up to date', async () => {
     await browser.execute((team) => document.querySelector(`button.result[data-team="${team}"]`).click(), beta.url);
     await browser.waitUntil(async () => (await fieldValue('Value')) === '47', {
       timeout: 20_000,
-      timeoutMsg: `beta's part never showed its kept value; last: ${await fieldValue('Value')}`,
+      timeoutMsg: `beta's part never showed its value from its parts file; last: ${await fieldValue('Value')}`,
     });
     await waitForText(
       browser,
