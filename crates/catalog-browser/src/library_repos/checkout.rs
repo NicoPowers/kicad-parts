@@ -5,6 +5,7 @@
 //! runs with `GIT_OPTIONAL_LOCKS=0`, so not even git's index is refreshed.
 //! The app then works in a copy of its own, made from the address.
 
+use super::address::RepoAddress;
 use crate::git_program::{Git, NotInstalled};
 use desktop_contract::RepoRemote;
 use std::path::Path;
@@ -38,25 +39,14 @@ impl From<NotInstalled> for NoAddress {
 }
 
 /// The address of the repo in `folder`, the person's own clone or a bare
-/// repo, read without writing anything there.
+/// repo, read without writing anything there. A remote whose address holds
+/// a password is never used, or shown.
 pub(crate) fn address_in(git: &Git, folder: &Path) -> Result<FromFolder, NoAddress> {
     let git = git.clone().with_env("GIT_OPTIONAL_LOCKS", "0");
     let read = |args: &[&str]| git.run(Some(folder), args, READ_LIMIT);
     let bare = read(&["rev-parse", "--is-bare-repository"])?;
     if !bare.succeeded {
-        let why = bare.stderr.to_lowercase();
-        return Err(NoAddress::Said(if why.contains("not a git repository") {
-            format!(
-                "{} is not in a git repo. Choose the folder of your clone of the library, or enter the repo's address.",
-                folder.display()
-            )
-        } else {
-            format!(
-                "git could not read {}: {}",
-                folder.display(),
-                bare.first_problem_line().trim_start_matches("fatal: ")
-            )
-        }));
+        return Err(NoAddress::Said(cannot_read(folder, &bare.stderr)));
     }
     if bare.stdout_text().trim() == "true" {
         // A bare repo has no work of anyone's in it: it is the remote.
@@ -73,7 +63,7 @@ pub(crate) fn address_in(git: &Git, folder: &Path) -> Result<FromFolder, NoAddre
     let address_of = |name: &str| -> Result<String, NoAddress> {
         // `get-url` applies the person's `url.<base>.insteadOf` settings.
         let url = read(&["remote", "get-url", name])?;
-        Ok(url.stdout_text().trim().to_owned())
+        Ok(whole_address(folder, url.stdout_text().trim()))
     };
     let chosen = match names.as_slice() {
         [] => {
@@ -86,13 +76,67 @@ pub(crate) fn address_in(git: &Git, folder: &Path) -> Result<FromFolder, NoAddre
         many => {
             let mut remotes = Vec::new();
             for name in many {
+                let address = address_of(name)?;
+                let refused = RepoAddress::parse(&address).err();
                 remotes.push(RepoRemote {
                     name: name.clone(),
-                    address: address_of(name)?,
+                    // Never shown when refused: it may hold a token.
+                    address: if refused.is_some() {
+                        String::new()
+                    } else {
+                        address
+                    },
+                    refused,
                 });
             }
             return Ok(FromFolder::ChooseRemote(remotes));
         }
     };
-    Ok(FromFolder::Address(address_of(&chosen)?))
+    let address = address_of(&chosen)?;
+    match RepoAddress::parse(&address) {
+        Ok(_) => Ok(FromFolder::Address(address)),
+        Err(why) => Err(NoAddress::Said(format!(
+            "The clone's remote {chosen}: {why}"
+        ))),
+    }
+}
+
+/// A remote's address as git uses it from `folder`: a relative folder path,
+/// such as `../library.git`, made whole.
+fn whole_address(folder: &Path, url: &str) -> String {
+    if RepoAddress::parse(url).is_err() && folder.join(url).exists() {
+        std::path::absolute(folder.join(url))
+            .unwrap_or_else(|_| folder.join(url))
+            .display()
+            .to_string()
+    } else {
+        url.to_owned()
+    }
+}
+
+/// Why git could not read `folder`, from what it said, in plain words.
+fn cannot_read(folder: &Path, said: &str) -> String {
+    let lower = said.to_lowercase();
+    if lower.contains("not a git repository") {
+        format!(
+            "{} is not in a git repo. Choose the folder of your clone of the library, or enter the repo's address.",
+            folder.display()
+        )
+    } else if lower.contains("dubious ownership") {
+        format!(
+            "git does not trust the owner of {}, so it won't read it. Run the git config --global --add safe.directory command git suggests, then try again.",
+            folder.display()
+        )
+    } else {
+        let first = said
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("it gave no reason");
+        format!(
+            "git could not read {}: {}",
+            folder.display(),
+            first.trim_start_matches("fatal: ")
+        )
+    }
 }

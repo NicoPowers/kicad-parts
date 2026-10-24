@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::teams::SignIns;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 const ACME: &str = "https://acme.example.test";
@@ -349,7 +350,7 @@ fn what_cannot_be_linked_is_said_plainly() {
             .trim_start_matches('/')
     );
     assert!(
-        refused(&missing).starts_with("Can't read the repo: the repo was not found."),
+        refused(&missing).starts_with("There is no folder file:///"),
         "{}",
         refused(&missing)
     );
@@ -399,11 +400,13 @@ fn a_clone_with_several_remotes_and_no_origin_asks_which() {
         [
             RepoRemote {
                 name: "client".into(),
-                address: bare_text.clone()
+                address: bare_text.clone(),
+                refused: None,
             },
             RepoRemote {
                 name: "fork".into(),
-                address: fork_text
+                address: fork_text,
+                refused: None,
             },
         ]
     );
@@ -557,4 +560,81 @@ fn without_git_the_app_says_where_to_get_it() {
         problem.summary.contains("git is not installed"),
         "{problem:?}"
     );
+}
+
+#[test]
+fn an_address_with_a_password_is_never_kept_or_shown() {
+    let fixture = Fixture::new();
+    let repos = fixture.repos();
+    let token = "https://oauth2:glpat-secret@gitlab.com/acme/lib.git";
+    assert_eq!(
+        repos.link(ACME, token).unwrap_err().summary,
+        address::HAS_PASSWORD
+    );
+    // A clone whose origin holds a token is refused the same way.
+    let clone = fixture.path("token-clone");
+    fs::create_dir_all(&clone).unwrap();
+    fixture.git(&clone, &["init", "-q"]);
+    fixture.git(&clone, &["remote", "add", "origin", token]);
+    let problem = repos.link(ACME, &clone.display().to_string()).unwrap_err();
+    assert!(
+        problem.summary.ends_with(address::HAS_PASSWORD),
+        "{problem:?}"
+    );
+    // Among several remotes, it is offered as unusable, its address unseen.
+    let bare = fixture.host_repo("client-library.git");
+    let several = fixture.path("several");
+    fs::create_dir_all(&several).unwrap();
+    fixture.git(&several, &["init", "-q"]);
+    fixture.git(
+        &several,
+        &["remote", "add", "client", &bare.display().to_string()],
+    );
+    fixture.git(&several, &["remote", "add", "work", token]);
+    let Ok(Linked::ChooseRemote(remotes)) = repos.link(ACME, &several.display().to_string()) else {
+        panic!("no choice of remotes");
+    };
+    assert_eq!(remotes[1].name, "work");
+    assert_eq!(remotes[1].address, "");
+    assert_eq!(remotes[1].refused.as_deref(), Some(address::HAS_PASSWORD));
+    assert!(remotes[0].refused.is_none());
+    // Nothing with the token reached the list of teams.
+    let saved = fs::read_to_string(fixture.path("config/team.json")).unwrap();
+    assert!(!saved.contains("glpat"), "{saved}");
+}
+
+#[test]
+fn a_file_address_of_a_clone_links_the_clone_s_remote_never_the_clone() {
+    let fixture = Fixture::new();
+    let bare = fixture.host_repo("client-library.git");
+    let clone = fixture.persons_clone(&bare, "my-checkout");
+    // A clone of the person's clone: its origin is the first clone.
+    let second = fixture.path("second-checkout");
+    let (clone_text, second_text) = (clone.display().to_string(), second.display().to_string());
+    fixture.git(
+        fixture.dir.path(),
+        &["clone", "-q", &clone_text, &second_text],
+    );
+    let repos = fixture.repos();
+    let as_url = |path: &Path| {
+        format!(
+            "file:///{}",
+            path.display()
+                .to_string()
+                .replace('\\', "/")
+                .trim_start_matches('/')
+        )
+    };
+    let bare_key = RepoAddress::parse(&bare.display().to_string())
+        .unwrap()
+        .key();
+    for place in [as_url(&clone), as_url(&second), second_text.clone()] {
+        assert_eq!(repos.link(ACME, &place), Ok(Linked::Done), "{place}");
+        let linked = repos.repo_for(ACME).unwrap();
+        assert_eq!(linked.address().key(), bare_key, "{place}");
+    }
+    // A bare repo's file:// address is kept as given.
+    assert_eq!(repos.link(BETA, &as_url(&bare)), Ok(Linked::Done));
+    assert_eq!(repos.repo_for(BETA).unwrap().address().url(), as_url(&bare));
+    repos.wait_until_idle();
 }

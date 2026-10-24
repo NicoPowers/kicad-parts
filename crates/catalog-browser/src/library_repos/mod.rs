@@ -32,7 +32,7 @@ use desktop_contract::{LibraryRepoStatus, RepoAccess, RepoProblem, RepoRemote, T
 use problems::{Step, git_not_installed};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::UNIX_EPOCH;
 
@@ -43,6 +43,25 @@ pub enum Linked {
     Done,
     /// The folder's clone has several remotes and none is `origin`.
     ChooseRemote(Vec<RepoRemote>),
+}
+
+/// How many clones the app follows, remote to remote, to find the repo.
+const MAX_CLONE_STEPS: usize = 5;
+
+/// What a place the person entered leads to.
+enum Found {
+    Address(RepoAddress),
+    /// A clone with several remotes and no `origin`.
+    ChooseRemote(Vec<RepoRemote>),
+}
+
+/// A refusal in plain words, with no git message behind it.
+fn refused(summary: String) -> RepoProblem {
+    RepoProblem {
+        summary,
+        details: String::new(),
+        offline: false,
+    }
 }
 
 pub struct LibraryRepos {
@@ -104,15 +123,10 @@ impl LibraryRepos {
     /// must be readable; then the app copies it and tries a push in the
     /// background.
     pub fn link(&self, server_url: &str, place: &str) -> Result<Linked, RepoProblem> {
-        let refused = |summary: String| RepoProblem {
-            summary,
-            details: String::new(),
-            offline: false,
-        };
         self.shared.teams.team(server_url).map_err(refused)?;
         let address = match self.address_for(place)? {
-            Ok(address) => address,
-            Err(remotes) => return Ok(Linked::ChooseRemote(remotes)),
+            Found::Address(address) => address,
+            Found::ChooseRemote(remotes) => return Ok(Linked::ChooseRemote(remotes)),
         };
         self.repo(&address).can_read()?;
         self.shared
@@ -178,37 +192,45 @@ impl LibraryRepos {
         }
     }
 
-    /// The address `place` names: an address as it is, or the address of
-    /// the repo in a folder. `Err` holds the remotes to choose from.
-    fn address_for(
-        &self,
-        place: &str,
-    ) -> Result<Result<RepoAddress, Vec<RepoRemote>>, RepoProblem> {
-        let refused = |summary: String| RepoProblem {
-            summary,
-            details: String::new(),
-            offline: false,
-        };
-        let place = place.trim();
-        let parsed = RepoAddress::parse(place);
-        let folder = Path::new(place);
-        // A URL, such as `ssh://` or `file://`, is an address; so is
-        // `host:path`. Anything else must be a folder.
-        let is_address = parsed
-            .as_ref()
-            .is_ok_and(|address| address.host() != "this computer" || place.contains("://"));
-        if is_address || !folder.is_dir() {
-            return match parsed {
-                Ok(address) if is_address => Ok(Ok(address)),
-                Ok(_) => Err(refused(format!(
-                    "There is no folder {place}. Check the path, or enter the repo's address."
-                ))),
-                Err(why) => Err(refused(why)),
-            };
+    /// The address `place` names: a host's address as it is, or, for a
+    /// folder (a path or a `file://` URL), the repo the folder leads to.
+    fn address_for(&self, place: &str) -> Result<Found, RepoProblem> {
+        let address = RepoAddress::parse(place).map_err(refused)?;
+        if address.folder_path().is_some_and(|folder| !folder.is_dir()) {
+            return Err(refused(format!(
+                "There is no folder {}. Check the path, or enter the repo's address.",
+                place.trim()
+            )));
         }
-        match checkout::address_in(&self.shared.git, folder) {
-            Ok(FromFolder::Address(url)) => RepoAddress::parse(&url).map(Ok).map_err(refused),
-            Ok(FromFolder::ChooseRemote(remotes)) => Ok(Err(remotes)),
+        self.follow(address, 0)
+    }
+
+    /// The repo `address` leads to. A bare repo in a folder is the repo. A
+    /// clone in a folder is someone's work, never written by the app
+    /// (mx-70700f), so its remote is followed instead, even when the remote
+    /// is another clone.
+    fn follow(&self, address: RepoAddress, steps: usize) -> Result<Found, RepoProblem> {
+        let Some(folder) = address.folder_path().filter(|folder| folder.is_dir()) else {
+            // A host, or a folder that is not there: reading it says so.
+            return Ok(Found::Address(address));
+        };
+        if steps >= MAX_CLONE_STEPS {
+            return Err(refused(format!(
+                "{} leads from clone to clone more than {MAX_CLONE_STEPS} times. Enter the repo's address instead.",
+                address.url()
+            )));
+        }
+        match checkout::address_in(&self.shared.git, &folder) {
+            Ok(FromFolder::Address(url)) => {
+                let next = RepoAddress::parse(&url).map_err(refused)?;
+                // A bare repo gives its own folder back.
+                if next.folder_path().as_deref() == Some(folder.as_path()) {
+                    Ok(Found::Address(address))
+                } else {
+                    self.follow(next, steps + 1)
+                }
+            }
+            Ok(FromFolder::ChooseRemote(remotes)) => Ok(Found::ChooseRemote(remotes)),
             Err(NoAddress::GitNotInstalled) => Err(git_not_installed(Step::Read)),
             Err(NoAddress::Said(why)) => Err(refused(why)),
         }

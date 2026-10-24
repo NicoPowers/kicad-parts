@@ -6,6 +6,12 @@
 //! `github.com/acme/lib`, so two teams that link one repo share one copy.
 
 use crate::file_safe::file_safe;
+use std::path::PathBuf;
+
+/// Why an address with a password or token in it is refused. It would be
+/// kept in the list of teams, shown in the Teams menu and written in the
+/// app's copy, so the app never takes one.
+pub const HAS_PASSWORD: &str = "That address has a password or token in it. The app never keeps passwords: sign in with a git credential helper, or use the repo's ssh address.";
 
 /// A git address the app accepts for a library repo.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,6 +67,9 @@ impl RepoAddress {
             return Err(format!("{url} is not a repo address."));
         }
         let place = if let Some((scheme, rest)) = url.split_once("://") {
+            if has_password(rest) {
+                return Err(HAS_PASSWORD.to_owned());
+            }
             from_url(&scheme.to_ascii_lowercase(), rest)?
         } else if let Some((authority, path)) = scp_like(url) {
             host_place(authority, None, path)?
@@ -82,6 +91,30 @@ impl RepoAddress {
     /// The address as given: what git is given.
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Whether the repo is in a folder on this computer or a network share,
+    /// given as a path or a `file://` URL.
+    pub fn is_folder(&self) -> bool {
+        matches!(self.place, Place::Folder { .. })
+    }
+
+    /// The folder, for a repo in one.
+    pub fn folder_path(&self) -> Option<PathBuf> {
+        match &self.place {
+            Place::Folder { path } => Some(PathBuf::from(path)),
+            Place::Host { .. } => None,
+        }
+    }
+
+    /// Whether git reaches the repo over https or http, where a credential
+    /// helper may ask for a sign-in.
+    pub fn is_web(&self) -> bool {
+        let scheme = self
+            .url
+            .split_once("://")
+            .map(|(scheme, _)| scheme.to_ascii_lowercase());
+        matches!(scheme.as_deref(), Some("https" | "http"))
     }
 
     /// The key the app knows the repo by, whatever way its address is
@@ -165,6 +198,15 @@ fn from_url(scheme: &str, rest: &str) -> Result<Place, String> {
     let (host, port) = split_port(authority)?;
     let port = port.filter(|port| port != usual_port);
     host_place(host, port, path)
+}
+
+/// Whether the text after `scheme://` names a user with a password, as in
+/// `https://oauth2:glpat-…@gitlab.com/acme/lib.git`.
+fn has_password(rest: &str) -> bool {
+    let authority = rest.split('/').next().unwrap_or(rest);
+    authority
+        .rsplit_once('@')
+        .is_some_and(|(user, _)| user.contains(':'))
 }
 
 /// `[user@]host[:port]` as the host and the port, if any.
@@ -295,6 +337,18 @@ mod tests {
         let folder = RepoAddress::parse(r"\\nas\hw\client-library.git").unwrap();
         assert_eq!(folder.name(), "client-library");
         assert_eq!(folder.host(), "this computer");
+        assert!(folder.is_folder() && !address.is_folder());
+        assert!(
+            RepoAddress::parse("file:///srv/lib.git")
+                .unwrap()
+                .is_folder()
+        );
+        assert!(
+            RepoAddress::parse("https://gitlab.com/a/b")
+                .unwrap()
+                .is_web()
+        );
+        assert!(!address.is_web());
     }
 
     #[test]
@@ -332,6 +386,16 @@ mod tests {
         assert!(refused("--upload-pack=evil").contains("is not a repo address"));
         assert!(refused("ext::sh -c touch% /tmp/x").contains("is not a repo address"));
         assert!(refused("fd::3").contains("is not a repo address"));
+        // A password or token is never kept.
+        for text in [
+            "https://oauth2:glpat-abc123@gitlab.com/acme/lib.git",
+            "https://ada:secret@github.com/acme/lib",
+            "ssh://git:pw@git.example.com:2222/hw/lib.git",
+        ] {
+            assert_eq!(refused(text), HAS_PASSWORD, "{text}");
+        }
+        // A user name alone is fine.
+        assert!(RepoAddress::parse("https://ada@bitbucket.org/acme/lib.git").is_ok());
         assert!(refused("ftp://host/x").contains("by ssh or https, not ftp://"));
         assert!(refused("git@gitlab.com:").contains("needs the repo's path on gitlab.com"));
         assert!(refused("https://gitlab.com/").contains("needs the repo's path"));

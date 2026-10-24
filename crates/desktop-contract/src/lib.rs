@@ -595,7 +595,12 @@ pub enum LibraryRepoLinking {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RepoRemote {
     pub name: String,
+    /// Blank when refused: an address with a token is never shown.
     pub address: String,
+    /// Why the app can't use this remote, such as a password in its
+    /// address.
+    #[serde(default)]
+    pub refused: Option<String>,
 }
 
 /// The person's answer on a team's row: the team at `server_url` moved
