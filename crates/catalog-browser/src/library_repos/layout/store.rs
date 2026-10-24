@@ -38,17 +38,30 @@ pub(crate) struct Reviewed {
     pub changed: bool,
 }
 
-/// What stays the same while a repo's layout does: its libraries, model
-/// folders, variables, tables and doubts, but not how many files it has.
+/// What the person reviews, and so what must stay the same for a newer
+/// commit to keep the review: library nicknames and paths, path variables
+/// and their folders, model folders, lib tables and `.kicad_dbl` files.
+/// Counts and per-file doubts are left out, so a new footprint with its
+/// 3D model asks for no review.
 pub(crate) fn fingerprint(layout: &LibraryLayout) -> String {
+    let libraries = |libraries: &[desktop_contract::LayoutLibrary]| -> Vec<(String, String)> {
+        libraries
+            .iter()
+            .map(|library| (library.nickname.clone(), library.path.clone()))
+            .collect()
+    };
+    let variables: Vec<(&str, Option<&str>)> = layout
+        .path_variables
+        .iter()
+        .map(|variable| (variable.name.as_str(), variable.folder.as_deref()))
+        .collect();
     let parts = serde_json::json!([
-        layout.symbol_libraries,
-        layout.footprint_libraries,
+        libraries(&layout.symbol_libraries),
+        libraries(&layout.footprint_libraries),
+        variables,
         layout.model_folders,
-        layout.path_variables,
         layout.database_libraries,
         layout.lib_tables,
-        layout.doubts,
     ]);
     sha256_hex(parts.to_string().as_bytes())
 }
@@ -101,18 +114,16 @@ pub(crate) fn checked(
             "The short name can have up to {MAX_PREFIX} letters, digits, - or _."
         ));
     }
-    for (name, folder) in &choices.variable_folders {
-        if !layout
+    // A choice made for an older commit whose variable or folder is gone
+    // is dropped, as a library no longer there is: the person sees the
+    // scan's own folder instead.
+    choices.variable_folders.retain(|name, folder| {
+        layout
             .path_variables
             .iter()
             .any(|variable| &variable.name == name)
-        {
-            return Err(format!("The repo uses no path variable {name}."));
-        }
-        if !layout.folders.contains(folder) {
-            return Err(format!("The repo has no folder {folder} for {name}."));
-        }
-    }
+            && layout.folders.contains(folder)
+    });
     let libraries = || {
         layout
             .symbol_libraries
@@ -334,11 +345,18 @@ mod tests {
         );
         assert!(with("A C", "ACME_3D", "3d").is_err());
         assert!(with("ABCDEFGHIJKLM", "ACME_3D", "3d").is_err());
-        assert!(with("AC", "NOPE", "3d").unwrap_err().contains("NOPE"));
+        // A folder choice whose variable or folder is gone is dropped.
+        assert!(
+            with("AC", "NOPE", "3d")
+                .unwrap()
+                .variable_folders
+                .is_empty()
+        );
         assert!(
             with("AC", "ACME_3D", "elsewhere")
-                .unwrap_err()
-                .contains("elsewhere")
+                .unwrap()
+                .variable_folders
+                .is_empty()
         );
         assert!(with("AC-2_x", "ACME_3D", "").is_ok());
     }
@@ -362,11 +380,17 @@ mod tests {
             changed: false,
         };
         assert_eq!(follow(&mut reviewed, &first), Followed::Same);
-        // More 3D models, same layout.
-        let more_models = LibraryLayout {
+        // More 3D models and links, and a doubt about one of them: the
+        // same layout as reviewed.
+        let mut more_models = LibraryLayout {
             model_files: 99,
             ..layout("b")
         };
+        more_models.path_variables[0].links = 40;
+        more_models.doubts.push(LayoutDoubt::MissingModel {
+            footprint: "lib/Acme.pretty/New.kicad_mod".into(),
+            link: "${ACME_3D}/New.step".into(),
+        });
         assert_eq!(follow(&mut reviewed, &more_models), Followed::Moved);
         assert_eq!(reviewed.commit, "b");
         // A new library: review again, still at b meanwhile.

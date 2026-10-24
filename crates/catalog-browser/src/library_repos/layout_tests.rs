@@ -235,12 +235,17 @@ fn a_newer_commit_asks_for_a_review_only_when_the_layout_changed() {
         })
         .unwrap();
 
-    // Another 3D model: the same layout, so it moves on silently.
+    // Another footprint with its 3D model: the same layout, so it moves on
+    // silently.
+    let spare = footprint("Spare", &["${BETA_LIB}/Beta.pretty/Spare.step"]);
     fixture.commit_files(
         &work,
         &beta,
-        &[("Beta.pretty/Spare.step", "ISO")],
-        "A model",
+        &[
+            ("Beta.pretty/Spare.kicad_mod", spare.as_str()),
+            ("Beta.pretty/Spare.step", "ISO"),
+        ],
+        "A footprint and its model",
     );
     repos.check_again(BETA);
     repos.wait_until_idle();
