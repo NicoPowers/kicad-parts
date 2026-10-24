@@ -2,8 +2,13 @@
 //! (kicad-parts-f397): the team code that names the libraries, whether the
 //! signed-in team's libraries are up to date, Update now and Open folder,
 //! what to add to KiCad once, and other teams' libraries on this computer.
+//!
+//! The panel shows one team's libraries: the team chosen in the part list,
+//! else the one chosen here last, else the first (kicad-parts-8a71). With
+//! All teams and two teams or more, it has its own Team list box.
 
 use crate::backend;
+use crate::team_marks::TeamSelect;
 use desktop_contract::{
     KicadLibrariesState, KicadLibrariesStatus, KicadLibrary, OdbcDriver, TeamCode,
     two_servers_claim_a_team,
@@ -51,6 +56,10 @@ pub fn KicadLibrariesSection(
     status: RwSignal<Option<KicadLibrariesStatus>>,
     /// The team whose libraries the panel shows, by server address.
     team: Signal<String>,
+    /// The teams to choose from, with All teams in the part list; empty
+    /// when it shows one team.
+    teams: Memo<Vec<(String, String)>>,
+    choose_team: Callback<String>,
 ) -> impl IntoView {
     let asked = RwSignal::new(false);
     // Which Copy button just copied, and what the live region says.
@@ -394,6 +403,7 @@ pub fn KicadLibrariesSection(
     view! {
         <section class="kicad-libraries" aria-labelledby="kicad-libraries-heading">
             <h2 id="kicad-libraries-heading">"KiCad libraries"</h2>
+            <TeamSelect id="kicad-libraries-team" options=teams chosen=team changed=choose_team />
             <p>
                 "The team's parts, one entry for each revision, so a design never switches to newer CAD by itself. They are in "
                 <code class="kicad-libraries-folder">

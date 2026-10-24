@@ -31,7 +31,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use libraries::{BrowseFor, BrowserActions, LibrariesDialog};
 use library_check::{LibraryCheckLine, LibraryCheckPanel};
-use list_controls::ListControls;
+use list_controls::{ListControls, remember_team};
 use part_list::{ResultList, SEARCH_ROWS, Searched};
 use std::time::Duration;
 use team::{Notice, TeamColumn, TeamUi};
@@ -149,6 +149,40 @@ fn App() -> impl IntoView {
                 .unwrap_or_default()
         })
     });
+    // The teams the library check and the KiCad libraries panel offer in
+    // their own Team list box: only with All teams in the part list, as
+    // one team chosen there is the team they use.
+    let own_choice = move |candidates: fn(&TeamsStatus) -> Vec<String>| {
+        Memo::new(move |_| {
+            if filter.with(Option::is_some) {
+                return Vec::new();
+            }
+            teams_badge.with(|status| {
+                status
+                    .as_ref()
+                    .map(|status| team_options(status, &candidates(status)))
+                    .unwrap_or_default()
+            })
+        })
+    };
+    let check_teams = own_choice(editable_teams);
+    let kicad_teams = own_choice(showing_teams);
+    let remember = move |feature: &'static str| {
+        Callback::new(move |team: String| remember_team(teams, feature, &team))
+    };
+    let choose_check_team = remember(feature::LIBRARY_CHECK);
+    let choose_kicad_team = remember(feature::KICAD_LIBRARIES);
+    // The code of the team checked, for the line under the search box,
+    // while the person can edit in two teams or more.
+    let check_label = Memo::new(move |_| {
+        let team = check_team.get()?;
+        add_teams.with(|teams| {
+            (teams.len() >= 2)
+                .then(|| teams.iter().find(|(server, _)| *server == team))
+                .flatten()
+                .map(|(_, label)| label.clone())
+        })
+    });
     let kicad_team_url = Memo::new(move |_| kicad_team.get().unwrap_or_default());
     // The selected part's team, while it has one and it is in the list.
     let part_team = Memo::new(move |_| {
@@ -222,6 +256,14 @@ fn App() -> impl IntoView {
     };
     refresh_libraries();
     set_interval(refresh_libraries, LIBRARIES_POLL);
+    // Another team's libraries show at once, not at the next poll.
+    Effect::new(move |previous: Option<String>| {
+        let team = kicad_team_url.get();
+        if previous.is_some_and(|previous| previous != team) {
+            refresh_libraries();
+        }
+        team
+    });
 
     // The library check, for people who can edit: worked out by the app
     // once per change of the team catalog (who is signed in, a new Change
@@ -359,6 +401,8 @@ fn App() -> impl IntoView {
                     override_input=override_input
                     libraries=kicad_libraries
                     libraries_team=kicad_team_url.into()
+                    libraries_teams=kicad_teams
+                    choose_libraries_team=choose_kicad_team
                 />
             </header>
             <KicadProblem status=status kicad_epoch=kicad_epoch override_input=override_input />
@@ -414,6 +458,7 @@ fn App() -> impl IntoView {
                     <LibraryCheckLine
                         check=library_check
                         problem=check_problem
+                        team=check_label.into()
                         open=Callback::new(move |_| {
                             adding.set(false);
                             checking.set(true);
@@ -437,6 +482,9 @@ fn App() -> impl IntoView {
                     any_team=any_team
                     add_team=add_team_url
                     add_teams=add_teams
+                    check_teams=check_teams
+                    check_team=check_team
+                    choose_check_team=choose_check_team
                     adding=adding
                     checking=checking
                     library_check=library_check
@@ -554,6 +602,9 @@ fn KicadBadge(
     libraries: RwSignal<Option<desktop_contract::KicadLibrariesStatus>>,
     /// The team whose KiCad libraries the panel shows.
     libraries_team: Signal<String>,
+    /// The teams the panel offers, with All teams in the part list.
+    libraries_teams: Memo<Vec<(String, String)>>,
+    choose_libraries_team: Callback<String>,
 ) -> impl IntoView {
     move || match status.get() {
         Load::Loading => view! { <p class="kicad-badge">"Looking for KiCad…"</p> }.into_any(),
@@ -590,7 +641,12 @@ fn KicadBadge(
                                 saved=app.kicad_override.is_some()
                                 rejected=app.override_rejected.clone()
                             />
-                            <KicadLibrariesSection status=libraries team=libraries_team />
+                            <KicadLibrariesSection
+                                status=libraries
+                                team=libraries_team
+                                teams=libraries_teams
+                                choose_team=choose_libraries_team
+                            />
                         </div>
                     </details>
                 }
@@ -803,6 +859,10 @@ fn PartPanel(
     add_team: Memo<String>,
     /// The teams a new part can go into, with their codes.
     add_teams: Memo<Vec<(String, String)>>,
+    /// The teams the library check offers, and the team it checks.
+    check_teams: Memo<Vec<(String, String)>>,
+    check_team: Memo<Option<String>>,
+    choose_check_team: Callback<String>,
     adding: RwSignal<bool>,
     checking: RwSignal<bool>,
     library_check: RwSignal<Option<LibraryCheckView>>,
@@ -1073,7 +1133,16 @@ fn PartPanel(
         }));
     });
     // The Library check's Add part from it: Add part opens with the symbol
-    // or footprint chosen in our libraries.
+    // or footprint chosen in our libraries, for the team checked.
+    let add_from_check = Callback::new(move |choice: desktop_contract::TeamLibraryChoice| {
+        add_form.start_from_library(choice);
+        if let Some(team) = check_team.get_untracked() {
+            add_form.start_in(team);
+        }
+        checking.set(false);
+        adding.set(true);
+    });
+    // The Libraries browser's Add part from it, for Add part's own team.
     let add_from = Callback::new(move |choice: desktop_contract::TeamLibraryChoice| {
         add_form.start_from_library(choice);
         checking.set(false);
@@ -1117,7 +1186,14 @@ fn PartPanel(
                 />
             })}
             {move || (checking.get() && !adding.get()).then(|| view! {
-                <LibraryCheckPanel check=library_check close=close_checking add_from=add_from />
+                <LibraryCheckPanel
+                    check=library_check
+                    teams=check_teams
+                    team=Signal::derive(move || check_team.get().unwrap_or_default())
+                    choose_team=choose_check_team
+                    close=close_checking
+                    add_from=add_from_check
+                />
             })}
             {move || if adding.get() || checking.get() { ().into_any() } else { match detail.get() {
                 None => view! {

@@ -3,16 +3,23 @@
 //! Library check view in the part panel, grouped as To fix, Not in the
 //! Catalog yet, Worth a look and Clean-up. A symbol or footprint not in
 //! the Catalog yet can start Add part (kicad-parts-37a7).
+//!
+//! The check compares our folder with one team's Catalog: the team chosen
+//! in the part list, else the one the person chose here last, else the
+//! first they can edit (kicad-parts-8a71). With All teams and two teams or
+//! more, the view has its own Team list box, and the line names the team.
 
 use crate::cad_reference;
 use crate::focus::focus_later;
+use crate::team_marks::TeamSelect;
 use desktop_contract::{LibraryCheckGroup, LibraryCheckItem, LibraryCheckView, TeamLibraryChoice};
 use leptos::prelude::*;
 
 /// The line's words, such as `Library check: 1 to fix, 2 new items`, or
 /// `None` when the check found nothing. To fix and new items come first;
-/// the other groups are counted only when neither has any.
-pub(crate) fn line_text(view: &LibraryCheckView) -> Option<String> {
+/// the other groups are counted only when neither has any. With `team`,
+/// the line names the team checked: `MA library check: 1 to fix`.
+pub(crate) fn line_text(view: &LibraryCheckView, team: Option<&str>) -> Option<String> {
     let counted = |count: usize, one: &str, many: &str| {
         (count > 0).then(|| format!("{count} {}", if count == 1 { one } else { many }))
     };
@@ -33,7 +40,11 @@ pub(crate) fn line_text(view: &LibraryCheckView) -> Option<String> {
             .flatten(),
         );
     }
-    (!parts.is_empty()).then(|| format!("Library check: {}", parts.join(", ")))
+    let name = match team {
+        Some(team) => format!("{team} library check"),
+        None => "Library check".to_owned(),
+    };
+    (!parts.is_empty()).then(|| format!("{name}: {}", parts.join(", ")))
 }
 
 /// The line under the search box; nothing when the check found nothing or
@@ -43,6 +54,9 @@ pub(crate) fn LibraryCheckLine(
     check: RwSignal<Option<LibraryCheckView>>,
     /// Why the check could not run, if it could not.
     problem: RwSignal<Option<String>>,
+    /// The code of the team checked, while the person can edit in two
+    /// teams or more.
+    team: Signal<Option<String>>,
     open: Callback<()>,
 ) -> impl IntoView {
     move || {
@@ -57,7 +71,7 @@ pub(crate) fn LibraryCheckLine(
             );
         }
         let view = check.get()?;
-        let text = line_text(&view)?;
+        let text = line_text(&view, team.get().as_deref())?;
         let urgent = view.to_fix > 0;
         Some(
             view! {
@@ -82,6 +96,12 @@ pub(crate) fn LibraryCheckLine(
 #[component]
 pub(crate) fn LibraryCheckPanel(
     check: RwSignal<Option<LibraryCheckView>>,
+    /// The teams to choose from, with All teams in the part list; empty
+    /// when it shows one team.
+    teams: Memo<Vec<(String, String)>>,
+    /// The team checked, by server address.
+    team: Signal<String>,
+    choose_team: Callback<String>,
     close: Callback<()>,
     /// Opens Add part with a symbol or footprint of the list chosen.
     add_from: Callback<TeamLibraryChoice>,
@@ -96,6 +116,7 @@ pub(crate) fn LibraryCheckPanel(
                     <p class="part-description">
                         "The symbols, footprints and 3D models of our CSV catalog folder, compared with the Catalog."
                     </p>
+                    <TeamSelect id="library-check-team" options=teams chosen=team changed=choose_team />
                 </div>
                 <button type="button" id="library-check-close" on:click=move |_| close.run(())>
                     "Close"
@@ -281,17 +302,22 @@ mod tests {
     #[test]
     fn the_line_says_what_to_fix_and_what_is_new_first() {
         assert_eq!(
-            line_text(&view(1, 2, 3, 4)).as_deref(),
+            line_text(&view(1, 2, 3, 4), None).as_deref(),
             Some("Library check: 1 to fix, 2 new items")
         );
         assert_eq!(
-            line_text(&view(0, 1, 3, 0)).as_deref(),
+            line_text(&view(0, 1, 3, 0), None).as_deref(),
             Some("Library check: 1 new item")
         );
         assert_eq!(
-            line_text(&view(0, 0, 3, 14)).as_deref(),
+            line_text(&view(0, 0, 3, 14), None).as_deref(),
             Some("Library check: 3 worth a look, 14 to clean up")
         );
-        assert_eq!(line_text(&view(0, 0, 0, 0)), None);
+        // With two teams to check, the line names the team checked.
+        assert_eq!(
+            line_text(&view(1, 0, 0, 0), Some("MA")).as_deref(),
+            Some("MA library check: 1 to fix")
+        );
+        assert_eq!(line_text(&view(0, 0, 0, 0), None), None);
     }
 }

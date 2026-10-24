@@ -276,6 +276,13 @@ impl Form {
         self.start_from_picks(picks);
     }
 
+    /// Adds to the team at `team`, as the person chose it elsewhere, such
+    /// as in the library check.
+    pub fn start_in(&self, team: String) {
+        self.team.set(team);
+        self.team_chosen.set_value(true);
+    }
+
     /// Starts again from items chosen in the Libraries browser (once the
     /// form is shown).
     fn start_from_picks(&self, picks: Vec<TeamPickRequest>) {
