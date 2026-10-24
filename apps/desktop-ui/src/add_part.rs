@@ -5,10 +5,13 @@
 //! offers, looks at the checks, and saves the new part with a reason.
 //!
 //! The form takes the part panel: the drawings on the left, the form on
-//! the right, like Edit part. With two teams or more the person can add
-//! to, a Team list box at the top says which team the part goes into
-//! (kicad-parts-8a71). It starts on the team chosen in the part list, else
-//! the team last added to, else the first.
+//! the right, like Edit part. While two teams or more show parts, the top
+//! of the form says which team the part goes into, with a Team list box
+//! when there is a choice (kicad-parts-8a71). It starts on the team chosen
+//! in the part list, else the team last added to, else the first. Once the
+//! form holds anything, or the person chose a team, the team never changes
+//! by itself: if that team can't take parts for a while, Save is off and
+//! the form says why.
 //!
 //! No CAD name is typed (kicad-parts-bc6f): Symbol and Footprint show the
 //! chosen reference, read only, with Choose... (the Libraries browser for
@@ -29,7 +32,7 @@ use crate::focus::focus_later;
 use crate::libraries::BrowseFor;
 use crate::list_controls::remember_team;
 use crate::team::{FilePreview, MAX_FILE_BYTES, RetrySlot, base64, shown};
-use crate::team_marks::TeamSelect;
+use crate::team_marks::{ListTeams, TeamSelect};
 use desktop_contract::{
     DownloadedFile, Field, FileKind, FilePreviewRequest, LibraryGroup, LibraryKey,
     ManufacturerPart, PickUse, PreviewKind, PreviewRequest, PublishResult, TeamDownload,
@@ -123,6 +126,9 @@ pub struct Form {
     /// The person chose the team in this form, so it no longer follows the
     /// part list's team until the form is emptied.
     team_chosen: StoredValue<bool>,
+    /// Counts the readings asked for, so only the newest one's answer is
+    /// used.
+    reads: StoredValue<u64>,
     reading: RwSignal<Option<TeamDownload>>,
     downloads: StoredValue<Vec<DownloadedFile>>,
     reading_files: RwSignal<bool>,
@@ -204,6 +210,7 @@ impl Form {
         Self {
             team: RwSignal::new(String::new()),
             team_chosen: StoredValue::new(false),
+            reads: StoredValue::new(0),
             reading: RwSignal::new(None),
             downloads: StoredValue::new(Vec::new()),
             reading_files: RwSignal::new(false),
@@ -379,7 +386,7 @@ impl Form {
                     if let Ok(parts) =
                         backend::team_check_mpn(&team, mpn.clone(), manufacturer).await
                     {
-                        if form.mpn.get_untracked() == mpn {
+                        if form.mpn.get_untracked() == mpn && form.team.get_untracked() == team {
                             form.mpn_shown.set_value(mpn);
                             form.same_mpn.set(parts);
                         }
@@ -417,7 +424,8 @@ impl Form {
         let team = form.team.get_untracked();
         spawn_local(async move {
             let answer = backend::team_check_ipn(&team, ipn.trim().to_owned(), prefix).await;
-            if form.ipn.get_untracked() == ipn {
+            // Kept only for the IPN and team still shown.
+            if form.ipn.get_untracked() == ipn && form.team.get_untracked() == team {
                 form.ipn_problem.set(match answer {
                     Ok(check) => check.problem,
                     Err(message) => Some(message),
@@ -602,12 +610,9 @@ fn draw_file(
 #[component]
 pub fn AddPartView(
     form: Form,
-    /// The teams the person can add parts to, by server address, with each
-    /// one's code.
-    teams: Memo<Vec<(String, String)>>,
     /// The team to start on: the part list's, else the last one used, else
-    /// the first.
-    start_team: Memo<String>,
+    /// the first. It applies only while the form is empty.
+    start_team: Signal<String>,
     close: Callback<()>,
     done: Callback<String>,
     open_part: Callback<(String, Option<ManufacturerPart>)>,
@@ -629,6 +634,33 @@ pub fn AddPartView(
     } = form;
     let opener = use_context::<LibrariesOpener>();
     let set_teams = use_context::<RwSignal<Option<TeamsStatus>>>();
+    let list_teams = expect_context::<ListTeams>();
+    // The teams to choose from: those that can take parts now, and the
+    // form's own team even while it can't, so the form always shows it.
+    let team_options = Memo::new(move |_| {
+        let mut options = list_teams.add_part.options.get();
+        let team = form.team.get();
+        if !team.is_empty() && !options.iter().any(|(server, _)| *server == team) {
+            let label = list_teams.status.with(|status| {
+                status.as_ref().and_then(|status| {
+                    status
+                        .teams
+                        .iter()
+                        .find(|listed| listed.server_url == team)
+                        .map(|listed| listed.label())
+                })
+            });
+            options.push((team, label.unwrap_or_default()));
+        }
+        options
+    });
+    // Why the form's team can't take the part now, which turns Save off.
+    let cannot_add = Memo::new(move |_| {
+        let team = form.team.get();
+        (!team.is_empty())
+            .then(|| list_teams.cannot_add_to(&team))
+            .flatten()
+    });
     // Keyboard and screen reader users land in the form.
     focus_later("add-files");
 
@@ -725,135 +757,150 @@ pub fn AddPartView(
     // Reads the chosen files and items with the symbol and footprint chosen
     // in a download; `first` for newly chosen files, which also takes what
     // the symbol says and the best guess.
-    let read = move |symbol: Option<usize>, footprint: Option<usize>, first: bool| {
-        reading_files.set(true);
-        read_problem.set(None);
-        let request = TeamDownloadRequest {
-            files: downloads.get_value(),
-            symbol,
-            footprint,
-            // The 3D models do not change with the symbol or footprint.
-            without_models: !first,
-            picks: form.picks.get_untracked(),
-        };
-        let team = form.team.get_untracked();
-        spawn_local(async move {
-            let result = backend::team_read_download(&team, request).await;
-            reading_files.set(false);
-            let mut found = match result {
-                Ok(found) => found,
-                Err(message) => {
-                    read_problem.set(Some(message));
+    let read_with =
+        move |symbol: Option<usize>, footprint: Option<usize>, first: bool, new_team: bool| {
+            form.reads.update_value(|reads| *reads += 1);
+            let asked = form.reads.get_value();
+            reading_files.set(true);
+            read_problem.set(None);
+            let request = TeamDownloadRequest {
+                files: downloads.get_value(),
+                symbol,
+                footprint,
+                // The 3D models do not change with the symbol or footprint.
+                without_models: !first,
+                picks: form.picks.get_untracked(),
+            };
+            let team = form.team.get_untracked();
+            spawn_local(async move {
+                let result = backend::team_read_download(&team, request).await;
+                // An answer for another team, or an older reading, is dropped.
+                if form.reads.get_value() != asked || form.team.get_untracked() != team {
                     return;
                 }
-            };
-            let footprint_picked = picked(&found, PreviewKind::Footprint).is_some();
-            if first {
-                form.reset_for_new_files();
-            } else if let Some(before) = form.reading.get_untracked() {
-                // A download's 3D models were not sent again.
-                if !footprint_picked && picked(&before, PreviewKind::Footprint).is_none() {
-                    found.model_files = before.model_files;
+                reading_files.set(false);
+                let mut found = match result {
+                    Ok(found) => found,
+                    Err(message) => {
+                        read_problem.set(Some(message));
+                        return;
+                    }
+                };
+                let footprint_picked = picked(&found, PreviewKind::Footprint).is_some();
+                if first {
+                    form.reset_for_new_files();
+                } else if let Some(before) = form.reading.get_untracked() {
+                    // A download's 3D models were not sent again.
+                    if !footprint_picked && picked(&before, PreviewKind::Footprint).is_none() {
+                        found.model_files = before.model_files;
+                    }
                 }
-            }
-            // What the reading chose stays chosen, such as the footprint a
-            // chosen symbol names.
-            form.picks.set(
-                found
-                    .picks
-                    .iter()
-                    .map(|pick| TeamPickRequest {
-                        kind: pick.kind,
-                        library: pick.library.clone(),
-                        name: pick.name.clone(),
-                    })
-                    .collect(),
-            );
-            // With a download, what it says stays when another symbol or
-            // footprint is chosen: it is still the same part.
-            let keep = !first && !downloads.with_value(Vec::is_empty);
-            // Only values that are still the app's own are replaced.
-            if !keep {
-                Form::offer(
-                    form.manufacturer,
-                    form.offered_manufacturer,
-                    &found.manufacturer,
-                );
-                Form::offer(form.mpn, form.offered_mpn, &found.mpn);
-                Form::offer(form.from, form.offered_from, &found.from);
-            }
-            // A known footprint chosen stays while it still matches.
-            if form.known_footprint.with_untracked(|known| {
-                known.as_ref().is_some_and(|known| {
-                    !found
-                        .known_footprints
+                // What the reading chose stays chosen, such as the footprint a
+                // chosen symbol names.
+                form.picks.set(
+                    found
+                        .picks
                         .iter()
-                        .any(|offer| &offer.reference == known)
-                })
-            }) {
-                form.known_footprint.set(None);
-            }
-            if first
-                || footprint_picked
-                || form
-                    .model
-                    .get_untracked()
-                    .is_none_or(|at| at >= found.models.len())
-            {
-                form.model.set(found.model);
-            }
-            if !keep {
-                form.mpn_shown.set_value(form.mpn.get_untracked());
-                if form.mpn.get_untracked() == found.mpn {
-                    form.same_mpn.set(found.same_mpn.clone());
-                } else {
-                    form.check_mpn_soon();
+                        .map(|pick| TeamPickRequest {
+                            kind: pick.kind,
+                            library: pick.library.clone(),
+                            name: pick.name.clone(),
+                        })
+                        .collect(),
+                );
+                // With a download, what it says stays when another symbol or
+                // footprint is chosen: it is still the same part. So does what
+                // was typed when another team is chosen.
+                let keep = !first && (new_team || !downloads.with_value(Vec::is_empty));
+                // Only values that are still the app's own are replaced.
+                if !keep {
+                    Form::offer(
+                        form.manufacturer,
+                        form.offered_manufacturer,
+                        &found.manufacturer,
+                    );
+                    Form::offer(form.mpn, form.offered_mpn, &found.mpn);
+                    Form::offer(form.from, form.offered_from, &found.from);
                 }
-            }
-            // The best guess, unless the person chose a category or a
-            // download says what the part is.
-            let guess = found
-                .guesses
-                .first()
-                .map(|guess| guess.code.clone())
-                .unwrap_or_default();
-            let now = form.category.get_untracked();
-            let guessed = first || now.is_empty() || now == form.offered_category.get_value();
-            let category = if guessed && !keep { guess.clone() } else { now };
-            if !keep {
-                form.offered_category.set_value(guess);
-            }
-            form.reading.set(Some(found));
-            if keep {
-                // The fields typed or filled from the download stay.
-                form.fields_version.update(|version| *version += 1);
-            } else {
-                form.choose_category(category);
-            }
-            draw();
-            if let Some(id) = form.focus_after.try_update_value(Option::take).flatten() {
-                focus_later(&id);
-            }
-        });
+                // A known footprint chosen stays while it still matches.
+                if form.known_footprint.with_untracked(|known| {
+                    known.as_ref().is_some_and(|known| {
+                        !found
+                            .known_footprints
+                            .iter()
+                            .any(|offer| &offer.reference == known)
+                    })
+                }) {
+                    form.known_footprint.set(None);
+                }
+                if first
+                    || footprint_picked
+                    || form
+                        .model
+                        .get_untracked()
+                        .is_none_or(|at| at >= found.models.len())
+                {
+                    form.model.set(found.model);
+                }
+                if !keep {
+                    form.mpn_shown.set_value(form.mpn.get_untracked());
+                    if form.mpn.get_untracked() == found.mpn {
+                        form.same_mpn.set(found.same_mpn.clone());
+                    } else {
+                        form.check_mpn_soon();
+                    }
+                }
+                // The best guess, unless the person chose a category or a
+                // download says what the part is.
+                let guess = found
+                    .guesses
+                    .first()
+                    .map(|guess| guess.code.clone())
+                    .unwrap_or_default();
+                let now = form.category.get_untracked();
+                let guessed = first || now.is_empty() || now == form.offered_category.get_value();
+                // Another team may not have the category chosen.
+                let known = found.categories.iter().any(|category| category.code == now);
+                let category = if (guessed && !keep) || (new_team && !known) {
+                    guess.clone()
+                } else {
+                    now
+                };
+                if !keep {
+                    form.offered_category.set_value(guess);
+                }
+                form.reading.set(Some(found));
+                if new_team {
+                    // The new team's fields and next free IPN; typed values
+                    // and an IPN typed by hand stay.
+                    form.choose_category(category);
+                    form.check_ipn();
+                } else if keep {
+                    // The fields typed or filled from the download stay.
+                    form.fields_version.update(|version| *version += 1);
+                } else {
+                    form.choose_category(category);
+                }
+                draw();
+                if let Some(id) = form.focus_after.try_update_value(Option::take).flatten() {
+                    focus_later(&id);
+                }
+            });
+        };
+    let read = move |symbol: Option<usize>, footprint: Option<usize>, first: bool| {
+        read_with(symbol, footprint, first, false)
     };
-    // The team the part goes into follows the part list's team while the
-    // form is empty and the person has not chosen one here. Otherwise it
-    // stays, unless that team can no longer take parts, such as after
-    // signing out; what was chosen is then read again for the new team.
+    // The team the part goes into follows the part list's team only while
+    // the form is empty and the person has not chosen one here. After that
+    // it never changes by itself, so a part half filled in for one team is
+    // never saved to another.
     Effect::new(move |_| {
         let start = start_team.get();
-        let usable = teams.with(|teams| {
-            form.team
-                .with_untracked(|team| teams.iter().any(|(server, _)| server == team))
-        });
-        let empty = form.reading.with_untracked(Option::is_none);
-        let follows = empty && !form.team_chosen.get_value();
-        if (usable && !follows) || form.team.with_untracked(|team| *team == start) {
-            return;
-        }
-        form.team.set(start);
-        if !empty {
-            read(None, None, true);
+        let empty = form.reading.with(Option::is_none)
+            && downloads.with_value(Vec::is_empty)
+            && form.picks.with(Vec::is_empty);
+        if empty && !form.team_chosen.get_value() {
+            form.team.set(start);
         }
     });
     let on_choose =
@@ -1176,8 +1223,9 @@ pub fn AddPartView(
                         <h3 id="add-heading" class="visually-hidden">"Add part"</h3>
                         <TeamSelect
                             id="add-team"
-                            options=teams
+                            options=team_options
                             chosen=form.team
+                            always=Signal::derive(move || list_teams.marks.with(|marks| marks.shown))
                             changed=Callback::new(move |team: String| {
                                 form.team_chosen.set_value(true);
                                 form.team.set(team.clone());
@@ -1185,12 +1233,16 @@ pub fn AddPartView(
                                     remember_team(set_teams, feature::ADD_PART, &team);
                                 }
                                 // Categories and free IPNs are the team's own,
-                                // so what was chosen is read again for it.
-                                if form.reading.with_untracked(Option::is_some) {
-                                    read(None, None, true);
+                                // so they are read again for it; what was typed
+                                // stays.
+                                if let Some(found) = form.reading.get_untracked() {
+                                    read_with(found.symbol, found.footprint, false, true);
                                 }
                             })
                         />
+                        {move || cannot_add.get().map(|why| view! {
+                            <p class="problem" id="add-team-problem" role="status">{why}</p>
+                        })}
                         <div class="add-files">
                             <input
                                 type="file"
@@ -1249,7 +1301,12 @@ pub fn AddPartView(
                             <button
                                 type="submit"
                                 class="primary"
-                                disabled=move || saving.get() || form.reading.with(Option::is_none) || blocked.get()
+                                disabled=move || {
+                                    saving.get()
+                                        || form.reading.with(Option::is_none)
+                                        || blocked.get()
+                                        || cannot_add.with(Option::is_some)
+                                }
                             >
                                 {move || if saving.get() { "Saving…" } else { "Save" }}
                             </button>

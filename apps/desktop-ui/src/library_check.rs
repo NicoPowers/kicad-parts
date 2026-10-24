@@ -254,6 +254,7 @@ mod tests {
 
     fn view(to_fix: usize, new: usize, look: usize, clean_up: usize) -> LibraryCheckView {
         LibraryCheckView {
+            team: String::new(),
             to_fix,
             not_in_catalog: new,
             worth_a_look: look,

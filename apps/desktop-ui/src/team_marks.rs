@@ -9,7 +9,7 @@
 //! library check, pick their team with [`team_for`].
 
 use crate::teams::{Standing, standing_of};
-use desktop_contract::{GroupBy, LiveUpdates, TeamSession, TeamStatus, TeamsStatus};
+use desktop_contract::{GroupBy, LiveUpdates, TeamSession, TeamStatus, TeamsStatus, feature};
 use leptos::prelude::*;
 use std::collections::BTreeMap;
 
@@ -203,9 +203,25 @@ pub(crate) fn TeamSelect(
     #[prop(into)]
     chosen: Signal<String>,
     changed: Callback<String>,
+    /// Say the team as text when there is only one, as Add part does while
+    /// two teams or more show parts.
+    #[prop(into, optional)]
+    always: Signal<bool>,
 ) -> impl IntoView {
     move || {
         let options = options.get();
+        if options.len() == 1 && always.get() {
+            let label = options[0].1.clone();
+            return Some(
+                view! {
+                    <p class="team-select" id=id>
+                        <span class="team-select-label">"Team"</span>
+                        <span class="team-select-only">{label}</span>
+                    </p>
+                }
+                .into_any(),
+            );
+        }
         (options.len() >= 2).then(|| {
             view! {
                 <p class="team-select">
@@ -225,8 +241,131 @@ pub(crate) fn TeamSelect(
                     </select>
                 </p>
             }
+            .into_any()
         })
     }
+}
+
+/// A feature that works on one team at a time, such as Add part.
+#[derive(Clone, Copy)]
+pub(crate) struct FeatureTeam {
+    /// The team it starts on: the part list's team, else the one it used
+    /// last, else the first it can use.
+    pub(crate) team: Memo<Option<String>>,
+    /// The teams it offers in its own Team list box, with their codes.
+    pub(crate) options: Memo<Vec<(String, String)>>,
+    /// Remembers the team the person chose, for next time.
+    pub(crate) choose: Callback<String>,
+}
+
+/// Everything the app shows about teams beside the part list: each row's
+/// mark, the filter and grouping, the hidden-teams note, and the team of
+/// each feature that works on one team at a time. Made once, in the app,
+/// from the teams' status, and given to whatever needs it as one value.
+#[derive(Clone, Copy)]
+pub(crate) struct ListTeams {
+    /// The teams' status without checkpoints, so saves do not redraw.
+    pub(crate) status: Memo<Option<TeamsStatus>>,
+    pub(crate) marks: Memo<TeamMarks>,
+    /// The team the part list shows; `None` for every team.
+    pub(crate) filter: Memo<Option<String>>,
+    pub(crate) group_by: Memo<GroupBy>,
+    pub(crate) hidden_note: Memo<Option<String>>,
+    pub(crate) add_part: FeatureTeam,
+    pub(crate) library_check: FeatureTeam,
+    pub(crate) kicad_libraries: FeatureTeam,
+}
+
+impl ListTeams {
+    /// Made from `status`, the teams' status without checkpoints;
+    /// `remember` keeps a feature's team for next time.
+    pub(crate) fn new(
+        status: Memo<Option<TeamsStatus>>,
+        remember: impl Fn(&'static str, String) + Copy + Send + Sync + 'static,
+    ) -> Self {
+        let derived = move |work: fn(&TeamsStatus) -> Option<String>| {
+            Memo::new(move |_| status.with(|status| status.as_ref().and_then(work)))
+        };
+        let filter = derived(list_filter);
+        let feature = move |name: &'static str,
+                            candidates: fn(&TeamsStatus) -> Vec<String>,
+                            own_box_with_filter: bool| FeatureTeam {
+            team: Memo::new(move |_| {
+                status.with(|status| {
+                    let status = status.as_ref()?;
+                    let last = status.choices.last_used.get(name).map(String::as_str);
+                    team_for(filter.get().as_deref(), last, &candidates(status))
+                })
+            }),
+            // With one team chosen in the part list, the library check and
+            // the KiCad libraries use it, with no list box of their own.
+            options: Memo::new(move |_| {
+                if !own_box_with_filter && filter.with(Option::is_some) {
+                    return Vec::new();
+                }
+                status.with(|status| {
+                    status
+                        .as_ref()
+                        .map(|status| team_options(status, &candidates(status)))
+                        .unwrap_or_default()
+                })
+            }),
+            choose: Callback::new(move |team: String| remember(name, team)),
+        };
+        Self {
+            status,
+            marks: Memo::new(move |_| {
+                status.with(|status| status.as_ref().map(TeamMarks::of).unwrap_or_default())
+            }),
+            filter,
+            group_by: Memo::new(move |_| {
+                status.with(|status| status.as_ref().map(list_group_by).unwrap_or_default())
+            }),
+            hidden_note: derived(hidden_teams_note),
+            add_part: feature(feature::ADD_PART, editable_teams, true),
+            library_check: feature(feature::LIBRARY_CHECK, editable_teams, false),
+            kicad_libraries: feature(feature::KICAD_LIBRARIES, showing_teams, false),
+        }
+    }
+
+    /// The code of the team at `team`, while two teams or more show parts,
+    /// so a feature can say which team it works on.
+    pub(crate) fn named(&self, team: &str) -> Option<String> {
+        self.marks
+            .with(|marks| marks.mark(team).map(|mark| mark.label.clone()))
+    }
+
+    /// Why the team at `team` can't take new parts now, in plain words, or
+    /// `None` when it can.
+    pub(crate) fn cannot_add_to(&self, team: &str) -> Option<String> {
+        self.status.with(|status| {
+            status
+                .as_ref()
+                .and_then(|status| cannot_add_to(status, team))
+        })
+    }
+}
+
+/// Why the team at `team` can't take new parts now, in plain words, or
+/// `None` when it can. Add part keeps its team and turns Save off meanwhile.
+pub(crate) fn cannot_add_to(status: &TeamsStatus, team: &str) -> Option<String> {
+    if editable_teams(status).iter().any(|server| server == team) {
+        return None;
+    }
+    let found = status.teams.iter().find(|listed| listed.server_url == team);
+    Some(match found {
+        Some(listed) if standing_of(listed) == Standing::Offline => {
+            format!(
+                "{} is offline. You can save when it is back.",
+                listed.label()
+            )
+        }
+        Some(listed) => format!(
+            "{} can't take new parts now. Sign in to it again from Teams to save.",
+            listed.label()
+        ),
+        None => "That team is no longer in your teams. Choose another team.".to_owned(),
+    })
 }
 
 /// A row's team mark: the team's code in its colour, and "offline" in
@@ -383,6 +522,30 @@ mod tests {
         let all = status(vec![ma, offline, viewer], "");
         assert_eq!(editable_teams(&all), [MA.to_owned()]);
         assert_eq!(showing_teams(&all).len(), 3);
+    }
+
+    #[test]
+    fn a_team_that_cannot_take_parts_says_why_and_when() {
+        let ma = team("MA", "blue", signed_in(LiveUpdates::Live));
+        let offline = team(
+            "AC",
+            "green",
+            signed_in(LiveUpdates::Reconnecting {
+                message: "refused".into(),
+            }),
+        );
+        let out = team("BE", "teal", TeamSession::SignedOut { problem: None });
+        let all = status(vec![ma, offline, out], "");
+        assert_eq!(cannot_add_to(&all, MA), None);
+        assert_eq!(
+            cannot_add_to(&all, AC).as_deref(),
+            Some("AC is offline. You can save when it is back.")
+        );
+        assert_eq!(
+            cannot_add_to(&all, "https://be.example.com").as_deref(),
+            Some("BE can't take new parts now. Sign in to it again from Teams to save.")
+        );
+        assert!(cannot_add_to(&all, "https://gone.example.com").is_some());
     }
 
     #[test]

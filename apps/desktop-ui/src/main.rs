@@ -23,7 +23,7 @@ use add_part::AddPartView;
 use desktop_contract::{
     AppStatus, KicadStatus, LibraryCheckView, ManufacturerPart, PartDetail, PartKey, PreviewKind,
     PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet,
-    SearchRequest, TeamPart, TeamSession, TeamStatus, TeamsStatus, feature, unit_label,
+    SearchRequest, TeamPart, TeamSession, TeamStatus, TeamsStatus, unit_label,
 };
 use focus::focus_later;
 use kicad_libraries::KicadLibrariesSection;
@@ -35,10 +35,7 @@ use list_controls::{ListControls, remember_team};
 use part_list::{ResultList, SEARCH_ROWS, Searched};
 use std::time::Duration;
 use team::{Notice, TeamColumn, TeamUi};
-use team_marks::{
-    TeamMarks, editable_teams, hidden_teams_note, list_filter, list_group_by, showing_teams,
-    team_for, team_options,
-};
+use team_marks::{ListTeams, shows_parts};
 use teams::TeamsMenu;
 use viewer::{CloseUp, CloseUpDialog, Picture, Viewer};
 
@@ -112,78 +109,21 @@ fn App() -> impl IntoView {
             status
         })
     });
-    // Each row's team mark, while two teams or more show parts.
-    let marks = Memo::new(move |_| {
-        teams_badge.with(|status| status.as_ref().map(TeamMarks::of).unwrap_or_default())
+    // Each row's team mark, the filter and grouping, and each one-team
+    // feature's team.
+    let list_teams = ListTeams::new(teams_badge, move |feature, team| {
+        remember_team(teams, feature, &team)
     });
-    provide_context(marks);
-    // The team the part list shows (`None` for all) and how it groups.
-    let filter =
-        Memo::new(move |_| teams_badge.with(|status| status.as_ref().and_then(list_filter)));
-    let group_by = Memo::new(move |_| {
-        teams_badge.with(|status| status.as_ref().map(list_group_by).unwrap_or_default())
-    });
-    let hidden_note =
-        Memo::new(move |_| teams_badge.with(|status| status.as_ref().and_then(hidden_teams_note)));
-    // The team each feature that works on one team at a time uses: the
-    // filter's team, else the one it last used, else the first it can.
-    let feature_team = move |feature: &'static str, candidates: fn(&TeamsStatus) -> Vec<String>| {
-        Memo::new(move |_| {
-            teams_badge.with(|status| {
-                let status = status.as_ref()?;
-                let last = status.choices.last_used.get(feature).map(String::as_str);
-                team_for(filter.get().as_deref(), last, &candidates(status))
-            })
-        })
-    };
-    let add_team = feature_team(feature::ADD_PART, editable_teams);
-    let check_team = feature_team(feature::LIBRARY_CHECK, editable_teams);
-    let kicad_team = feature_team(feature::KICAD_LIBRARIES, showing_teams);
-    let add_team_url = Memo::new(move |_| add_team.get().unwrap_or_default());
-    // The teams Add part can add to, with their codes.
-    let add_teams = Memo::new(move |_| {
-        teams_badge.with(|status| {
-            status
-                .as_ref()
-                .map(|status| team_options(status, &editable_teams(status)))
-                .unwrap_or_default()
-        })
-    });
-    // The teams the library check and the KiCad libraries panel offer in
-    // their own Team list box: only with All teams in the part list, as
-    // one team chosen there is the team they use.
-    let own_choice = move |candidates: fn(&TeamsStatus) -> Vec<String>| {
-        Memo::new(move |_| {
-            if filter.with(Option::is_some) {
-                return Vec::new();
-            }
-            teams_badge.with(|status| {
-                status
-                    .as_ref()
-                    .map(|status| team_options(status, &candidates(status)))
-                    .unwrap_or_default()
-            })
-        })
-    };
-    let check_teams = own_choice(editable_teams);
-    let kicad_teams = own_choice(showing_teams);
-    let remember = move |feature: &'static str| {
-        Callback::new(move |team: String| remember_team(teams, feature, &team))
-    };
-    let choose_check_team = remember(feature::LIBRARY_CHECK);
-    let choose_kicad_team = remember(feature::KICAD_LIBRARIES);
-    // The code of the team checked, for the line under the search box,
-    // while the person can edit in two teams or more.
-    let check_label = Memo::new(move |_| {
-        let team = check_team.get()?;
-        add_teams.with(|teams| {
-            (teams.len() >= 2)
-                .then(|| teams.iter().find(|(server, _)| *server == team))
-                .flatten()
-                .map(|(_, label)| label.clone())
-        })
-    });
-    let kicad_team_url = Memo::new(move |_| kicad_team.get().unwrap_or_default());
+    provide_context(list_teams);
+    provide_context(list_teams.marks);
+    let ListTeams {
+        filter,
+        group_by,
+        hidden_note,
+        ..
+    } = list_teams;
+    let kicad_team_url =
+        Memo::new(move |_| list_teams.kicad_libraries.team.get().unwrap_or_default());
     // The selected part's team, while it has one and it is in the list.
     let part_team = Memo::new(move |_| {
         let team = selected.with(|part| part.as_ref().map(|part| part.team.clone()))?;
@@ -196,18 +136,10 @@ fn App() -> impl IntoView {
                 .cloned()
         })
     });
-    // Whether any team shows parts: signed in, or offline after it was.
-    let any_team = Memo::new(move |_| {
-        teams.with(|status| {
-            status
-                .as_ref()
-                .is_some_and(|status| status.teams.iter().any(|team| team.session.is_signed_in()))
-        })
-    });
     // True while the Add part form is open in the part panel.
     let adding = RwSignal::new(false);
     // Add part is offered while the person can add parts to some team.
-    let can_add = Memo::new(move |_| add_team.with(Option::is_some));
+    let can_add = Memo::new(move |_| list_teams.add_part.team.with(Option::is_some));
     // True while the Library check view is open in the part panel.
     let checking = RwSignal::new(false);
     // The Libraries browser, while it is open, and what it is open for.
@@ -248,7 +180,11 @@ fn App() -> impl IntoView {
         let team = kicad_team_url.get_untracked();
         spawn_local(async move {
             if let Ok(latest) = backend::kicad_libraries_status(&team).await {
-                if kicad_libraries.with_untracked(|known| known.as_ref() != Some(&latest)) {
+                // A late answer about the team shown before is dropped.
+                let current = kicad_team_url.get_untracked() == latest.team;
+                if current
+                    && kicad_libraries.with_untracked(|known| known.as_ref() != Some(&latest))
+                {
                     kicad_libraries.set(Some(latest));
                 }
             }
@@ -268,6 +204,7 @@ fn App() -> impl IntoView {
     // The library check, for people who can edit: worked out by the app
     // once per change of the team catalog (who is signed in, a new Change
     // or a finished import), never per keystroke.
+    let check_team = list_teams.library_check.team;
     let check_position = Memo::new(move |_| {
         let team = check_team.get()?;
         teams.with(|status| {
@@ -411,9 +348,6 @@ fn App() -> impl IntoView {
                     kicad_epoch=kicad_epoch
                     override_input=override_input
                     libraries=kicad_libraries
-                    libraries_team=kicad_team_url.into()
-                    libraries_teams=kicad_teams
-                    choose_libraries_team=choose_kicad_team
                 />
             </header>
             <KicadProblem status=status kicad_epoch=kicad_epoch override_input=override_input />
@@ -469,7 +403,13 @@ fn App() -> impl IntoView {
                     <LibraryCheckLine
                         check=library_check
                         problem=check_problem
-                        team=check_label.into()
+                        team=Signal::derive(move || {
+                            // The team of the results shown, while two teams
+                            // or more show parts.
+                            library_check.with(|check| {
+                                check.as_ref().and_then(|check| list_teams.named(&check.team))
+                            })
+                        })
                         open=Callback::new(move |_| {
                             adding.set(false);
                             checking.set(true);
@@ -490,12 +430,6 @@ fn App() -> impl IntoView {
                     selected=selected
                     kicad_epoch=kicad_epoch
                     team=part_team
-                    any_team=any_team
-                    add_team=add_team_url
-                    add_teams=add_teams
-                    check_teams=check_teams
-                    check_team=check_team
-                    choose_check_team=choose_check_team
                     adding=adding
                     checking=checking
                     library_check=library_check
@@ -535,7 +469,9 @@ fn list_version(status: &TeamsStatus) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut any = false;
-    for team in &status.teams {
+    // Only teams that show parts: one asked to sign in again leaves the
+    // list at once.
+    for team in status.teams.iter().filter(|team| shows_parts(team)) {
         if let TeamSession::SignedIn { checkpoint, .. } = &team.session {
             (&team.server_url, checkpoint).hash(&mut hasher);
             any = true;
@@ -588,17 +524,31 @@ fn into_load<T>(result: Result<T, String>) -> Load<T> {
     }
 }
 
+/// The header's words about where the list's parts come from. With two
+/// teams or more showing parts, the CSV count alone would not match the
+/// list, so it says the teams instead of a number.
+fn catalog_words(csv_parts: usize, csv_files: usize, teams: usize) -> String {
+    let files = counted(csv_files, "CSV file", "CSV files");
+    if teams >= 2 {
+        format!("Parts from {teams} teams and {files}")
+    } else {
+        format!("{} from {files}", counted(csv_parts, "part", "parts"))
+    }
+}
+
 #[component]
 fn CatalogBadge(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
+    let marks = use_context::<Memo<team_marks::TeamMarks>>();
+    let teams = move || {
+        marks
+            .map(|marks| marks.with(|marks| if marks.shown { marks.by_team.len() } else { 0 }))
+            .unwrap_or_default()
+    };
     move || match status.get() {
         Load::Ready(status) => match status.catalog.error {
             None => view! {
                 <p class="catalog-summary">
-                    {format!(
-                        "{} from {}",
-                        counted(status.catalog.parts, "part", "parts"),
-                        counted(status.catalog.csv_files, "CSV file", "CSV files"),
-                    )}
+                    {move || catalog_words(status.catalog.parts, status.catalog.csv_files, teams())}
                 </p>
             }
             .into_any(),
@@ -620,11 +570,6 @@ fn KicadBadge(
     kicad_epoch: RwSignal<u32>,
     override_input: RwSignal<String>,
     libraries: RwSignal<Option<desktop_contract::KicadLibrariesStatus>>,
-    /// The team whose KiCad libraries the panel shows.
-    libraries_team: Signal<String>,
-    /// The teams the panel offers, with All teams in the part list.
-    libraries_teams: Memo<Vec<(String, String)>>,
-    choose_libraries_team: Callback<String>,
 ) -> impl IntoView {
     move || match status.get() {
         Load::Loading => view! { <p class="kicad-badge">"Looking for KiCad…"</p> }.into_any(),
@@ -661,12 +606,7 @@ fn KicadBadge(
                                 saved=app.kicad_override.is_some()
                                 rejected=app.override_rejected.clone()
                             />
-                            <KicadLibrariesSection
-                                status=libraries
-                                team=libraries_team
-                                teams=libraries_teams
-                                choose_team=choose_libraries_team
-                            />
+                            <KicadLibrariesSection status=libraries />
                         </div>
                     </details>
                 }
@@ -867,28 +807,20 @@ fn SettingsProblem(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
 }
 
 #[component]
-#[allow(clippy::too_many_arguments)]
 fn PartPanel(
     selected: RwSignal<Option<PartKey>>,
     kicad_epoch: RwSignal<u32>,
     /// The selected part's team, if it has one.
     team: Memo<Option<TeamStatus>>,
-    /// Whether any team shows parts.
-    any_team: Memo<bool>,
-    /// The team a new part starts going into.
-    add_team: Memo<String>,
-    /// The teams a new part can go into, with their codes.
-    add_teams: Memo<Vec<(String, String)>>,
-    /// The teams the library check offers, and the team it checks.
-    check_teams: Memo<Vec<(String, String)>>,
-    check_team: Memo<Option<String>>,
-    choose_check_team: Callback<String>,
     adding: RwSignal<bool>,
     checking: RwSignal<bool>,
     library_check: RwSignal<Option<LibraryCheckView>>,
     /// Add part from it, chosen in the Libraries browser.
     library_add: RwSignal<Option<desktop_contract::TeamLibraryChoice>>,
 ) -> impl IntoView {
+    let list_teams = expect_context::<ListTeams>();
+    // Whether any team shows parts.
+    let any_team = Memo::new(move |_| list_teams.marks.with(|marks| !marks.by_team.is_empty()));
     let detail = RwSignal::new(None::<Load<Option<PartDetail>>>);
     let symbol = RwSignal::new(Load::<PreviewOutcome>::Loading);
     let footprint = RwSignal::new(Load::<PreviewOutcome>::Loading);
@@ -907,7 +839,7 @@ fn PartPanel(
     // Set by Add part for the part it opens: what to say once it is shown,
     // and a manufacturer part to add to it in Edit part.
     let pending_notice = StoredValue::new(None::<String>);
-    let pending_part = StoredValue::new(None::<(String, ManufacturerPart)>);
+    let pending_part = StoredValue::new(None::<(PartKey, ManufacturerPart)>);
     // Add part's form, kept while another part is looked at.
     let add_form = add_part::Form::new();
     // Changes whenever someone saves a Change, a CSV import run finishes
@@ -950,11 +882,10 @@ fn PartPanel(
     });
     // Why the part's team can't take edits now, while its server cannot be
     // reached: it shows the parts last seen.
-    let marks = use_context::<Memo<TeamMarks>>();
     let offline_note = Memo::new(move |_| {
         // With one team the note says "the team catalog", as the rest of
         // the one-team view does.
-        let several = marks.is_some_and(|marks| marks.with(|marks| marks.shown));
+        let several = list_teams.marks.with(|marks| marks.shown);
         team.with(|status| {
             let status = status.as_ref()?;
             matches!(
@@ -971,7 +902,7 @@ fn PartPanel(
     // The part's team code, said in its Source while several teams show
     // parts, as its row's mark says it.
     let source_team = Memo::new(move |_| {
-        let several = marks.is_some_and(|marks| marks.with(|marks| marks.shown));
+        let several = list_teams.marks.with(|marks| marks.shown);
         team.with(|status| status.as_ref().filter(|_| several).map(TeamStatus::label))
     });
     let can_edit = Memo::new(move |_| {
@@ -1083,10 +1014,13 @@ fn PartPanel(
         let Some(part) = team_part.get() else {
             return;
         };
+        // The part of the team Add part was adding to, not the same IPN
+        // in another team.
+        let shown = selected.get_untracked();
         let wanted = pending_part.with_value(|pending| {
             pending
                 .as_ref()
-                .filter(|(ipn, _)| *ipn == part.ipn)
+                .filter(|(key, _)| key.ipn == part.ipn && Some(key) == shown.as_ref())
                 .map(|(_, added)| added.clone())
         });
         if let Some(added) = wanted {
@@ -1183,7 +1117,11 @@ fn PartPanel(
     // or footprint chosen in our libraries, for the team checked.
     let add_from_check = Callback::new(move |choice: desktop_contract::TeamLibraryChoice| {
         add_form.start_from_library(choice);
-        if let Some(team) = check_team.get_untracked() {
+        // The team of the results shown, which may not be the team chosen
+        // since, while its check is still worked out.
+        let checked =
+            library_check.with_untracked(|check| check.as_ref().map(|check| check.team.clone()));
+        if let Some(team) = checked.filter(|team| !team.is_empty()) {
             add_form.start_in(team);
         }
         checking.set(false);
@@ -1204,12 +1142,13 @@ fn PartPanel(
     });
     // A part of the team Add part was adding to.
     let open_part = Callback::new(move |(ipn, part): (String, Option<ManufacturerPart>)| {
-        pending_part.set_value(part.map(|part| (ipn.clone(), part)));
-        adding.set(false);
-        selected.set(Some(PartKey {
+        let key = PartKey {
             team: add_form.team.get_untracked(),
             ipn,
-        }));
+        };
+        pending_part.set_value(part.map(|part| (key.clone(), part)));
+        adding.set(false);
+        selected.set(Some(key));
     });
     view! {
         <section
@@ -1225,8 +1164,9 @@ fn PartPanel(
             {move || adding.get().then(|| view! {
                 <AddPartView
                     form=add_form
-                    teams=add_teams
-                    start_team=add_team
+                    start_team=Signal::derive(move || {
+                        list_teams.add_part.team.get().unwrap_or_default()
+                    })
                     close=close_adding
                     done=added
                     open_part=open_part
@@ -1235,9 +1175,11 @@ fn PartPanel(
             {move || (checking.get() && !adding.get()).then(|| view! {
                 <LibraryCheckPanel
                     check=library_check
-                    teams=check_teams
-                    team=Signal::derive(move || check_team.get().unwrap_or_default())
-                    choose_team=choose_check_team
+                    teams=list_teams.library_check.options
+                    team=Signal::derive(move || {
+                        library_check.with(|check| check.as_ref().map(|check| check.team.clone()).unwrap_or_default())
+                    })
+                    choose_team=list_teams.library_check.choose
                     close=close_checking
                     add_from=add_from_check
                 />
@@ -1759,5 +1701,24 @@ fn PreviewProblemView(problem: PreviewProblem) -> impl IntoView {
                     </details>
                 })}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_header_says_where_the_lists_parts_come_from() {
+        assert_eq!(
+            super::catalog_words(178, 21, 0),
+            "178 parts from 21 CSV files"
+        );
+        assert_eq!(
+            super::catalog_words(178, 21, 1),
+            "178 parts from 21 CSV files"
+        );
+        assert_eq!(
+            super::catalog_words(178, 21, 2),
+            "Parts from 2 teams and 21 CSV files"
+        );
     }
 }

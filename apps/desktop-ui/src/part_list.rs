@@ -879,9 +879,15 @@ fn PartRow(
     // The part's team, as text in the team's colour, while two teams or
     // more show parts; "CSV" for a part only the CSV files have.
     let marks = use_context::<Memo<TeamMarks>>();
+    // Inside a team's own section the section names the team, so its rows
+    // need no mark.
+    let in_team_section = category.starts_with("team:");
     let mark = {
         let team = key.team.clone();
         Memo::new(move |_| {
+            if in_team_section {
+                return None;
+            }
             let marks = marks?;
             marks.with(|marks| {
                 if !marks.shown {
