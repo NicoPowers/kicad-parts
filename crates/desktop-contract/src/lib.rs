@@ -4,6 +4,7 @@
 //! names and payload shapes cannot drift apart. It holds data only.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub mod drawing;
 pub mod measure;
@@ -25,7 +26,7 @@ pub mod command {
     pub const TEAM_SIGN_IN: &str = "team_sign_in";
     pub const TEAM_SIGN_OUT: &str = "team_sign_out";
     pub const TEAM_REMOVE: &str = "team_remove";
-    pub const TEAM_SHOW: &str = "team_show";
+    pub const TEAM_CHOOSE: &str = "team_choose";
     pub const TEAM_PART: &str = "team_part";
     pub const TEAM_EDIT: &str = "team_edit";
     pub const TEAM_ARCHIVE: &str = "team_archive";
@@ -405,9 +406,10 @@ pub enum PreviewProblemReason {
 pub struct TeamsStatus {
     /// In the order they were added.
     pub teams: Vec<TeamStatus>,
-    /// The server address of the team the catalog view shows; blank when
-    /// no team is signed in.
-    pub shown: String,
+    /// What the person last chose in the part list and in features that
+    /// work on one team at a time.
+    #[serde(default)]
+    pub choices: TeamChoices,
     /// Whether sign-ins outlive the app.
     pub kept: SignInsKept,
     /// What the sign-in form starts with: the suggested server address and
@@ -422,14 +424,37 @@ pub struct TeamsStatus {
     pub note: Option<String>,
 }
 
-impl TeamsStatus {
-    /// The team the catalog view shows, if any.
-    pub fn shown_team(&self) -> Option<&TeamStatus> {
-        self.teams
-            .iter()
-            .find(|team| !self.shown.is_empty() && team.server_url == self.shown)
-    }
+/// What the person last chose in the part list, and in each feature that
+/// works on one team at a time, kept between runs in the list of teams.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TeamChoices {
+    /// The team the part list shows, by server address; blank for every
+    /// team ("All teams").
+    #[serde(default)]
+    pub filter: String,
+    #[serde(default)]
+    pub group_by: GroupBy,
+    /// The team each feature last used, by server address, such as the
+    /// team Add part last added to. Keys are in [`feature`].
+    #[serde(default)]
+    pub last_used: BTreeMap<String, String>,
 }
+
+/// The features that work on one team at a time, as [`TeamChoices`]
+/// remembers them.
+pub mod feature {
+    pub const ADD_PART: &str = "add_part";
+    pub const LIBRARY_CHECK: &str = "library_check";
+    pub const KICAD_LIBRARIES: &str = "kicad_libraries";
+}
+
+/// The team colours, in the order new teams get them. Each names a pair
+/// of styles in the UI's stylesheet: a soft background and a dark text of
+/// the same hue, which pass contrast. A team's mark always shows its code
+/// as text too, never colour alone.
+pub const TEAM_COLOURS: [&str; 8] = [
+    "blue", "green", "purple", "orange", "teal", "rose", "olive", "slate",
+];
 
 /// One team.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -441,6 +466,10 @@ pub struct TeamStatus {
     /// The team's code, such as `MA`, once known; blank before.
     #[serde(default)]
     pub code: String,
+    /// The team's colour, one of [`TEAM_COLOURS`]. It is given once, when
+    /// the team joins the list, and kept, so it never changes.
+    #[serde(default)]
+    pub colour: String,
     pub session: TeamSession,
     /// Something the person should know about this team, in a plain
     /// sentence, such as a sign-in the password store could not remove.
@@ -1823,6 +1852,7 @@ mod tests {
             server_url: "https://parts.example.com/acme".into(),
             email: "a@example.test".into(),
             code: String::new(),
+            colour: "blue".into(),
             note: None,
             libraries_made_from: None,
             session: TeamSession::SignedOut { problem: None },

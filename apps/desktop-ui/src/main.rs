@@ -11,17 +11,19 @@ mod focus;
 mod kicad_libraries;
 mod libraries;
 mod library_check;
+mod list_controls;
 mod list_focus;
 mod part_list;
 mod team;
+mod team_marks;
 mod teams;
 mod viewer;
 
 use add_part::AddPartView;
 use desktop_contract::{
-    AppStatus, GroupBy, KicadStatus, LibraryCheckView, ManufacturerPart, PartDetail, PartKey,
-    PreviewKind, PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet,
-    SearchRequest, TeamPart, TeamSession, TeamStatus, TeamsStatus, unit_label,
+    AppStatus, KicadStatus, LibraryCheckView, ManufacturerPart, PartDetail, PartKey, PreviewKind,
+    PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet,
+    SearchRequest, TeamPart, TeamSession, TeamStatus, TeamsStatus, feature, unit_label,
 };
 use focus::focus_later;
 use kicad_libraries::KicadLibrariesSection;
@@ -29,10 +31,15 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use libraries::{BrowseFor, BrowserActions, LibrariesDialog};
 use library_check::{LibraryCheckLine, LibraryCheckPanel};
+use list_controls::ListControls;
 use part_list::{ResultList, SEARCH_ROWS, Searched};
 use std::time::Duration;
 use team::{Notice, TeamColumn, TeamUi};
-use teams::{TeamSwitcher, TeamsMenu};
+use team_marks::{
+    TeamMarks, editable_teams, hidden_teams_note, list_filter, list_group_by, showing_teams,
+    team_for,
+};
+use teams::TeamsMenu;
 use viewer::{CloseUp, CloseUpDialog, Picture, Viewer};
 
 /// The ID of the search box above the part list.
@@ -82,25 +89,56 @@ fn App() -> impl IntoView {
         status.set(loaded);
     });
 
-    // Every team in the person's list, and the one the catalog view shows.
+    // Every team in the person's list; the part list shows every team's
+    // parts at once.
     let teams = RwSignal::new(None::<TeamsStatus>);
-    let team = Memo::new(move |_| {
-        teams.with(|status| {
+    // The header does not need the checkpoints; leaving them out keeps the
+    // menu from re-rendering whenever someone saves a Change.
+    let teams_badge = Memo::new(move |_| {
+        teams.get().map(|mut status| {
+            for team in &mut status.teams {
+                if let TeamSession::SignedIn {
+                    checkpoint,
+                    imports,
+                    ..
+                } = &mut team.session
+                {
+                    *checkpoint = 0;
+                    *imports = 0;
+                }
+            }
             status
-                .as_ref()
-                .and_then(|status| status.shown_team().cloned())
         })
     });
-    // The server address of the shown team, blank while none is: every
-    // request to a team names it.
-    let shown_team = Memo::new(move |_| {
-        team.with(|status| {
-            status
-                .as_ref()
-                .map(|status| status.server_url.clone())
-                .unwrap_or_default()
-        })
+    // Each row's team mark, while two teams or more show parts.
+    let marks = Memo::new(move |_| {
+        teams_badge.with(|status| status.as_ref().map(TeamMarks::of).unwrap_or_default())
     });
+    provide_context(marks);
+    // The team the part list shows (`None` for all) and how it groups.
+    let filter =
+        Memo::new(move |_| teams_badge.with(|status| status.as_ref().and_then(list_filter)));
+    let group_by = Memo::new(move |_| {
+        teams_badge.with(|status| status.as_ref().map(list_group_by).unwrap_or_default())
+    });
+    let hidden_note =
+        Memo::new(move |_| teams_badge.with(|status| status.as_ref().and_then(hidden_teams_note)));
+    // The team each feature that works on one team at a time uses: the
+    // filter's team, else the one it last used, else the first it can.
+    let feature_team = move |feature: &'static str, candidates: fn(&TeamsStatus) -> Vec<String>| {
+        Memo::new(move |_| {
+            teams_badge.with(|status| {
+                let status = status.as_ref()?;
+                let last = status.choices.last_used.get(feature).map(String::as_str);
+                team_for(filter.get().as_deref(), last, &candidates(status))
+            })
+        })
+    };
+    let add_team = feature_team(feature::ADD_PART, editable_teams);
+    let check_team = feature_team(feature::LIBRARY_CHECK, editable_teams);
+    let kicad_team = feature_team(feature::KICAD_LIBRARIES, showing_teams);
+    let add_team_url = Memo::new(move |_| add_team.get().unwrap_or_default());
+    let kicad_team_url = Memo::new(move |_| kicad_team.get().unwrap_or_default());
     // The selected part's team, while it has one and it is in the list.
     let part_team = Memo::new(move |_| {
         let team = selected.with(|part| part.as_ref().map(|part| part.team.clone()))?;
@@ -123,14 +161,8 @@ fn App() -> impl IntoView {
     });
     // True while the Add part form is open in the part panel.
     let adding = RwSignal::new(false);
-    let can_add = Memo::new(move |_| {
-        team.with(|status| {
-            matches!(
-                status.as_ref().map(|status| &status.session),
-                Some(TeamSession::SignedIn { can_edit: true, .. })
-            )
-        })
-    });
+    // Add part is offered while the person can add parts to some team.
+    let can_add = Memo::new(move |_| add_team.with(Option::is_some));
     // True while the Library check view is open in the part panel.
     let checking = RwSignal::new(false);
     // The Libraries browser, while it is open, and what it is open for.
@@ -168,7 +200,7 @@ fn App() -> impl IntoView {
     set_interval(refresh_team, TEAM_POLL);
     let kicad_libraries = RwSignal::new(None::<desktop_contract::KicadLibrariesStatus>);
     let refresh_libraries = move || {
-        let team = shown_team.get_untracked();
+        let team = kicad_team_url.get_untracked();
         spawn_local(async move {
             if let Ok(latest) = backend::kicad_libraries_status(&team).await {
                 if kicad_libraries.with_untracked(|known| known.as_ref() != Some(&latest)) {
@@ -184,20 +216,23 @@ fn App() -> impl IntoView {
     // once per change of the team catalog (who is signed in, a new Change
     // or a finished import), never per keystroke.
     let check_position = Memo::new(move |_| {
-        team.with(|status| match status {
-            Some(TeamStatus {
-                server_url,
-                session:
-                    TeamSession::SignedIn {
-                        can_edit: true,
-                        email,
-                        checkpoint,
-                        imports,
-                        ..
-                    },
-                ..
-            }) => Some((format!("{server_url}\n{email}"), *checkpoint, *imports)),
-            _ => None,
+        let team = check_team.get()?;
+        teams.with(|status| {
+            let status = status
+                .as_ref()?
+                .teams
+                .iter()
+                .find(|t| t.server_url == team)?;
+            match &status.session {
+                TeamSession::SignedIn {
+                    can_edit: true,
+                    email,
+                    checkpoint,
+                    imports,
+                    ..
+                } => Some((format!("{team}\n{email}"), *checkpoint, *imports)),
+                _ => None,
+            }
         })
     });
     let library_check = RwSignal::new(None::<LibraryCheckView>);
@@ -215,7 +250,7 @@ fn App() -> impl IntoView {
             checked_at.set(None);
             return;
         };
-        let team = shown_team.get_untracked();
+        let team = check_team.get_untracked().unwrap_or_default();
         spawn_local(async move {
             let result = backend::team_library_check(&team).await;
             // Only the answer for the latest position is kept; the last
@@ -242,25 +277,6 @@ fn App() -> impl IntoView {
         Some(position) if checked_at.get().as_ref() == Some(&position) => "ready",
         Some(_) => "loading",
     };
-    // The header does not need the checkpoints; leaving them out keeps the
-    // menu from re-rendering whenever someone saves a Change.
-    let teams_badge = Memo::new(move |_| {
-        teams.get().map(|mut status| {
-            for team in &mut status.teams {
-                if let TeamSession::SignedIn {
-                    checkpoint,
-                    imports,
-                    ..
-                } = &mut team.session
-                {
-                    *checkpoint = 0;
-                    *imports = 0;
-                }
-            }
-            status
-        })
-    });
-
     Effect::new(move |_| {
         let text = query.get();
         let only_using = uses.get();
@@ -272,6 +288,7 @@ fn App() -> impl IntoView {
         // The answer says which section holds the selected part, and
         // always includes it there.
         let chosen = selected.get();
+        let (team, group_by) = (filter.get(), group_by.get());
         let seq = search_seq.get_value() + 1;
         search_seq.set_value(seq);
         set_timeout(
@@ -293,8 +310,8 @@ fn App() -> impl IntoView {
                         selected: chosen,
                         section: None,
                         uses: only_using,
-                        team: None,
-                        group_by: GroupBy::Category,
+                        team,
+                        group_by,
                     };
                     let response = backend::search(request.clone()).await;
                     // Ignore answers to queries the user has already replaced.
@@ -324,14 +341,13 @@ fn App() -> impl IntoView {
                 >
                     "Libraries"
                 </button>
-                <TeamSwitcher teams=teams_badge set_teams=teams />
                 <TeamsMenu teams=teams_badge set_teams=teams />
                 <KicadBadge
                     status=status
                     kicad_epoch=kicad_epoch
                     override_input=override_input
                     libraries=kicad_libraries
-                    libraries_team=shown_team.into()
+                    libraries_team=kicad_team_url.into()
                 />
             </header>
             <KicadProblem status=status kicad_epoch=kicad_epoch override_input=override_input />
@@ -383,6 +399,7 @@ fn App() -> impl IntoView {
                             </button>
                         </p>
                     })}
+                    <ListControls teams=teams_badge set_teams=teams />
                     <LibraryCheckLine
                         check=library_check
                         problem=check_problem
@@ -394,14 +411,20 @@ fn App() -> impl IntoView {
                             refresh_check();
                         })
                     />
-                    <ResultList results=results selected=selected adding=adding checking=checking />
+                    <ResultList
+                        results=results
+                        selected=selected
+                        adding=adding
+                        checking=checking
+                        hidden_note=hidden_note
+                    />
                 </section>
                 <PartPanel
                     selected=selected
                     kicad_epoch=kicad_epoch
                     team=part_team
                     any_team=any_team
-                    add_team=shown_team
+                    add_team=add_team_url
                     adding=adding
                     checking=checking
                     library_check=library_check
@@ -413,7 +436,7 @@ fn App() -> impl IntoView {
                     open=libraries_open
                     library_check=library_check
                     actions=BrowserActions {
-                        team: Signal::derive(|| None),
+                        team: filter.into(),
                         can_add,
                         add_from: Callback::new(move |choice| library_add.set(Some(choice))),
                         show_parts: Callback::new(move |reference: String| {

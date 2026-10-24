@@ -11,6 +11,7 @@
 //! one role, the current item selected, and a callback for the choice.
 
 use crate::focus::focus_later;
+use crate::team_marks::{CsvChip, TeamChip, TeamMarks};
 use crate::{Load, PreviewSection, backend, cad_reference, counted, grouped, into_load};
 use desktop_contract::{
     LibrariesView, LibraryCheckView, LibraryEntry, LibraryFilters, LibraryGroup, LibraryItemDetail,
@@ -1249,6 +1250,11 @@ fn UsedBy(
     done_with: Callback<Box<dyn FnOnce() + Send + Sync>>,
 ) -> impl IntoView {
     let used = !detail.used_by.is_empty();
+    // Each part's team mark, while two teams or more show parts, as in the
+    // part list: the same IPN may be in two teams.
+    let marks = use_context::<Memo<TeamMarks>>()
+        .map(|marks| marks.get_untracked())
+        .unwrap_or_default();
     used.then(|| {
         let count = detail.used_by.len();
         view! {
@@ -1265,8 +1271,14 @@ fn UsedBy(
                             team: part.team.clone(),
                             ipn: part.ipn.clone(),
                         };
+                        let chip = match marks.mark(&part.team) {
+                            Some(mark) => Some(view! { <TeamChip mark=mark.clone() /> }.into_any()),
+                            None if marks.shown => Some(view! { <CsvChip /> }.into_any()),
+                            None => None,
+                        };
                         view! {
                             <li>
+                                {chip}
                                 <button
                                     type="button"
                                     class="link-button"

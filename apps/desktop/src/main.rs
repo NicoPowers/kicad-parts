@@ -14,10 +14,11 @@ use desktop_contract::{
     AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, FootprintDrawing,
     KicadLibrariesStatus, LibrariesView, LibraryCheckView, LibraryItemDetail, LibraryItemRequest,
     LibraryItems, LibraryItemsRequest, OurLibraries, PartDetail, PreviewOutcome, PreviewRequest,
-    PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCodeCheck,
-    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
-    TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
-    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus, UseNewServerRequest,
+    PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamChoices,
+    TeamCodeCheck, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest,
+    TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest,
+    TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus,
+    UseNewServerRequest,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -433,19 +434,20 @@ async fn team_remove(
     .await
 }
 
-/// Shows another team in the catalog view; no sign-in is needed.
+/// Remembers what the person chose in the part list, and the team each
+/// feature that works on one team at a time last used, for the next start.
 #[tauri::command]
-async fn team_show(
+async fn team_choose(
     team: State<'_, Team>,
     libraries: State<'_, Libraries>,
-    server_url: String,
+    choices: TeamChoices,
 ) -> Result<TeamsStatus, String> {
     let (teams, libraries) = (team.inner().clone(), libraries.inner().clone());
     blocking(move || {
-        teams.show(&server_url)?;
-        Ok(teams_status(&teams, &libraries))
+        teams.choose(choices);
+        teams_status(&teams, &libraries)
     })
-    .await?
+    .await
 }
 
 #[tauri::command]
@@ -834,7 +836,7 @@ fn main() {
             team_sign_in,
             team_sign_out,
             team_remove,
-            team_show,
+            team_choose,
             team_part,
             team_edit,
             team_pick,
@@ -967,7 +969,7 @@ mod tests {
             command::TEAM_SIGN_IN,
             command::TEAM_SIGN_OUT,
             command::TEAM_REMOVE,
-            command::TEAM_SHOW,
+            command::TEAM_CHOOSE,
             command::TEAM_PART,
             command::TEAM_EDIT,
             command::TEAM_ARCHIVE,

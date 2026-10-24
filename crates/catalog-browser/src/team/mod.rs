@@ -261,6 +261,8 @@ impl TeamCatalog {
                 server_url: String::new(),
                 email: String::new(),
                 code: self.code(),
+                // The list of teams knows the colour.
+                colour: String::new(),
                 note: None,
                 libraries_made_from: None,
                 session: TeamSession::SignedOut {
@@ -273,6 +275,7 @@ impl TeamCatalog {
             server_url: session.client().base_url().to_owned(),
             email: session.email.clone(),
             code: self.code(),
+            colour: String::new(),
             note: None,
             libraries_made_from: None,
             session: TeamSession::SignedIn {

@@ -1,8 +1,8 @@
 //! The Teams area in the header: every team the person works with, each
 //! signed in, offline or needing a sign-in, with Sign out, Sign in and
-//! Remove, and a form that adds a team or signs in again. With two or more
-//! teams signed in, a switcher beside it chooses the team the catalog view
-//! shows; switching needs no sign-in.
+//! Remove, and a form that adds a team or signs in again. Each team's name
+//! is in its colour, as its mark in the part list is. The part list shows
+//! every team's parts at once (kicad-parts-8a71).
 //!
 //! A team whose KiCad libraries were made from another server address asks,
 //! on its row, whether the team moved (kicad-parts-092b).
@@ -280,6 +280,16 @@ fn team_row(
         })
     });
     let label = move || team.with(|team| team.as_ref().map(TeamStatus::label).unwrap_or_default());
+    // The team's name in its colour, as the part list marks its parts.
+    let chip_class = move || {
+        team.with(|team| {
+            let colour = team
+                .as_ref()
+                .map(|team| team.colour.as_str())
+                .unwrap_or_default();
+            format!("team-chip team-colour-{colour}")
+        })
+    };
     let address = move || {
         team.with(|team| {
             let team = team.as_ref()?;
@@ -305,7 +315,7 @@ fn team_row(
     view! {
         <li class="team-row" id=row_id>
             <p class="team-name">
-                <strong>{label}</strong>
+                <strong class=chip_class>{label}</strong>
                 {move || address().map(|address| view! { <span class="team-server">{address}</span> })}
             </p>
             <p class="team-state">{words}</p>
@@ -587,73 +597,6 @@ fn id_part(text: &str) -> String {
         .collect()
 }
 
-/// Chooses the team the catalog view shows, when two or more teams are
-/// signed in. A native list box, so it works with the keyboard and screen
-/// readers as people expect.
-#[component]
-pub fn TeamSwitcher(
-    teams: Memo<Option<TeamsStatus>>,
-    set_teams: RwSignal<Option<TeamsStatus>>,
-) -> impl IntoView {
-    let show = move |server: String| {
-        spawn_local(async move {
-            if let Ok(status) = backend::team_show(&server).await {
-                set_teams.set(Some(status));
-            }
-        });
-    };
-    // The choices and the shown team are kept apart, so switching only
-    // moves the selection: the list box is never drawn again under the
-    // person's focus.
-    let choices = Memo::new(move |_| {
-        teams.with(|status| {
-            status.as_ref().map_or_else(Vec::new, |status| {
-                status
-                    .teams
-                    .iter()
-                    .filter(|team| has_session(team))
-                    .map(|team| (team.server_url.clone(), team.label()))
-                    .collect::<Vec<_>>()
-            })
-        })
-    });
-    let shown = Memo::new(move |_| {
-        teams.with(|status| {
-            status
-                .as_ref()
-                .map(|status| status.shown.clone())
-                .unwrap_or_default()
-        })
-    });
-    move || {
-        let choices = choices.get();
-        if choices.len() < 2 {
-            return None;
-        }
-        Some(view! {
-            <div class="team-switcher">
-                <label for="team-shown">"Team"</label>
-                <select
-                    id="team-shown"
-                    on:change:target=move |event| show(event.target().value())
-                >
-                    {choices
-                        .into_iter()
-                        .map(|(server, label)| {
-                            let this = server.clone();
-                            view! {
-                                <option value=server prop:selected=move || shown.get() == this>
-                                    {label}
-                                </option>
-                            }
-                        })
-                        .collect_view()}
-                </select>
-            </div>
-        })
-    }
-}
-
 #[derive(Clone, Copy)]
 enum Action {
     SignOut,
@@ -688,10 +631,19 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
         count(Standing::Offline),
         count(Standing::SignInAgain),
     );
-    let shown = status.shown_team().and_then(|team| match &team.session {
-        TeamSession::SignedIn { name, .. } => Some((team, name)),
+    // The team showing parts, while only one does: the badge names it.
+    let showing: Vec<(&TeamStatus, &String)> = status
+        .teams
+        .iter()
+        .filter_map(|team| match &team.session {
+            TeamSession::SignedIn { name, .. } => Some((team, name)),
+            _ => None,
+        })
+        .collect();
+    let shown = match showing.as_slice() {
+        [only] => Some(*only),
         _ => None,
-    });
+    };
     // Teams whose KiCad libraries wait for the person (kicad-parts-092b):
     // for an answer, or for them to remove one of two servers.
     let waiting = status
@@ -707,7 +659,7 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
     };
     let look = if offline + again + waiting > 0 {
         PROBLEM
-    } else if connecting > 0 || shown.is_none() {
+    } else if connecting > 0 || showing.is_empty() {
         OFF
     } else {
         READY
@@ -729,8 +681,9 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
         };
         return (needs_a_look(words), look);
     }
-    // Several teams: say whose parts are shown, then count each team once
-    // by where it stands. Teams signed out on purpose are not counted.
+    // Several teams: name the team showing parts, if only one does, then
+    // count each team once by where it stands. Teams signed out on purpose
+    // are not counted.
     let counts: Vec<String> = [
         (live, "live"),
         (connecting, "connecting"),
@@ -749,9 +702,10 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
     (needs_a_look(words), look)
 }
 
-/// Where one team stands, for the header badge. Each team has exactly one.
+/// Where one team stands, for the header badge and the part list. Each
+/// team has exactly one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Standing {
+pub(crate) enum Standing {
     Live,
     Connecting,
     Offline,
@@ -760,7 +714,7 @@ enum Standing {
     SignedOut,
 }
 
-fn standing_of(team: &TeamStatus) -> Standing {
+pub(crate) fn standing_of(team: &TeamStatus) -> Standing {
     match &team.session {
         TeamSession::SignedIn { live, .. } => match live {
             LiveUpdates::Live => Standing::Live,
@@ -830,6 +784,7 @@ mod tests {
             server_url: format!("https://{}.example.com", code.to_lowercase()),
             email: "ada@example.test".into(),
             code: code.into(),
+            colour: "blue".into(),
             session,
             note: None,
             libraries_made_from: None,
@@ -849,11 +804,8 @@ mod tests {
 
     fn status(teams: Vec<TeamStatus>) -> TeamsStatus {
         TeamsStatus {
-            shown: teams
-                .first()
-                .map(|team| team.server_url.clone())
-                .unwrap_or_default(),
             teams,
+            choices: desktop_contract::TeamChoices::default(),
             kept: SignInsKept::AfterRestart,
             form_server: String::new(),
             form_email: String::new(),
@@ -900,12 +852,13 @@ mod tests {
     }
 
     #[test]
-    fn several_teams_say_whose_parts_are_shown_and_count_each_team_once() {
+    fn several_teams_count_each_team_once() {
         let ma = team("MA", signed_in(LiveUpdates::Live));
         let ac = team("AC", signed_in(LiveUpdates::Live));
+        // Both teams' parts are in the list: no team is "shown".
         assert_eq!(
             summary(&status(vec![ma.clone(), ac.clone()])),
-            ("MA · Ada Editor · 2 live".into(), READY)
+            ("Teams · 2 live".into(), READY)
         );
         let offline_be = team(
             "BE",
@@ -916,7 +869,7 @@ mod tests {
         // An offline team with its session is counted once: offline.
         assert_eq!(
             summary(&status(vec![ma.clone(), offline_be.clone()])),
-            ("MA · Ada Editor · 1 live, 1 offline".into(), PROBLEM)
+            ("Teams · 1 live, 1 offline".into(), PROBLEM)
         );
         let reaching = team(
             "BE",
@@ -933,7 +886,7 @@ mod tests {
         assert_eq!(
             summary(&status(vec![ma.clone(), ac, reaching.clone(), again])),
             (
-                "MA · Ada Editor · 2 live, 1 offline, 1 to sign in again".into(),
+                "Teams · 2 live, 1 offline, 1 to sign in again".into(),
                 PROBLEM
             )
         );
@@ -1018,10 +971,7 @@ mod tests {
         let ac = team("AC", signed_in(LiveUpdates::Live));
         assert_eq!(
             summary(&status(vec![ma.clone(), ac.clone()])),
-            (
-                "MA · Ada Editor · 2 live · 1 team needs a look".into(),
-                PROBLEM
-            )
+            ("Teams · 2 live · 1 team needs a look".into(), PROBLEM)
         );
         // Two servers claiming one team have no answer to give, but need a
         // look all the same.
@@ -1033,10 +983,7 @@ mod tests {
         });
         assert_eq!(
             summary(&status(vec![ma, claimed])),
-            (
-                "MA · Ada Editor · 2 live · 2 teams need a look".into(),
-                PROBLEM
-            )
+            ("Teams · 2 live · 2 teams need a look".into(), PROBLEM)
         );
     }
 

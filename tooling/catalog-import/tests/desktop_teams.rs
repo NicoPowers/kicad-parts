@@ -8,6 +8,12 @@
 //! team working. A second server that claims a team's ID cannot write that
 //! team's libraries until the person says the team moved (kicad-parts-092b).
 //!
+//! One part list shows both teams' parts (kicad-parts-8a71): the same IPN
+//! once per team, an edit saved only to its own team's server, a
+//! teammate's save changing only that team's rows, and a stopped server
+//! leaving its rows in the list, marked offline, while the other team can
+//! still be edited.
+//!
 //! The kept tokens live in a store in memory, never the system's
 //! credential store.
 
@@ -15,11 +21,13 @@ use catalog::pocketbase::{ImportCommand, submit_import, submit_team_code};
 use catalog_browser::kicad_libraries::KicadLibraries;
 use catalog_browser::team::{SIGN_IN_AGAIN, TeamCatalog};
 use catalog_browser::teams::{MemorySignIns, SignInStore, SignIns, Teams};
+use catalog_browser::{BrowserConfig, CatalogBrowser};
 use catalog_import::services;
 use collaboration::PocketBaseClient;
 use desktop_contract::{
-    KicadLibrariesState, LibrariesMadeFrom, LiveUpdates, PublishResult, SignInRequest,
-    TeamEditRequest, TeamSession, TeamStatus, UseNewServerRequest, two_servers_claim_a_team,
+    GroupBy, KicadLibrariesState, LibrariesMadeFrom, LiveUpdates, PartSummary, PublishResult,
+    SearchRequest, SignInRequest, TeamEditRequest, TeamSession, TeamStatus, UseNewServerRequest,
+    two_servers_claim_a_team,
 };
 use native_services::PocketBaseServer;
 use std::path::Path;
@@ -127,10 +135,19 @@ impl Client {
 
     /// Another member saves a new Value for the part.
     fn someone_else_edits(&self, value: &str) {
+        assert!(matches!(
+            value_edit(&self.another_member(value), value),
+            PublishResult::Saved { .. }
+        ));
+    }
+
+    /// Another member of this team, new each time, signed in on their own.
+    fn another_member(&self, name: &str) -> TeamCatalog {
+        let unique = native_services::random_token(10).to_lowercase();
         let grace = services::add_member(
             &self.admin,
-            "Grace Editor",
-            &format!("grace-{value}@example.test"),
+            &format!("Grace {name}"),
+            &format!("grace-{unique}@example.test"),
             true,
         )
         .unwrap();
@@ -140,30 +157,39 @@ impl Client {
             email: grace.email.clone(),
             password: grace.password.clone(),
         });
-        let part = other.part(IPN).unwrap().unwrap();
-        let mut request = TeamEditRequest {
-            correlation_id: None,
-            ipn: IPN.into(),
-            expected_details: part.details.number,
-            expected_revision: part.revision.number,
-            reason: "Write the value the way the BOM does".into(),
-            category: String::new(),
-            fields: part.details.fields.clone(),
-            manufacturer_parts: part.details.manufacturer_parts.clone(),
-            cad_fields: part.revision.cad_fields.clone(),
-            files: Vec::new(),
-        };
-        request
-            .fields
-            .iter_mut()
-            .find(|field| field.name == "Value")
-            .unwrap()
-            .value = value.into();
-        assert!(matches!(
-            other.edit(request).unwrap(),
-            PublishResult::Saved { .. }
-        ));
+        other
     }
+
+    /// The part's Value as this team's server has it now, read afresh.
+    fn value_on_server(&self) -> String {
+        let reader = self.another_member("reader");
+        let part = reader.part(IPN).unwrap().unwrap();
+        part.details.field("Value").unwrap_or_default().to_owned()
+    }
+}
+
+/// Saves `value` as the part's Value through `team`.
+fn value_edit(team: &TeamCatalog, value: &str) -> PublishResult {
+    let part = team.part(IPN).unwrap().unwrap();
+    let mut request = TeamEditRequest {
+        correlation_id: None,
+        ipn: IPN.into(),
+        expected_details: part.details.number,
+        expected_revision: part.revision.number,
+        reason: "Write the value the way the BOM does".into(),
+        category: String::new(),
+        fields: part.details.fields.clone(),
+        manufacturer_parts: part.details.manufacturer_parts.clone(),
+        cad_fields: part.revision.cad_fields.clone(),
+        files: Vec::new(),
+    };
+    request
+        .fields
+        .iter_mut()
+        .find(|field| field.name == "Value")
+        .unwrap()
+        .value = value.into();
+    team.edit(request).unwrap()
 }
 
 fn team<'a>(teams: &'a [TeamStatus], client: &Client) -> &'a TeamStatus {
@@ -245,7 +271,14 @@ fn two_teams_are_followed_side_by_side_and_stay_signed_in() {
     wait_until("both teams to be live", || {
         live(&teams, &acme).is_some() && live(&teams, &beta).is_some()
     });
-    assert_eq!(teams.status().shown, beta.url, "the last sign-in is shown");
+    // Each team got its own colour, kept with the list.
+    let colours: Vec<String> = teams
+        .status()
+        .teams
+        .into_iter()
+        .map(|team| team.colour)
+        .collect();
+    assert_eq!(colours, ["blue", "green"]);
 
     // Both teams' KiCad libraries are made, each in its own folder.
     let up_to_date = |client: &Client| {
@@ -272,9 +305,6 @@ fn two_teams_are_followed_side_by_side_and_stay_signed_in() {
     assert_eq!(value_of(&catalog_of(&teams, &acme)).as_deref(), Some("47R"));
     assert_eq!(live(&teams, &beta), Some(beta_at));
     assert_eq!(value_of(&catalog_of(&teams, &beta)).as_deref(), Some("47"));
-    // Switching shows the other team at once.
-    teams.show(&acme.url).unwrap();
-    assert!(Arc::ptr_eq(&teams.shown(), &catalog_of(&teams, &acme)));
     wait_until("both sign-ins to be kept", || {
         store.read(&acme.url).unwrap().is_some() && store.read(&beta.url).unwrap().is_some()
     });
@@ -286,7 +316,6 @@ fn two_teams_are_followed_side_by_side_and_stay_signed_in() {
     wait_until("both teams to be live again with no password", || {
         live(&teams, &acme).is_some() && live(&teams, &beta).is_some()
     });
-    assert_eq!(teams.status().shown, acme.url, "acme is still shown");
     let values = catalog_of(&teams, &acme);
     assert_eq!(value_of(&values).as_deref(), Some("47R"));
 
@@ -307,7 +336,13 @@ fn two_teams_are_followed_side_by_side_and_stay_signed_in() {
         None,
         "its token is forgotten"
     );
-    assert_eq!(teams.status().shown, beta.url, "beta is shown meanwhile");
+    // Beta's parts are in the list meanwhile; acme's are not.
+    let shown: Vec<String> = teams
+        .known_parts()
+        .iter()
+        .map(|parts| parts.team.clone())
+        .collect();
+    assert_eq!(shown, [beta.url.clone()]);
     teams.sign_in(acme.sign_in()).unwrap();
     wait_until("acme to be live again", || live(&teams, &acme).is_some());
 
@@ -476,4 +511,139 @@ fn a_second_server_claiming_a_team_cannot_write_its_libraries_until_confirmed() 
     drop(teams);
     clear_read_only(&folder);
     let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// The part list as the app asks for it: every team, by category.
+fn list(browser: &CatalogBrowser, teams: &Teams, query: &str) -> Vec<PartSummary> {
+    let request = SearchRequest {
+        query: query.into(),
+        limit: 50,
+        selected: None,
+        section: None,
+        uses: None,
+        team: None,
+        group_by: GroupBy::Category,
+    };
+    browser
+        .search_request(&request, &teams.known_parts())
+        .hits()
+        .cloned()
+        .collect()
+}
+
+/// The row of the part in the team at `client`.
+fn row<'a>(rows: &'a [PartSummary], client: &Client) -> &'a PartSummary {
+    rows.iter()
+        .find(|row| row.team == client.url && row.ipn == IPN)
+        .unwrap_or_else(|| panic!("no row for {} in {rows:?}", client.url))
+}
+
+#[test]
+fn one_list_holds_both_teams_and_each_edit_goes_to_its_own_server() {
+    let root = services::repository_root();
+    let mut acme = Client::start(&root, "AC");
+    let beta = Client::start(&root, "BE");
+    let config = tempfile::tempdir().unwrap();
+    let teams = Teams::open(
+        config.path().join("team.json"),
+        SignIns::kept_in(Arc::new(MemorySignIns::default())),
+        None,
+        None,
+    );
+    teams.sign_in(acme.sign_in()).unwrap();
+    teams.sign_in(beta.sign_in()).unwrap();
+    wait_until("both teams to be live", || {
+        live(&teams, &acme).is_some() && live(&teams, &beta).is_some()
+    });
+    let cache = tempfile::tempdir().unwrap();
+    let browser = CatalogBrowser::open(BrowserConfig {
+        catalog_root: root.clone(),
+        cache_dir: cache.path().join("cache"),
+        settings_file: cache.path().join("settings.json"),
+        kicad_locations: kicad_integration::SearchLocations::Only(Vec::new()),
+        kicad_config_dir: None,
+        kicad_documents_dir: None,
+    });
+
+    // Both teams' parts are in one list: the same IPN once per team, in
+    // team order, and the CSV catalog's other parts beside them.
+    let rows = list(&browser, &teams, IPN);
+    let both: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.ipn == IPN)
+        .map(|row| row.team.as_str())
+        .collect();
+    assert_eq!(both, [acme.url.as_str(), beta.url.as_str()]);
+    let everything = list(&browser, &teams, "");
+    assert!(
+        everything.iter().any(|row| row.team.is_empty()),
+        "CSV parts no team has"
+    );
+
+    // Editing acme's part saves to acme's server only.
+    let acme_team = teams.team(&acme.url).unwrap();
+    let saved = browser
+        .edit(
+            {
+                let part = acme_team.part(IPN).unwrap().unwrap();
+                let mut request = TeamEditRequest {
+                    correlation_id: None,
+                    ipn: IPN.into(),
+                    expected_details: part.details.number,
+                    expected_revision: part.revision.number,
+                    reason: "Acme writes 47R".into(),
+                    category: String::new(),
+                    fields: part.details.fields.clone(),
+                    manufacturer_parts: part.details.manufacturer_parts.clone(),
+                    cad_fields: part.revision.cad_fields.clone(),
+                    files: Vec::new(),
+                };
+                request
+                    .fields
+                    .iter_mut()
+                    .find(|field| field.name == "Value")
+                    .unwrap()
+                    .value = "47R".into();
+                request
+            },
+            &acme_team,
+        )
+        .unwrap();
+    assert!(matches!(saved, PublishResult::Saved { .. }), "{saved:?}");
+    assert_eq!(acme.value_on_server(), "47R");
+    assert_eq!(beta.value_on_server(), "47", "beta's server is untouched");
+    wait_until("acme's row to show the edit", || {
+        row(&list(&browser, &teams, IPN), &acme).value == "47R"
+    });
+    assert_eq!(row(&list(&browser, &teams, IPN), &beta).value, "47");
+
+    // A teammate's save on beta changes beta's row only.
+    beta.someone_else_edits("47 ohm");
+    wait_until("beta's row to show the teammate's save", || {
+        row(&list(&browser, &teams, IPN), &beta).value == "47 ohm"
+    });
+    assert_eq!(row(&list(&browser, &teams, IPN), &acme).value, "47R");
+
+    // Acme's server stops: its rows stay, from the parts last seen, and
+    // acme is marked offline. Beta can still be edited.
+    acme.server.take().unwrap().stop();
+    wait_until("acme to be offline", || {
+        matches!(
+            team(&teams.status().teams, &acme).session,
+            TeamSession::SignedIn {
+                live: LiveUpdates::Reconnecting { .. },
+                ..
+            }
+        )
+    });
+    assert_eq!(row(&list(&browser, &teams, IPN), &acme).value, "47R");
+    let beta_team = teams.team(&beta.url).unwrap();
+    assert!(matches!(
+        value_edit(&beta_team, "47R0"),
+        PublishResult::Saved { .. }
+    ));
+    assert_eq!(beta.value_on_server(), "47R0");
+    wait_until("beta's row to show the edit while acme is offline", || {
+        row(&list(&browser, &teams, IPN), &beta).value == "47R0"
+    });
 }

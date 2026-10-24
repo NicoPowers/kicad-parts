@@ -4,10 +4,10 @@ use desktop_contract::{
     AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, KicadLibrariesStatus,
     LibrariesView, LibraryCheckView, LibraryItemDetail, LibraryItemRequest, LibraryItems,
     LibraryItemsRequest, OurLibraries, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
-    SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamCsvReviewRequest,
-    TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest,
-    TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick,
-    TeamPickRequest, TeamSameMpn, TeamsStatus, command,
+    SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamChoices,
+    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
+    TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
+    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -196,8 +196,15 @@ pub async fn team_remove(server_url: &str) -> Result<TeamsStatus, String> {
     call(command::TEAM_REMOVE, &ServerArgs { server_url }).await
 }
 
-pub async fn team_show(server_url: &str) -> Result<TeamsStatus, String> {
-    call(command::TEAM_SHOW, &ServerArgs { server_url }).await
+#[derive(Serialize)]
+struct ChoicesArgs {
+    choices: TeamChoices,
+}
+
+/// Remembers what the person chose in the part list, and the team each
+/// feature last used, for the next start.
+pub async fn team_choose(choices: TeamChoices) -> Result<TeamsStatus, String> {
+    call(command::TEAM_CHOOSE, &ChoicesArgs { choices }).await
 }
 
 #[derive(Serialize)]

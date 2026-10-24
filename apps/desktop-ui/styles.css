@@ -18,6 +18,27 @@
   /* The part list's sticky section header, which the list's scroll padding
      keeps parts clear of. */
   --section-header-height: 2.6rem;
+  /* Team colours (TEAM_COLOURS in desktop-contract): a soft background and
+     a dark text of the same hue. The text passes 4.5:1 on its background,
+     on white and on a selected row, and the background stands out on the
+     navy header too; a unit test checks each pair. A team's mark always
+     shows its code as text, never colour alone. */
+  --team-blue-bg: #dbe7f6;
+  --team-blue-ink: #1c4a80;
+  --team-green-bg: #d9efe0;
+  --team-green-ink: #1b5e33;
+  --team-purple-bg: #ebe2f6;
+  --team-purple-ink: #5a3589;
+  --team-orange-bg: #fbe4d0;
+  --team-orange-ink: #86400f;
+  --team-teal-bg: #d3eeee;
+  --team-teal-ink: #125858;
+  --team-rose-bg: #f8dde3;
+  --team-rose-ink: #8c1f3d;
+  --team-olive-bg: #ebead0;
+  --team-olive-ink: #55530f;
+  --team-slate-bg: #e1e6ed;
+  --team-slate-ink: #3a4759;
   color-scheme: light;
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
   font-size: 15px;
@@ -414,6 +435,41 @@ button:disabled {
   margin: 0.5rem 0.9rem;
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+/* The team filter and Group by, shown with two or more teams. */
+.list-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.5rem;
+  margin: 0.45rem 0.9rem 0;
+  font-size: 0.9rem;
+}
+
+.list-controls label {
+  font-weight: 600;
+}
+
+.list-controls select {
+  font: inherit;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+}
+
+.list-controls label + select {
+  margin-right: 0.5rem;
+}
+
+/* Teams whose parts are hidden, and how to show them. */
+.hidden-teams {
+  margin: -0.2rem 0.9rem 0.5rem;
+  padding: 0.3rem 0.6rem;
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn-line);
+  border-radius: 4px;
+  font-size: 0.85rem;
 }
 
 .results {
@@ -1354,29 +1410,45 @@ a {
   border-top: 1px solid var(--line);
 }
 
-/* The team switcher in the header, shown with two or more teams. */
-.team-switcher {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin-left: auto;
-}
-
-.team-switcher label {
-  font-size: 0.9rem;
+/* A team's mark: its code in a chip of the team's colour, with a border
+   of the text colour so the chip shows on any background. Positioned, so
+   the hidden words inside it never stretch the list (mx-2d5f30). */
+.team-chip {
+  position: relative;
+  display: inline-block;
+  margin-right: 0.4rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--chip-ink);
+  border-radius: 4px;
+  background: var(--chip-bg);
+  color: var(--chip-ink);
+  font-size: 0.75rem;
   font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+  font-variant-numeric: normal;
 }
 
-.team-switcher select {
-  font: inherit;
+.team-colour-blue { --chip-bg: var(--team-blue-bg); --chip-ink: var(--team-blue-ink); }
+.team-colour-green { --chip-bg: var(--team-green-bg); --chip-ink: var(--team-green-ink); }
+.team-colour-purple { --chip-bg: var(--team-purple-bg); --chip-ink: var(--team-purple-ink); }
+.team-colour-orange { --chip-bg: var(--team-orange-bg); --chip-ink: var(--team-orange-ink); }
+.team-colour-teal { --chip-bg: var(--team-teal-bg); --chip-ink: var(--team-teal-ink); }
+.team-colour-rose { --chip-bg: var(--team-rose-bg); --chip-ink: var(--team-rose-ink); }
+.team-colour-olive { --chip-bg: var(--team-olive-bg); --chip-ink: var(--team-olive-ink); }
+.team-colour-slate { --chip-bg: var(--team-slate-bg); --chip-ink: var(--team-slate-ink); }
+
+/* A part only the CSV files have: no team, so no team colour. */
+.team-chip-csv {
+  --chip-bg: var(--panel);
+  --chip-ink: var(--muted);
+  border-style: dashed;
+}
+
+/* The team's name in the Teams menu, in its colour. */
+.kicad-settings-body .team-name .team-chip {
+  margin-right: 0;
   font-size: 0.9rem;
-  padding: 0.15rem 0.4rem;
-  border: 1px solid #c9d4e2;
-  border-radius: 6px;
-}
-
-.team-switcher + .team-settings {
-  margin-left: 0;
 }
 
 /* With the team column, the right side gets more room for history and

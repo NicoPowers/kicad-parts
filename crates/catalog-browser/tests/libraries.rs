@@ -5,17 +5,17 @@
 
 #![allow(clippy::format_collect)]
 
+use catalog_browser::team::KnownParts;
 use catalog_browser::{BrowserConfig, CatalogBrowser, PartValues};
 use desktop_contract::{
     LibraryFilters, LibraryGroup, LibraryItemRequest, LibraryItemsRequest, LibraryKey, MountFilter,
     PreviewKind, PreviewOutcome, PreviewProblemReason,
 };
 use kicad_integration::SearchLocations;
-use catalog_browser::team::KnownParts;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(120);

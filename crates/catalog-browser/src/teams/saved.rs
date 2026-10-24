@@ -1,8 +1,10 @@
 //! The list of teams the app remembers between runs: each team's server
-//! address and the email last used there, and which team the catalog view
-//! shows. It never holds a password or a token.
+//! address, the email last used there, its code and colour, and what the
+//! person last chose in the part list. It never holds a password or a
+//! token.
 
 use collaboration::ServerAddress;
+use desktop_contract::TeamChoices;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -19,6 +21,10 @@ pub(super) struct SavedTeam {
     /// its server is reached.
     #[serde(default)]
     pub(super) code: String,
+    /// The team's colour, one of `TEAM_COLOURS`, given once when the team
+    /// joined the list, so it stays the same.
+    #[serde(default)]
+    pub(super) colour: String,
     /// The person signed out of this team. Its kept sign-in, if the store
     /// could not forget it, is never carried on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -28,9 +34,11 @@ pub(super) struct SavedTeam {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct SavedList {
     pub(super) teams: Vec<SavedTeam>,
-    /// The server address of the team the catalog view shows.
+    /// What the person last chose in the part list and in features that
+    /// work on one team at a time. (Earlier versions saved the one team
+    /// the catalog view showed, as `shown`; it is no longer read.)
     #[serde(default)]
-    pub(super) shown: String,
+    pub(super) choices: TeamChoices,
 }
 
 /// What the file may hold: the list, or the one team that versions before
@@ -55,8 +63,8 @@ pub(super) fn read(file: &Path) -> SavedList {
         OnDisk::List(list) => list,
         OnDisk::OneTeam(team) if team.server_url.is_empty() => SavedList::default(),
         OnDisk::OneTeam(team) => SavedList {
-            shown: team.server_url.clone(),
             teams: vec![team],
+            choices: TeamChoices::default(),
         },
     };
     one_address_per_server(list)
@@ -80,10 +88,12 @@ fn one_address_per_server(list: SavedList) -> SavedList {
             None => teams.push(team),
         }
     }
-    SavedList {
-        teams,
-        shown: address_now(&list.shown),
+    let mut choices = list.choices;
+    choices.filter = address_now(&choices.filter);
+    for server in choices.last_used.values_mut() {
+        *server = address_now(server);
     }
+    SavedList { teams, choices }
 }
 
 /// `address` as sign-in writes it now; as it is if it is not an address.
@@ -119,7 +129,7 @@ mod tests {
         )
         .unwrap();
         let list = read(&file);
-        assert_eq!(list.shown, "https://parts.example.com");
+        assert_eq!(list.choices, TeamChoices::default());
         assert_eq!(list.teams.len(), 1);
         assert_eq!(list.teams[0].email, "a@example.test");
         // Nothing saved yet, or a file that cannot be read, is no team.
@@ -140,7 +150,8 @@ mod tests {
                 {"server_url":"https://Parts.example.com","email":"a@example.test"},
                 {"server_url":"https://beta.example.com","email":"a@example.test"},
                 {"server_url":"https://parts.example.com:443","email":"b@example.test","code":"PE"}
-            ],"shown":"https://PARTS.example.com"}"#,
+            ],"shown":"https://PARTS.example.com",
+            "choices":{"filter":"https://PARTS.example.com","last_used":{"add_part":"https://Beta.example.com"}}}"#,
         )
         .unwrap();
         let list = read(&file);
@@ -156,7 +167,13 @@ mod tests {
         // The first is kept, with the code the other knew.
         assert_eq!(list.teams[0].email, "a@example.test");
         assert_eq!(list.teams[0].code, "PE");
-        assert_eq!(list.shown, "https://parts.example.com");
+        // The choices name each team as its address is written now; the
+        // shown team earlier versions saved is no longer read.
+        assert_eq!(list.choices.filter, "https://parts.example.com");
+        assert_eq!(
+            list.choices.last_used.get("add_part").map(String::as_str),
+            Some("https://beta.example.com")
+        );
     }
 
     #[test]
@@ -169,16 +186,22 @@ mod tests {
                     server_url: "https://parts.example.com/acme".into(),
                     email: "a@example.test".into(),
                     code: "AC".into(),
+                    colour: "blue".into(),
                     signed_out: false,
                 },
                 SavedTeam {
                     server_url: "https://beta.example.com".into(),
                     email: "a@example.test".into(),
                     code: String::new(),
+                    colour: "green".into(),
                     signed_out: false,
                 },
             ],
-            shown: "https://beta.example.com".into(),
+            choices: TeamChoices {
+                filter: "https://beta.example.com".into(),
+                group_by: desktop_contract::GroupBy::Team,
+                last_used: [("add_part".to_owned(), "https://beta.example.com".to_owned())].into(),
+            },
         };
         write(&file, &list).unwrap();
         assert_eq!(read(&file), list);

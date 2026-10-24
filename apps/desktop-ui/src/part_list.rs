@@ -16,6 +16,7 @@
 
 use crate::focus::{Scrolling, focus_found_later};
 use crate::list_focus::{DrawnSection, Focused, ListFocus};
+use crate::team_marks::{CsvChip, TeamChip, TeamMarks};
 use crate::{Load, backend, grouped};
 use desktop_contract::{PartKey, PartSummary, SearchRequest, SearchResponse};
 use leptos::prelude::*;
@@ -375,6 +376,8 @@ pub(crate) fn ResultList(
     selected: RwSignal<Option<PartKey>>,
     adding: RwSignal<bool>,
     checking: RwSignal<bool>,
+    /// How many teams' parts are hidden, and how to show them.
+    hidden_note: Memo<Option<String>>,
 ) -> impl IntoView {
     let open = RwSignal::new(OpenSections::default());
     let loaded = RwSignal::new(Loaded::default());
@@ -571,6 +574,9 @@ pub(crate) fn ResultList(
                 Load::Ready(searched) => count_text(&searched.response),
             })}
         </p>
+        {move || hidden_note.get().map(|note| view! {
+            <p id="hidden-teams" class="hidden-teams" role="status">{note}</p>
+        })}
         // Says why focus moved, when a teammate's save took the focused
         // part or section out of the list.
         <p id="list-focus-note" class="visually-hidden" aria-live="polite">
@@ -870,6 +876,24 @@ fn PartRow(
     };
     let labels =
         Memo::new(move |_| part.with(|part| part.as_ref().map(row_labels).unwrap_or_default()));
+    // The part's team, as text in the team's colour, while two teams or
+    // more show parts; "CSV" for a part only the CSV files have.
+    let marks = use_context::<Memo<TeamMarks>>();
+    let mark = {
+        let team = key.team.clone();
+        Memo::new(move |_| {
+            let marks = marks?;
+            marks.with(|marks| {
+                if !marks.shown {
+                    None
+                } else if team.is_empty() {
+                    Some(None)
+                } else {
+                    marks.mark(&team).cloned().map(Some)
+                }
+            })
+        })
+    };
     let description = move || part.with(|part| part.as_ref().map(|part| part.description.clone()));
     let focused = Focused::Row {
         section: category,
@@ -887,7 +911,13 @@ fn PartRow(
                 on:click=move |_| choose(key.clone())
             >
                 <span class="result-title">{move || labels.with(|(title, _)| title.clone())}</span>
-                <span class="result-ipn">{move || labels.with(|(_, aside)| aside.clone())}</span>
+                <span class="result-ipn">
+                    {move || mark.get().map(|mark| match mark {
+                        Some(mark) => view! { <TeamChip mark=mark /> }.into_any(),
+                        None => view! { <CsvChip /> }.into_any(),
+                    })}
+                    {move || labels.with(|(_, aside)| aside.clone())}
+                </span>
                 <span class="result-description">{description}</span>
             </button>
         </li>

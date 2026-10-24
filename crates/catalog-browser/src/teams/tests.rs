@@ -50,8 +50,19 @@ fn is_signed_in(teams: &Teams, server: &FakeServer) -> bool {
         .any(|(server_url, _)| *server_url == server.url)
 }
 
-fn same(a: &Arc<TeamCatalog>, b: &Arc<TeamCatalog>) -> bool {
-    Arc::ptr_eq(a, b)
+/// The catalog of the first team in the list, for tests with one team.
+fn first(teams: &Teams) -> Arc<TeamCatalog> {
+    teams.every()[0].1.clone()
+}
+
+/// Each team's colour, in list order.
+fn colours(teams: &Teams) -> Vec<String> {
+    teams
+        .status()
+        .teams
+        .into_iter()
+        .map(|team| team.colour)
+        .collect()
 }
 
 #[test]
@@ -71,9 +82,9 @@ fn a_failed_sign_in_adds_no_team_and_saves_no_password() {
     assert!(!file.exists(), "a failed sign-in saves nothing at all");
     let status = teams.status();
     assert_eq!(status.problem, Some(problem));
-    assert!(status.teams.is_empty() && status.shown.is_empty());
+    assert!(status.teams.is_empty());
     assert!(teams.signed_in().is_empty());
-    assert!(!teams.shown().is_signed_in());
+    assert!(teams.known_parts().is_empty());
 }
 
 #[test]
@@ -104,9 +115,10 @@ fn suggested_values_fill_in_the_sign_in_form() {
                 server_url: "https://parts.example.com".into(),
                 email: "a@example.test".into(),
                 code: "PE".into(),
+                colour: String::new(),
                 signed_out: false,
             }],
-            shown: "https://parts.example.com".into(),
+            choices: TeamChoices::default(),
         },
     )
     .unwrap();
@@ -118,7 +130,10 @@ fn suggested_values_fill_in_the_sign_in_form() {
     // Nothing is kept for it, so it needs signing in; its saved code
     // names it.
     assert_eq!(status.teams[0].label(), "PE");
-    assert!(status.shown.is_empty(), "no team is signed in");
+    assert!(!status.teams[0].session.is_signed_in());
+    // A team saved before colours were gets its colour once, and keeps it.
+    assert_eq!(status.teams[0].colour, "blue");
+    assert_eq!(saved::read(&file).teams[0].colour, "blue");
     let suggested = Some("http://127.0.0.1:1".into());
     let status = Teams::open(file, memory(), suggested, None).status();
     assert_eq!(
@@ -135,11 +150,11 @@ fn signing_in_keeps_the_sign_in_in_the_store_never_in_a_file() {
     let file = dir.path().join("team.json");
     let teams = Teams::open(file.clone(), kept_in(&store), None, None);
     teams.sign_in(request(&server)).unwrap();
-    assert!(teams.shown().is_signed_in());
+    assert!(first(&teams).is_signed_in());
     wait_until("the sign-in to be kept", || {
         kept_token(&store, &server).is_some()
     });
-    assert_eq!(kept_token(&store, &server), teams.shown().token());
+    assert_eq!(kept_token(&store, &server), first(&teams).token());
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.contains(&server.url) && text.contains(EMAIL), "{text}");
     let token = kept_token(&store, &server).unwrap();
@@ -160,9 +175,10 @@ fn a_restart_carries_on_every_kept_sign_in_without_a_password() {
         let teams = Teams::open(file.clone(), kept_in(&store), None, None);
         teams.sign_in(request(&acme)).unwrap();
         teams.sign_in(request(&beta)).unwrap();
-        // Signing in to beta kept acme signed in, and shows beta.
+        // Signing in to beta kept acme signed in. Each team got its own
+        // colour.
         assert!(is_signed_in(&teams, &acme) && is_signed_in(&teams, &beta));
-        assert_eq!(teams.status().shown, beta.url);
+        assert_eq!(colours(&teams), ["blue", "green"]);
         wait_until("both sign-ins to be kept", || {
             kept_token(&store, &acme).is_some() && kept_token(&store, &beta).is_some()
         });
@@ -174,7 +190,7 @@ fn a_restart_carries_on_every_kept_sign_in_without_a_password() {
     });
     assert_eq!((acme.password_sign_ins(), beta.password_sign_ins()), (1, 1));
     assert!(acme.refreshes() >= 1 && beta.refreshes() >= 1);
-    assert_eq!(teams.status().shown, beta.url, "beta is still shown");
+    assert_eq!(colours(&teams), ["blue", "green"], "colours stay");
     // The renewed tokens are kept for the next start.
     wait_until("the renewed tokens to be kept", || {
         kept_token(&store, &acme) == teams.signed_in()[0].1.token()
@@ -182,21 +198,46 @@ fn a_restart_carries_on_every_kept_sign_in_without_a_password() {
 }
 
 #[test]
-fn switching_teams_needs_no_sign_in() {
+fn every_request_names_its_team_and_the_list_choices_are_kept() {
     let (acme, beta) = (FakeServer::start(), FakeServer::start());
     let dir = tempfile::tempdir().unwrap();
-    let teams = Teams::open(dir.path().join("team.json"), memory(), None, None);
+    let file = dir.path().join("team.json");
+    let teams = Teams::open(file.clone(), memory(), None, None);
     teams.sign_in(request(&acme)).unwrap();
     teams.sign_in(request(&beta)).unwrap();
+    // Each team is reached by its address, with no team "shown".
     let signed_in = teams.signed_in();
-    let (acme_catalog, beta_catalog) = (&signed_in[0].1, &signed_in[1].1);
-    assert!(same(&teams.shown(), beta_catalog));
-    teams.show(&acme.url).unwrap();
-    assert!(same(&teams.shown(), acme_catalog));
-    teams.show(&beta.url).unwrap();
-    assert!(same(&teams.shown(), beta_catalog));
-    assert_eq!((acme.password_sign_ins(), beta.password_sign_ins()), (1, 1));
-    assert!(teams.show("https://other.example.com").is_err());
+    assert!(Arc::ptr_eq(
+        &teams.team(&acme.url).unwrap(),
+        &signed_in[0].1
+    ));
+    assert!(Arc::ptr_eq(
+        &teams.team(&beta.url).unwrap(),
+        &signed_in[1].1
+    ));
+    assert!(teams.team("https://other.example.com").is_err());
+    // What the person chose in the part list is kept for the next start.
+    let chosen = TeamChoices {
+        filter: acme.url.clone(),
+        group_by: desktop_contract::GroupBy::Team,
+        last_used: [("add_part".to_owned(), beta.url.clone())].into(),
+    };
+    teams.choose(chosen.clone());
+    assert_eq!(teams.status().choices, chosen);
+    assert_eq!(saved::read(&file).choices, chosen);
+    // A team not in the list is never chosen: the list shows every team.
+    teams.choose(TeamChoices {
+        filter: "https://other.example.com".into(),
+        ..chosen.clone()
+    });
+    assert_eq!(teams.status().choices.filter, "");
+    // Removing a team forgets it wherever it was chosen.
+    teams.choose(chosen);
+    teams.remove(&acme.url);
+    teams.remove(&beta.url);
+    let left = teams.status().choices;
+    assert_eq!((left.filter.as_str(), left.last_used.len()), ("", 0));
+    assert_eq!(left.group_by, desktop_contract::GroupBy::Team);
 }
 
 #[test]
@@ -208,19 +249,17 @@ fn signing_out_and_removing_touch_one_team_only() {
     let teams = Teams::open(file.clone(), kept_in(&store), None, None);
     teams.sign_in(request(&acme)).unwrap();
     teams.sign_in(request(&beta)).unwrap();
-    teams.show(&acme.url).unwrap();
     wait_until("both sign-ins to be kept", || {
         kept_token(&store, &acme).is_some() && kept_token(&store, &beta).is_some()
     });
 
     // Signing out of acme forgets its sign-in; it stays in the list, and
-    // the catalog view shows beta, which is still signed in.
+    // beta is still signed in.
     teams.sign_out(&acme.url);
     assert_eq!(kept_token(&store, &acme), None);
     assert!(kept_token(&store, &beta).is_some());
     assert!(!is_signed_in(&teams, &acme) && is_signed_in(&teams, &beta));
     assert_eq!(saved::read(&file).teams.len(), 2);
-    assert_eq!(teams.status().shown, beta.url);
     // Its keeper never brings the forgotten sign-in back.
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(kept_token(&store, &acme), None);
@@ -256,10 +295,13 @@ fn a_rejected_sign_in_asks_only_that_team_again() {
         teams.reaching(&acme.url).is_none() && kept_token(&store, &acme).is_none()
     });
     assert!(!is_signed_in(&teams, &acme));
-    teams.show(&acme.url).unwrap();
-    // Acme is not signed in, so the catalog view shows beta; the sign-in
-    // form asks for acme's password.
-    assert_eq!(teams.status().shown, beta.url);
+    // Acme shows no parts until the person signs in again; beta's show.
+    let shown: Vec<String> = teams
+        .known_parts()
+        .iter()
+        .map(|parts| parts.team.clone())
+        .collect();
+    assert_eq!(shown, [beta.url.clone()]);
     let acme_problem = teams
         .lock()
         .find(&acme.url)
@@ -323,13 +365,13 @@ fn a_sign_in_is_renewed_before_it_ends() {
     wait_until("the sign-in to be kept", || {
         kept_token(&store, &server).is_some()
     });
-    let first = kept_token(&store, &server).unwrap();
+    let first_token = kept_token(&store, &server).unwrap();
     // Half its life is 2 seconds.
     wait_until("a renewed token to be kept", || {
-        kept_token(&store, &server).is_some_and(|token| token != first)
+        kept_token(&store, &server).is_some_and(|token| token != first_token)
     });
     assert!(server.refreshes() >= 1);
-    assert_eq!(kept_token(&store, &server), teams.shown().token());
+    assert_eq!(kept_token(&store, &server), first(&teams).token());
     assert_eq!(server.password_sign_ins(), 1);
 }
 
@@ -363,7 +405,7 @@ fn a_store_that_fails_says_sign_ins_last_until_the_app_closes() {
     };
     assert!(reason.contains("the keychain is locked"), "{reason}");
     // The session itself carries on.
-    assert!(teams.shown().is_signed_in());
+    assert!(first(&teams).is_signed_in());
     let until_closed = SignIns::until_closed("this computer has no password store");
     let teams = Teams::open(dir.path().join("other.json"), until_closed, None, None);
     assert_eq!(
@@ -407,13 +449,13 @@ fn a_renewal_answered_after_a_new_sign_in_leaves_the_new_sign_in_alone() {
     let old = renewal_in_flight(&teams, &server, &store);
     // The person signs in again meanwhile, and the old sign-in ends.
     teams.sign_in(request(&server)).unwrap();
-    let new = teams.shown().token().unwrap();
+    let new = first(&teams).token().unwrap();
     assert_ne!(new, old);
     server.reject(&old);
     answer_the_renewal(&server);
     // The rejection was about the old sign-in: the new one stays, kept.
     assert!(is_signed_in(&teams, &server));
-    assert_eq!(teams.shown().token(), Some(new.clone()));
+    assert_eq!(first(&teams).token(), Some(new.clone()));
     assert_eq!(kept_token(&store, &server), Some(new));
     assert!(teams.status().teams[0].session.is_signed_in());
 }
@@ -544,7 +586,7 @@ fn a_wrong_password_leaves_a_signed_in_team_signed_in() {
     wait_until("the sign-in to be kept", || {
         kept_token(&store, &server).is_some()
     });
-    let catalog = teams.shown();
+    let catalog = first(&teams);
     let (session, token) = catalog.session_token().unwrap();
     // "Add a team" with the same address and a mistyped password.
     let wrong = SignInRequest {

@@ -2,16 +2,19 @@
 //! its own [`TeamCatalog`] and session, side by side: signing in to one
 //! team never signs out of another.
 //!
-//! The app remembers the list (each server address and email, see
-//! [`saved`]) and which team the catalog view shows. The catalog view
-//! shows one team at a time through [`Teams::shown`]; anything that works
-//! on every team, such as keeping each team's KiCad libraries up to date,
-//! uses [`Teams::signed_in`].
+//! The app remembers the list (each server address, email, code and
+//! colour, see [`saved`]) and what the person last chose in the part list.
+//! The part list shows every team's parts at once, through
+//! [`Teams::known_parts`]. Every request about one team's parts names its
+//! team by server address ([`Teams::team`]), so no team is "the shown
+//! one". Anything that works on every team, such as keeping each team's
+//! KiCad libraries up to date, uses [`Teams::signed_in`].
 //!
 //! Each team's sign-in is kept between runs in a [`SignInStore`] (the
 //! operating system's credential store in the app), and each team's
 //! [`keeper`] carries it on at start and renews it while in use.
 
+mod colours;
 mod keeper;
 mod saved;
 mod sign_ins;
@@ -20,7 +23,9 @@ pub use sign_ins::{MemorySignIns, SignInStore, SignIns};
 
 use crate::team::{KnownParts, TeamCatalog};
 use collaboration::ServerAddress;
-use desktop_contract::{SignInRequest, SignInsKept, TeamSession, TeamsStatus, team_label};
+use desktop_contract::{
+    SignInRequest, SignInsKept, TeamChoices, TeamSession, TeamsStatus, team_label,
+};
 use keeper::{Keeper, KeeperTask};
 use saved::{SavedList, SavedTeam};
 use std::path::PathBuf;
@@ -39,8 +44,6 @@ pub struct Teams {
     /// new server cannot both add it, and adding a team back waits until
     /// its removal has forgotten the old sign-in.
     one_at_a_time: Mutex<()>,
-    /// What the catalog view shows while no team is signed in.
-    nobody: Arc<TeamCatalog>,
 }
 
 /// One team in the list.
@@ -57,8 +60,9 @@ struct Team {
 
 struct TeamList {
     teams: Vec<Team>,
-    /// The server address of the team the person chose to show.
-    chosen: String,
+    /// What the person last chose in the part list, and the team each
+    /// feature that works on one team at a time last used.
+    choices: TeamChoices,
     /// Why the last sign-in failed, for the sign-in form.
     problem: Option<String>,
     /// Something to say once in the Teams menu, such as a removed team's
@@ -73,22 +77,23 @@ impl TeamList {
             .find(|team| team.saved.server_url == server_url)
     }
 
-    /// The team the catalog view shows: the chosen one while it is signed
-    /// in, otherwise the first team that is, otherwise the chosen one.
-    fn shown(&self) -> Option<&Team> {
-        let signed_in = |team: &&Team| team.catalog.is_signed_in();
-        let chosen = self.find(&self.chosen);
-        chosen
-            .filter(signed_in)
-            .or_else(|| self.teams.iter().find(signed_in))
-            .or(chosen)
-    }
-
     fn saved(&self) -> SavedList {
         SavedList {
             teams: self.teams.iter().map(|team| team.saved.clone()).collect(),
-            shown: self.chosen.clone(),
+            choices: self.choices.clone(),
         }
+    }
+
+    /// `choices` with only teams in the list: a team taken off the list is
+    /// no longer chosen anywhere, and the part list shows every team.
+    fn only_listed(&self, mut choices: TeamChoices) -> TeamChoices {
+        if self.find(&choices.filter).is_none() {
+            choices.filter.clear();
+        }
+        choices
+            .last_used
+            .retain(|_, server| self.find(server).is_some());
+        choices
     }
 }
 
@@ -102,9 +107,25 @@ impl Teams {
         suggested_server: Option<String>,
         suggested_email: Option<String>,
     ) -> Self {
-        let saved = saved::read(&list_file);
+        let mut saved = saved::read(&list_file);
+        // Teams saved before colours were (or with a colour edited away)
+        // get theirs now, once, in list order.
+        let mut coloured = false;
+        for at in 0..saved.teams.len() {
+            if !colours::is_known(&saved.teams[at].colour) {
+                let taken: Vec<String> = saved.teams[..at]
+                    .iter()
+                    .map(|team| team.colour.clone())
+                    .collect();
+                saved.teams[at].colour = colours::next_colour(taken.iter().map(String::as_str));
+                coloured = true;
+            }
+        }
+        if coloured {
+            let _ = saved::write(&list_file, &saved);
+        }
         let kept = Arc::new(Mutex::new(sign_ins.kept.clone()));
-        let teams = saved
+        let teams: Vec<Team> = saved
             .teams
             .into_iter()
             .map(|saved| {
@@ -132,17 +153,16 @@ impl Teams {
             },
             state: Mutex::new(TeamList {
                 teams,
-                chosen: saved.shown,
+                choices: saved.choices,
                 problem: None,
                 note: None,
             }),
             one_at_a_time: Mutex::new(()),
-            nobody: Arc::new(TeamCatalog::new()),
         }
     }
 
     /// Signs in to the team at the request's server, adding it to the list
-    /// if it is new, and shows it. Other teams stay signed in. Its keeper
+    /// if it is new, with a colour of its own. Other teams stay signed in. Its keeper
     /// then keeps the sign-in for the next run. A failed sign-in adds
     /// nothing; its problem, in plain words, is the error.
     pub fn sign_in(&self, request: SignInRequest) -> Result<(), String> {
@@ -176,13 +196,19 @@ impl Teams {
             // The password replaces any kept sign-in still being carried on.
             keeper.signed_in();
         }
+        let mut list = self.lock();
+        // A team keeps its colour; a new one gets the next free colour.
+        let colour = match list.find(&server_url) {
+            Some(team) => team.saved.colour.clone(),
+            None => colours::next_colour(list.teams.iter().map(|team| team.saved.colour.as_str())),
+        };
         let saved = SavedTeam {
             server_url: server_url.clone(),
             email,
             code: catalog.code(),
+            colour,
             signed_out: false,
         };
-        let mut list = self.lock();
         list.problem = None;
         match list
             .teams
@@ -203,7 +229,6 @@ impl Teams {
                 });
             }
         }
-        list.chosen = server_url;
         self.save(&list);
         Ok(())
     }
@@ -261,6 +286,7 @@ impl Teams {
         let mut list = self.lock();
         list.teams
             .retain(|team| team.saved.server_url != server_url);
+        list.choices = list.only_listed(list.choices.clone());
         // A sign-in the store could not forget is never used: the team is
         // off the list. The person is told once, to delete it themselves.
         list.note = forgotten.err().map(|problem| {
@@ -271,26 +297,13 @@ impl Teams {
         self.save(&list);
     }
 
-    /// Shows the team at `server_url` in the catalog view. No sign-in is
-    /// needed: its session is already running.
-    pub fn show(&self, server_url: &str) -> Result<(), String> {
+    /// Remembers what the person chose in the part list and in features
+    /// that work on one team at a time, for the next start. A team not in
+    /// the list is not kept, so the part list then shows every team.
+    pub fn choose(&self, choices: TeamChoices) {
         let mut list = self.lock();
-        if list.find(server_url).is_none() {
-            return Err(format!("{server_url} is not in your list of teams."));
-        }
-        list.chosen = server_url.to_owned();
+        list.choices = list.only_listed(choices);
         self.save(&list);
-        Ok(())
-    }
-
-    /// The team the catalog view shows, or a team catalog that is signed
-    /// out when no team is. The one-team catalog view reads everything
-    /// through this.
-    pub fn shown(&self) -> Arc<TeamCatalog> {
-        self.lock()
-            .shown()
-            .map(|team| team.catalog.clone())
-            .unwrap_or_else(|| self.nobody.clone())
     }
 
     /// The team at `server_url`, signed in or not. Every request about a
@@ -352,8 +365,8 @@ impl Teams {
             .collect()
     }
 
-    /// Every team in the list and how it is doing, which team the catalog
-    /// view shows, and what the sign-in form starts with.
+    /// Every team in the list and how it is doing, what the person last
+    /// chose, and what the sign-in form starts with.
     pub fn status(&self) -> TeamsStatus {
         let mut list = self.lock();
         let mut learned_a_code = false;
@@ -369,6 +382,7 @@ impl Teams {
                     learned_a_code = true;
                 }
                 status.code.clone_from(&team.saved.code);
+                status.colour.clone_from(&team.saved.colour);
                 status.note.clone_from(&team.note);
                 status.server_url.clone_from(&team.saved.server_url);
                 status.email.clone_from(&team.saved.email);
@@ -383,19 +397,11 @@ impl Teams {
         if learned_a_code {
             self.save(&list);
         }
-        let signed_in = |team: &&Team| team.catalog.is_signed_in();
-        let shown = list
-            .shown()
-            .filter(signed_in)
-            .map(|team| team.saved.server_url.clone())
-            .unwrap_or_default();
-        // The form offers the chosen team if it needs signing in, else the
-        // first team that does.
-        let needs_signing_in = |team: &&Team| !signed_in(team);
+        // The form offers the first team that needs signing in.
         let form = list
-            .find(&list.chosen)
-            .filter(needs_signing_in)
-            .or_else(|| list.teams.iter().find(needs_signing_in))
+            .teams
+            .iter()
+            .find(|team| !team.catalog.is_signed_in())
             .map(|team| team.saved.clone())
             .unwrap_or_default();
         let pick = |suggested: &str, saved: String| {
@@ -407,7 +413,7 @@ impl Teams {
         };
         TeamsStatus {
             teams,
-            shown,
+            choices: list.choices.clone(),
             kept: self.kept(),
             form_server: pick(&self.suggested.server_url, form.server_url),
             form_email: pick(&self.suggested.email, form.email),
