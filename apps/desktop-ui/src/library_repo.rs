@@ -354,6 +354,7 @@ mod tests {
             access,
             copied_at,
             unusable: false,
+            layout: None,
         }
     }
 

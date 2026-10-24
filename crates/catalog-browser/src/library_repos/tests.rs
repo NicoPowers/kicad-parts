@@ -880,3 +880,6 @@ fn a_quiet_https_time_out_is_offline() {
         "{problem:?}"
     );
 }
+
+#[path = "layout_tests.rs"]
+mod layouts;

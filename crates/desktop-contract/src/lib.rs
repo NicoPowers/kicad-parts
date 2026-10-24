@@ -58,6 +58,8 @@ pub mod command {
     pub const LIBRARY_REPO_LINK: &str = "library_repo_link";
     pub const LIBRARY_REPO_CHECK: &str = "library_repo_check";
     pub const LIBRARY_REPO_UNLINK: &str = "library_repo_unlink";
+    pub const LIBRARY_LAYOUT_REVIEW: &str = "library_layout_review";
+    pub const LIBRARY_LAYOUT_USE: &str = "library_layout_use";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -534,6 +536,135 @@ pub struct LibraryRepoStatus {
     /// repo.
     #[serde(default)]
     pub unusable: bool,
+    /// Where the repo's libraries are, as the person reviewed it
+    /// (kicad-parts-e9a3); `None` until the app has a copy to scan.
+    #[serde(default)]
+    pub layout: Option<LayoutState>,
+}
+
+/// Whether the person reviewed a library repo's layout.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LayoutState {
+    NotReviewed,
+    /// Reviewed, and the newest commit still scans the same.
+    Reviewed {
+        symbol_libraries: usize,
+        footprint_libraries: usize,
+    },
+    /// A newer commit scans differently: the person should review again.
+    /// The app keeps using the layout reviewed before meanwhile.
+    Changed,
+}
+
+/// What a scan of a library repo found at one commit: where its libraries,
+/// 3D models and path variables are (kicad-parts-e9a3, ADR 0022).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryLayout {
+    pub commit: String,
+    pub symbol_libraries: Vec<LayoutLibrary>,
+    pub footprint_libraries: Vec<LayoutLibrary>,
+    /// The repo folders that hold 3D models.
+    pub model_folders: Vec<String>,
+    /// How many 3D model files the repo has.
+    pub model_files: usize,
+    pub path_variables: Vec<LayoutVariable>,
+    /// The repo's `.kicad_dbl` files.
+    pub database_libraries: Vec<String>,
+    /// The repo's own lib tables (`sym-lib-table`, `fp-lib-table`).
+    pub lib_tables: Vec<String>,
+    /// What may be wrong, for the person to check.
+    pub doubts: Vec<LayoutDoubt>,
+    /// Where a path variable may point: every folder that holds 3D models
+    /// or libraries, and the folders above them. Blank is the repo's top.
+    pub folders: Vec<String>,
+}
+
+/// One library a scan found: the nickname boards use and its repo path.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct LayoutLibrary {
+    pub nickname: String,
+    pub path: String,
+    /// The nickname comes from one of the repo's lib tables, not from the
+    /// file name.
+    pub from_table: bool,
+}
+
+/// One path variable footprints or lib tables use, such as `ACME_3D`.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct LayoutVariable {
+    pub name: String,
+    /// The repo folder it must point to; blank for the repo's top, `None`
+    /// when the scan could not tell.
+    pub folder: Option<String>,
+    /// How many links use it.
+    pub links: usize,
+}
+
+/// Something a scan found doubtful.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "doubt", rename_all = "snake_case")]
+pub enum LayoutDoubt {
+    /// A footprint links a 3D model the repo does not have.
+    MissingModel { footprint: String, link: String },
+    /// A link names a 3D model whose file name differs only in capitals:
+    /// it works on Windows and macOS, not on Linux.
+    CaseDiffers {
+        footprint: String,
+        link: String,
+        file: String,
+    },
+    /// Two libraries of one kind have the same nickname.
+    NicknameClash {
+        nickname: String,
+        paths: Vec<String>,
+    },
+    /// No folder of the repo matches the links of this path variable.
+    VariableNotFound { name: String },
+    /// A file stored with Git LFS: the app sees only a small pointer file,
+    /// not the file itself.
+    GitLfs { path: String },
+    /// A lib table the app could not read.
+    TableUnreadable { table: String, why: String },
+}
+
+/// What the person changed in a scanned layout: only what the scan got
+/// wrong.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LayoutChoices {
+    /// Tells this repo's libraries apart inside the app, such as `AC`.
+    /// KiCad and boards never see it.
+    pub prefix: String,
+    /// A folder chosen for a path variable, by the variable's name.
+    #[serde(default)]
+    pub variable_folders: BTreeMap<String, String>,
+    /// The repo paths of libraries left out.
+    #[serde(default)]
+    pub left_out: Vec<String>,
+}
+
+/// A team's library layout to review: the newest scan, and the choices
+/// the person made before, or the defaults.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryLayoutReview {
+    pub server_url: String,
+    /// The repo's short name, such as `acme/kicad-lib`.
+    pub repo_name: String,
+    pub layout: LibraryLayout,
+    pub choices: LayoutChoices,
+    pub reviewed_before: bool,
+    /// Something to know about the scan, such as the host being offline.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Use the layout of the team at `server_url`'s repo as scanned at
+/// `commit`, with the person's `choices`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LayoutUseRequest {
+    pub server_url: String,
+    pub commit: String,
+    pub choices: LayoutChoices,
 }
 
 /// What the app can do with a library repo, as its last check found.

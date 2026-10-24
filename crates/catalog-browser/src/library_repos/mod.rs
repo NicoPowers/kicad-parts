@@ -19,11 +19,16 @@
 //! Rows show the last results meanwhile, and the fetch says whether the
 //! repo can still be read.
 //!
+//! Once the app has a copy, the person reviews the repo's library layout
+//! (kicad-parts-e9a3, [`layout`]): where its libraries, 3D models and path
+//! variables are. The reviewed layout follows each later fetch.
+//!
 //! Features that read or write a team's library get its [`LibraryRepo`]
 //! from [`LibraryRepos::repo_for`].
 
 mod address;
 mod checkout;
+mod layout;
 mod problems;
 mod repo;
 
@@ -33,7 +38,12 @@ pub use repo::{CanWrite, LibraryRepo, Limits, RepoFile};
 use crate::git_program::Git;
 use crate::teams::Teams;
 use checkout::{FromFolder, NoAddress};
-use desktop_contract::{LibraryRepoStatus, RepoAccess, RepoProblem, RepoRemote, TeamsStatus};
+use desktop_contract::{
+    LayoutUseRequest, LibraryLayoutReview, LibraryRepoStatus, RepoAccess, RepoProblem, RepoRemote,
+    TeamsStatus,
+};
+use kicad_integration::library_source::SourceProfile;
+use layout::Layouts;
 use problems::{Step, git_not_installed};
 use repo::CopyLocks;
 use serde::{Deserialize, Serialize};
@@ -67,6 +77,21 @@ enum Found {
     ChooseRemote(Vec<RepoRemote>),
 }
 
+/// A linked team's reviewed library layout, with its library files
+/// written out of the app's copy, for the Libraries browser.
+#[derive(Clone, Debug)]
+pub struct TeamLibraries {
+    pub server_url: String,
+    /// The team's code and colour, for its mark.
+    pub code: String,
+    pub colour: String,
+    /// The repo's short name, such as `acme/kicad-lib`.
+    pub repo_name: String,
+    pub profile: SourceProfile,
+    /// Holds the profile's libraries at their repo paths.
+    pub folder: PathBuf,
+}
+
 /// A refusal in plain words, with no git message behind it.
 fn refused(summary: String) -> RepoProblem {
     RepoProblem {
@@ -90,6 +115,8 @@ struct Shared {
     /// linked: two teams may reach one copy by different addresses.
     known: Mutex<HashMap<String, Known>>,
     locks: CopyLocks,
+    /// Each repo's reviewed layout, in `library-layouts` beside `folder`.
+    layouts: Layouts,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -125,8 +152,10 @@ impl LibraryRepos {
 
     pub(crate) fn start_with(folder: PathBuf, teams: Arc<Teams>, git: Git, limits: Limits) -> Self {
         let known = read_results(&folder);
+        let layouts = Layouts::new(folder.with_file_name("library-layouts"));
         let repos = Self {
             shared: Arc::new(Shared {
+                layouts,
                 folder,
                 git,
                 limits,
@@ -182,6 +211,85 @@ impl LibraryRepos {
     pub fn repo_for(&self, server_url: &str) -> Option<LibraryRepo> {
         let address = RepoAddress::parse(&self.address_of(server_url)?).ok()?;
         Some(self.repo(&address))
+    }
+
+    /// The newest scan of the library layout of the team at `server_url`'s
+    /// repo, to review. With `fetch`, the app's copy is brought up to date
+    /// first; while the host can't be reached, the copy is scanned as it
+    /// is, and the review says so.
+    pub fn review_layout(
+        &self,
+        server_url: &str,
+        fetch: bool,
+    ) -> Result<LibraryLayoutReview, RepoProblem> {
+        let repo = self
+            .repo_for(server_url)
+            .ok_or_else(|| refused("This team has no library repo. Add one first.".to_owned()))?;
+        let mut note = None;
+        if fetch {
+            match repo.copy_or_fetch() {
+                Ok(()) => self.shared.layouts.follow_latest(&repo),
+                Err(problem) if problem.offline && repo.is_copied() => {
+                    note = Some(format!(
+                        "Can't reach {}, so this is the app's copy as last fetched.",
+                        repo.address().host()
+                    ));
+                }
+                Err(problem) => return Err(problem),
+            }
+        }
+        let code = self
+            .shared
+            .teams
+            .status()
+            .teams
+            .into_iter()
+            .find(|team| team.server_url == server_url)
+            .map(|team| team.code)
+            .unwrap_or_default();
+        self.shared.layouts.review(&repo, server_url, &code, note)
+    }
+
+    /// Keeps the library layout the person reviewed for the team's repo.
+    pub fn use_layout(&self, request: &LayoutUseRequest) -> Result<(), String> {
+        let repo = self
+            .repo_for(&request.server_url)
+            .ok_or_else(|| "This team has no library repo. Add one first.".to_owned())?;
+        self.shared
+            .layouts
+            .use_layout(&repo, &request.commit, request.choices.clone())
+    }
+
+    /// Every linked team's reviewed library layout, with its library files
+    /// ready to read, and a note for each repo whose files could not be
+    /// written. Works offline, from the app's copies.
+    pub fn team_libraries(&self) -> (Vec<TeamLibraries>, Vec<String>) {
+        let mut found = Vec::new();
+        let mut notes = Vec::new();
+        let linked: HashMap<String, String> =
+            self.shared.teams.library_repos().into_iter().collect();
+        for team in self.shared.teams.status().teams {
+            let Some(repo) = linked
+                .get(&team.server_url)
+                .and_then(|address| RepoAddress::parse(address).ok())
+                .map(|address| self.repo(&address))
+            else {
+                continue;
+            };
+            match self.shared.layouts.browsable(&repo) {
+                None => {}
+                Some(Ok((profile, folder))) => found.push(TeamLibraries {
+                    server_url: team.server_url.clone(),
+                    code: team.label(),
+                    colour: team.colour.clone(),
+                    repo_name: repo.address().name(),
+                    profile,
+                    folder,
+                }),
+                Some(Err(problem)) => notes.push(problem.summary),
+            }
+        }
+        (found, notes)
     }
 
     /// Fills in each team's library repo in `status`. A copy no team links
@@ -290,9 +398,11 @@ impl LibraryRepos {
                 },
                 copied_at: None,
                 unusable: true,
+                layout: None,
             };
         };
         let state = known.get(address).cloned().unwrap_or_default();
+        let repo = self.repo(&parsed);
         let access = match (state.running, state.access) {
             (Some(Running::Check { copying }), _) => RepoAccess::Checking { copying },
             (_, Some(access)) => access,
@@ -303,12 +413,12 @@ impl LibraryRepos {
             name: parsed.name(),
             host: parsed.host(),
             access,
-            copied_at: self
-                .repo(&parsed)
+            copied_at: repo
                 .copied_at()
                 .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
                 .map(|since| since.as_millis() as u64),
             unusable: false,
+            layout: self.shared.layouts.state(&repo),
         }
     }
 
@@ -328,6 +438,9 @@ impl LibraryRepos {
         let shared = self.shared.clone();
         std::thread::spawn(move || {
             let access = check(&repo, already_read);
+            if !matches!(access, RepoAccess::CannotRead { .. }) {
+                shared.layouts.follow_latest(&repo);
+            }
             let write = matches!(
                 access,
                 RepoAccess::CanReadAndWrite
@@ -434,7 +547,11 @@ impl Shared {
         if self.running(url) != Some(Running::StartFetch) {
             return;
         }
-        let fetched = self.repo(address).asking_nothing().copy_or_fetch();
+        let repo = self.repo(address).asking_nothing();
+        let fetched = repo.copy_or_fetch();
+        if fetched.is_ok() {
+            self.layouts.follow_latest(&repo);
+        }
         if self.running(url) != Some(Running::StartFetch) {
             return;
         }
@@ -496,6 +613,7 @@ impl Shared {
                 }
             }
         }
+        self.layouts.delete_unlinked(&self.wanted_folders());
         let linked: BTreeSet<String> = self.linked_addresses().into_iter().collect();
         self.known()
             .retain(|url, known| linked.contains(url) || known.running.is_some());
