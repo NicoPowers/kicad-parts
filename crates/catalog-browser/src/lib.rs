@@ -8,6 +8,7 @@ mod add_part;
 pub mod csv_ipns;
 pub mod drawing;
 mod git;
+mod git_program;
 pub mod kicad_libraries;
 mod libraries;
 mod library;

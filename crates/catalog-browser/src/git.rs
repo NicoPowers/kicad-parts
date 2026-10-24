@@ -8,10 +8,11 @@
 //! their git object ID is worked out here, so a file saved again in KiCad
 //! after it was read can never slip through as committed.
 
+use crate::git_program::{Git, NotInstalled};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// The git program the app runs.
 const GIT: &str = "git";
@@ -205,40 +206,25 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     out
 }
 
-/// Runs git in `root` without a window or a prompt: its standard output
-/// without the whitespace at its end when it succeeds, otherwise the first
-/// line of what it said went wrong; or why it could not be started.
+/// How long one local git step for the CSV catalog folder may take.
+const LOCAL_STEP: Duration = Duration::from_secs(120);
+
+/// Runs git in `root` without a window or a prompt (see [`Git::run`]): its
+/// standard output without the whitespace at its end when it succeeds,
+/// otherwise the first line of what it said went wrong; or why it could
+/// not be started.
 fn git(program: &str, root: &Path, args: &[&str]) -> Result<Result<String, String>, String> {
-    let mut command = Command::new(program);
-    command
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW: a GUI app must not flash a console.
-        command.creation_flags(0x0800_0000);
-    }
-    let output = command.output().map_err(|_| {
-        "git was not found, so the app cannot tell which commit the files came from. Install git, then try again.".to_owned()
-    })?;
-    Ok(if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_owned())
+    let ran = Git::named(program)
+        .run(Some(root), args, LOCAL_STEP)
+        .map_err(|NotInstalled| {
+            "git was not found, so the app cannot tell which commit the files came from. Install git, then try again.".to_owned()
+        })?;
+    Ok(if ran.succeeded {
+        Ok(ran.stdout.trim_end().to_owned())
+    } else if ran.timed_out {
+        Err("it did not finish in time".to_owned())
     } else {
-        let said = String::from_utf8_lossy(&output.stderr);
-        Err(said
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or("it gave no reason")
-            .to_owned())
+        Err(ran.first_problem_line().to_owned())
     })
 }
 
