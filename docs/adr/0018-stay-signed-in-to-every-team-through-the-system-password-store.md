@@ -21,7 +21,7 @@ The person designs for many clients in one day, and each client is its own team 
 - A token, like a password, is never sent over plain `http://` to another computer (`PocketBaseClient::with_token`).
 - The list of teams is one seam for what comes next: `Teams::signed_in` serves work across every team. Since ADR 0019, `Teams::known_parts` feeds one search over all teams, and `Teams::shown` is gone.
 - Each team's KiCad libraries are kept up to date at once, one updater per team, and each writes only its own folder (ADR 0015).
-- After a restart with a server that cannot be reached, that team has no parts to show until it is reached: the app does not yet keep a team's parts on disk.
+- After a restart with a server that cannot be reached, that team shows the parts the app kept on disk, marked offline, until it is reached (ADR 0020, kicad-parts-ed46).
 - PocketBase tokens last 7 days by default. Renewal happens only while the app is open, so a person who does not open the app for 7 days signs in again to each team. While the app is open, renewal keeps every team signed in.
 - On macOS, the Keychain ties each saved sign-in to the app's code signature. Until the app is signed, the Keychain may ask once per team, after each update, whether the app may read it.
 - Sign out marks the team signed out in the list file. So if the password store cannot forget the sign-in, for example a locked Linux keyring, the next start still does not use it, and the team's row says so.

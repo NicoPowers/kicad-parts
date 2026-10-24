@@ -21,7 +21,7 @@ The person designs for many clients in one day, and each client is its own team 
 
 ## Consequences
 
-- Each team's parts reach the part list, the part panel and the Libraries browser through one seam, `TeamCatalog::last_known_parts`; the panel takes the list's own row (`CatalogBrowser::part_in_list`). Today the seam reads the session's copy of the team catalog, so a team keeps its parts only while the app runs. Keeping them on disk for offline starts (kicad-parts-ed46) changes only that seam.
+- Each team's parts reach the part list, the part panel and the Libraries browser through one seam, `TeamCatalog::last_known_parts`; the panel takes the list's own row (`CatalogBrowser::part_in_list`). The seam reads the session's copy of the team catalog, and, until this run's first catch-up, the parts kept on disk (ADR 0020, kicad-parts-ed46).
 - The list's rows for a team are made once per change of that team and kept, so a search over 10 teams of a few thousand parts each only compares text.
 - The list file (`team.json`) now keeps each team's colour, the filter, the grouping, and the team each one-team feature used last. It no longer keeps a shown team.
 - Copying parts between teams (kicad-parts-1a46) and roles per team (kicad-parts-5514) can name both teams by server address, as every other request now does.

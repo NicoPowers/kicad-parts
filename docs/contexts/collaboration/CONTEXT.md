@@ -40,6 +40,10 @@ _Avoid_: backend, instance, workspace, account
 What lets a person use a team server without typing the password each time. The app keeps it in the computer's password store, never the password itself. Signing out forgets it.
 _Avoid_: session, token, credentials, login
 
+**Last-known parts**:
+A team's parts as the app last saw them from its team server. The app keeps them on disk, so a team whose server is down at start still shows them, marked offline, with when they were last up to date. Signing out or removing the team deletes them.
+_Avoid_: cache, offline copy, snapshot
+
 **Team colour**:
 The colour of a team's mark in the part list and its name in the Teams menu. The app gives each team one when it joins the list, and keeps it. The mark always shows the team code too, never colour alone.
 _Avoid_: team badge colour, label colour
