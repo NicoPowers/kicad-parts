@@ -481,14 +481,24 @@ button:disabled {
   border-radius: 6px;
 }
 
-/* Teams whose parts are hidden, and how to show them. */
-.hidden-teams {
-  margin: -0.2rem 0.9rem 0.5rem;
+/* Teams whose parts are hidden, and how to show them; and why an offline
+   team's part can't be edited now. */
+.hidden-teams,
+.team-offline-note {
   padding: 0.3rem 0.6rem;
   background: var(--warn-soft);
   border-left: 3px solid var(--warn-line);
   border-radius: 4px;
   font-size: 0.85rem;
+  color: var(--ink);
+}
+
+.hidden-teams {
+  margin: -0.2rem 0.9rem 0.5rem;
+}
+
+.team-offline-note {
+  margin: 0 0 0.75rem;
 }
 
 .results {

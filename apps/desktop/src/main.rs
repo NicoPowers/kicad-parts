@@ -303,14 +303,11 @@ async fn part_detail(
     ipn: String,
 ) -> Result<Option<PartDetail>, String> {
     let (browser, team) = (browser.inner().clone(), maybe_team_at(&teams, &team)?);
-    // A part only the team catalog has, such as one added in the app, is
-    // found there.
-    // The team catalog's values are read only when the CSV catalog lacks it.
-    blocking(move || {
-        browser.part(&ipn).or_else(|| {
-            team.as_ref()
-                .and_then(|team| browser.part_with(&ipn, &team.current_values()))
-        })
+    // A team's part shows that team's last-known values, even while its
+    // server cannot be reached; a part of no team, the CSV catalog's row.
+    blocking(move || match team {
+        Some(team) => browser.part_with(&ipn, &team.current_values()),
+        None => browser.part(&ipn),
     })
     .await
 }

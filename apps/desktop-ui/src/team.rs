@@ -70,6 +70,9 @@ pub struct TeamUi {
     /// The server address of the team whose part the column shows. Every
     /// save names it, so it reaches that part's own team.
     pub team: RwSignal<String>,
+    /// The team's server cannot be reached now, which a note above the
+    /// column explains; the column then offers no edits.
+    pub offline: RwSignal<bool>,
     pub tab: RwSignal<Tab>,
     /// Some while the edit form is open; a new number re-renders it.
     pub editing: RwSignal<Option<u32>>,
@@ -172,6 +175,7 @@ impl TeamUi {
     pub fn new() -> Self {
         Self {
             team: RwSignal::new(String::new()),
+            offline: RwSignal::new(false),
             tab: RwSignal::new(Tab::Details),
             editing: RwSignal::new(None),
             draft: StoredValue::new(Draft::default()),
@@ -916,6 +920,9 @@ fn DetailsView(part: RwSignal<Option<TeamPart>>, can_edit: bool, ui: TeamUi) -> 
                         </button>
                     }
                     .into_any()
+                } else if ui.offline.get() {
+                    // The note about the offline team says why.
+                    ().into_any()
                 } else {
                     view! { <p class="hint read-only">"You can view this part but not edit it."</p> }
                         .into_any()

@@ -227,17 +227,19 @@ impl CatalogBrowser {
         self.search_request(&request, teams)
     }
 
-    /// Like [`Self::part`], but a part only the team catalog has (in
-    /// `current`, such as one added in the app) is found too.
+    /// The part `ipn` as a team has it, from `current` (its last-known
+    /// values), else the CSV catalog's row. So a part of a team whose
+    /// server cannot be reached still shows that team's values, as its row
+    /// in the part list does, and a part only the team has is found too.
     pub fn part_with(
         &self,
         ipn: &str,
         current: &BTreeMap<String, PartValues>,
     ) -> Option<PartDetail> {
-        self.part(ipn).or_else(|| {
-            let values = current.get(ipn)?;
-            Some(detail(&values.part(ipn)))
-        })
+        match current.get(ipn) {
+            Some(values) => Some(detail(&values.part(ipn))),
+            None => self.part(ipn),
+        }
     }
 
     /// Reads the files chosen for Add part (kicad-parts-9693): what they

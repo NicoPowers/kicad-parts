@@ -533,6 +533,14 @@ fn list_version(status: &TeamsStatus) -> Option<u64> {
     any.then(|| hasher.finish())
 }
 
+/// Why a part of the team `label` can't be edited while its server cannot
+/// be reached, in plain words.
+fn offline_words(label: &str) -> String {
+    format!(
+        "{label} is offline, so this part can't be edited now. You see it as it was last seen. The app reconnects by itself."
+    )
+}
+
 /// `20000` as `20,000`.
 fn grouped(n: usize) -> String {
     let digits = n.to_string();
@@ -928,13 +936,30 @@ fn PartPanel(
         }
         now
     });
-    let can_edit = Memo::new(move |_| {
+    // Why the part's team can't take edits now, while its server cannot be
+    // reached: it shows the parts last seen.
+    let offline_note = Memo::new(move |_| {
         team.with(|status| {
+            let status = status.as_ref()?;
+            matches!(
+                status.session,
+                TeamSession::SignedIn {
+                    live: desktop_contract::LiveUpdates::Reconnecting { .. },
+                    ..
+                }
+            )
+            .then(|| offline_words(&status.label()))
+        })
+    });
+    Effect::new(move |_| ui.offline.set(offline_note.with(Option::is_some)));
+    let can_edit = Memo::new(move |_| {
+        let may_edit = team.with(|status| {
             matches!(
                 status.as_ref().map(|status| &status.session),
                 Some(TeamSession::SignedIn { can_edit: true, .. })
             )
-        })
+        });
+        may_edit && offline_note.with(Option::is_none)
     });
     // The selected part's team, which every request about it names.
     let team_url = Memo::new(move |_| {
@@ -1225,6 +1250,7 @@ fn PartPanel(
                         in_no_team=Signal::derive(move || {
                             any_team.get() && team_url.with(String::is_empty)
                         })
+                        offline_note=offline_note
                         can_edit=can_edit
                         ui=ui
                     />
@@ -1245,6 +1271,8 @@ fn PartView(
     team_checked: RwSignal<bool>,
     /// The part is only in the CSV files while a team shows parts.
     in_no_team: Signal<bool>,
+    /// Why the part can't be edited now, while its team is offline.
+    offline_note: Memo<Option<String>>,
     can_edit: Memo<bool>,
     ui: TeamUi,
 ) -> impl IntoView {
@@ -1339,15 +1367,26 @@ fn PartView(
                     tabindex="0"
                 >
                     {move || {
+                        let offline = move || offline_note.get().map(|note| view! {
+                            <p class="hint team-offline-note" role="status">{note}</p>
+                        });
                         if in_team.get() {
+                            // Drawn again when edit access changes, such as
+                            // when the team goes offline or comes back.
                             return view! {
-                                <TeamColumn part=team_part can_edit=can_edit.get_untracked() ui=ui />
+                                {offline}
+                                <TeamColumn part=team_part can_edit=can_edit.get() ui=ui />
                             }
                             .into_any();
                         }
                         let fields = fields.clone();
-                        let not_in_team = in_no_team.get() || team_checked.get();
+                        // An offline team's part is shown as last seen,
+                        // which the offline note says, not "not in the
+                        // team catalog".
+                        let is_offline = offline_note.with(Option::is_some);
+                        let not_in_team = in_no_team.get() || (team_checked.get() && !is_offline);
                         view! {
+                            {offline}
                             <h3 id="fields-heading">{format!("Catalog fields ({field_count})")}</h3>
                             {not_in_team.then(|| view! {
                                 <p class="hint">"This part is not in the team catalog yet, so it has no history."</p>
