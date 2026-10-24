@@ -184,9 +184,15 @@ describe('one part list over several teams', () => {
       ['AC', 'BE'],
     );
     assert.equal(await (await browser.$('#add-team')).getValue(), acme.url);
-    await choose('add-team', beta.url);
+    // Files chosen, then another team at once, before they are read: they
+    // are read for the new team, and the form never sticks on Reading….
     await (await browser.$('#add-files')).addValue(download(tempDir('download')));
+    await choose('add-team', beta.url);
     await waitForText(browser, '#add-guess', /^Best guess: Capacitors, because /);
+    await browser.waitUntil(
+      async () => !(await browser.execute(() => document.querySelector('.add-files [aria-busy="true"]'))),
+      { timeout: 20_000, timeoutMsg: 'the form stayed on Reading…' },
+    );
     // BE's next free IPN.
     assert.equal(await browser.execute(() => document.querySelector('#add-ipn').value), IPN);
     await browser.waitUntil(
