@@ -1,9 +1,11 @@
-// Several teams journey (kicad-parts-f10d): the person works for two
-// clients, each its own team on its own server. They sign in to one, add
-// the other without signing out, and switch between them from the
-// keyboard with no sign-in. When one server stops, that team shows its
-// last-known parts marked offline while the other keeps working. Signing
-// out and removing touch one team only. Without a credential store, the
+// Several teams journey (kicad-parts-f10d, kicad-parts-8a71): the person
+// works for two clients, each its own team on its own server. They sign in
+// to one and add the other without signing out. One part list then shows
+// both teams' parts, each row marked with its team, and a Team filter
+// chosen from the keyboard shows one team. When one server stops, that
+// team's rows stay, marked offline, and its parts can't be edited, while
+// the other team keeps working. Signing out and removing touch one team
+// only. Without a credential store, the
 // Teams menu says once why the app will ask again after a restart. KiCad
 // libraries made from another server address wait until the person, asked
 // on the team's row, says the team moved (kicad-parts-092b). If both
@@ -137,8 +139,9 @@ describe('several teams at once', () => {
       timeout: 20_000,
       timeoutMsg: 'the team was never named by its code',
     });
-    // With one team signed in, there is nothing to switch to.
-    assert.equal(await browser.execute(() => document.querySelector('#team-shown')), null);
+    // With one team signed in, the list shows no team marks and no filter.
+    assert.equal(await browser.execute(() => document.querySelector('#team-filter')), null);
+    assert.equal(await browser.execute(() => document.querySelector('.results .team-chip')), null);
     await (await browser.$('#team-add')).click();
     assert.equal(
       await browser.execute(() => document.activeElement?.id),
@@ -146,69 +149,113 @@ describe('several teams at once', () => {
       'Add a team puts the cursor in the address',
     );
     await signInWithForm(beta, beta.accounts[0]);
-    // The badge says whose parts are shown, and counts each team once.
-    await waitForText(browser, BADGE, `BE · ${beta.accounts[0].name} · 2 live`);
+    // Both teams' parts are shown; the badge counts each team once.
+    await waitForText(browser, BADGE, 'Teams · 2 live');
     await waitForLiveUpdates(browser);
     await setMenuOpen(true);
     await browser.waitUntil(async () => (await rowText('BE')) !== null, { timeout: 20_000 });
     assert.match(await rowText('AC'), /^Signed in as .+ You can edit parts\. Changes others make appear here by themselves\.$/);
     assert.match(await rowText('BE'), /^Signed in as /);
     assert.equal(await textOf(browser, '#teams-heading'), 'Your teams');
-    // The switcher shows the team signed in last.
-    assert.equal(await (await browser.$('#team-shown')).getValue(), beta.url);
+    // Each team's name is in its own colour, as its rows are marked.
+    assert.deepEqual(
+      await browser.execute(() => [...document.querySelectorAll('.team-row .team-name strong')].map((s) => s.className)),
+      ['team-chip team-colour-blue', 'team-chip team-colour-green'],
+    );
+    // The filter shows every team at first.
+    assert.equal(await (await browser.$('#team-filter')).getValue(), '');
     await assertAccessible(browser, '31-teams-two-signed-in');
     await screenshot(browser, '31-teams-two-signed-in', { blankOut: ADDRESSES });
     await setMenuOpen(false);
   });
 
-  it('switches teams from the keyboard, with no sign-in', async () => {
-    await searchFor(browser, MPN, '1 matching part');
-    await selectResult(browser, MPN);
+  /** Each row shown, as `team code:IPN`, in order. */
+  async function rows() {
+    return browser.execute(() =>
+      [...document.querySelectorAll('.results button.result')].map((row) => {
+        const chip = row.querySelector('.team-chip');
+        const code = chip ? chip.childNodes[1].textContent : '';
+        return `${code}:${row.dataset.ipn}`;
+      }),
+    );
+  }
+
+  it('shows both teams\' parts in one list, each marked with its team', async () => {
+    await searchFor(browser, MPN, '2 matching parts');
+    // The same IPN once per team, in the order of the Teams menu.
+    assert.deepEqual(await rows(), [`AC:${IPN}`, `BE:${IPN}`]);
+    // Each team's part shows that team's values.
+    await browser.execute((team) => document.querySelector(`button.result[data-team="${team}"]`).click(), beta.url);
     await waitForValue('47');
-    const switcher = await browser.$('#team-shown');
-    assert.equal(await (await browser.$('label[for="team-shown"]')).getText(), 'Team');
+    await browser.execute((team) => document.querySelector(`button.result[data-team="${team}"]`).click(), acme.url);
+    await waitForValue('47R');
+    await waitForPreview(browser, SYMBOL);
+    await waitForPreview(browser, FOOTPRINT);
+    await assertAccessible(browser, '38-teams-one-list');
+    await screenshot(browser, '38-teams-one-list');
+  });
+
+  it('shows one team with the Team filter, from the keyboard', async () => {
+    const filter = await browser.$('#team-filter');
+    assert.equal(await (await browser.$('label[for="team-filter"]')).getText(), 'Team');
     // Move to the first team with the arrow key, as a person would.
-    await browser.execute(() => document.querySelector('#team-shown').focus());
-    await browser.keys('ArrowUp');
-    await browser.waitUntil(async () => (await switcher.getValue()) === acme.url, {
+    await browser.execute(() => document.querySelector('#team-filter').focus());
+    await browser.keys('ArrowDown');
+    await browser.waitUntil(async () => (await filter.getValue()) === acme.url, {
       timeout: 5_000,
       timeoutMsg: 'the arrow key did not choose the first team',
     });
-    // The part list reloads for acme; the switcher keeps the focus.
+    await waitForText(browser, '#result-count', '1 matching part');
+    assert.deepEqual(await rows(), [`AC:${IPN}`]);
+    // The filter keeps the focus while the list changes under it.
+    assert.equal(await browser.execute(() => document.activeElement?.id), 'team-filter');
     await waitForValue('47R');
-    assert.equal(await browser.execute(() => document.activeElement?.id), 'team-shown');
-    assert.equal(await textOf(browser, BADGE), `AC · ${editor.name} · 2 live`);
-    await waitForPreview(browser, SYMBOL);
-    await waitForPreview(browser, FOOTPRINT);
-    await assertAccessible(browser, '32-teams-switched');
-    await screenshot(browser, '32-teams-switched');
+    await assertAccessible(browser, '39-teams-filter');
+    await screenshot(browser, '39-teams-filter');
+    // Back to every team. (Taking a screenshot moves the focus away.)
+    await browser.execute(() => document.querySelector('#team-filter').focus());
+    await browser.keys('ArrowUp');
+    await waitForText(browser, '#result-count', '2 matching parts');
   });
 
   it('marks a team offline when its server stops, and keeps the other working', async () => {
     await beta.stop();
-    await waitForText(browser, BADGE, `AC · ${editor.name} · 1 live, 1 offline`, 30_000);
-    // Acme, shown, keeps working.
-    await selectResult(browser, MPN);
+    await waitForText(browser, BADGE, 'Teams · 1 live, 1 offline', 30_000);
+    // Beta's rows stay, from the parts last seen, and say it is offline.
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          (team) => document.querySelector(`button.result[data-team="${team}"] .team-chip`)?.textContent,
+          beta.url,
+        )) === 'Team BE · offline',
+      { timeout: 10_000, timeoutMsg: 'beta\'s row never said it is offline' },
+    );
+    // Acme keeps working.
     await waitForValue('47R');
     await waitForPreview(browser, SYMBOL);
     await waitForPreview(browser, FOOTPRINT);
     await setMenuOpen(true);
     assert.match(await rowText('BE'), /^Offline: showing the parts last seen\. The app reconnects by itself\./);
-    await assertAccessible(browser, '33-teams-offline');
-    // Beta's last problem holds the system's own words, which differ
-    // between machines.
-    const betaProblem = '.team-row:nth-child(2) .team-state';
-    assert.match(await textOf(browser, betaProblem), /^Offline/);
-    await screenshot(browser, '33-teams-offline', { blankOut: [...ADDRESSES, betaProblem] });
-    // Beta's last-known parts are still there to show.
-    await browser.execute((server) => {
-      const select = document.querySelector('#team-shown');
-      select.value = server;
-      select.dispatchEvent(new Event('change'));
-    }, beta.url);
     await setMenuOpen(false);
-    await selectResult(browser, MPN);
+    // Beta's part shows as last seen, and says why it can't be edited.
+    await browser.execute((team) => document.querySelector(`button.result[data-team="${team}"]`).click(), beta.url);
     await waitForValue('47');
+    await waitForText(
+      browser,
+      '.team-offline-note',
+      "BE is offline, so this part can't be edited now. You see it as it was last seen. The app reconnects by itself.",
+    );
+    assert.equal(
+      await browser.execute(() =>
+        [...document.querySelectorAll('.team-toolbar button')].some((b) => b.textContent.trim() === 'Edit part'),
+      ),
+      false,
+      'no Edit part while offline',
+    );
+    await waitForPreview(browser, SYMBOL);
+    await waitForPreview(browser, FOOTPRINT);
+    await assertAccessible(browser, '33-teams-offline');
+    await screenshot(browser, '33-teams-offline', { blankOut: ADDRESSES });
   });
 
   it('signs out of one team and removes another, each alone', async () => {
@@ -228,7 +275,7 @@ describe('several teams at once', () => {
       "Remove BE from your teams? You'll need the address, email and password to add it again.",
     );
     assert.equal(await browser.execute(() => document.activeElement?.id), 'team-remove-cancel');
-    // Behind the menu, the part panel now shows beta, offline: let it settle.
+    // Behind the menu, the part panel still shows beta's part: let it settle.
     await waitForLibraryCheck(browser);
     await waitForPreview(browser, SYMBOL);
     await waitForPreview(browser, FOOTPRINT);
