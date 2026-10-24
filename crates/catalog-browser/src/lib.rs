@@ -36,7 +36,7 @@ use kicad_integration::{
     SUPPORTED_MAJOR, SearchLocations, StoredItem, discover, footprint_choices, sha256_hex,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -225,21 +225,6 @@ impl CatalogBrowser {
             group_by: desktop_contract::GroupBy::Category,
         };
         self.search_request(&request, teams)
-    }
-
-    /// The part `ipn` as a team has it, from `current` (its last-known
-    /// values), else the CSV catalog's row. So a part of a team whose
-    /// server cannot be reached still shows that team's values, as its row
-    /// in the part list does, and a part only the team has is found too.
-    pub fn part_with(
-        &self,
-        ipn: &str,
-        current: &BTreeMap<String, PartValues>,
-    ) -> Option<PartDetail> {
-        match current.get(ipn) {
-            Some(values) => Some(detail(&values.part(ipn))),
-            None => self.part(ipn),
-        }
     }
 
     /// Reads the files chosen for Add part (kicad-parts-9693): what they

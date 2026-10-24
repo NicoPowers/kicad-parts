@@ -444,3 +444,62 @@ fn shows_only_the_parts_using_a_reference_exactly() {
         );
     }
 }
+
+#[test]
+fn the_part_panel_shows_a_part_as_its_row_in_the_list() {
+    use catalog_browser::PartValues;
+    use catalog_browser::team::KnownParts;
+    use desktop_contract::PartKey;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let browser = open_browser(
+        dir.path(),
+        SearchLocations::Only(vec![empty.path().to_path_buf()]),
+    );
+    let ipn = "RES-0000-0470".to_owned();
+    let values = PartValues {
+        category: Some("res".into()),
+        value: Some("47R".into()),
+        fields: Some(vec![("Value".into(), "47R".into())]),
+        ..PartValues::default()
+    };
+    let team = |server: &str| {
+        Arc::new(KnownParts::new(
+            server,
+            "AC",
+            [(ipn.clone(), values.clone())].into(),
+            BTreeMap::new(),
+        ))
+    };
+    let key = |team: &str| PartKey {
+        team: team.into(),
+        ipn: ipn.clone(),
+    };
+    let teams = [
+        team("https://ac.example.com"),
+        team("https://be.example.com"),
+    ];
+    // The team's last-known values, as its row shows them.
+    let detail = browser
+        .part_in_list(&teams, &key("https://ac.example.com"))
+        .unwrap();
+    assert_eq!(detail.summary.value, "47R");
+    assert_eq!(detail.summary.team, "");
+    assert_eq!(detail.summary.csv_file, "Team catalog");
+    // A part of no team is the CSV catalog's row; another team's is not.
+    assert_eq!(
+        browser
+            .part_in_list(&teams, &key(""))
+            .unwrap()
+            .summary
+            .csv_file,
+        "g-res.csv"
+    );
+    assert!(
+        browser
+            .part_in_list(&teams, &key("https://other.example.com"))
+            .is_none()
+    );
+}

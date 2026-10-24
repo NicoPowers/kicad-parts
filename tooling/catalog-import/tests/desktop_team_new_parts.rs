@@ -359,7 +359,15 @@ fn the_desktop_adds_a_part_from_a_download() {
     assert_eq!(found.sections[0].name, "Capacitors");
     assert_eq!(found.sections[0].hits[0].ipn, ipn);
     assert_eq!(found.sections[0].hits[0].csv_file, "Team catalog");
-    let detail = browser.part_with(&ipn, &team.current_values()).unwrap();
+    let detail = browser
+        .part_in_list(
+            &parts,
+            &desktop_contract::PartKey {
+                team: "https://team.example.test".into(),
+                ipn: ipn.clone(),
+            },
+        )
+        .unwrap();
     // The MPN an engineer types is checked too, without regard to case.
     let typed = team.same_mpn("cl10c020cb8nnnc", "Someone Else");
     assert_eq!(typed.len(), 1);

@@ -2,10 +2,16 @@
 //! every signed-in team's parts, and the CSV catalog's parts no team has.
 //!
 //! A part is named by its team and its IPN ([`PartKey`]). Two teams may
-//! both have RES-0000-0470, and each shows as its own row. A part the CSV
-//! catalog has shows with each team's current values, as that team's part.
-//! The CSV row itself shows only while no team has its IPN. So a person
-//! with one team sees the list exactly as before.
+//! both have RES-0000-0470, and each shows as its own row. The CSV row
+//! itself shows only while no team has its IPN.
+//!
+//! Which team the CSV folder belongs to is not known yet: team parts keep
+//! no record of the CSV file they came from, and the link between a team
+//! and its library repository is still to come (kicad-parts-e9a3). So the
+//! CSV row's values (its file, fields, symbol and footprint) fill in a team
+//! part only while exactly one team shows parts, as before several teams.
+//! With two or more, each team's part shows only its own values, so a
+//! client team never shows our CSV data.
 //!
 //! Rows rank as the CSV catalog's search ranks parts ([`SearchText::rank`]).
 //! Within a rank they keep catalog order: the CSV catalog's order, then the
@@ -17,10 +23,11 @@
 //! a search over 10 teams of a few thousand parts each only compares text.
 
 use crate::team::KnownParts;
-use crate::{CatalogBrowser, PartValues, part_uses, summary};
+use crate::{CatalogBrowser, PartValues, detail, part_uses, summary};
 use csv_catalog::{CatalogPart, CsvCatalog, Query, SearchText};
 use desktop_contract::{
-    GroupBy, PartKey, PartSummary, SearchRequest, SearchResponse, SearchSection, team_section,
+    GroupBy, PartDetail, PartKey, PartSummary, SearchRequest, SearchResponse, SearchSection,
+    team_section,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -39,6 +46,8 @@ pub(crate) struct ListedTeam {
     /// What they were made from, so they are made again only when it
     /// changes.
     source: Arc<KnownParts>,
+    /// Whether the CSV rows' values fill in its parts (see the module).
+    with_csv: bool,
     /// In IPN order.
     parts: Vec<ListedPart>,
     /// Where each IPN is in `parts`.
@@ -55,24 +64,38 @@ struct ListedPart {
 }
 
 impl ListedTeam {
-    fn new(source: Arc<KnownParts>, csv: &CsvRows<'_>) -> Self {
+    fn new(source: Arc<KnownParts>, csv: &CsvRows<'_>, with_csv: bool) -> Self {
         let parts: Vec<ListedPart> = source
             .values
             .iter()
-            .map(|(ipn, values)| listed_part(ipn, values, csv.find(ipn)))
+            .map(|(ipn, values)| {
+                let row = csv.find(ipn);
+                listed_part(ipn, values, row.filter(|_| with_csv), row.is_some())
+            })
             .collect();
         let at = parts
             .iter()
             .enumerate()
             .map(|(at, listed)| (listed.part.ipn.clone(), at))
             .collect();
-        Self { source, parts, at }
+        Self {
+            source,
+            with_csv,
+            parts,
+            at,
+        }
     }
 }
 
-/// The team part `ipn` with `values`: over the CSV catalog's `row` when it
-/// has the IPN, as the part header shows it.
-fn listed_part(ipn: &str, values: &PartValues, row: Option<&CatalogPart>) -> ListedPart {
+/// The team part `ipn` with `values`, filled in from the CSV catalog's
+/// `row` when it is given, as the part header shows it. `in_csv` says the
+/// CSV catalog has the IPN, which places the row in CSV order.
+fn listed_part(
+    ipn: &str,
+    values: &PartValues,
+    row: Option<&CatalogPart>,
+    in_csv: bool,
+) -> ListedPart {
     let part = match row {
         Some(row) => values.apply(row),
         None => values.part(ipn),
@@ -86,7 +109,7 @@ fn listed_part(ipn: &str, values: &PartValues, row: Option<&CatalogPart>) -> Lis
         text: SearchText::new(&part),
         part,
         category,
-        in_csv: row.is_some(),
+        in_csv,
     }
 }
 
@@ -129,12 +152,17 @@ impl ListedTeams {
     fn rows_of(&self, teams: &[Arc<KnownParts>], csv: &CsvRows<'_>) -> Vec<Arc<ListedTeam>> {
         let mut known = self.0.lock().unwrap_or_else(|e| e.into_inner());
         known.retain(|team, _| teams.iter().any(|given| given.team == *team));
+        let with_csv = teams.len() == 1;
         teams
             .iter()
             .map(|source| match known.get(&source.team) {
-                Some(listed) if Arc::ptr_eq(&listed.source, source) => listed.clone(),
+                Some(listed)
+                    if Arc::ptr_eq(&listed.source, source) && listed.with_csv == with_csv =>
+                {
+                    listed.clone()
+                }
                 _ => {
-                    let listed = Arc::new(ListedTeam::new(source.clone(), csv));
+                    let listed = Arc::new(ListedTeam::new(source.clone(), csv, with_csv));
                     known.insert(source.team.clone(), listed.clone());
                     listed
                 }
@@ -307,6 +335,23 @@ impl CatalogBrowser {
         let mut response = answer(&self.sources(teams), request);
         response.elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         response
+    }
+
+    /// The part `key` as the part list shows it: the team's row, from its
+    /// last-known parts in `teams`, or for a part of no team the CSV
+    /// catalog's row. So the part panel and the list always agree, also
+    /// while the team's server cannot be reached.
+    pub fn part_in_list(&self, teams: &[Arc<KnownParts>], key: &PartKey) -> Option<PartDetail> {
+        if key.team.is_empty() {
+            return self.part(&key.ipn);
+        }
+        let sources = self.sources(teams);
+        let team = sources
+            .teams
+            .iter()
+            .find(|listed| listed.source.team == key.team)?;
+        let part = &team.parts[*team.at.get(&key.ipn)?].part;
+        Some(detail(part))
     }
 
     /// Every part the list would show for `only` (every team when `None`),

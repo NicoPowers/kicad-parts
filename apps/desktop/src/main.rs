@@ -13,12 +13,12 @@ use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
     AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, FootprintDrawing,
     KicadLibrariesStatus, LibrariesView, LibraryCheckView, LibraryItemDetail, LibraryItemRequest,
-    LibraryItems, LibraryItemsRequest, OurLibraries, PartDetail, PreviewOutcome, PreviewRequest,
-    PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamChoices,
-    TeamCodeCheck, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest,
-    TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest,
-    TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus,
-    UseNewServerRequest,
+    LibraryItems, LibraryItemsRequest, OurLibraries, PartDetail, PartKey, PreviewOutcome,
+    PreviewRequest, PublishResult, SearchRequest, SearchResponse, SignInRequest,
+    TeamArchiveRequest, TeamChoices, TeamCodeCheck, TeamCsvReviewRequest, TeamDownload,
+    TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest, TeamIpnCheck,
+    TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest,
+    TeamSameMpn, TeamsStatus, UseNewServerRequest,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -279,22 +279,19 @@ async fn search_parts(
     blocking(move || browser.search_request(&request, &teams.known_parts())).await
 }
 
-/// The team at `server_url` in the person's list. Every request about a
-/// team's parts names its team by server address, never "the shown team",
-/// so a request always reaches the team the person meant.
-fn team_at(teams: &Teams, server_url: &str) -> Result<Arc<TeamCatalog>, String> {
-    teams.team(server_url)
-}
-
 /// The team at `server_url`, or none for a blank address: a part only the
-/// CSV catalog has belongs to no team.
+/// CSV catalog has belongs to no team. Every request about a team's parts
+/// names its team by server address, never "the shown team".
 fn maybe_team_at(teams: &Teams, server_url: &str) -> Result<Option<Arc<TeamCatalog>>, String> {
     if server_url.is_empty() {
         return Ok(None);
     }
-    team_at(teams, server_url).map(Some)
+    teams.team(server_url).map(Some)
 }
 
+/// The part panel's view of a part, as its row in the part list shows it:
+/// the team's last-known values, even while its server cannot be reached,
+/// or for a part of no team the CSV catalog's row.
 #[tauri::command]
 async fn part_detail(
     browser: State<'_, Browser>,
@@ -302,14 +299,8 @@ async fn part_detail(
     team: String,
     ipn: String,
 ) -> Result<Option<PartDetail>, String> {
-    let (browser, team) = (browser.inner().clone(), maybe_team_at(&teams, &team)?);
-    // A team's part shows that team's last-known values, even while its
-    // server cannot be reached; a part of no team, the CSV catalog's row.
-    blocking(move || match team {
-        Some(team) => browser.part_with(&ipn, &team.current_values()),
-        None => browser.part(&ipn),
-    })
-    .await
+    let (browser, teams) = (browser.inner().clone(), teams.inner().clone());
+    blocking(move || browser.part_in_list(&teams.known_parts(), &PartKey { team, ipn })).await
 }
 
 #[tauri::command]
@@ -454,7 +445,7 @@ async fn team_part(
     team: String,
     ipn: String,
 ) -> Result<Option<TeamPart>, String> {
-    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
+    let (browser, team) = (browser.inner().clone(), teams.team(&team)?);
     blocking(move || browser.team_part(&ipn, &team)).await?
 }
 
@@ -465,7 +456,7 @@ async fn team_edit(
     team: String,
     request: TeamEditRequest,
 ) -> Result<PublishResult, String> {
-    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
+    let (browser, team) = (browser.inner().clone(), teams.team(&team)?);
     blocking(move || browser.edit(request, &team)).await?
 }
 
@@ -476,7 +467,7 @@ async fn team_pick(
     team: String,
     request: TeamPickRequest,
 ) -> Result<TeamPick, String> {
-    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
+    let (browser, team) = (browser.inner().clone(), teams.team(&team)?);
     blocking(move || browser.pick(&request, &team)).await?
 }
 
@@ -487,7 +478,7 @@ async fn team_item_preview(
     team: String,
     request: LibraryItemRequest,
 ) -> Result<PreviewOutcome, String> {
-    let (browser, catalog) = (browser.inner().clone(), team_at(&teams, &team)?);
+    let (browser, catalog) = (browser.inner().clone(), teams.team(&team)?);
     blocking(move || {
         browser
             .catalog_item_preview(&request, &catalog)
@@ -508,7 +499,7 @@ async fn team_archive(
     team: String,
     request: TeamArchiveRequest,
 ) -> Result<PublishResult, String> {
-    let team = team_at(&teams, &team)?;
+    let team = teams.team(&team)?;
     blocking(move || team.archive(request)).await?
 }
 
@@ -518,7 +509,7 @@ async fn team_csv_review(
     team: String,
     request: TeamCsvReviewRequest,
 ) -> Result<PublishResult, String> {
-    let team = team_at(&teams, &team)?;
+    let team = teams.team(&team)?;
     blocking(move || team.csv_review(request)).await?
 }
 
@@ -528,7 +519,7 @@ async fn team_read_file(
     team: String,
     request: TeamFileRequest,
 ) -> Result<TeamFileReading, String> {
-    let team = team_at(&teams, &team)?;
+    let team = teams.team(&team)?;
     blocking(move || team.read_file(request)).await?
 }
 
@@ -548,7 +539,7 @@ async fn team_read_download(
     team: String,
     request: TeamDownloadRequest,
 ) -> Result<TeamDownload, String> {
-    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
+    let (browser, team) = (browser.inner().clone(), teams.team(&team)?);
     blocking(move || browser.read_download(&request, &team)).await?
 }
 
@@ -559,7 +550,7 @@ async fn team_check_ipn(
     team: String,
     request: TeamIpnRequest,
 ) -> Result<TeamIpnCheck, String> {
-    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
+    let (browser, team) = (browser.inner().clone(), teams.team(&team)?);
     blocking(move || browser.check_ipn(&request.ipn, &request.prefix, &team)).await
 }
 
@@ -569,7 +560,7 @@ async fn team_check_mpn(
     team: String,
     request: TeamMpnRequest,
 ) -> Result<Vec<TeamSameMpn>, String> {
-    let team = team_at(&teams, &team)?;
+    let team = teams.team(&team)?;
     blocking(move || team.same_mpn(&request.mpn, &request.manufacturer)).await
 }
 
@@ -580,7 +571,7 @@ async fn team_add_part(
     team: String,
     request: TeamNewPartRequest,
 ) -> Result<PublishResult, String> {
-    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
+    let (browser, team) = (browser.inner().clone(), teams.team(&team)?);
     blocking(move || browser.add_part(request, &team)).await?
 }
 
@@ -590,7 +581,7 @@ async fn team_library_check(
     teams: State<'_, Team>,
     team: String,
 ) -> Result<Option<LibraryCheckView>, String> {
-    let (browser, team) = (browser.inner().clone(), team_at(&teams, &team)?);
+    let (browser, team) = (browser.inner().clone(), teams.team(&team)?);
     // Worked out again only when the team catalog changed.
     blocking(move || browser.library_check(&team)).await?
 }

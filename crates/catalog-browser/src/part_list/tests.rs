@@ -147,6 +147,23 @@ fn with_one_team_the_list_is_as_before() {
 }
 
 #[test]
+fn with_two_teams_a_team_part_never_takes_the_csv_rows_values() {
+    // Whose CSV folder this is is not known yet (kicad-parts-e9a3), so a
+    // client team's RES-1 must not show our CSV file's data.
+    let catalog = csv(&[("RES-1", "R1", "g-res")]);
+    let mut ac_values = (*team(AC, "AC", &[("RES-1", "R1-AC", "res")])).clone();
+    ac_values.values.get_mut("RES-1").unwrap().symbol = Some("AC-Lib:R".into());
+    let ma = team(MA, "MA", &[("RES-1", "R1", "res")]);
+    let found = search(&catalog, &[ma, Arc::new(ac_values.clone())], &request(""));
+    let ac_row = found.hits().find(|hit| hit.team == AC).unwrap();
+    assert_eq!(ac_row.csv_file, "Team catalog");
+    assert_eq!(ac_row.description, "R1-AC in AC");
+    // With one team, the CSV row fills it in, as before several teams.
+    let found = search(&catalog, &[Arc::new(ac_values)], &request(""));
+    assert_eq!(found.hits().next().unwrap().csv_file, "g-res.csv");
+}
+
+#[test]
 fn search_ranks_as_before_and_ties_on_one_part_go_by_team_order() {
     let catalog = csv(&[("CAP-1", "C100N", "g-cap")]);
     let ma = team(
