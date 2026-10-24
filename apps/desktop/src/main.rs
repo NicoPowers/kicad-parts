@@ -51,7 +51,8 @@ struct LaunchOptions {
     team_email: Option<String>,
     /// `--sign-ins=memory` or `--sign-ins=until-closed`: keep team sign-ins
     /// in memory instead of the system's credential store, so tests never
-    /// touch the person's store. See `sign_ins::for_tests`.
+    /// touch the person's store. Debug builds also take `test-file`. See
+    /// `sign_ins::for_tests`.
     sign_ins: Option<String>,
     /// `--display-scale N` (Windows only, N from 0.5 to 4): draw N screen pixels per CSS
     /// pixel, whatever the Windows display scaling is. The journeys use 1, so
@@ -742,7 +743,7 @@ fn main() {
     };
     let sign_ins = match options.sign_ins.as_deref() {
         None => sign_ins::system_or_memory(),
-        Some(choice) => match sign_ins::for_tests(choice) {
+        Some(choice) => match sign_ins::for_tests(choice, options.data_dir.as_deref()) {
             Ok(sign_ins) => sign_ins,
             Err(message) => {
                 eprintln!("kicad-parts-desktop: {message}");

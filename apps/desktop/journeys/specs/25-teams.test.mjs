@@ -235,7 +235,8 @@ describe('several teams at once', () => {
     await waitForPreview(browser, SYMBOL);
     await waitForPreview(browser, FOOTPRINT);
     await setMenuOpen(true);
-    assert.match(await rowText('BE'), /^Offline: showing the parts last seen\. The app reconnects by itself\./);
+    // It says when beta's parts last matched its server (kicad-parts-ed46).
+    assert.match(await rowText('BE'), /^Offline\. Parts as of \d\d:\d\d\. The app reconnects by itself\./);
     await setMenuOpen(false);
     // Beta's part shows as last seen, and says why it can't be edited.
     await browser.execute((team) => document.querySelector(`button.result[data-team="${team}"]`).click(), beta.url);
@@ -243,7 +244,7 @@ describe('several teams at once', () => {
     await waitForText(
       browser,
       '.team-offline-note',
-      "BE is offline, so this part can't be edited now. You see it as it was last seen. The app reconnects by itself.",
+      /^BE is offline, so this part can't be edited now\. Parts as of \d\d:\d\d\. The app reconnects by itself\.$/,
     );
     assert.equal(
       await browser.execute(() =>
