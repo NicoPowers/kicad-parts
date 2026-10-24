@@ -88,6 +88,8 @@ pub(crate) fn git_not_installed(step: Step) -> RepoProblem {
 /// for git's message `said` (in small letters).
 fn reason_for(step: Step, said: &str, host: &str) -> (String, String, bool) {
     let has = |words: &[&str]| words.iter().any(|word| said.contains(word));
+    // A repo in a folder, such as on a network share, has no account.
+    let on_this_computer = host == "this computer";
     let plain = |reason: String, next: String| (reason, next, false);
     let offline = |reason: String, next: &str| (reason, next.to_owned(), true);
     let connection_hint = "Check your internet connection, or try again later.";
@@ -189,10 +191,12 @@ fn reason_for(step: Step, said: &str, host: &str) -> (String, String, bool) {
         "returned error: 404",
     ]) || (said.contains("repository '") && said.contains("' not found"))
     {
-        return plain(
-            "the repo was not found".to_owned(),
-            format!("Check the address, and that your account on {host} can see the repo."),
-        );
+        let next = if on_this_computer {
+            "Check that its folder is there and holds the repo.".to_owned()
+        } else {
+            format!("Check the address, and that your account on {host} can see the repo.")
+        };
+        return plain("the repo was not found".to_owned(), next);
     }
     if has(&[
         "permission to",
@@ -205,11 +209,15 @@ fn reason_for(step: Step, said: &str, host: &str) -> (String, String, bool) {
         "forbidden",
         "permission denied",
     ]) {
-        let next = match step {
-            Step::Write => {
+        let next = match (step, on_this_computer) {
+            (Step::Write, false) => {
                 format!("Check that your SSH key or account has write access on {host}.")
             }
-            _ => format!("Check that your account on {host} can see the repo."),
+            (Step::Write, true) => {
+                "Check that you may change files in the repo's folder.".to_owned()
+            }
+            (_, false) => format!("Check that your account on {host} can see the repo."),
+            (_, true) => "Check that you may read the repo's folder.".to_owned(),
         };
         return plain("permission denied".to_owned(), next);
     }
@@ -378,6 +386,18 @@ mod tests {
                 "{stderr}"
             );
         }
+    }
+
+    #[test]
+    fn a_repo_in_a_folder_is_checked_as_a_folder() {
+        let ran = Ran {
+            stderr: "fatal: '//nas/hw/lib.git' does not appear to be a git repository".to_owned(),
+            ..Ran::default()
+        };
+        assert_eq!(
+            explain(Step::Read, &ran, "this computer", LIMIT).summary,
+            "Can't read the repo: the repo was not found. Check that its folder is there and holds the repo."
+        );
     }
 
     #[test]

@@ -322,7 +322,7 @@ fn a_repo_that_refuses_pushes_can_only_be_read() {
     };
     assert_eq!(
         summary(problem),
-        "Can read, but can't push: permission denied. Check that your SSH key or account has write access on this computer."
+        "Can read, but can't push: permission denied. Check that you may change files in the repo's folder."
     );
     assert!(problem.details.contains("denied to ada"), "{problem:?}");
 }
