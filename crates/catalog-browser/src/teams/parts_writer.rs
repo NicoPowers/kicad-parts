@@ -82,31 +82,33 @@ impl Shared {
         self.turn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Writes the team's parts at `version`, if they are still at it, in
-    /// the team's turn. Says whether it wrote.
-    fn write_now(&self, version: Version) -> bool {
+    /// Writes the team's parts, read at `version`, in the team's turn.
+    fn write_now(&self, version: Version) -> Written {
         let task = &self.task;
         // Read before taking the turn: the category names may ask the
-        // server, and signing out waits for the turn.
+        // server, and signing out waits for the turn. The names first:
+        // without them the parts are not worth copying.
+        let category_names = task.catalog.category_names();
+        let values = task.catalog.current_values();
+        if category_names.is_empty() && !values.is_empty() {
+            // The names could not be read. The catalog keeps that answer
+            // until it moves on, so wait for its next version.
+            return Written::NoCategoryNames;
+        }
         let parts = PartsFile {
             server_url: task.server_url.clone(),
             as_of_ms: crate::team::now_ms(),
-            values: task.catalog.current_values(),
-            category_names: task.catalog.category_names(),
+            values,
+            category_names,
         };
-        if parts.category_names.is_empty() && !parts.values.is_empty() {
-            // The names could not be read: try again soon, rather than
-            // write parts with no category names.
-            return false;
-        }
         let _turn = self.turn();
-        // Still in step, and the session that was read: a sign-out or a new
-        // sign-in meanwhile makes these parts not worth writing.
-        if self.stop.load(Ordering::SeqCst) || task.catalog.version_in_step() != Some(version) {
-            return false;
+        if self.stop.load(Ordering::SeqCst)
+            || !still_worth_writing(version, task.catalog.version_in_step())
+        {
+            return Written::NotInStep;
         }
         match parts_file::write(&task.folder, &parts) {
-            Ok(()) => true,
+            Ok(()) => Written::Yes,
             Err(problem) => {
                 // Not shown: the app works on, and only an offline start
                 // would miss these parts. The writer tries again soon.
@@ -114,10 +116,30 @@ impl Shared {
                     "kicad-parts-desktop: could not write the parts file of {} ({problem}).",
                     task.server_url
                 );
-                false
+                Written::Failed
             }
         }
     }
+}
+
+/// How a write went.
+enum Written {
+    Yes,
+    /// The disk refused it: try again soon.
+    Failed,
+    /// The category names could not be read: wait for the next version.
+    NoCategoryNames,
+    /// Signed out, signed in again, or offline meanwhile: nothing to do.
+    NotInStep,
+}
+
+/// Whether parts read at version `read` may still be written, when the
+/// session's parts are in step at `now`. Only the session must be the same:
+/// a sign-out or a new sign-in meanwhile makes them not worth writing. New
+/// Changes are not a reason to drop them, or a long burst would never be
+/// written; the next write brings those.
+fn still_worth_writing(read: Version, now: Option<Version>) -> bool {
+    now.is_some_and(|now| now.0 == read.0)
 }
 
 fn write_while_running(shared: &Shared) {
@@ -133,10 +155,11 @@ fn write_while_running(shared: &Shared) {
         }
         // The version read before the parts: parts newer than it are
         // written again at the next look, never missed.
-        if shared.write_now(version) {
-            debounce.wrote(version, now);
-        } else {
-            debounce.failed(now);
+        match shared.write_now(version) {
+            Written::Yes => debounce.wrote(version, now),
+            Written::Failed => debounce.failed(now),
+            Written::NoCategoryNames => debounce.skip(version),
+            Written::NotInStep => {}
         }
     }
 }
@@ -157,12 +180,14 @@ struct Debounce {
     changed_since: Option<Instant>,
     /// After a failed write, when to try again.
     retry_at: Option<Instant>,
+    /// A version not worth writing: wait for the next one.
+    skipped: Option<Version>,
 }
 
 impl Debounce {
     /// Whether to write `version`, seen at `now`.
     fn due(&mut self, version: Version, now: Instant) -> bool {
-        if self.retry_at.is_some_and(|at| now < at) {
+        if self.retry_at.is_some_and(|at| now < at) || self.skipped == Some(version) {
             return false;
         }
         if let Some((written, at)) = self.written {
@@ -185,7 +210,13 @@ impl Debounce {
         self.retry_at = None;
     }
 
-    /// A write failed at `now`, or was not worth doing: try again after
+    /// `version` is not worth writing, such as with no category names:
+    /// wait for the next version.
+    fn skip(&mut self, version: Version) {
+        self.skipped = Some(version);
+    }
+
+    /// A write failed at `now`: try again after
     /// [`QUIET`], not at every look.
     fn failed(&mut self, now: Instant) {
         self.retry_at = Some(now + QUIET);
@@ -241,6 +272,33 @@ mod tests {
         // Once per MAX_WAIT, counted from the first change after a write.
         let wait = ticks(MAX_WAIT);
         assert_eq!(written, [wait, 2 * wait + 1, 3 * wait + 2]);
+    }
+
+    #[test]
+    fn a_long_burst_is_written_within_max_wait_though_its_version_moves_on() {
+        // The writer saw (1, 59, 1); by its turn, more Changes came.
+        assert!(still_worth_writing((1, 59, 1), Some((1, 64, 1))));
+        // Signed out, offline, or signed in again meanwhile: not written.
+        assert!(!still_worth_writing((1, 59, 1), None));
+        assert!(!still_worth_writing((1, 59, 1), Some((2, 64, 1))));
+        // And the debounce asks for it within MAX_WAIT of the first change.
+        let written = writes((0..ticks(MAX_WAIT) as u64 + 1).map(|seq| (1, seq, 1)));
+        assert_eq!(written, [ticks(MAX_WAIT)]);
+    }
+
+    #[test]
+    fn parts_with_no_category_names_wait_for_the_next_version() {
+        let start = Instant::now();
+        let mut debounce = Debounce::default();
+        assert!(!debounce.due((1, 7, 1), start));
+        assert!(debounce.due((1, 7, 1), start + QUIET));
+        debounce.skip((1, 7, 1));
+        assert!(!debounce.due((1, 7, 1), start + QUIET * 5));
+        assert!(
+            !debounce.due((1, 8, 1), start + QUIET * 5),
+            "quiet again first"
+        );
+        assert!(debounce.due((1, 8, 1), start + QUIET * 6));
     }
 
     #[test]
