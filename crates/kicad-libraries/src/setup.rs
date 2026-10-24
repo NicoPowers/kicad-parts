@@ -61,41 +61,37 @@ pub fn libraries(folder: &Path, plan: &Plan<'_>, naming: &Naming) -> Vec<Library
 /// table order and builds every database entry as the database library
 /// loads. An entry whose symbol library has not loaded yet gets an empty
 /// symbol, which ERC calls "doesn't match copy in library" (KiCad issue
-/// 25870).
+/// 25870). This helps only our team libraries. KiCad puts pasted rows
+/// above its own libraries, so parts using KiCad's own symbols stay
+/// affected until KiCad fixes the issue.
 pub fn symbol_table(libraries: &[Library]) -> String {
     let parts = libraries
         .iter()
         .find(|library| library.kind == LibraryKind::Parts)
         .map(|library| library.nickname.as_str())
         .unwrap_or("the database library");
-    let sources_first = libraries
+    let symbols = libraries
         .iter()
         .filter(|library| library.kind == LibraryKind::Symbols)
-        .chain(
-            libraries
-                .iter()
-                .filter(|library| library.kind == LibraryKind::Parts),
-        );
-    let rows = sources_first
-        .filter_map(|library| match library.kind {
-            LibraryKind::Parts => Some(LibTableRow {
-                name: library.nickname.clone(),
-                kind: "Database".into(),
-                uri: library.path.clone(),
-                descr: "Parts from the team catalog, one entry per revision".into(),
-                ..LibTableRow::default()
-            }),
-            LibraryKind::Symbols => Some(LibTableRow {
-                name: library.nickname.clone(),
-                kind: "KiCad".into(),
-                uri: library.path.clone(),
-                descr: format!("Team symbols that {parts} uses"),
-                hidden: true,
-                ..LibTableRow::default()
-            }),
-            LibraryKind::Footprints => None,
-        })
-        .collect();
+        .map(|library| LibTableRow {
+            name: library.nickname.clone(),
+            kind: "KiCad".into(),
+            uri: library.path.clone(),
+            descr: format!("Team symbols that {parts} uses"),
+            hidden: true,
+            ..LibTableRow::default()
+        });
+    let database = libraries
+        .iter()
+        .filter(|library| library.kind == LibraryKind::Parts)
+        .map(|library| LibTableRow {
+            name: library.nickname.clone(),
+            kind: "Database".into(),
+            uri: library.path.clone(),
+            descr: "Parts from the team catalog, one entry per revision".into(),
+            ..LibTableRow::default()
+        });
+    let rows = symbols.chain(database).collect();
     LibTable {
         version: Some("7".into()),
         rows,
