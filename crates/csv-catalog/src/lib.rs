@@ -197,56 +197,13 @@ impl CsvCatalog {
     /// IPN or MPN prefix matches, then catalog order. An empty query matches
     /// every row.
     pub fn search(&self, query: &str, limit: usize) -> SearchResults {
-        self.search_replacing(query, limit, |_| None)
-    }
-
-    /// Like [`Self::search`], but a part for which `replace` returns a part
-    /// is matched on that part's values instead (for example the team
-    /// catalog's current details), so a search finds what the app shows.
-    pub fn search_replacing(
-        &self,
-        query: &str,
-        limit: usize,
-        replace: impl Fn(&CatalogPart) -> Option<CatalogPart>,
-    ) -> SearchResults {
-        self.search_with_extra(query, limit, replace, &[])
-    }
-
-    /// Like [`Self::search_replacing`], but `extra` parts (for example
-    /// ones only the team catalog has) are searched too, after the
-    /// catalog's own. A hit at `parts().len() + n` is `extra[n]`.
-    pub fn search_with_extra(
-        &self,
-        query: &str,
-        limit: usize,
-        replace: impl Fn(&CatalogPart) -> Option<CatalogPart>,
-        extra: &[CatalogPart],
-    ) -> SearchResults {
         let query = Query::new(query);
-        let mut ranked: Vec<(u8, usize)> = Vec::new();
-        let extra_keys: Vec<SearchText> = extra.iter().map(SearchText::new).collect();
-        let keys = self
+        let mut ranked: Vec<(u8, usize)> = self
             .index
             .iter()
             .enumerate()
-            .map(|(position, indexed)| {
-                let replaced = replace(&self.parts[position]).map(|part| SearchText::new(&part));
-                (position, replaced, Some(indexed))
-            })
-            .chain(
-                extra_keys
-                    .iter()
-                    .enumerate()
-                    .map(|(at, key)| (self.parts.len() + at, None, Some(key))),
-            );
-        for (position, replaced, indexed) in keys {
-            let Some(key) = replaced.as_ref().or(indexed) else {
-                continue;
-            };
-            if let Some(rank) = key.rank(&query) {
-                ranked.push((rank, position));
-            }
-        }
+            .filter_map(|(position, key)| Some((key.rank(&query)?, position)))
+            .collect();
         let total = ranked.len();
         // Positions are already ascending, so a stable sort keeps catalog order
         // within each rank.
@@ -418,20 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn extra_parts_are_searched_after_the_catalogs_own() {
-        let catalog = CsvCatalog::from_parts(
-            vec![part("A-1", "X", "abc"), part("A-2", "Y", "other")],
-            Vec::new(),
-        );
-        let extra = [part("N-1", "ABC", "added in the app")];
-        let results = catalog.search_with_extra("abc", 10, |_| None, &extra);
-        // The extra part is an exact MPN match, so it ranks first; its hit
-        // is past the catalog's own parts.
-        assert_eq!(results.hits, vec![2, 0]);
-        assert_eq!(results.total, 2);
-    }
-
-    #[test]
     fn all_terms_must_match_and_limit_keeps_total() {
         let catalog = CsvCatalog::from_parts(
             vec![
@@ -445,29 +388,6 @@ mod tests {
         assert_eq!(results.total, 2);
         assert_eq!(results.hits, vec![0]);
         assert_eq!(catalog.search("  ", 10).total, 3);
-    }
-
-    #[test]
-    fn replaced_parts_match_on_their_replacement_values() {
-        let catalog = CsvCatalog::from_parts(
-            vec![part("R-1", "", "res 47"), part("R-2", "", "res 10k")],
-            Vec::new(),
-        );
-        let replace = |found: &CatalogPart| {
-            (found.ipn == "R-1").then(|| CatalogPart {
-                description: "thick film 47R".into(),
-                ..found.clone()
-            })
-        };
-        assert_eq!(catalog.search_replacing("47r", 10, replace).hits, vec![0]);
-        assert_eq!(catalog.search("47r", 10).total, 0);
-        // The old value no longer finds the replaced part.
-        assert_eq!(catalog.search_replacing("res", 10, replace).hits, vec![1]);
-        assert_eq!(
-            catalog.search_replacing("10k", 10, replace).hits,
-            vec![1],
-            "other parts match as before"
-        );
     }
 
     #[test]
