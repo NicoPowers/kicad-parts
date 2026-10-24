@@ -74,6 +74,8 @@ describe('a team linked to its library repo', () => {
     await (await browser.$('#team-password')).setValue(acme.accounts[0].password);
     await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();
     await waitForText(browser, BADGE, `Team catalog · ${acme.accounts[0].name}`);
+    // The row names the team by its code once known, not by its address.
+    await waitForText(browser, '.team-row .team-name strong', 'AC');
     await setMenuOpen(true);
     await waitForText(browser, `${REPO} .team-repo-name`, 'Library repo: None yet');
     const add = await browser.$(`${REPO} .team-actions button`);
@@ -86,6 +88,9 @@ describe('a team linked to its library repo', () => {
       'Add… puts the cursor in the field',
     );
     await field.setValue(checkout);
+    // The folder's path changes from run to run.
+    await screenshot(browser, '105-team-library-repo-add', { blankOut: [...ADDRESSES, `${REPO} input`] });
+    await assertAccessible(browser, '105-team-library-repo-add');
     await (await browser.$(`${REPO} button[type="submit"]`)).click();
     await waitForText(browser, `${REPO} .team-repo-state`, 'Can read and write.', 60_000);
     assert.equal(await (await browser.$(`${REPO} .team-repo-which`)).getText(), 'client-library');
@@ -115,9 +120,50 @@ describe('a team linked to its library repo', () => {
     assert.match(await browser.execute(() => document.querySelector('.team-repo-details pre')?.textContent ?? ''), /does not appear to be a git repository/);
     await screenshot(browser, '104-team-library-repo-problem', { blankOut: ADDRESSES });
     await assertAccessible(browser, '104-team-library-repo-problem');
-    // Remove unlinks it, and the row offers Add… again.
-    await (await browser.$(`${REPO} button[aria-label="Remove the library repo"]`)).click();
+    // Remove repo unlinks it, and the row offers Add… again.
+    const remove = await browser.$(`${REPO} .team-actions button:last-child`);
+    assert.equal(await remove.getText(), 'Remove repo');
+    await remove.click();
     await waitForText(browser, `${REPO} .team-repo-name`, 'Library repo: None yet');
+  });
+
+  it('asks which remote holds the library, and never shows one with a token', async () => {
+    // A clone with two remotes and no origin: the moved repo, and a remote
+    // whose address holds a token.
+    const repos = path.dirname(bare);
+    const several = path.join(repos, 'several-remotes');
+    fs.mkdirSync(several);
+    git(several, 'init', '-q');
+    git(several, 'remote', 'add', 'client', `${bare}-moved`);
+    git(several, 'remote', 'add', 'work', 'https://oauth2:glpat-journey@gitlab.com/acme/kicad-lib.git');
+    await (await browser.$(`${REPO} .team-actions button`)).click();
+    await (await browser.$(`${REPO} input[type="text"]`)).setValue(several);
+    await (await browser.$(`${REPO} button[type="submit"]`)).click();
+    await waitForText(
+      browser,
+      `${REPO} .team-repo-remotes legend`,
+      'This clone has several remotes. Which one holds the library?',
+    );
+    const remotes = await browser.execute(() =>
+      [...document.querySelectorAll('.team-repo-remotes button, .team-repo-remote-refused')].map((el) => el.textContent),
+    );
+    assert.equal(remotes.length, 2);
+    assert.match(remotes[0], /^client /);
+    assert.equal(
+      remotes[1],
+      "work: That address has a password or token in it. The app never keeps passwords: sign in with a git credential helper, or use the repo's ssh address.",
+    );
+    assert.equal(
+      await browser.execute(() => document.body.textContent.includes('glpat')),
+      false,
+      'the token is never shown',
+    );
+    await screenshot(browser, '106-team-library-repo-remotes', {
+      blankOut: [...ADDRESSES, `${REPO} input`, '.team-repo-remote-address'],
+    });
+    await assertAccessible(browser, '106-team-library-repo-remotes');
+    await (await browser.$('.team-repo-remotes button')).click();
+    await waitForText(browser, `${REPO} .team-repo-state`, 'Can read and write.', 60_000);
     await setMenuOpen(false);
   });
 });
