@@ -352,19 +352,33 @@ pub(crate) fn cannot_add_to(status: &TeamsStatus, team: &str) -> Option<String> 
     if editable_teams(status).iter().any(|server| server == team) {
         return None;
     }
-    let found = status.teams.iter().find(|listed| listed.server_url == team);
-    Some(match found {
-        Some(listed) if standing_of(listed) == Standing::Offline => {
-            format!(
-                "{} is offline. You can save when it is back.",
-                listed.label()
-            )
+    let Some(listed) = status.teams.iter().find(|listed| listed.server_url == team) else {
+        return Some("That team is no longer in your teams. Choose another team.".to_owned());
+    };
+    let name = listed.label();
+    // Signed in, reachable, yet not allowed to add: today that means view
+    // only; roles (kicad-parts-5514) will say more here.
+    let view_only = matches!(
+        listed.session,
+        TeamSession::SignedIn {
+            can_edit: false,
+            ..
         }
-        Some(listed) => format!(
-            "{} can't take new parts now. Sign in to it again from Teams to save.",
-            listed.label()
-        ),
-        None => "That team is no longer in your teams. Choose another team.".to_owned(),
+    );
+    Some(match standing_of(listed) {
+        Standing::Offline => format!("{name} is offline. You can save when it is back."),
+        Standing::Connecting => {
+            format!("{name} is still connecting. You can save when it is ready.")
+        }
+        Standing::Live if view_only => {
+            format!("You can view {name}'s parts but not add to them. Choose another team.")
+        }
+        Standing::SignInAgain => {
+            format!("{name} asks you to sign in again. Sign in from Teams to save.")
+        }
+        Standing::Live | Standing::SignedOut => {
+            format!("You are signed out of {name}. Sign in from Teams to save.")
+        }
     })
 }
 
@@ -543,9 +557,34 @@ mod tests {
         );
         assert_eq!(
             cannot_add_to(&all, "https://be.example.com").as_deref(),
-            Some("BE can't take new parts now. Sign in to it again from Teams to save.")
+            Some("You are signed out of BE. Sign in from Teams to save.")
         );
         assert!(cannot_add_to(&all, "https://gone.example.com").is_some());
+        let connecting = team("CE", "rose", TeamSession::Reaching { problem: None });
+        let again = team(
+            "DE",
+            "olive",
+            TeamSession::SignedOut {
+                problem: Some("Sign in again.".into()),
+            },
+        );
+        let mut viewer = team("FE", "slate", signed_in(LiveUpdates::Live));
+        if let TeamSession::SignedIn { can_edit, .. } = &mut viewer.session {
+            *can_edit = false;
+        }
+        let more = status(vec![connecting, again, viewer], "");
+        assert_eq!(
+            cannot_add_to(&more, "https://ce.example.com").as_deref(),
+            Some("CE is still connecting. You can save when it is ready.")
+        );
+        assert_eq!(
+            cannot_add_to(&more, "https://de.example.com").as_deref(),
+            Some("DE asks you to sign in again. Sign in from Teams to save.")
+        );
+        assert_eq!(
+            cannot_add_to(&more, "https://fe.example.com").as_deref(),
+            Some("You can view FE's parts but not add to them. Choose another team.")
+        );
     }
 
     #[test]
