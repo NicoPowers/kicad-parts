@@ -3,10 +3,10 @@
 // libraries with ${KIPRJMOD}, 3D models sit in a folder of their own behind
 // ${ACME_3D}, and an old copy of the symbol library has the same name.
 // After linking, the team's row offers "Review library layout". The
-// review shows what the scan found and what to check. The person leaves
-// out the old copy and chooses "Use this layout". The Libraries browser
-// then lists the client's libraries in a group with the team's mark,
-// read from the app's own copy. The repo is a bare repo in a folder; git
+// review shows what the scan found and what to check. The person keeps
+// the old copy left out, as the app suggests, and chooses "Use this
+// layout". The Libraries browser then lists the client's libraries in a
+// group with the team's mark, read from the app's own copy. The repo is a bare repo in a folder; git
 // reads only the run's own empty settings file (run-journeys.mjs).
 
 import assert from 'node:assert/strict';
@@ -133,9 +133,8 @@ describe('a client library repo laid out its own way', () => {
       await textOf(browser, '.layout-summary'),
       '2 symbol libraries, 1 footprint library and 1 3D model in 1 folder.',
     );
-    // The short name starts as the team's code, with the cursor in it.
-    assert.equal(await browser.execute(() => document.activeElement?.id), 'layout-prefix');
-    assert.equal(await (await browser.$('#layout-prefix')).getValue(), 'AC');
+    // The keyboard starts at the summary of what was found.
+    assert.equal(await browser.execute(() => document.activeElement?.id), 'layout-summary');
     // The path variable points to the model folder the links match.
     assert.equal(
       await browser.execute(() => document.querySelector('#layout-variable-ACME_3D').selectedOptions[0].textContent),
@@ -156,9 +155,17 @@ describe('a client library repo laid out its own way', () => {
     // The commit changes from run to run.
     await screenshot(browser, '107-team-library-layout-review', { blankOut: ['.layout-commit'] });
     await assertAccessible(browser, '107-team-library-layout-review');
-    // Leave out the old copy, then use the layout.
-    await (await browser.$('#layout-symbols-0')).click();
+    // The old copy, which no library table names, starts left out. Keeping
+    // both is refused, since KiCad would use only one.
     assert.equal(await (await browser.$('#layout-symbols-0')).isSelected(), false);
+    await (await browser.$('#layout-symbols-0')).click();
+    await (await browser.$('#layout-use')).click();
+    await waitForText(
+      browser,
+      '.layout-refused',
+      '2 libraries are named Acme: archive/Acme.kicad_sym, lib/acme_symbols.kicad_sym. KiCad would use only one, so leave out the others.',
+    );
+    await (await browser.$('#layout-symbols-0')).click();
     await (await browser.$('#layout-use')).click();
     await browser.waitUntil(async () => browser.execute((s) => document.querySelector(s) === null, LAYOUT), {
       timeout: 30_000,

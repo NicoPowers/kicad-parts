@@ -632,9 +632,6 @@ pub enum LayoutDoubt {
 /// wrong.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LayoutChoices {
-    /// Tells this repo's libraries apart inside the app, such as `AC`.
-    /// KiCad and boards never see it.
-    pub prefix: String,
     /// A folder chosen for a path variable, by the variable's name.
     #[serde(default)]
     pub variable_folders: BTreeMap<String, String>,

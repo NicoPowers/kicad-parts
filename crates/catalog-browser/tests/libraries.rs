@@ -862,7 +862,6 @@ fn lists_each_linked_teams_reviewed_libraries_in_a_group_of_its_own() {
         colour: "blue".into(),
         repo_name: "acme/kicad-lib".into(),
         profile: SourceProfile {
-            prefix: "AC".into(),
             // A client's own Device library, beside KiCad's.
             symbols: listed("Device", "lib/Device.kicad_sym"),
             footprints: listed("Acme_FP", "lib/Acme.pretty"),
@@ -870,6 +869,7 @@ fn lists_each_linked_teams_reviewed_libraries_in_a_group_of_its_own() {
             path_variables: vec![],
             database_libraries: vec![],
             models_by_library: None,
+            own_library_start: None,
         },
         folder: files,
     };

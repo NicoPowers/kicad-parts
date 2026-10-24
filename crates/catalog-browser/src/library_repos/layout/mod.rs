@@ -107,20 +107,28 @@ impl Layouts {
     }
 
     /// The newest scan of `repo` to review, with the choices made before,
-    /// or the first ones: the team's code `team_code` as the prefix.
+    /// or the first ones. Where two libraries now share a nickname and the
+    /// choices made before keep both, the first choices leave one out.
     pub(crate) fn review(
         &self,
         repo: &LibraryRepo,
         server_url: &str,
-        team_code: &str,
         note: Option<String>,
     ) -> Result<LibraryLayoutReview, RepoProblem> {
         let layout = Self::scan_latest(repo)?;
         let reviewed = self.store.read(&repo.address().folder_name());
         let repo_name = repo.address().name();
+        let first = store::first_choices(&layout);
         let choices = match &reviewed {
-            Some(reviewed) => reviewed.choices.clone(),
-            None => store::first_choices(team_code, &repo_name),
+            Some(reviewed) => match store::checked(&layout, reviewed.choices.clone()) {
+                Ok(choices) => choices,
+                Err(_) => {
+                    let mut choices = reviewed.choices.clone();
+                    choices.left_out.extend(first.left_out);
+                    choices
+                }
+            },
+            None => first,
         };
         Ok(LibraryLayoutReview {
             server_url: server_url.to_owned(),

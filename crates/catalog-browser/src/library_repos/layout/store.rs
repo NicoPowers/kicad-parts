@@ -11,18 +11,16 @@
 //! marks it changed, so the team's row asks the person to review it again.
 //! The layout reviewed before stays in use meanwhile.
 
-use desktop_contract::{LayoutChoices, LibraryLayout};
+use desktop_contract::{LayoutChoices, LayoutLibrary, LibraryLayout};
 use kicad_integration::library_source::{
     LibraryList, SourceLibrary, SourceProfile, SourceVariable,
 };
 use kicad_integration::sha256_hex;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-
-/// The longest prefix: it is a label, such as a team code.
-const MAX_PREFIX: usize = 12;
 
 /// One repo's reviewed layout, as kept in its file.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -66,33 +64,47 @@ pub(crate) fn fingerprint(layout: &LibraryLayout) -> String {
     sha256_hex(parts.to_string().as_bytes())
 }
 
-/// The choices a first review starts with: the team's code as the prefix,
-/// the scan's folders, and every library in.
-pub(crate) fn first_choices(team_code: &str, repo_name: &str) -> LayoutChoices {
+/// The choices a first review starts with: the scan's folders, and every
+/// library in, except where two libraries of one kind share a nickname.
+/// Then the ones no lib table names are left out, since KiCad finds a
+/// nickname through the tables; with no table naming one, all but the
+/// first are.
+pub(crate) fn first_choices(layout: &LibraryLayout) -> LayoutChoices {
+    let mut left_out = Vec::new();
+    for libraries in [&layout.symbol_libraries, &layout.footprint_libraries] {
+        for clash in clashes(libraries) {
+            let keep = clash
+                .iter()
+                .find(|library| library.from_table)
+                .or(clash.first())
+                .map(|library| library.path.clone());
+            left_out.extend(
+                clash
+                    .iter()
+                    .map(|library| library.path.clone())
+                    .filter(|path| Some(path) != keep.as_ref()),
+            );
+        }
+    }
     LayoutChoices {
-        prefix: default_prefix(team_code, repo_name),
+        left_out,
         ..LayoutChoices::default()
     }
 }
 
-/// The team's code, or for a team with none yet, the repo name's first
-/// two letters or digits in capitals.
-fn default_prefix(team_code: &str, repo_name: &str) -> String {
-    if !team_code.trim().is_empty() {
-        return team_code.trim().to_owned();
+/// The groups of libraries that share one nickname, in list order.
+fn clashes(libraries: &[LayoutLibrary]) -> Vec<Vec<&LayoutLibrary>> {
+    let mut by_nickname: BTreeMap<&str, Vec<&LayoutLibrary>> = BTreeMap::new();
+    for library in libraries {
+        by_nickname
+            .entry(&library.nickname)
+            .or_default()
+            .push(library);
     }
-    let name = repo_name.rsplit('/').next().unwrap_or(repo_name);
-    let letters: String = name
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(2)
-        .collect::<String>()
-        .to_ascii_uppercase();
-    if letters.is_empty() {
-        "LIB".to_owned()
-    } else {
-        letters
-    }
+    by_nickname
+        .into_values()
+        .filter(|group| group.len() > 1)
+        .collect()
 }
 
 /// `choices` checked against the scan they were made for, with what is
@@ -101,19 +113,6 @@ pub(crate) fn checked(
     layout: &LibraryLayout,
     mut choices: LayoutChoices,
 ) -> Result<LayoutChoices, String> {
-    choices.prefix = choices.prefix.trim().to_owned();
-    if choices.prefix.is_empty() {
-        return Err("Give the library a short name, such as the team's code.".to_owned());
-    }
-    let plain = choices
-        .prefix
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if choices.prefix.chars().count() > MAX_PREFIX || !plain {
-        return Err(format!(
-            "The short name can have up to {MAX_PREFIX} letters, digits, - or _."
-        ));
-    }
     // A choice made for an older commit whose variable or folder is gone
     // is dropped, as a library no longer there is: the person sees the
     // scan's own folder instead.
@@ -135,6 +134,24 @@ pub(crate) fn checked(
         .retain(|path| libraries().any(|library| &library.path == path));
     choices.left_out.sort();
     choices.left_out.dedup();
+    // KiCad would use only one library of a nickname, so one must go.
+    for libraries in [&layout.symbol_libraries, &layout.footprint_libraries] {
+        for clash in clashes(libraries) {
+            let kept: Vec<&str> = clash
+                .iter()
+                .map(|library| library.path.as_str())
+                .filter(|path| !choices.left_out.iter().any(|out| out == path))
+                .collect();
+            if kept.len() > 1 {
+                return Err(format!(
+                    "{} libraries are named {}: {}. KiCad would use only one, so leave out the others.",
+                    kept.len(),
+                    clash[0].nickname,
+                    kept.join(", ")
+                ));
+            }
+        }
+    }
     Ok(choices)
 }
 
@@ -151,7 +168,6 @@ pub(crate) fn profile_of(layout: &LibraryLayout, choices: &LayoutChoices) -> Sou
             .collect(),
     };
     SourceProfile {
-        prefix: choices.prefix.clone(),
         symbols: listed(&layout.symbol_libraries),
         footprints: listed(&layout.footprint_libraries),
         model_folders: layout.model_folders.clone(),
@@ -169,6 +185,7 @@ pub(crate) fn profile_of(layout: &LibraryLayout, choices: &LayoutChoices) -> Sou
             .collect(),
         database_libraries: layout.database_libraries.clone(),
         models_by_library: None,
+        own_library_start: None,
     }
 }
 
@@ -290,16 +307,13 @@ mod tests {
         let choices = checked(
             &layout,
             LayoutChoices {
-                prefix: " AC ".into(),
                 variable_folders: [("LOST".to_owned(), "lib".to_owned())].into(),
                 left_out: vec!["old/Old.pretty".into(), "not/a/library".into()],
             },
         )
         .unwrap();
-        assert_eq!(choices.prefix, "AC");
         assert_eq!(choices.left_out, ["old/Old.pretty"]);
         let profile = profile_of(&layout, &choices);
-        assert_eq!(profile.prefix, "AC");
         assert_eq!(
             profile.footprints,
             LibraryList::Listed {
@@ -326,52 +340,50 @@ mod tests {
     }
 
     #[test]
-    fn choices_that_do_not_fit_the_scan_are_refused_plainly() {
+    fn a_folder_choice_whose_variable_or_folder_is_gone_is_dropped() {
         let layout = layout("a");
-        let with = |prefix: &str, variable: &str, folder: &str| {
+        let with = |variable: &str, folder: &str| {
             checked(
                 &layout,
                 LayoutChoices {
-                    prefix: prefix.into(),
                     variable_folders: [(variable.to_owned(), folder.to_owned())].into(),
                     left_out: vec![],
                 },
             )
+            .unwrap()
+            .variable_folders
         };
-        assert!(
-            with("", "ACME_3D", "3d")
-                .unwrap_err()
-                .contains("short name")
-        );
-        assert!(with("A C", "ACME_3D", "3d").is_err());
-        assert!(with("ABCDEFGHIJKLM", "ACME_3D", "3d").is_err());
-        // A folder choice whose variable or folder is gone is dropped.
-        assert!(
-            with("AC", "NOPE", "3d")
-                .unwrap()
-                .variable_folders
-                .is_empty()
-        );
-        assert!(
-            with("AC", "ACME_3D", "elsewhere")
-                .unwrap()
-                .variable_folders
-                .is_empty()
-        );
-        assert!(with("AC-2_x", "ACME_3D", "").is_ok());
+        assert!(with("NOPE", "3d").is_empty());
+        assert!(with("ACME_3D", "elsewhere").is_empty());
+        assert_eq!(with("ACME_3D", "").len(), 1);
     }
 
     #[test]
-    fn the_prefix_starts_as_the_team_code() {
-        assert_eq!(first_choices("AC", "acme/kicad-lib").prefix, "AC");
-        assert_eq!(first_choices("", "acme/kicad-lib").prefix, "KI");
-        assert_eq!(first_choices("", "--").prefix, "LIB");
+    fn libraries_sharing_a_nickname_keep_only_the_one_a_table_names() {
+        let mut layout = layout("a");
+        layout.footprint_libraries.push(LayoutLibrary {
+            nickname: "Acme_FP".into(),
+            path: "archive/Acme.pretty".into(),
+            from_table: false,
+        });
+        let first = first_choices(&layout);
+        assert_eq!(first.left_out, ["archive/Acme.pretty"]);
+        assert!(checked(&layout, first).is_ok());
+        // Keeping both is refused, saying which.
+        let both = checked(&layout, LayoutChoices::default()).unwrap_err();
+        assert_eq!(
+            both,
+            "2 libraries are named Acme_FP: lib/Acme.pretty, archive/Acme.pretty. KiCad would use only one, so leave out the others."
+        );
+        // With no table naming either, the first is kept.
+        layout.footprint_libraries[0].from_table = false;
+        assert_eq!(first_choices(&layout).left_out, ["archive/Acme.pretty"]);
     }
 
     #[test]
     fn a_new_commit_moves_silently_only_while_its_scan_is_the_same() {
         let first = layout("a");
-        let choices = first_choices("AC", "acme/lib");
+        let choices = first_choices(&first);
         let mut reviewed = Reviewed {
             commit: "a".into(),
             fingerprint: fingerprint(&first),
@@ -414,7 +426,7 @@ mod tests {
         let store = Store::new(folder.path().join("library-layouts"));
         assert_eq!(store.read("repo"), None);
         let first = layout("a");
-        let choices = first_choices("AC", "acme/lib");
+        let choices = first_choices(&first);
         let reviewed = Reviewed {
             commit: "a".into(),
             fingerprint: fingerprint(&first),

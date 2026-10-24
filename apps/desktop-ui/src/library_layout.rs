@@ -1,11 +1,10 @@
 //! Review library layout (kicad-parts-e9a3): one screen that says where a
 //! team's library repo keeps its libraries, 3D models and path variables,
 //! as the app's scan found them. The person fixes only what the scan got
-//! wrong (the short name in this app, a path variable's folder, a library
-//! to leave out), then chooses "Use this layout".
+//! wrong (a path variable's folder, a library to leave out), then chooses
+//! "Use this layout".
 //!
 //! Library names stay exactly as the repo gives them: boards store them.
-//! The short name only tells this repo's libraries apart inside the app.
 
 use crate::backend;
 use crate::focus::focus_later;
@@ -92,7 +91,7 @@ pub(crate) fn doubt_groups(doubts: &[LayoutDoubt]) -> Vec<DoubtGroup> {
                 1,
                 "Libraries with the same name",
                 format!(
-                    "{} libraries are named {nickname}: {}. Leave out the one boards don't use.",
+                    "{} libraries are named {nickname}: {}. KiCad uses only one, so keep the one boards use. The app first keeps the one a library table names.",
                     paths.len(),
                     paths.join(", ")
                 ),
@@ -165,7 +164,6 @@ pub(crate) fn LayoutDialog(open: RwSignal<Option<LayoutOpen>>) -> impl IntoView 
     });
     let dialog = NodeRef::<leptos::html::Dialog>::new();
     let review = RwSignal::new(None::<Result<LibraryLayoutReview, String>>);
-    let prefix = RwSignal::new(String::new());
     let folders = RwSignal::new(BTreeMap::<String, String>::new());
     let left_out = RwSignal::new(BTreeSet::<String>::new());
     let busy = RwSignal::new(true);
@@ -203,7 +201,6 @@ pub(crate) fn LayoutDialog(open: RwSignal<Option<LayoutOpen>>) -> impl IntoView 
                 if let Ok(found) = &found {
                     let first = review.with_untracked(|review| !matches!(review, Some(Ok(_))));
                     if first {
-                        prefix.set(found.choices.prefix.clone());
                         folders.set(found.choices.variable_folders.clone());
                         left_out.set(found.choices.left_out.iter().cloned().collect());
                     }
@@ -211,10 +208,10 @@ pub(crate) fn LayoutDialog(open: RwSignal<Option<LayoutOpen>>) -> impl IntoView 
                 let first_answer = review.with_untracked(Option::is_none);
                 review.set(Some(found));
                 busy.set(false);
-                // The cursor waits in the short name, the first thing the
-                // person may change, once the scan is shown.
+                // Once the scan is shown, the keyboard starts at its
+                // summary, so a screen reader reads what was found first.
                 if first_answer {
-                    focus_later("layout-prefix");
+                    focus_later("layout-summary");
                 }
             });
         }
@@ -241,7 +238,6 @@ pub(crate) fn LayoutDialog(open: RwSignal<Option<LayoutOpen>>) -> impl IntoView 
                 server_url: server_url.clone(),
                 commit: found.layout.commit.clone(),
                 choices: LayoutChoices {
-                    prefix: prefix.get_untracked(),
                     variable_folders: folders.get_untracked(),
                     left_out: left_out.get_untracked().into_iter().collect(),
                 },
@@ -274,7 +270,7 @@ pub(crate) fn LayoutDialog(open: RwSignal<Option<LayoutOpen>>) -> impl IntoView 
             <div class="problem" role="alert"><p>{message}</p></div>
         }
         .into_any(),
-        Some(Ok(found)) => layout_view(found, prefix, folders, left_out).into_any(),
+        Some(Ok(found)) => layout_view(found, folders, left_out).into_any(),
     };
     let title = move || {
         review.with(|review| match review {
@@ -352,7 +348,6 @@ pub(crate) fn LayoutDialog(open: RwSignal<Option<LayoutOpen>>) -> impl IntoView 
 /// change on the left, the libraries on the right.
 fn layout_view(
     found: LibraryLayoutReview,
-    prefix: RwSignal<String>,
     folders: RwSignal<BTreeMap<String, String>>,
     left_out: RwSignal<BTreeSet<String>>,
 ) -> impl IntoView {
@@ -363,7 +358,7 @@ fn layout_view(
     view! {
         <div class="layout-columns">
             <div class="layout-column">
-                <p class="layout-summary">{summary_text(&found)}</p>
+                <p class="layout-summary" id="layout-summary" tabindex="-1">{summary_text(&found)}</p>
                 {(!doubts.is_empty()).then(|| view! {
                     <section class="layout-section layout-doubts" aria-labelledby="layout-doubts-title">
                         <h3 id="layout-doubts-title">"Check these"</h3>
@@ -378,24 +373,6 @@ fn layout_view(
                         }).collect_view()}
                     </section>
                 })}
-                <section class="layout-section" aria-labelledby="layout-prefix-title">
-                    <h3 id="layout-prefix-title">
-                        <label for="layout-prefix">"Short name in this app"</label>
-                    </h3>
-                    <input
-                        id="layout-prefix"
-                        type="text"
-                        maxlength="12"
-                        spellcheck="false"
-                        autocomplete="off"
-                        aria-describedby="layout-prefix-hint"
-                        prop:value=move || prefix.get()
-                        on:input:target=move |event| prefix.set(event.target().value())
-                    />
-                    <p class="hint" id="layout-prefix-hint">
-                        "Tells this repo's libraries apart in this app, such as in the Libraries browser. KiCad and boards keep the library names as they are."
-                    </p>
-                </section>
                 <section class="layout-section" aria-labelledby="layout-variables-title">
                     <h3 id="layout-variables-title">
                         {format!("Path variables ({})", variables.len())}

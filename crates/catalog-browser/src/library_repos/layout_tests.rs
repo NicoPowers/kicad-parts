@@ -119,8 +119,8 @@ fn a_linked_repo_is_scanned_reviewed_and_browsed_offline() {
     let review = repos.review_layout(ACME, false).unwrap();
     assert_eq!(review.repo_name, "acme-lib");
     assert!(!review.reviewed_before);
-    // The team's code is the in-app prefix to start with.
-    assert_eq!(review.choices.prefix, "AC");
+    // Nothing to change to start with.
+    assert_eq!(review.choices, LayoutChoices::default());
     let layout = &review.layout;
     let nicknames = |libraries: &[desktop_contract::LayoutLibrary]| -> Vec<String> {
         libraries
@@ -143,25 +143,16 @@ fn a_linked_repo_is_scanned_reviewed_and_browsed_offline() {
         }]
     );
 
-    // A choice that doesn't fit the scan is refused plainly.
-    let commit = layout.commit.clone();
-    let refused = repos.use_layout(&LayoutUseRequest {
-        server_url: ACME.into(),
-        commit: commit.clone(),
-        choices: LayoutChoices {
-            prefix: String::new(),
-            ..review.choices.clone()
-        },
-    });
-    assert!(refused.unwrap_err().contains("short name"));
+    // The person points the variable at the repo's top folder instead.
+    let chosen = LayoutChoices {
+        variable_folders: [("ACME_3D".to_owned(), String::new())].into(),
+        ..review.choices.clone()
+    };
     repos
         .use_layout(&LayoutUseRequest {
             server_url: ACME.into(),
-            commit,
-            choices: LayoutChoices {
-                prefix: "ACME".into(),
-                ..review.choices.clone()
-            },
+            commit: layout.commit.clone(),
+            choices: chosen.clone(),
         })
         .unwrap();
     assert_eq!(
@@ -174,7 +165,7 @@ fn a_linked_repo_is_scanned_reviewed_and_browsed_offline() {
     // A review again starts from the choices made.
     let again = repos.review_layout(ACME, false).unwrap();
     assert!(again.reviewed_before);
-    assert_eq!(again.choices.prefix, "ACME");
+    assert_eq!(again.choices, chosen);
 
     // Browsing works offline, from the app's copy.
     fs::rename(&acme, fixture.path("acme-moved.git")).unwrap();
@@ -184,7 +175,11 @@ fn a_linked_repo_is_scanned_reviewed_and_browsed_offline() {
         panic!("one team's libraries: {libraries:?}");
     };
     assert_eq!((team.code.as_str(), team.colour.as_str()), ("AC", "blue"));
-    assert_eq!(team.profile.prefix, "ACME");
+    assert_eq!(
+        team.profile.path_variables[0].folder.as_deref(),
+        Some(""),
+        "the person's choice"
+    );
     let symbols = team
         .profile
         .library_path(TableKind::Symbol, "ACME")
@@ -216,7 +211,6 @@ fn a_newer_commit_asks_for_a_review_only_when_the_layout_changed() {
     repos.link(BETA, &beta.display().to_string()).unwrap();
     repos.wait_until_idle();
     let review = repos.review_layout(BETA, false).unwrap();
-    assert_eq!(review.choices.prefix, "BE");
     assert_eq!(review.layout.database_libraries, ["beta.kicad_dbl"]);
     assert_eq!(
         review.layout.path_variables[0].folder.as_deref(),

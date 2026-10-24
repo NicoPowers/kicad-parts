@@ -10,12 +10,10 @@
 //!   and its path in the repo;
 //! - the folders that hold its 3D models;
 //! - its path variables, each with the repo folder it points to;
-//! - any `.kicad_dbl` files;
-//! - a short prefix that tells sources apart inside the app.
+//! - any `.kicad_dbl` files.
 //!
 //! Nicknames are never renamed: a client's boards store them, so they stay
-//! exactly as the repo's lib tables (or file names) give them. The prefix
-//! is only for the app (ADR 0022).
+//! exactly as the repo's lib tables (or file names) give them (ADR 0022).
 //!
 //! Our own repo's layout (`symbols/`, `footprints/`, `3d-models/` and
 //! `${GITPLM_PARTS}`) is the default profile, [`SourceProfile::own`]. The
@@ -61,9 +59,6 @@ pub struct SourceVariable {
 /// Where one library repo keeps its KiCad libraries.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceProfile {
-    /// Tells this source apart inside the app, such as `AC`. Never part of
-    /// a name KiCad or a board sees, except for libraries the app makes.
-    pub prefix: String,
     pub symbols: LibraryList,
     pub footprints: LibraryList,
     /// The repo folders that hold 3D models, such as `3d-models`.
@@ -78,9 +73,13 @@ pub struct SourceProfile {
     /// for client repos.
     #[serde(default)]
     pub models_by_library: Option<String>,
+    /// How the nicknames of the libraries the app makes start, such as our
+    /// `g-`. Only our own layout has such libraries yet.
+    #[serde(default)]
+    pub own_library_start: Option<String>,
 }
 
-/// The folders, variable and prefix of our own layout.
+/// The folders, variable and nickname start of our own layout.
 pub mod own {
     /// Our symbol libraries: `symbols/g-<category>.kicad_sym`.
     pub const SYMBOL_FOLDER: &str = "symbols";
@@ -90,8 +89,8 @@ pub mod own {
     pub const MODEL_FOLDER: &str = "3d-models";
     /// Points to the repo's top folder in every link to our 3D models.
     pub const VARIABLE: &str = "GITPLM_PARTS";
-    /// Our libraries are named `g-...`.
-    pub const PREFIX: &str = "g";
+    /// Our libraries' nicknames start so: `g-res`, `g-Resistor_SMD`.
+    pub const LIBRARY_START: &str = "g-";
 }
 
 /// Where a 3D model link leads, read through a source's path variables.
@@ -116,7 +115,6 @@ impl SourceProfile {
     /// models are linked as `${GITPLM_PARTS}/3d-models/...`.
     pub fn own() -> Self {
         Self {
-            prefix: own::PREFIX.to_owned(),
             symbols: LibraryList::EveryLibraryIn {
                 folder: own::SYMBOL_FOLDER.to_owned(),
             },
@@ -130,6 +128,7 @@ impl SourceProfile {
             }],
             database_libraries: Vec::new(),
             models_by_library: Some(own::MODEL_FOLDER.to_owned()),
+            own_library_start: Some(own::LIBRARY_START.to_owned()),
         }
     }
 
@@ -141,12 +140,12 @@ impl SourceProfile {
         }
     }
 
-    /// Whether `nickname` is one the app made for this source: it starts
-    /// with the prefix and a dash, such as our `g-res`.
+    /// Whether `nickname` names a library the app made for this source,
+    /// such as our `g-res`.
     pub fn is_own_name(&self, nickname: &str) -> bool {
-        nickname
-            .strip_prefix(&self.prefix)
-            .is_some_and(|rest| rest.starts_with('-'))
+        self.own_library_start
+            .as_deref()
+            .is_some_and(|start| nickname.starts_with(start))
     }
 
     /// The repo path of the library `nickname` of `kind`, such as
@@ -370,7 +369,6 @@ mod tests {
 
     fn client() -> SourceProfile {
         SourceProfile {
-            prefix: "AC".into(),
             symbols: LibraryList::Listed {
                 libraries: vec![SourceLibrary {
                     nickname: "Acme".into(),
@@ -406,6 +404,7 @@ mod tests {
             ],
             database_libraries: vec![],
             models_by_library: None,
+            own_library_start: None,
         }
     }
 
@@ -446,6 +445,7 @@ mod tests {
         assert!(own.is_own_name("g-res"));
         assert!(!own.is_own_name("gx-res"));
         assert!(!own.is_own_name("Device"));
+        assert!(!client().is_own_name("Acme"));
     }
 
     #[test]

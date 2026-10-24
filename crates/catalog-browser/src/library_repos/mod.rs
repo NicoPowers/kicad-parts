@@ -238,16 +238,7 @@ impl LibraryRepos {
                 Err(problem) => return Err(problem),
             }
         }
-        let code = self
-            .shared
-            .teams
-            .status()
-            .teams
-            .into_iter()
-            .find(|team| team.server_url == server_url)
-            .map(|team| team.code)
-            .unwrap_or_default();
-        self.shared.layouts.review(&repo, server_url, &code, note)
+        self.shared.layouts.review(&repo, server_url, note)
     }
 
     /// Keeps the library layout the person reviewed for the team's repo.

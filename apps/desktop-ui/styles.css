@@ -2838,6 +2838,10 @@ a {
   padding: 0.6rem 0.2rem 0.8rem;
 }
 
+.layout-summary:focus {
+  outline: none;
+}
+
 .layout-summary {
   margin: 0 0 0.6rem;
   font-weight: 600;
@@ -2884,17 +2888,11 @@ a {
   overflow-wrap: anywhere;
 }
 
-#layout-prefix,
 .layout-variables select {
   font: inherit;
   padding: 0.3rem 0.5rem;
   border: 1px solid #9aa7b6;
   border-radius: 6px;
-}
-
-#layout-prefix {
-  width: 8rem;
-  margin-bottom: 0.3rem;
 }
 
 .layout-variables li {
