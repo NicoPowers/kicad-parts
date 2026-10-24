@@ -7,6 +7,7 @@
 //! A team whose KiCad libraries were made from another server address asks,
 //! on its row, whether the team moved (kicad-parts-092b).
 
+use crate::as_of::{Said, SaidView};
 use crate::backend;
 use crate::focus::{Scrolling, focus_found_later, focus_later};
 use desktop_contract::{
@@ -296,7 +297,14 @@ fn team_row(
             (team.label() != address_of(&team.server_url)).then(|| team.server_url.clone())
         })
     };
-    let words = move || team.with(|team| team.as_ref().map(state_words).unwrap_or_default());
+    let words = move || {
+        team.with(|team| {
+            let said = team
+                .as_ref()
+                .map_or_else(|| Said::plain(String::new()), state_words);
+            view! { <SaidView said=said /> }
+        })
+    };
     let note = move || team.with(|team| team.as_ref().and_then(|team| team.note.clone()));
     let can_sign_out = move || team.with(|team| team.as_ref().is_some_and(has_session));
     let needs_password = move || {
@@ -729,8 +737,39 @@ pub(crate) fn standing_of(team: &TeamStatus) -> Standing {
     }
 }
 
-/// What a team's row says about it.
-pub(crate) fn state_words(team: &TeamStatus) -> String {
+/// What a team's row says about it. An offline team that shows parts says
+/// when they last matched its server.
+pub(crate) fn state_words(team: &TeamStatus) -> Said {
+    match (&team.session, team.parts_as_of) {
+        (
+            TeamSession::SignedIn {
+                live: LiveUpdates::Reconnecting { message },
+                ..
+            },
+            Some(as_of),
+        ) => Said::parts_as_of(
+            "Offline. ",
+            as_of,
+            &format!(" The app reconnects by itself. Last problem: {message}"),
+        ),
+        (
+            TeamSession::Reaching {
+                problem: Some(problem),
+            },
+            Some(as_of),
+        ) => Said::parts_as_of(
+            "Offline. ",
+            as_of,
+            &format!(
+                " The app keeps trying, and signs you in when it is back. Last problem: {problem}"
+            ),
+        ),
+        _ => Said::plain(words_without_time(team)),
+    }
+}
+
+/// What a team's row says about it, with no time in it.
+fn words_without_time(team: &TeamStatus) -> String {
     match &team.session {
         TeamSession::SignedIn {
             name,
@@ -778,6 +817,9 @@ pub(crate) fn state_words(team: &TeamStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-10-24 09:12 UTC: tests read times in UTC.
+    const AS_OF: u64 = 1_792_833_120_000;
 
     fn team(code: &str, session: TeamSession) -> TeamStatus {
         TeamStatus {
@@ -991,18 +1033,42 @@ mod tests {
     #[test]
     fn each_row_says_plainly_where_the_team_stands() {
         let ma = team("MA", signed_in(LiveUpdates::Live));
+        let words = |team: &TeamStatus| state_words(team).text(AS_OF + 60_000);
         assert_eq!(
-            state_words(&ma),
+            words(&ma),
             "Signed in as Ada Editor (ada@example.test). You can edit parts. Changes others make appear here by themselves."
         );
-        let offline = team(
+        let mut offline = team(
             "MA",
             signed_in(LiveUpdates::Reconnecting {
                 message: "The team server could not be reached.".into(),
             }),
         );
-        assert!(state_words(&offline).starts_with("Offline: showing the parts last seen."));
+        assert!(words(&offline).starts_with("Offline: showing the parts last seen."));
+        // With the time the parts last matched the server, it says when.
+        offline.parts_as_of = Some(AS_OF);
+        assert_eq!(
+            words(&offline),
+            "Offline. Parts as of 09:12. The app reconnects by itself. Last problem: The team server could not be reached."
+        );
         let out = team("MA", TeamSession::SignedOut { problem: None });
-        assert_eq!(state_words(&out), "Signed out (ada@example.test).");
+        assert_eq!(words(&out), "Signed out (ada@example.test).");
+    }
+
+    #[test]
+    fn a_team_unreachable_at_start_says_when_its_kept_parts_are_from() {
+        let mut reaching = team(
+            "MA",
+            TeamSession::Reaching {
+                problem: Some("The team server could not be reached.".into()),
+            },
+        );
+        let words = |team: &TeamStatus| state_words(team).text(AS_OF + 60_000);
+        assert!(words(&reaching).starts_with("Offline: the team server could not be reached."));
+        reaching.parts_as_of = Some(AS_OF);
+        assert_eq!(
+            words(&reaching),
+            "Offline. Parts as of 09:12. The app keeps trying, and signs you in when it is back. Last problem: The team server could not be reached."
+        );
     }
 }

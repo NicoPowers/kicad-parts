@@ -63,11 +63,13 @@ impl TeamMarks {
 }
 
 /// Whether `team` shows parts in the list: it has a session, live or
-/// offline. A team asked to sign in again shows none.
+/// offline, or its parts kept from an earlier run show while its server
+/// cannot be reached (kicad-parts-ed46). A team asked to sign in again
+/// shows none.
 pub(crate) fn shows_parts(team: &TeamStatus) -> bool {
     match &team.session {
         TeamSession::SignedIn { live, .. } => !matches!(live, LiveUpdates::SignInAgain { .. }),
-        _ => false,
+        _ => team.parts_as_of.is_some(),
     }
 }
 
@@ -632,7 +634,25 @@ mod tests {
                 message: "refused".into(),
             }),
         );
-        assert_eq!(hidden_teams_note(&status(vec![ma, offline], "")), None);
+        assert_eq!(
+            hidden_teams_note(&status(vec![ma.clone(), offline], "")),
+            None
+        );
+        // Unreachable at start with parts kept from an earlier run: they
+        // show, marked offline, and editable nowhere (kicad-parts-ed46).
+        let mut kept = team(
+            "BE",
+            "teal",
+            TeamSession::Reaching {
+                problem: Some("refused".into()),
+            },
+        );
+        kept.parts_as_of = Some(1_792_833_120_000);
+        let with_kept = status(vec![ma, kept], "");
+        assert_eq!(hidden_teams_note(&with_kept), None);
+        let marks = TeamMarks::of(&with_kept);
+        assert!(marks.mark("https://be.example.com").unwrap().offline);
+        assert_eq!(editable_teams(&with_kept), [MA]);
         // Signed out on purpose: nothing to say.
         let out = team("DE", "rose", TeamSession::SignedOut { problem: None });
         assert_eq!(hidden_teams_note(&status(vec![out], "")), None);

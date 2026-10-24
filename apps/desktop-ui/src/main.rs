@@ -4,6 +4,7 @@
 //! can be edited there.
 
 mod add_part;
+mod as_of;
 mod backend;
 mod cad_choice;
 mod edit_cad;
@@ -20,6 +21,7 @@ mod teams;
 mod viewer;
 
 use add_part::AddPartView;
+use as_of::{Said, SaidView};
 use desktop_contract::{
     AppStatus, KicadStatus, LibraryCheckView, ManufacturerPart, PartDetail, PartKey, PreviewKind,
     PreviewOutcome, PreviewProblem, PreviewProblemReason, PreviewRequest, PreviewSet,
@@ -36,7 +38,7 @@ use part_list::{ResultList, SEARCH_ROWS, Searched};
 use std::time::Duration;
 use team::{Notice, TeamColumn, TeamUi};
 use team_marks::{ListTeams, shows_parts};
-use teams::TeamsMenu;
+use teams::{Standing, TeamsMenu, standing_of};
 use viewer::{CloseUp, CloseUpDialog, Picture, Viewer};
 
 /// The ID of the search box above the part list.
@@ -471,23 +473,31 @@ fn list_version(status: &TeamsStatus) -> Option<u64> {
     // Only teams that show parts: one asked to sign in again leaves the
     // list at once.
     for team in status.teams.iter().filter(|team| shows_parts(team)) {
-        if let TeamSession::SignedIn { checkpoint, .. } = &team.session {
-            // The code too: a team named once its code is known shows its
-            // name at once.
-            (&team.server_url, &team.code, checkpoint).hash(&mut hasher);
-            any = true;
-        }
+        let checkpoint = match &team.session {
+            TeamSession::SignedIn { checkpoint, .. } => *checkpoint,
+            _ => 0,
+        };
+        // The code too: a team named once its code is known shows its name
+        // at once. And whether its parts are kept from an earlier run, so
+        // the list changes when the first catch-up replaces them.
+        (&team.server_url, &team.code, checkpoint, team.parts_as_of).hash(&mut hasher);
+        any = true;
     }
     any.then(|| hasher.finish())
 }
 
 /// Why a part can't be edited while its team's server cannot be reached,
-/// in plain words, naming the team by `label` when there are several.
-fn offline_words(label: Option<&str>) -> String {
+/// in plain words, naming the team by `label` when there are several, and
+/// saying when its parts last matched the server, if known.
+fn offline_words(label: Option<&str>, as_of_ms: Option<u64>) -> Said {
     let team = label.map_or_else(|| "The team catalog".to_owned(), str::to_owned);
-    format!(
-        "{team} is offline, so this part can't be edited now. You see it as it was last seen. The app reconnects by itself."
-    )
+    let cannot = format!("{team} is offline, so this part can't be edited now. ");
+    match as_of_ms {
+        Some(as_of) => Said::parts_as_of(&cannot, as_of, " The app reconnects by itself."),
+        None => Said::plain(format!(
+            "{cannot}You see it as it was last seen. The app reconnects by itself."
+        )),
+    }
 }
 
 /// `20000` as `20,000`.
@@ -889,14 +899,14 @@ fn PartPanel(
         let several = list_teams.marks.with(|marks| marks.shown);
         team.with(|status| {
             let status = status.as_ref()?;
-            matches!(
-                status.session,
-                TeamSession::SignedIn {
-                    live: desktop_contract::LiveUpdates::Reconnecting { .. },
-                    ..
-                }
-            )
-            .then(|| offline_words(several.then(|| status.label()).as_deref()))
+            // Offline with a session, or at start with parts kept from an
+            // earlier run.
+            (standing_of(status) == Standing::Offline && shows_parts(status)).then(|| {
+                offline_words(
+                    several.then(|| status.label()).as_deref(),
+                    status.parts_as_of,
+                )
+            })
         })
     });
     Effect::new(move |_| ui.offline.set(offline_note.with(Option::is_some)));
@@ -1238,7 +1248,7 @@ fn PartView(
     /// The part is only in the CSV files while a team shows parts.
     in_no_team: Signal<bool>,
     /// Why the part can't be edited now, while its team is offline.
-    offline_note: Memo<Option<String>>,
+    offline_note: Memo<Option<Said>>,
     /// The part's team code, while several teams show parts.
     source_team: Memo<Option<String>>,
     can_edit: Memo<bool>,
@@ -1338,7 +1348,7 @@ fn PartView(
                 >
                     {move || {
                         let offline = move || offline_note.get().map(|note| view! {
-                            <p class="hint team-offline-note" role="status">{note}</p>
+                            <p class="hint team-offline-note" role="status"><SaidView said=note /></p>
                         });
                         if in_team.get() {
                             // Drawn again when edit access changes, such as
