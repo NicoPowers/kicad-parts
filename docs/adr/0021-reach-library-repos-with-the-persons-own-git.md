@@ -28,4 +28,4 @@ The person designs for many clients, and each client is a team (ADR 0018). Many 
 - If git is not installed, the row says where to get it for the person's system, and the rest of the app works as before.
 - Tests use bare repos in folders, a test git that reads only an empty settings file, and a local port that never answers. The journeys run git with an empty settings file of the run's own.
 
-Mulch records: the records of kicad-parts-ab30.
+Mulch records: mx-ffee38, mx-a0655b, mx-2a621b, mx-d2814d, mx-044140, mx-4160ed.
