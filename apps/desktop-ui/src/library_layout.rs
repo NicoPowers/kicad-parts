@@ -122,6 +122,28 @@ pub(crate) fn doubt_groups(doubts: &[LayoutDoubt]) -> Vec<DoubtGroup> {
                 "Library tables that can't be read",
                 format!("{table}: {why}."),
             ),
+            LayoutDoubt::OldSymbolLibrary { path } => (
+                7,
+                "Old-format symbol libraries",
+                format!(
+                    "{path}: KiCad can convert it. Open it in KiCad's Symbol Editor and save it as a .kicad_sym library in the repo."
+                ),
+            ),
+            LayoutDoubt::FootprintOutsideLibrary { path } => (
+                8,
+                "Footprints outside a footprint library",
+                format!(
+                    "{path} is not in a .pretty folder, so KiCad can't list it. Move it into a footprint library."
+                ),
+            ),
+            LayoutDoubt::KicadVariable { name, links } => (
+                9,
+                "3D models in KiCad's own folders",
+                format!(
+                    "{} use ${{{name}}}, a folder of each person's KiCad, not of this repo. They work only where that folder holds the models.",
+                    counted(*links, "link", "links")
+                ),
+            ),
             LayoutDoubt::PathNotUsable { path } => (
                 6,
                 "File names Windows can't use",
@@ -385,7 +407,7 @@ fn layout_view(
                         {format!("Path variables ({})", variables.len())}
                     </h3>
                     {if variables.is_empty() {
-                        view! { <p class="hint">"No footprint links a 3D model through a path variable."</p> }.into_any()
+                        view! { <p class="hint">"No footprint links a 3D model through a path variable of this repo."</p> }.into_any()
                     } else {
                         view! {
                             <p class="hint">"Set each one in KiCad's Configure Paths to this folder of your clone."</p>

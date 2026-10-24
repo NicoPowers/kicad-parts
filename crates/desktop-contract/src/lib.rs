@@ -629,6 +629,13 @@ pub enum LayoutDoubt {
     /// A library file whose name Windows can't keep, such as `CON` or one
     /// ending in a dot; the app leaves it out.
     PathNotUsable { path: String },
+    /// An old-format (`.lib`) symbol library, which KiCad can convert.
+    OldSymbolLibrary { path: String },
+    /// A footprint outside any `.pretty` folder: KiCad can't list it.
+    FootprintOutsideLibrary { path: String },
+    /// Links through one of KiCad's own folders other than its 3D models,
+    /// such as `KICAD8_3RD_PARTY`: they point into each person's KiCad.
+    KicadVariable { name: String, links: usize },
 }
 
 /// What the person changed in a scanned layout: only what the scan got

@@ -336,6 +336,9 @@ fn only_small_models_and_every_footprint_and_table_are_read() {
         files_to_read(&listed),
         ["3d/small.step", "Acme.pretty/A.kicad_mod", "fp-lib-table"]
     );
+    // A footprint outside a library is read too, for its links.
+    let (listed, _) = repo(&[("loose/F.kicad_mod", "(footprint)")]);
+    assert_eq!(files_to_read(&listed), ["loose/F.kicad_mod"]);
 }
 
 #[test]
@@ -359,6 +362,43 @@ fn library_files_windows_cannot_keep_are_left_out_and_said() {
             },
             LayoutDoubt::PathNotUsable {
                 path: "lib./Acme.pretty/R.kicad_mod".into()
+            },
+        ]
+    );
+}
+
+#[test]
+fn what_kicad_cannot_use_as_a_library_is_said_not_skipped() {
+    let layout = scanned(&[
+        // An old-format symbol library, as DigiKey's library has many.
+        ("symbols/Old.lib", "EESchema-LIBRARY Version 2.4\n"),
+        // A footprint outside any .pretty folder, whose link still counts.
+        ("parts/F.kicad_mod", &footprint(&["${AMZ}/F.step"])),
+        ("3d/F.step", "ISO"),
+        // KiCad's own folders: its 3D models are fine, an add-on is not.
+        (
+            "Acme.pretty/A.kicad_mod",
+            &footprint(&[
+                "${KICAD8_3DMODEL_DIR}/R.step",
+                "${KICAD8_3RD_PARTY}/3dmodels/x.step",
+                "${KICAD8_3RD_PARTY}/3dmodels/y.step",
+            ]),
+        ),
+    ]);
+    assert_eq!(layout.symbol_libraries, []);
+    assert_eq!(layout.path_variables, [variable("AMZ", Some("3d"), 1)]);
+    assert_eq!(
+        layout.doubts,
+        [
+            LayoutDoubt::OldSymbolLibrary {
+                path: "symbols/Old.lib".into()
+            },
+            LayoutDoubt::FootprintOutsideLibrary {
+                path: "parts/F.kicad_mod".into()
+            },
+            LayoutDoubt::KicadVariable {
+                name: "KICAD8_3RD_PARTY".into(),
+                links: 2
             },
         ]
     );

@@ -17,8 +17,11 @@
 //! - **Doubts** are what the person should check: a link to a missing 3D
 //!   model, a name that differs only in capitals, two libraries with one
 //!   nickname, a variable with no matching folder, a file stored with Git
-//!   LFS, a lib table that can't be read, and a library file whose name
-//!   Windows can't keep (such as `CON.kicad_sym`), which is left out.
+//!   LFS, a lib table that can't be read, a library file whose name
+//!   Windows can't keep (such as `CON.kicad_sym`), which is left out, an
+//!   old-format `.lib` symbol library, a footprint outside any `.pretty`
+//!   folder, and links through KiCad's own folders other than its 3D
+//!   models, such as `${KICAD8_3RD_PARTY}`.
 //!
 //! Paths are repo paths with `/`, compared with exact case, as on Linux:
 //! a link that works only on Windows or macOS is a doubt.
@@ -48,7 +51,7 @@ pub(crate) fn files_to_read(files: &[RepoFile]) -> Vec<&str> {
         .iter()
         .filter(|file| {
             table_kind(&file.path).is_some()
-                || footprint_library(&file.path).is_some()
+                || has_extension(&file.path, "kicad_mod")
                 || (file.size <= LFS_POINTER_MAX
                     && (is_model(&file.path) || has_extension(&file.path, "kicad_sym")))
         })
@@ -103,6 +106,16 @@ pub(crate) fn scan(
         if has_extension(path, "kicad_dbl") {
             databases.push((*path).to_owned());
         }
+        if has_extension(path, "lib") {
+            doubts.insert(LayoutDoubt::OldSymbolLibrary {
+                path: (*path).to_owned(),
+            });
+        }
+        if has_extension(path, "kicad_mod") && footprint_library(path).is_none() {
+            doubts.insert(LayoutDoubt::FootprintOutsideLibrary {
+                path: (*path).to_owned(),
+            });
+        }
     }
 
     // Lib tables: each row's path, or its variable and the rest.
@@ -148,29 +161,40 @@ pub(crate) fn scan(
         }
     }
 
-    // Model links through a variable, from every footprint.
+    // Model links through a variable, from every footprint, in a library
+    // or not. KiCad's own variables point into each person's KiCad, not
+    // this repo; its own 3D models are fine, anything else is a doubt.
     let mut links: Vec<Link> = Vec::new();
+    let mut kicads: BTreeMap<String, usize> = BTreeMap::new();
     for path in &paths {
-        if footprint_library(path).is_none() {
+        if !has_extension(path, "kicad_mod") {
             continue;
         }
         let Some(bytes) = read.get(*path) else {
             continue;
         };
         for link in model_links(&String::from_utf8_lossy(bytes)) {
-            if let Some((variable, rest)) = through_variable(&link) {
+            let Some((variable, rest)) = through_variable(&link) else {
+                continue;
+            };
+            if is_kicads_own(&variable) {
+                if !is_kicads_model_folder(&variable) {
+                    *kicads.entry(variable).or_default() += 1;
+                }
+            } else if variable != "KIPRJMOD" {
                 // ${KIPRJMOD} is a project's folder, which a library repo
                 // can't know.
-                if !is_kicads_own(&variable) && variable != "KIPRJMOD" {
-                    links.push(Link {
-                        footprint: (*path).to_owned(),
-                        text: link.clone(),
-                        variable,
-                        rest,
-                    });
-                }
+                links.push(Link {
+                    footprint: (*path).to_owned(),
+                    text: link.clone(),
+                    variable,
+                    rest,
+                });
             }
         }
+    }
+    for (name, links) in kicads {
+        doubts.insert(LayoutDoubt::KicadVariable { name, links });
     }
 
     // Each variable's folder: the one whose files match the most uses.
@@ -481,6 +505,12 @@ fn is_kicads_own(variable: &str) -> bool {
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
             digits > 0 && rest[digits..].starts_with('_')
         })
+}
+
+/// KiCad's own 3D model folder (`KICAD<n>_3DMODEL_DIR`, or the older
+/// `KISYS3DMOD`): every engineer's KiCad has those models.
+fn is_kicads_model_folder(variable: &str) -> bool {
+    variable == "KISYS3DMOD" || variable.ends_with("_3DMODEL_DIR")
 }
 
 /// The library a symbol file belongs to: a `.kicad_sym` file, or the
