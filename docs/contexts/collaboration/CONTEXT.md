@@ -41,8 +41,12 @@ What lets a person use a team server without typing the password each time. The 
 _Avoid_: session, token, credentials, login
 
 **Last-known parts**:
-A team's parts as the app last saw them from its team server. The app keeps them on disk, so a team whose server is down at start still shows them, marked offline, with when they were last up to date. Signing out or removing the team deletes them.
+A team's parts as the app last saw them from its team server. The app keeps them in the team's parts file, so a team whose server is down at start still shows them, marked offline, with when they were last up to date. Signing out or removing the team deletes the file.
 _Avoid_: cache, offline copy, snapshot
+
+**Parts file**:
+The file on this computer that keeps one team's last-known parts between runs.
+_Avoid_: kept parts, cache file
 
 **Team colour**:
 The colour of a team's mark in the part list and its name in the Teams menu. The app gives each team one when it joins the list, and keeps it. The mark always shows the team code too, never colour alone.
