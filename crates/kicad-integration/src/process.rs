@@ -6,7 +6,7 @@
 //! file. That empties the person's path variables. So every run gets its
 //! own settings folder, a [`CliSettingsFolder`], and never sees theirs.
 
-use crate::discovery::SUPPORTED_MAJOR;
+use crate::discovery::{KicadVersion, SUPPORTED_MAJOR};
 use crate::lib_table::is_inside;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -89,6 +89,14 @@ impl CliSettingsFolder {
     /// kicad-cli's settings folder: `KICAD_CONFIG_HOME`.
     fn config_home(&self) -> PathBuf {
         self.path.join("config")
+    }
+
+    /// The folder where kicad-cli `version` keeps its settings files, such
+    /// as `kicad_advanced`: `KICAD_CONFIG_HOME/10.0`. KiCad names it by
+    /// major and minor version.
+    pub fn settings_for(&self, version: &KicadVersion) -> PathBuf {
+        self.config_home()
+            .join(format!("{}.{}", version.major, version.minor))
     }
 
     /// kicad-cli's cache folder: `KICAD_CACHE_HOME`.
