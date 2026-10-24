@@ -38,14 +38,15 @@ struct OnDisk {
     parts: BTreeMap<String, PartValues>,
 }
 
-/// The parts file of the team at `server_url`, in `folder`.
-/// Every character but letters, digits, `.` and `-` is written as its code,
-/// so two addresses never share a file and every system accepts the name.
+/// The parts file of the team at `server_url`, in `folder`. Every
+/// character but small letters, digits, `.` and `-` is written as its
+/// code, capitals too. So two addresses never share a file, even where
+/// file names ignore case, and every system accepts the name.
 pub(super) fn file_for(folder: &Path, server_url: &str) -> PathBuf {
     let name: String = server_url
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' {
+            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '-' {
                 ch.to_string()
             } else {
                 format!("_{:x}_", u32::from(ch))
@@ -171,9 +172,24 @@ mod tests {
             acme.file_name().unwrap(),
             "https_3a__2f__2f_parts.example.com_2f_acme.json"
         );
-        // Addresses that differ in any character never share a file.
-        assert_ne!(acme, file_for(dir, "https://parts.example.com_2f_acme"));
-        assert_ne!(acme, file_for(dir, "http://parts.example.com/acme"));
+        // Addresses that differ in any character never share a file, even
+        // where file names ignore case, as on Windows and macOS.
+        let same_ignoring_case = |a: &str, b: &str| {
+            let name = |address| file_for(dir, address).to_string_lossy().to_lowercase();
+            name(a) == name(b)
+        };
+        assert!(!same_ignoring_case(
+            ACME,
+            "https://parts.example.com_2f_acme"
+        ));
+        assert!(!same_ignoring_case(ACME, "http://parts.example.com/acme"));
+        assert!(!same_ignoring_case(ACME, "https://parts.example.com/Acme"));
+        assert_eq!(
+            file_for(dir, "https://parts.example.com/Acme")
+                .file_name()
+                .unwrap(),
+            "https_3a__2f__2f_parts.example.com_2f__41_cme.json"
+        );
     }
 
     #[test]
