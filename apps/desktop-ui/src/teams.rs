@@ -297,14 +297,14 @@ fn team_row(
             (team.label() != address_of(&team.server_url)).then(|| team.server_url.clone())
         })
     };
-    let words = move || {
+    // Drawn again only when the words change, not at every status poll.
+    let said = Memo::new(move |_| {
         team.with(|team| {
-            let said = team
-                .as_ref()
-                .map_or_else(|| Said::plain(String::new()), state_words);
-            view! { <SaidView said=said /> }
+            team.as_ref()
+                .map_or_else(|| Said::plain(String::new()), state_words)
         })
-    };
+    });
+    let words = move || view! { <SaidView said=said.get() /> };
     let note = move || team.with(|team| team.as_ref().and_then(|team| team.note.clone()));
     let can_sign_out = move || team.with(|team| team.as_ref().is_some_and(has_session));
     let needs_password = move || {
@@ -648,8 +648,15 @@ pub(crate) fn summary(status: &TeamsStatus) -> (String, &'static str) {
             _ => None,
         })
         .collect();
+    // Teams that show parts kept from an earlier run while their server
+    // cannot be reached (kicad-parts-ed46) show parts too, with no session.
+    let kept_only = status
+        .teams
+        .iter()
+        .filter(|team| !has_session(team) && team.parts_as_of.is_some())
+        .count();
     let shown = match showing.as_slice() {
-        [only] => Some(*only),
+        [only] if kept_only == 0 => Some(*only),
         _ => None,
     };
     // Teams whose KiCad libraries wait for the person (kicad-parts-092b):
@@ -820,6 +827,7 @@ mod tests {
 
     /// 2026-10-24 09:12 UTC: tests read times in UTC.
     const AS_OF: u64 = 1_792_833_120_000;
+    const PROBLEM_TEXT: &str = "The team server could not be reached.";
 
     fn team(code: &str, session: TeamSession) -> TeamStatus {
         TeamStatus {
@@ -1053,6 +1061,28 @@ mod tests {
         );
         let out = team("MA", TeamSession::SignedOut { problem: None });
         assert_eq!(words(&out), "Signed out (ada@example.test).");
+    }
+
+    #[test]
+    fn a_team_showing_kept_parts_counts_as_a_team_showing_parts() {
+        let ma = team("MA", signed_in(LiveUpdates::Live));
+        let mut be = team(
+            "BE",
+            TeamSession::Reaching {
+                problem: Some(PROBLEM_TEXT.into()),
+            },
+        );
+        be.parts_as_of = Some(AS_OF);
+        // Two teams show parts, so the badge names neither.
+        assert_eq!(
+            summary(&status(vec![ma, be.clone()])),
+            ("Teams · 1 live, 1 offline".into(), PROBLEM)
+        );
+        // Alone, it reads as one team offline.
+        assert_eq!(
+            summary(&status(vec![be])),
+            ("Team catalog: offline".into(), PROBLEM)
+        );
     }
 
     #[test]
