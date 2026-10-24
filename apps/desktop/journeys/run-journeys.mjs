@@ -159,6 +159,16 @@ const nativeDriver = await download(version, driverCache);
 console.log(`WebView2 ${version}; msedgedriver ${nativeDriver}`);
 console.log(`Node.js ${testNode.version} (${testNode.path})`);
 
+// git, run by the app for library repos and by journeys that make them,
+// reads only an empty settings file of this run's own: never the
+// developer's settings, so their hosts, keys and rewrites never apply.
+const gitConfig = path.join(outDir, 'gitconfig');
+fs.writeFileSync(gitConfig, '');
+process.env.GIT_CONFIG_GLOBAL = gitConfig;
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+delete process.env.GIT_SSH_COMMAND;
+delete process.env.GIT_SSH;
+
 const driverArgs = ['--port', String(driverPort), '--native-driver', nativeDriver];
 console.log(`mode: ${visible ? 'visible desktop' : 'hidden desktop (journey-desktop)'}`);
 // Killing journey-desktop closes its job, which ends tauri-driver and
