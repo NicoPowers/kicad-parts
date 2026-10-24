@@ -219,10 +219,18 @@ fn the_app_reads_files_from_its_copy_while_the_host_is_gone() {
     repos.wait_until_idle();
     let repo = repos.repo_for(ACME).unwrap();
     let commit = repo.latest_commit().unwrap().unwrap();
+    let files = repo.list_files(&commit).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, "symbols/Acme.kicad_sym");
+    assert_eq!(files[0].size, SYMBOLS.len() as u64);
+    // Many files in one git run, a missing one as None.
     assert_eq!(
-        repo.list_files(&commit).unwrap(),
-        ["symbols/Acme.kicad_sym"]
+        repo.read_files(&commit, &["symbols/Acme.kicad_sym", "nope.txt", "symbols"])
+            .unwrap(),
+        [Some(SYMBOLS.as_bytes().to_vec()), None, None]
     );
+    // Only whole commit IDs are read.
+    assert!(repo.read_file("--output=x", "a").is_err());
     assert_eq!(
         repo.read_file(&commit, "symbols/Acme.kicad_sym").unwrap(),
         SYMBOLS.as_bytes()
@@ -641,4 +649,138 @@ fn a_file_address_of_a_clone_links_the_clone_s_remote_never_the_clone() {
     assert_eq!(repos.link(BETA, &as_url(&bare)), Ok(Linked::Done));
     assert_eq!(repos.repo_for(BETA).unwrap().address().url(), as_url(&bare));
     repos.wait_until_idle();
+}
+
+#[test]
+fn each_team_fetches_and_checks_with_its_own_address() {
+    let fixture = Fixture::new();
+    let bare = fixture.host_repo("client-library.git");
+    let path = bare.display().to_string();
+    let url = format!(
+        "file:///{}",
+        path.replace('\\', "/").trim_start_matches('/')
+    );
+    let repos = fixture.repos();
+    repos.link(ACME, &url).unwrap();
+    repos.link(BETA, &path).unwrap();
+    repos.wait_until_idle();
+    assert_eq!(fixture.copies().len(), 1);
+    let origin = |repos: &LibraryRepos| {
+        let copy = repos.repo_for(BETA).unwrap().folder().to_path_buf();
+        fixture.git(&copy, &["remote", "get-url", "origin"])
+    };
+    // Acme unlinks; Beta's next check goes by Beta's own address.
+    repos.unlink(ACME).unwrap();
+    repos.check_again(BETA);
+    repos.wait_until_idle();
+    assert_eq!(origin(&repos), path);
+    assert_eq!(
+        fixture.status(&repos, BETA).unwrap().access,
+        RepoAccess::CanReadAndWrite
+    );
+}
+
+#[test]
+fn a_restart_shows_the_last_results_and_tries_no_push() {
+    let fixture = Fixture::new();
+    let bare = fixture.host_repo("client-library.git");
+    {
+        let repos = fixture.repos();
+        repos.link(ACME, &bare.display().to_string()).unwrap();
+        repos.wait_until_idle();
+    }
+    // The results are kept beside the copies, never in the list of teams.
+    assert!(fixture.path("library-repos.json").is_file());
+    // After a restart, a host that now refuses pushes is not asked: the
+    // start only fetches, and the last push check's result stands.
+    let refuse = fixture.path("refuse-push.sh");
+    fs::write(
+        &refuse,
+        "#!/bin/sh
+echo refused >&2
+exit 1
+",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&refuse, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let git = fixture
+        .git
+        .clone()
+        .with_env("GIT_CONFIG_COUNT", "1")
+        .with_env("GIT_CONFIG_KEY_0", "remote.origin.receivepack")
+        .with_env(
+            "GIT_CONFIG_VALUE_0",
+            refuse.display().to_string().replace('\\', "/"),
+        );
+    let repos = fixture.repos_with(git, Limits::default());
+    // At once, before the start fetch ends, the row says what it said.
+    assert_eq!(
+        fixture.status(&repos, ACME).unwrap().access,
+        RepoAccess::CanReadAndWrite
+    );
+    repos.wait_until_idle();
+    assert_eq!(
+        fixture.status(&repos, ACME).unwrap().access,
+        RepoAccess::CanReadAndWrite
+    );
+    // Check again tries a push, and finds the refusal.
+    repos.check_again(ACME);
+    repos.wait_until_idle();
+    assert!(matches!(
+        fixture.status(&repos, ACME).unwrap().access,
+        RepoAccess::CanReadOnly { .. }
+    ));
+    // A host gone at start is said by the start fetch.
+    drop(repos);
+    fs::rename(&bare, fixture.path("moved.git")).unwrap();
+    let repos = fixture.repos();
+    repos.wait_until_idle();
+    assert!(matches!(
+        fixture.status(&repos, ACME).unwrap().access,
+        RepoAccess::CannotRead { .. }
+    ));
+}
+
+#[test]
+fn the_main_branch_is_the_host_s_not_the_first_by_name() {
+    let fixture = Fixture::new();
+    let bare = fixture.path("empty.git");
+    fs::create_dir_all(&bare).unwrap();
+    fixture.git(&bare, &["init", "-q", "--bare"]);
+    let repos = fixture.repos();
+    repos.link(ACME, &bare.display().to_string()).unwrap();
+    repos.wait_until_idle();
+    let repo = repos.repo_for(ACME).unwrap();
+    assert_eq!(repo.latest_commit().unwrap(), None);
+    // Commits arrive, on main and on a branch named before it.
+    let work = fixture.path("work");
+    fs::create_dir_all(&work).unwrap();
+    fixture.git(&work, &["init", "-q"]);
+    fs::write(
+        work.join("a.txt"),
+        "a
+",
+    )
+    .unwrap();
+    fixture.git(&work, &["add", "."]);
+    fixture.git(&work, &["commit", "-q", "-m", "main"]);
+    let main = fixture.git(&work, &["rev-parse", "HEAD"]);
+    let bare_text = bare.display().to_string();
+    fixture.git(&work, &["push", "-q", &bare_text, "HEAD:main"]);
+    fs::write(
+        work.join("b.txt"),
+        "b
+",
+    )
+    .unwrap();
+    fixture.git(&work, &["add", "."]);
+    fixture.git(&work, &["commit", "-q", "-m", "aside"]);
+    fixture.git(&work, &["push", "-q", &bare_text, "HEAD:aaa-aside"]);
+    repos.check_again(ACME);
+    repos.wait_until_idle();
+    assert_eq!(repo.latest_commit().unwrap(), Some(main));
 }

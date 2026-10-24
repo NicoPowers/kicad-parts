@@ -149,7 +149,25 @@ impl Git {
     {
         let mut command = self.command(dir);
         command.args(args);
-        run_with_limit(command, limit)
+        run_with_limit(command, limit, None)
+    }
+
+    /// Like [`Git::run`], with `input` as git's standard input, such as the
+    /// list of objects `git cat-file --batch` reads.
+    pub(crate) fn run_with_input<I, S>(
+        &self,
+        dir: Option<&Path>,
+        args: I,
+        input: Vec<u8>,
+        limit: Duration,
+    ) -> Result<Ran, NotInstalled>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = self.command(dir);
+        command.args(args);
+        run_with_limit(command, limit, Some(input))
     }
 
     /// Like [`Git::run`], for a step that reaches another computer, such as
@@ -177,7 +195,7 @@ impl Git {
             command.env("GIT_SSH_COMMAND", BATCH_SSH);
         }
         command.args(args);
-        run_with_limit(command, limit)
+        run_with_limit(command, limit, None)
     }
 
     /// Whether the person chose an SSH command of their own, in the
@@ -239,8 +257,23 @@ impl Git {
 
 /// Starts `command`, and stops it, with every program it started, once it
 /// has run for `limit`.
-fn run_with_limit(mut command: Command, limit: Duration) -> Result<Ran, NotInstalled> {
+fn run_with_limit(
+    mut command: Command,
+    limit: Duration,
+    input: Option<Vec<u8>>,
+) -> Result<Ran, NotInstalled> {
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let mut child = command.spawn().map_err(|_| NotInstalled)?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        // On a thread of its own, so git can write while it reads; closing
+        // the input tells git it has everything.
+        thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(&input);
+        });
+    }
     let stdout = child.stdout.take().map(read_all);
     let stderr = child.stderr.take().map(read_all);
     let started = Instant::now();

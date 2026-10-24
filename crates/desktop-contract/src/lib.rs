@@ -541,6 +541,9 @@ pub enum RepoAccess {
         copying: bool,
     },
     CanReadAndWrite,
+    /// The repo can be read, and no push has been tried yet: a fetch at
+    /// start tries none.
+    CanRead,
     /// The repo has no commits yet, so the app cannot try a push.
     CanReadEmpty,
     CanReadOnly {

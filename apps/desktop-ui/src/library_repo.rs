@@ -283,6 +283,9 @@ pub(crate) fn access_words(repo: &LibraryRepoStatus) -> Said {
         ),
         RepoAccess::Checking { copying: false } => Said::plain("Checking access…".to_owned()),
         RepoAccess::CanReadAndWrite => Said::plain("Can read and write.".to_owned()),
+        RepoAccess::CanRead => Said::plain(
+            "Can read. Choose Check again to see whether you can push.".to_owned(),
+        ),
         RepoAccess::CanReadEmpty => Said::plain(
             "Can read. The repo has no commits yet, so the app can't try a push.".to_owned(),
         ),
