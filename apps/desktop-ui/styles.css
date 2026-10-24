@@ -189,7 +189,10 @@ button:disabled {
 
 /* The KiCad settings panel scrolls when its KiCad libraries section is
    taller than the window. */
-.kicad-settings > .kicad-settings-body {
+/* Both menus scroll inside the window: the Teams menu grows with each
+   team and its library repo, and a person may work for ten clients. */
+.kicad-settings > .kicad-settings-body,
+.team-settings > .kicad-settings-body {
   max-height: calc(100vh - 4.5rem);
   overflow-y: auto;
 }
