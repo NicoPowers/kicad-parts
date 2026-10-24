@@ -48,6 +48,10 @@ _Avoid_: cache, offline copy, snapshot
 The file on this computer that keeps one team's last-known parts between runs.
 _Avoid_: kept parts, cache file
 
+**Library repo**:
+The git repo that holds a team's own KiCad library, often a client's ad hoc one, on any git host. The person links a team to it from their own clone or its address. The app reaches it with the person's own git and SSH setup, and keeps a copy of its own. Teams that link one repo share that copy.
+_Avoid_: client repo, remote, library source, git library
+
 **Team colour**:
 The colour of a team's mark in the part list and its name in the Teams menu. The app gives each team one when it joins the list, and keeps it. The mark always shows the team code too, never colour alone.
 _Avoid_: team badge colour, label colour
