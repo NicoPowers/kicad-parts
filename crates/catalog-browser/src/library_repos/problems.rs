@@ -64,7 +64,7 @@ pub(crate) fn explain(
     }
     let (reason, next, offline) = if ran.timed_out && may_prompt {
         (
-            format!("{host} did not answer within {} seconds", limit.as_secs()),
+            format!("git stopped after {} seconds", limit.as_secs()),
             format!(
                 "git or ssh may be waiting for a passphrase or sign-in the app can't show. Try git ls-remote {} in a terminal.",
                 address.url()
@@ -290,7 +290,7 @@ mod tests {
         let problem = explain(Step::Read, &ran, &web, LIMIT, true);
         assert_eq!(
             problem.summary,
-            "Can't read the repo: gitlab.com did not answer within 60 seconds. git or ssh may be waiting for a passphrase or sign-in the app can't show. Try git ls-remote https://gitlab.com/acme/lib.git in a terminal."
+            "Can't read the repo: git stopped after 60 seconds. git or ssh may be waiting for a passphrase or sign-in the app can't show. Try git ls-remote https://gitlab.com/acme/lib.git in a terminal."
         );
         assert!(!problem.offline);
     }

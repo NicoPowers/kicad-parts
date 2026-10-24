@@ -123,6 +123,9 @@ pub struct LibraryRepo {
     git: Git,
     limits: Limits,
     lock: Arc<CopyLock>,
+    /// Set by [`LibraryRepo::asking_nothing`]: no credential helper can
+    /// ask, so an https time-out is a slow host, not a hidden question.
+    quiet: bool,
 }
 
 impl LibraryRepo {
@@ -140,6 +143,7 @@ impl LibraryRepo {
             address,
             git,
             limits,
+            quiet: false,
         }
     }
 
@@ -148,6 +152,7 @@ impl LibraryRepo {
     /// git or ssh. For checks the person did not ask for, such as at start.
     pub(crate) fn asking_nothing(&self) -> Self {
         let mut quiet = self.clone();
+        quiet.quiet = true;
         quiet.git = quiet
             .git
             .with_env("GCM_INTERACTIVE", "never")
@@ -392,9 +397,11 @@ impl LibraryRepo {
         if ran.succeeded {
             Ok(ran)
         } else {
-            // An https sign-in or the person's own ssh may have asked.
+            // An https sign-in (unless asking nothing) or the person's own
+            // ssh command may have asked.
             let may_prompt = ran.timed_out
-                && (self.address.is_web() || self.git.has_own_ssh_command(dir).unwrap_or(true));
+                && ((self.address.is_web() && !self.quiet)
+                    || self.git.has_own_ssh_command(dir).unwrap_or(true));
             Err(explain(step, &ran, &self.address, limit, may_prompt))
         }
     }
