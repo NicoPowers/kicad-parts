@@ -49,6 +49,7 @@ fn library(nickname: &str, path: &str, from_table: bool) -> LayoutLibrary {
         nickname: nickname.into(),
         path: path.into(),
         from_table,
+        files: 1,
     }
 }
 
@@ -318,7 +319,10 @@ fn database_libraries_symbol_folders_and_bad_tables_are_found() {
     // A KiCad 10 symbol folder is one library, not one per file.
     assert_eq!(
         layout.symbol_libraries,
-        [library("Acme", "symbols/Acme.kicad_symdir", false)]
+        [LayoutLibrary {
+            files: 2,
+            ..library("Acme", "symbols/Acme.kicad_symdir", false)
+        }]
     );
     assert!(matches!(
         layout.doubts.as_slice(),

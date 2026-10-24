@@ -163,11 +163,13 @@ pub(crate) fn scan(commit: &str, files: &[RepoFile], contents: &Contents) -> Lib
         if let Some(library) = symbol_library(path) {
             symbols
                 .entry(library.clone())
-                .or_insert_with(|| Found::named(&library));
+                .or_insert_with(|| Found::named(&library))
+                .files += 1;
         } else if let Some(library) = footprint_library(path) {
             footprints
                 .entry(library.clone())
-                .or_insert_with(|| Found::named(&library));
+                .or_insert_with(|| Found::named(&library))
+                .files += 1;
         } else if is_model(path) {
             models.push(path);
         }
@@ -378,6 +380,7 @@ pub(crate) fn scan(commit: &str, files: &[RepoFile], contents: &Contents) -> Lib
 struct Found {
     nickname: String,
     from_table: bool,
+    files: usize,
 }
 
 impl Found {
@@ -388,6 +391,7 @@ impl Found {
         Self {
             nickname: stem.to_owned(),
             from_table: false,
+            files: 0,
         }
     }
 }
@@ -403,6 +407,7 @@ fn listed(
             nickname: found.nickname,
             path,
             from_table: found.from_table,
+            files: found.files,
         })
         .collect();
     libraries.sort_by(|a, b| {

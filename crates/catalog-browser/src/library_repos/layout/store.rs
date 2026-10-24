@@ -77,17 +77,24 @@ pub(crate) fn fingerprint(layout: &LibraryLayout) -> String {
 
 /// The choices a first review starts with: the scan's folders, and every
 /// library in, except where two libraries of one kind share a nickname.
-/// Then the ones no lib table names are left out, since KiCad finds a
-/// nickname through the tables; with no table naming one, all but the
-/// first are.
+/// Then the one a lib table names is kept, since KiCad finds a nickname
+/// through the tables; with no table naming one, the one with the most
+/// files, such as a real `footprints/` over a stray `Footprints/`, then
+/// the first.
 pub(crate) fn first_choices(layout: &LibraryLayout) -> LayoutChoices {
     let mut left_out = Vec::new();
     for libraries in [&layout.symbol_libraries, &layout.footprint_libraries] {
         for clash in clashes(libraries) {
+            let most_files = clash
+                .iter()
+                .rev()
+                .max_by_key(|library| library.files)
+                .copied();
             let keep = clash
                 .iter()
                 .find(|library| library.from_table)
-                .or(clash.first())
+                .copied()
+                .or(most_files)
                 .map(|library| library.path.clone());
             left_out.extend(
                 clash
@@ -289,17 +296,20 @@ mod tests {
                 nickname: "Acme".into(),
                 path: "lib/Acme.kicad_sym".into(),
                 from_table: true,
+                files: 1,
             }],
             footprint_libraries: vec![
                 LayoutLibrary {
                     nickname: "Acme_FP".into(),
                     path: "lib/Acme.pretty".into(),
                     from_table: true,
+                    files: 1,
                 },
                 LayoutLibrary {
                     nickname: "Old".into(),
                     path: "old/Old.pretty".into(),
                     from_table: false,
+                    files: 1,
                 },
             ],
             model_folders: vec!["3d".into()],
@@ -389,6 +399,7 @@ mod tests {
             nickname: "Acme_FP".into(),
             path: "archive/Acme.pretty".into(),
             from_table: false,
+            files: 1,
         });
         let first = first_choices(&layout);
         assert_eq!(first.left_out, ["archive/Acme.pretty"]);
@@ -399,9 +410,12 @@ mod tests {
             both,
             "2 libraries are named Acme_FP: lib/Acme.pretty, archive/Acme.pretty. KiCad would use only one, so leave out the others."
         );
-        // With no table naming either, the first is kept.
+        // With no table naming either, the one with the most files is
+        // kept, then the first.
         layout.footprint_libraries[0].from_table = false;
         assert_eq!(first_choices(&layout).left_out, ["archive/Acme.pretty"]);
+        layout.footprint_libraries[2].files = 211;
+        assert_eq!(first_choices(&layout).left_out, ["lib/Acme.pretty"]);
     }
 
     #[test]
@@ -436,6 +450,7 @@ mod tests {
             nickname: "New".into(),
             path: "lib/New.kicad_sym".into(),
             from_table: false,
+            files: 1,
         });
         assert_eq!(follow(&mut reviewed, &new_library), Followed::Changed);
         assert!(reviewed.changed);

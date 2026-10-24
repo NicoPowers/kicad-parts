@@ -34,9 +34,10 @@ pub(crate) fn commit_folder(files_folder: &Path, commit: &str) -> PathBuf {
     files_folder.join(short(commit))
 }
 
-/// Whether `folder` holds every library file of its commit.
-pub(crate) fn is_complete(folder: &Path) -> bool {
-    folder.join(COMPLETE).is_file()
+/// Whether `folder` holds every library file of `commit`: its mark names
+/// that whole commit, not only one that starts the same.
+pub(crate) fn is_complete(folder: &Path, commit: &str) -> bool {
+    fs::read_to_string(folder.join(COMPLETE)).is_ok_and(|written| written == commit)
 }
 
 /// Writes the library files of `profile` at `commit` from `repo`'s copy
@@ -48,7 +49,7 @@ pub(crate) fn write_library_files(
     files_folder: &Path,
 ) -> Result<(), RepoProblem> {
     let folder = commit_folder(files_folder, commit);
-    if is_complete(&folder) {
+    if is_complete(&folder, commit) {
         return Ok(());
     }
     let listed = repo.list_files(commit)?;
@@ -148,6 +149,18 @@ fn wanted<'a>(listed: &'a [RepoFile], profile: &SourceProfile) -> Vec<&'a RepoFi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_is_complete_only_for_the_whole_commit_it_names() {
+        let folder = tempfile::tempdir().unwrap();
+        let commit = "0123456789ab".to_owned() + &"c".repeat(28);
+        let other = "0123456789ab".to_owned() + &"d".repeat(28);
+        assert!(!is_complete(folder.path(), &commit));
+        fs::write(folder.path().join(COMPLETE), &commit).unwrap();
+        assert!(is_complete(folder.path(), &commit));
+        // Another commit that starts the same shares the short folder name.
+        assert!(!is_complete(folder.path(), &other));
+    }
 
     fn file(path: &str, size: u64) -> RepoFile {
         RepoFile {

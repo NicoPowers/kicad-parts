@@ -558,6 +558,7 @@ mod tests {
             nickname: nickname.into(),
             path: format!("{nickname}.kicad_sym"),
             from_table: false,
+            files: 1,
         }
     }
 

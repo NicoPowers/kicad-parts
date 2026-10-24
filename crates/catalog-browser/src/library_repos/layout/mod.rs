@@ -211,7 +211,7 @@ impl Layouts {
         let reviewed = self.store.read(&name)?;
         let files_folder = self.store.files_folder(&name);
         let folder = files::commit_folder(&files_folder, &reviewed.commit);
-        if !files::is_complete(&folder) {
+        if !files::is_complete(&folder, &reviewed.commit) {
             let problem = lock(&self.files_problems).get(&name).cloned();
             return Some(Files::Writing {
                 profile: reviewed.profile,

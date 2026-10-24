@@ -588,6 +588,10 @@ pub struct LayoutLibrary {
     /// The nickname comes from one of the repo's lib tables, not from the
     /// file name.
     pub from_table: bool,
+    /// How many files the library has: one for a `.kicad_sym`, every file
+    /// in a library folder.
+    #[serde(default)]
+    pub files: usize,
 }
 
 /// One path variable footprints or lib tables use, such as `ACME_3D`.
