@@ -82,29 +82,41 @@ impl Shared {
         self.turn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Writes the team's parts, if they are still in step, in the team's
-    /// turn. Says whether it wrote.
-    fn write_now(&self) -> bool {
-        let _turn = self.turn();
+    /// Writes the team's parts at `version`, if they are still at it, in
+    /// the team's turn. Says whether it wrote.
+    fn write_now(&self, version: Version) -> bool {
         let task = &self.task;
-        if self.stop.load(Ordering::SeqCst) || task.catalog.version_in_step().is_none() {
-            return false;
-        }
-        let kept = PartsFile {
+        // Read before taking the turn: the category names may ask the
+        // server, and signing out waits for the turn.
+        let parts = PartsFile {
             server_url: task.server_url.clone(),
             as_of_ms: crate::team::now_ms(),
             values: task.catalog.current_values(),
             category_names: task.catalog.category_names(),
         };
-        if let Err(problem) = parts_file::write(&task.folder, &kept) {
-            // Not shown: the app works on, and only an offline start
-            // would miss these parts. The next change tries again.
-            eprintln!(
-                "kicad-parts-desktop: could not keep the parts of {} on disk ({problem}).",
-                task.server_url
-            );
+        if parts.category_names.is_empty() && !parts.values.is_empty() {
+            // The names could not be read: try again soon, rather than
+            // write parts with no category names.
+            return false;
         }
-        true
+        let _turn = self.turn();
+        // Still in step, and the session that was read: a sign-out or a new
+        // sign-in meanwhile makes these parts not worth writing.
+        if self.stop.load(Ordering::SeqCst) || task.catalog.version_in_step() != Some(version) {
+            return false;
+        }
+        match parts_file::write(&task.folder, &parts) {
+            Ok(()) => true,
+            Err(problem) => {
+                // Not shown: the app works on, and only an offline start
+                // would miss these parts. The writer tries again soon.
+                eprintln!(
+                    "kicad-parts-desktop: could not write the parts file of {} ({problem}).",
+                    task.server_url
+                );
+                false
+            }
+        }
     }
 }
 
@@ -116,10 +128,15 @@ fn write_while_running(shared: &Shared) {
             continue;
         };
         let now = Instant::now();
-        if debounce.due(version, now) && shared.write_now() {
-            // The version read before the parts: parts newer than it are
-            // written again at the next look, never missed.
+        if !debounce.due(version, now) {
+            continue;
+        }
+        // The version read before the parts: parts newer than it are
+        // written again at the next look, never missed.
+        if shared.write_now(version) {
             debounce.wrote(version, now);
+        } else {
+            debounce.failed(now);
         }
     }
 }
@@ -138,11 +155,16 @@ struct Debounce {
     seen: Option<(Version, Instant)>,
     /// When the parts first differed from the file.
     changed_since: Option<Instant>,
+    /// After a failed write, when to try again.
+    retry_at: Option<Instant>,
 }
 
 impl Debounce {
     /// Whether to write `version`, seen at `now`.
     fn due(&mut self, version: Version, now: Instant) -> bool {
+        if self.retry_at.is_some_and(|at| now < at) {
+            return false;
+        }
         if let Some((written, at)) = self.written {
             if written == version {
                 return now.duration_since(at) >= REFRESH;
@@ -160,6 +182,13 @@ impl Debounce {
     fn wrote(&mut self, version: Version, now: Instant) {
         self.written = Some((version, now));
         self.changed_since = None;
+        self.retry_at = None;
+    }
+
+    /// A write failed at `now`, or was not worth doing: try again after
+    /// [`QUIET`], not at every look.
+    fn failed(&mut self, now: Instant) {
+        self.retry_at = Some(now + QUIET);
     }
 }
 
@@ -212,6 +241,17 @@ mod tests {
         // Once per MAX_WAIT, counted from the first change after a write.
         let wait = ticks(MAX_WAIT);
         assert_eq!(written, [wait, 2 * wait + 1, 3 * wait + 2]);
+    }
+
+    #[test]
+    fn a_failed_write_is_tried_again_soon_but_not_at_every_look() {
+        let start = Instant::now();
+        let mut debounce = Debounce::default();
+        let quiet = start + QUIET;
+        assert!(!debounce.due((1, 7, 1), start) && debounce.due((1, 7, 1), quiet));
+        debounce.failed(quiet);
+        assert!(!debounce.due((1, 7, 1), quiet + TICK));
+        assert!(debounce.due((1, 7, 1), quiet + QUIET));
     }
 
     #[test]
