@@ -1433,6 +1433,89 @@ a {
   margin-bottom: 0.5rem;
 }
 
+/* A team's library repo, under the team's own state and buttons. */
+.team-repo {
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--line);
+}
+
+.kicad-settings-body .team-repo-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin: 0 0 0.2rem;
+}
+
+.team-repo-label {
+  font-weight: 600;
+}
+
+.team-repo-label::after {
+  content: ":";
+}
+
+.team-repo-which {
+  overflow-wrap: anywhere;
+}
+
+.team-repo-details {
+  margin: 0 0 0.5rem;
+}
+
+.team-repo-details summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.team-repo-details pre {
+  margin: 0.3rem 0 0;
+  padding: 0.5rem 0.7rem;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 12rem;
+  overflow: auto;
+}
+
+.team-repo-form label {
+  display: block;
+  font-weight: 600;
+  margin: 0.3rem 0 0.2rem;
+}
+
+.team-repo-form input {
+  width: 100%;
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+}
+
+.team-repo-form .problem {
+  margin: 0.5rem 0;
+}
+
+.team-repo-remotes {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.team-repo-remotes button {
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
 /* With teams listed above it, the sign-in form starts under a line. */
 .team-list ~ .team-sign-in {
   padding-top: 0.75rem;

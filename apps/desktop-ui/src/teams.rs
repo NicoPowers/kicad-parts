@@ -5,11 +5,13 @@
 //! every team's parts at once (kicad-parts-8a71).
 //!
 //! A team whose KiCad libraries were made from another server address asks,
-//! on its row, whether the team moved (kicad-parts-092b).
+//! on its row, whether the team moved (kicad-parts-092b). Each row also
+//! shows the team's library repo (kicad-parts-ab30, see [`crate::library_repo`]).
 
 use crate::as_of::{Said, SaidView};
 use crate::backend;
 use crate::focus::{Scrolling, focus_found_later, focus_later};
+use crate::library_repo::library_repo_part;
 use desktop_contract::{
     LibrariesMadeFrom, LiveUpdates, SignInRequest, SignInsKept, TeamSession, TeamStatus,
     TeamsStatus, UseNewServerRequest, two_servers_claim_a_team,
@@ -319,6 +321,7 @@ fn team_row(
     };
     let row_id = format!("team-row-{}", id_part(&server));
     let question = new_server_question(server.clone(), row_id.clone(), team, set_teams);
+    let library_repo = library_repo_part(server.clone(), row_id.clone(), team, set_teams);
     let (sign_out_server, remove_server, ask_server) = (server.clone(), server.clone(), server);
     view! {
         <li class="team-row" id=row_id>
@@ -405,6 +408,7 @@ fn team_row(
                     </div>
                 </div>
             </Show>
+            {library_repo}
         </li>
     }
 }

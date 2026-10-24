@@ -224,6 +224,28 @@ pub async fn kicad_libraries_use_new_server(
     .await
 }
 
+#[derive(Serialize)]
+struct LibraryRepoArgs {
+    request: desktop_contract::LibraryRepoRequest,
+}
+
+/// Links a team to its library repo, from a folder or an address.
+pub async fn library_repo_link(
+    request: desktop_contract::LibraryRepoRequest,
+) -> Result<desktop_contract::LibraryRepoLinking, String> {
+    call(command::LIBRARY_REPO_LINK, &LibraryRepoArgs { request }).await
+}
+
+/// Checks a team's library repo again, in the background.
+pub async fn library_repo_check(server_url: &str) -> Result<TeamsStatus, String> {
+    call(command::LIBRARY_REPO_CHECK, &ServerArgs { server_url }).await
+}
+
+/// Unlinks a team from its library repo.
+pub async fn library_repo_unlink(server_url: &str) -> Result<TeamsStatus, String> {
+    call(command::LIBRARY_REPO_UNLINK, &ServerArgs { server_url }).await
+}
+
 pub async fn team_part(team: &str, ipn: &str) -> Result<Option<TeamPart>, String> {
     call(command::TEAM_PART, &for_team(team, DetailArgs { ipn })).await
 }

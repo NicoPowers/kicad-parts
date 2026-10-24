@@ -12,6 +12,7 @@ mod focus;
 mod kicad_libraries;
 mod libraries;
 mod library_check;
+mod library_repo;
 mod list_controls;
 mod list_focus;
 mod part_list;
