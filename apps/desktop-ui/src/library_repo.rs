@@ -35,6 +35,8 @@ pub(crate) fn library_repo_part(
                 .map(|repo| (repo.name.clone(), repo.host.clone()))
         })
     });
+    let unusable =
+        Memo::new(move |_| repo.with(|repo| repo.as_ref().is_some_and(|repo| repo.unusable)));
     let said = Memo::new(move |_| repo.with(|repo| repo.as_ref().map(access_words)));
     let details = Memo::new(move |_| repo.with(|repo| repo.as_ref().and_then(details_of)));
     // A problem reads in the danger colour too; its words say it first.
@@ -143,9 +145,12 @@ pub(crate) fn library_repo_part(
                 }
                 .into_any();
             }
+            // An address that can't be used can only be removed.
             view! {
                 <div class="team-actions">
-                    <button type="button" on:click=move |_| check(false)>"Check again"</button>
+                    {(!unusable.get()).then(|| view! {
+                        <button type="button" on:click=move |_| check(false)>"Check again"</button>
+                    })}
                     <button type="button" on:click=move |_| remove(true)>"Remove repo"</button>
                 </div>
             }
@@ -226,7 +231,14 @@ pub(crate) fn library_repo_part(
                         }
                     }
                     <div class="team-actions">
-                        <button type="submit" class="primary" disabled=move || busy.get()>
+                        // While the person chooses a remote, the remote is the
+                        // way on: Add would only ask again.
+                        <button
+                            type="submit"
+                            class="primary"
+                            hidden=move || remotes.with(|found| !found.is_empty())
+                            disabled=move || busy.get()
+                        >
                             {move || if busy.get() { "Checking…" } else { "Add" }}
                         </button>
                         <button
@@ -255,8 +267,10 @@ pub(crate) fn library_repo_part(
                 {move || match which.get() {
                     Some((name, host)) => view! {
                         <span class="team-repo-which">{name}</span>
-                        " "
-                        <span class="team-repo-host">{format!("on {host}")}</span>
+                        {(!host.is_empty()).then(|| view! {
+                            " "
+                            <span class="team-repo-host">{format!("on {host}")}</span>
+                        })}
                     }
                     .into_any(),
                     None => view! { <span class="hint">"None yet"</span> }.into_any(),
@@ -339,6 +353,7 @@ mod tests {
             host: "gitlab.com".into(),
             access,
             copied_at,
+            unusable: false,
         }
     }
 

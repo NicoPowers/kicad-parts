@@ -529,6 +529,11 @@ pub struct LibraryRepoStatus {
     /// milliseconds since 1970; `None` before the first copy.
     #[serde(default)]
     pub copied_at: Option<u64>,
+    /// The saved address can't be used, such as one an older version kept
+    /// with a token in it. It is not shown; the row offers only Remove
+    /// repo.
+    #[serde(default)]
+    pub unusable: bool,
 }
 
 /// What the app can do with a library repo, as its last check found.

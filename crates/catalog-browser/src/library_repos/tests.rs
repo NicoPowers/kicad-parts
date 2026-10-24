@@ -463,7 +463,7 @@ fn a_host_that_does_not_answer_fails_within_the_time_limit() {
     assert_eq!(
         problem.summary,
         format!(
-            "Can't read the repo: 127.0.0.1 did not answer within 2 seconds. git or ssh may be waiting for a passphrase or sign-in the app can't show. Try git ls-remote https://127.0.0.1:{port}/client/library.git in a terminal."
+            "Can't read the repo: git stopped after 2 seconds. git or ssh may be waiting for a passphrase or sign-in the app can't show. Try git ls-remote https://127.0.0.1:{port}/client/library.git in a terminal."
         )
     );
     // A port nobody listens on is refused. Windows tries for about two
@@ -783,4 +783,100 @@ fn the_main_branch_is_the_host_s_not_the_first_by_name() {
     repos.check_again(ACME);
     repos.wait_until_idle();
     assert_eq!(repo.latest_commit().unwrap(), Some(main));
+}
+
+#[test]
+fn a_clone_whose_origin_is_its_own_folder_is_never_linked() {
+    let fixture = Fixture::new();
+    let clone = fixture.path("loop-checkout");
+    fs::create_dir_all(&clone).unwrap();
+    fixture.git(&clone, &["init", "-q"]);
+    let clone_text = clone.display().to_string();
+    fixture.git(&clone, &["remote", "add", "origin", &clone_text]);
+    let repos = fixture.repos();
+    let problem = repos.link(ACME, &clone_text).unwrap_err();
+    assert!(
+        problem.summary.contains("leads from clone to clone"),
+        "{problem:?}"
+    );
+    assert!(fixture.status(&repos, ACME).is_none());
+}
+
+#[test]
+fn a_relative_remote_is_read_from_the_clone_s_top_folder() {
+    let fixture = Fixture::new();
+    let bare = fixture.host_repo("client-library.git");
+    let clone = fixture.persons_clone(&bare, "my-checkout");
+    fixture.git(
+        &clone,
+        &["remote", "set-url", "origin", "../client-library.git"],
+    );
+    let inside = clone.join("symbols");
+    let repos = fixture.repos();
+    // From a folder inside the clone, and with `..` in it: one key.
+    assert_eq!(
+        repos.link(ACME, &inside.display().to_string()),
+        Ok(Linked::Done)
+    );
+    let bare_key = RepoAddress::parse(&fs::canonicalize(&bare).unwrap().display().to_string())
+        .unwrap()
+        .key();
+    let linked = repos.repo_for(ACME).unwrap().address().key();
+    assert_eq!(
+        linked.trim_start_matches("//?/"),
+        bare_key.trim_start_matches("//?/")
+    );
+    repos.wait_until_idle();
+}
+
+#[test]
+fn a_saved_address_that_cannot_be_used_is_never_shown() {
+    let fixture = Fixture::new();
+    // As an older version could have kept it.
+    fixture
+        .teams
+        .set_library_repo(
+            ACME,
+            Some("https://oauth2:glpat-secret@gitlab.com/acme/lib.git"),
+        )
+        .unwrap();
+    let repos = fixture.repos();
+    let status = fixture.status(&repos, ACME).unwrap();
+    assert!(status.unusable);
+    assert_eq!(status.address, "");
+    assert_eq!(status.name, "This address can't be used");
+    assert!(!format!("{status:?}").contains("glpat"));
+    repos.unlink(ACME).unwrap();
+    assert!(fixture.status(&repos, ACME).is_none());
+}
+
+#[test]
+fn a_quiet_https_time_out_is_offline() {
+    let fixture = Fixture::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let held: Vec<_> = listener.incoming().take(4).collect();
+        std::thread::sleep(Duration::from_secs(60));
+        drop(held);
+    });
+    let limits = Limits {
+        check: Duration::from_secs(2),
+        ..Limits::default()
+    };
+    let repos = fixture.repos_with(fixture.git.clone(), limits);
+    let address =
+        RepoAddress::parse(&format!("https://127.0.0.1:{port}/client/library.git")).unwrap();
+    // Asking nothing, no sign-in window can be waiting: a slow host.
+    let problem = repos
+        .shared
+        .repo(&address)
+        .asking_nothing()
+        .can_read()
+        .unwrap_err();
+    assert!(problem.offline, "{problem:?}");
+    assert!(
+        problem.summary.contains("did not answer within 2 seconds"),
+        "{problem:?}"
+    );
 }

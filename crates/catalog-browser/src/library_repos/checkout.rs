@@ -8,7 +8,7 @@
 use super::address::RepoAddress;
 use crate::git_program::{Git, NotInstalled};
 use desktop_contract::RepoRemote;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How long one read of the person's folder may take.
@@ -17,8 +17,9 @@ const READ_LIMIT: Duration = Duration::from_secs(30);
 /// What a folder says about the repo it holds.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum FromFolder {
-    /// The repo's address: the clone's `origin` or only remote, or a bare
-    /// repo's own folder.
+    /// A bare repo: the folder is the repo itself.
+    Bare,
+    /// A clone: the address of its `origin` or only remote.
     Address(String),
     /// A clone with several remotes and no `origin`: the person chooses.
     ChooseRemote(Vec<RepoRemote>),
@@ -50,8 +51,11 @@ pub(crate) fn address_in(git: &Git, folder: &Path) -> Result<FromFolder, NoAddre
     }
     if bare.stdout_text().trim() == "true" {
         // A bare repo has no work of anyone's in it: it is the remote.
-        return Ok(FromFolder::Address(folder.display().to_string()));
+        return Ok(FromFolder::Bare);
     }
+    // A relative remote is relative to the clone's top folder.
+    let top = read(&["rev-parse", "--show-toplevel"])?;
+    let top = PathBuf::from(top.stdout_text().trim());
     let names = read(&["remote"])?;
     let names: Vec<String> = names
         .stdout_text()
@@ -63,7 +67,7 @@ pub(crate) fn address_in(git: &Git, folder: &Path) -> Result<FromFolder, NoAddre
     let address_of = |name: &str| -> Result<String, NoAddress> {
         // `get-url` applies the person's `url.<base>.insteadOf` settings.
         let url = read(&["remote", "get-url", name])?;
-        Ok(whole_address(folder, url.stdout_text().trim()))
+        Ok(whole_address(&top, url.stdout_text().trim()))
     };
     let chosen = match names.as_slice() {
         [] => {
@@ -101,16 +105,26 @@ pub(crate) fn address_in(git: &Git, folder: &Path) -> Result<FromFolder, NoAddre
     }
 }
 
-/// A remote's address as git uses it from `folder`: a relative folder path,
-/// such as `../library.git`, made whole.
-fn whole_address(folder: &Path, url: &str) -> String {
-    if RepoAddress::parse(url).is_err() && folder.join(url).exists() {
-        std::path::absolute(folder.join(url))
-            .unwrap_or_else(|_| folder.join(url))
-            .display()
-            .to_string()
+/// A remote's address as git uses it from the clone's top folder `top`:
+/// a relative folder path, such as `../library.git`, made whole and real,
+/// so `..` never gives one repo two keys.
+fn whole_address(top: &Path, url: &str) -> String {
+    let joined = top.join(url);
+    if RepoAddress::parse(url).is_err() && joined.exists() {
+        real_path(&joined).display().to_string()
     } else {
         url.to_owned()
+    }
+}
+
+/// `path` with links and `..` resolved, without the `\\?\` Windows puts
+/// in front, which git and people read badly (mx-98ef75).
+fn real_path(path: &Path) -> PathBuf {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = real.display().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(plain) if !plain.starts_with("UNC") => PathBuf::from(plain),
+        _ => real,
     }
 }
 

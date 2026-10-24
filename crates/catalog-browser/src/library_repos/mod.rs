@@ -248,14 +248,10 @@ impl LibraryRepos {
             )));
         }
         match checkout::address_in(&self.shared.git, &folder) {
+            Ok(FromFolder::Bare) => Ok(Found::Address(address)),
             Ok(FromFolder::Address(url)) => {
                 let next = RepoAddress::parse(&url).map_err(refused)?;
-                // A bare repo gives its own folder back.
-                if next.folder_path().as_deref() == Some(folder.as_path()) {
-                    Ok(Found::Address(address))
-                } else {
-                    self.follow(next, steps + 1)
-                }
+                self.follow(next, steps + 1)
             }
             Ok(FromFolder::ChooseRemote(remotes)) => Ok(Found::ChooseRemote(remotes)),
             Err(NoAddress::GitNotInstalled) => Err(git_not_installed(Step::Read)),
@@ -280,15 +276,20 @@ impl LibraryRepos {
     fn status_of(&self, address: &str, known: &HashMap<String, Known>) -> LibraryRepoStatus {
         let parsed = RepoAddress::parse(address);
         let Ok(parsed) = parsed else {
-            // Only a hand-edited list of teams holds such an address.
+            // Only a hand-edited list of teams, or an older version, holds
+            // such an address. It may hold a token, so it is never shown.
             return LibraryRepoStatus {
-                address: address.to_owned(),
-                name: address.to_owned(),
+                address: String::new(),
+                name: "This address can't be used".to_owned(),
                 host: String::new(),
                 access: RepoAccess::CannotRead {
-                    problem: refused(format!("Can't read the repo: {}", parsed.unwrap_err())),
+                    problem: refused(
+                        "The saved address can't be used. Remove the repo, then add it again."
+                            .to_owned(),
+                    ),
                 },
                 copied_at: None,
+                unusable: true,
             };
         };
         let state = known.get(address).cloned().unwrap_or_default();
@@ -307,6 +308,7 @@ impl LibraryRepos {
                 .copied_at()
                 .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
                 .map(|since| since.as_millis() as u64),
+            unusable: false,
         }
     }
 
