@@ -270,6 +270,7 @@ impl TeamCatalog {
                 colour: String::new(),
                 note: None,
                 libraries_made_from: None,
+                library_repo: None,
                 parts_as_of: self.parts_as_of(None),
                 session: TeamSession::SignedOut {
                     problem: state.problem.clone(),
@@ -285,6 +286,7 @@ impl TeamCatalog {
             colour: String::new(),
             note: None,
             libraries_made_from: None,
+            library_repo: None,
             parts_as_of: self.parts_as_of(Some((&live, imports, in_step_at))),
             session: TeamSession::SignedIn {
                 name: session.name.clone(),

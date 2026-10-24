@@ -423,6 +423,7 @@ mod tests {
             session,
             note: None,
             libraries_made_from: None,
+            library_repo: None,
             parts_as_of: None,
         }
     }

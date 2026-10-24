@@ -55,6 +55,9 @@ pub mod command {
     pub const TEAM_CODE_CHECK: &str = "team_code_check";
     pub const TEAM_CODE_SET: &str = "team_code_set";
     pub const KICAD_LIBRARIES_USE_NEW_SERVER: &str = "kicad_libraries_use_new_server";
+    pub const LIBRARY_REPO_LINK: &str = "library_repo_link";
+    pub const LIBRARY_REPO_CHECK: &str = "library_repo_check";
+    pub const LIBRARY_REPO_UNLINK: &str = "library_repo_unlink";
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -492,6 +495,10 @@ pub struct TeamStatus {
     /// while none are shown.
     #[serde(default)]
     pub parts_as_of: Option<u64>,
+    /// The git repo holding the team's own KiCad library, once the person
+    /// linked one (kicad-parts-ab30).
+    #[serde(default)]
+    pub library_repo: Option<LibraryRepoStatus>,
 }
 
 /// Where a team's KiCad libraries come from, when it is not the team's
@@ -505,6 +512,90 @@ pub struct LibrariesMadeFrom {
     /// are this team. The app keeps updating from `server`, and offers the
     /// new one only once `server` is removed from the person's teams.
     pub in_your_teams: bool,
+}
+
+/// A team's library repo: the git repo that holds the team's own KiCad
+/// library, and whether the app can reach it (kicad-parts-ab30).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryRepoStatus {
+    /// The address as linked, such as `git@gitlab.com:acme/kicad-lib.git`.
+    pub address: String,
+    /// The repo's short name, such as `acme/kicad-lib`.
+    pub name: String,
+    /// Where it is, such as `gitlab.com`, or `this computer`.
+    pub host: String,
+    pub access: RepoAccess,
+    /// When the app's own copy of the repo last matched it, in
+    /// milliseconds since 1970; `None` before the first copy.
+    #[serde(default)]
+    pub copied_at: Option<u64>,
+}
+
+/// What the app can do with a library repo, as its last check found.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RepoAccess {
+    /// A check is running. `copying` while the app makes its own copy of
+    /// the repo for the first time.
+    Checking {
+        copying: bool,
+    },
+    CanReadAndWrite,
+    /// The repo has no commits yet, so the app cannot try a push.
+    CanReadEmpty,
+    CanReadOnly {
+        problem: RepoProblem,
+    },
+    CannotRead {
+        problem: RepoProblem,
+    },
+}
+
+/// Why a step with a library repo failed: one plain line that says which
+/// step and what to check, and git's own words for the Details.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RepoProblem {
+    pub summary: String,
+    pub details: String,
+    /// The repo's host could not be reached. Fetching waits until it can,
+    /// and reading uses the app's copy meanwhile.
+    #[serde(default)]
+    pub offline: bool,
+}
+
+/// Link the team at `server_url` to a library repo. `place` is what the
+/// person entered: a folder holding a clone of the repo, or the repo's
+/// address.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryRepoRequest {
+    pub server_url: String,
+    pub place: String,
+}
+
+/// What linking a library repo did.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum LibraryRepoLinking {
+    /// Linked. The app now copies the repo and checks write access in the
+    /// background; `teams` shows it.
+    Linked {
+        teams: TeamsStatus,
+    },
+    /// The folder's clone has several remotes and none is `origin`: the
+    /// person chooses one.
+    ChooseRemote {
+        remotes: Vec<RepoRemote>,
+    },
+    Refused {
+        problem: RepoProblem,
+    },
+}
+
+/// One remote of a clone: its name and address.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RepoRemote {
+    pub name: String,
+    pub address: String,
 }
 
 /// The person's answer on a team's row: the team at `server_url` moved
@@ -1876,6 +1967,7 @@ mod tests {
             colour: "blue".into(),
             note: None,
             libraries_made_from: None,
+            library_repo: None,
             parts_as_of: None,
             session: TeamSession::SignedOut { problem: None },
         };

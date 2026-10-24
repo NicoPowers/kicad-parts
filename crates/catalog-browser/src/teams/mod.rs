@@ -241,12 +241,18 @@ impl Teams {
             .filter(|code| !code.is_empty())
             .or_else(|| list.find(&server_url).map(|team| team.saved.code.clone()))
             .unwrap_or_default();
+        // Signing in again keeps the team's library repo.
+        let library_repo = list
+            .find(&server_url)
+            .map(|team| team.saved.library_repo.clone())
+            .unwrap_or_default();
         let saved = SavedTeam {
             server_url: server_url.clone(),
             email,
             code,
             colour,
             signed_out: false,
+            library_repo,
         };
         list.problem = None;
         match list
@@ -403,6 +409,36 @@ impl Teams {
                 catalog.last_known_parts(&server_url, &label)
             })
             .collect()
+    }
+
+    /// Every team's library repo, as the address it was linked with, by
+    /// server address, in list order. Teams with none are left out.
+    pub fn library_repos(&self) -> Vec<(String, String)> {
+        self.lock()
+            .teams
+            .iter()
+            .filter(|team| !team.saved.library_repo.is_empty())
+            .map(|team| {
+                (
+                    team.saved.server_url.clone(),
+                    team.saved.library_repo.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Links the team at `server_url` to the library repo at `address`, or
+    /// unlinks it with `None`, and saves the list.
+    pub fn set_library_repo(&self, server_url: &str, address: Option<&str>) -> Result<(), String> {
+        let mut list = self.lock();
+        let team = list
+            .teams
+            .iter_mut()
+            .find(|team| team.saved.server_url == server_url)
+            .ok_or_else(|| format!("The team at {server_url} is no longer in your teams."))?;
+        team.saved.library_repo = address.unwrap_or_default().to_owned();
+        self.save(&list);
+        Ok(())
     }
 
     /// Every team that is signed in, by server address, in list order.

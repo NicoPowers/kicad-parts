@@ -29,6 +29,11 @@ pub(super) struct SavedTeam {
     /// could not forget it, is never carried on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) signed_out: bool,
+    /// The address of the git repo that holds the team's own KiCad
+    /// library, once linked (kicad-parts-ab30). Only the address: the app
+    /// reaches it with the person's own git and SSH setup.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(super) library_repo: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -188,6 +193,7 @@ mod tests {
                     code: "AC".into(),
                     colour: "blue".into(),
                     signed_out: false,
+                    library_repo: "git@gitlab.com:acme/kicad-lib.git".into(),
                 },
                 SavedTeam {
                     server_url: "https://beta.example.com".into(),
@@ -195,6 +201,7 @@ mod tests {
                     code: String::new(),
                     colour: "green".into(),
                     signed_out: false,
+                    library_repo: String::new(),
                 },
             ],
             choices: TeamChoices {
