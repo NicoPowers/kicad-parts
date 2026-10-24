@@ -6,6 +6,7 @@
 //! below matches words they print; the tests hold real messages from git,
 //! OpenSSH, GitHub, GitLab and Bitbucket.
 
+use super::address::RepoAddress;
 use crate::git_program::Ran;
 use desktop_contract::RepoProblem;
 use std::time::Duration;
@@ -35,27 +36,49 @@ impl Step {
     }
 }
 
-/// Why `step` failed, from what git said in `ran`, for the repo on `host`.
-/// `limit` is the step's time limit, said if git ran out of time.
-pub(crate) fn explain(step: Step, ran: &Ran, host: &str, limit: Duration) -> RepoProblem {
+/// Why `step` failed, from what git said in `ran`, for the repo at
+/// `address`. `limit` is the step's time limit, said if git ran out of
+/// time. `may_prompt` says git or ssh could have been waiting on a hidden
+/// question: the person has an SSH command of their own, or the address is
+/// https, where a credential helper may ask.
+pub(crate) fn explain(
+    step: Step,
+    ran: &Ran,
+    address: &RepoAddress,
+    limit: Duration,
+    may_prompt: bool,
+) -> RepoProblem {
+    let host = address.host();
+    let host = host.as_str();
     let said = ran.stderr.trim();
     let mut details = if said.is_empty() {
         "git gave no reason.".to_owned()
     } else {
         said.to_owned()
     };
-    let (reason, next, offline) = if ran.timed_out {
+    if ran.timed_out {
         details.push_str(&format!(
             "\nThe app stopped git after {} seconds.",
             limit.as_secs()
         ));
+    }
+    let (reason, next, offline) = if ran.timed_out && may_prompt {
+        (
+            format!("{host} did not answer within {} seconds", limit.as_secs()),
+            format!(
+                "git or ssh may be waiting for a passphrase or sign-in the app can't show. Try git ls-remote {} in a terminal.",
+                address.url()
+            ),
+            false,
+        )
+    } else if ran.timed_out {
         (
             format!("{host} did not answer within {} seconds", limit.as_secs()),
             "Check your internet connection, or try again later.".to_owned(),
             true,
         )
     } else {
-        reason_for(step, &said.to_lowercase(), host)
+        reason_for(step, &said.to_lowercase(), host, address.is_folder())
     };
     RepoProblem {
         summary: format!("{}: {reason}. {next}", step.opening()),
@@ -86,10 +109,13 @@ pub(crate) fn git_not_installed(step: Step) -> RepoProblem {
 
 /// The reason, the next step, and whether the host could not be reached,
 /// for git's message `said` (in small letters).
-fn reason_for(step: Step, said: &str, host: &str) -> (String, String, bool) {
+fn reason_for(
+    step: Step,
+    said: &str,
+    host: &str,
+    on_this_computer: bool,
+) -> (String, String, bool) {
     let has = |words: &[&str]| words.iter().any(|word| said.contains(word));
-    // A repo in a folder, such as on a network share, has no account.
-    let on_this_computer = host == "this computer";
     let plain = |reason: String, next: String| (reason, next, false);
     let offline = |reason: String, next: &str| (reason, next.to_owned(), true);
     let connection_hint = "Check your internet connection, or try again later.";
@@ -250,12 +276,31 @@ mod tests {
     /// What git adds after ssh's own message.
     const COULD_NOT_READ: &str = "fatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.";
 
+    fn gitlab() -> RepoAddress {
+        RepoAddress::parse("git@gitlab.com:acme/lib.git").unwrap()
+    }
+
+    #[test]
+    fn a_time_out_that_may_be_a_hidden_question_says_so() {
+        let ran = Ran {
+            timed_out: true,
+            ..Ran::default()
+        };
+        let web = RepoAddress::parse("https://gitlab.com/acme/lib.git").unwrap();
+        let problem = explain(Step::Read, &ran, &web, LIMIT, true);
+        assert_eq!(
+            problem.summary,
+            "Can't read the repo: gitlab.com did not answer within 60 seconds. git or ssh may be waiting for a passphrase or sign-in the app can't show. Try git ls-remote https://gitlab.com/acme/lib.git in a terminal."
+        );
+        assert!(!problem.offline);
+    }
+
     fn said(step: Step, stderr: &str) -> String {
         let ran = Ran {
             stderr: stderr.to_owned(),
             ..Ran::default()
         };
-        explain(step, &ran, "gitlab.com", LIMIT).summary
+        explain(step, &ran, &gitlab(), LIMIT, false).summary
     }
 
     #[test]
@@ -298,7 +343,7 @@ mod tests {
                 stderr: stderr.to_owned(),
                 ..Ran::default()
             };
-            explain(Step::Fetch, &ran, "gitlab.com", LIMIT)
+            explain(Step::Fetch, &ran, &gitlab(), LIMIT, false)
         };
         // Real messages from Git for Windows 2.53 and its OpenSSH.
         for (stderr, reason) in [
@@ -355,7 +400,7 @@ mod tests {
             timed_out: true,
             ..Ran::default()
         };
-        let problem = explain(Step::Read, &ran, "gitlab.com", LIMIT);
+        let problem = explain(Step::Read, &ran, &gitlab(), LIMIT, false);
         assert!(problem.offline);
         assert_eq!(
             problem.summary,
@@ -395,7 +440,14 @@ mod tests {
             ..Ran::default()
         };
         assert_eq!(
-            explain(Step::Read, &ran, "this computer", LIMIT).summary,
+            explain(
+                Step::Read,
+                &ran,
+                &RepoAddress::parse("/srv/hw/lib.git").unwrap(),
+                LIMIT,
+                false
+            )
+            .summary,
             "Can't read the repo: the repo was not found. Check that its folder is there and holds the repo."
         );
     }

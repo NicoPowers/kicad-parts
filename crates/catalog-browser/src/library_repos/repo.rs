@@ -247,7 +247,10 @@ impl LibraryRepo {
         if ran.succeeded {
             Ok(ran)
         } else {
-            Err(explain(step, &ran, &self.address.host(), limit))
+            // An https sign-in or the person's own ssh may have asked.
+            let may_prompt = ran.timed_out
+                && (self.address.is_web() || self.git.has_own_ssh_command(dir).unwrap_or(true));
+            Err(explain(step, &ran, &self.address, limit, may_prompt))
         }
     }
 

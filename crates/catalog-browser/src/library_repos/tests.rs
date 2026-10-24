@@ -449,10 +449,14 @@ fn a_host_that_does_not_answer_fails_within_the_time_limit() {
         "{:?}",
         started.elapsed()
     );
-    assert!(problem.offline, "{problem:?}");
+    // Over https a credential helper may have been asking, so the line
+    // says so rather than blaming the connection.
+    assert!(!problem.offline, "{problem:?}");
     assert_eq!(
         problem.summary,
-        "Can't read the repo: 127.0.0.1 did not answer within 2 seconds. Check your internet connection, or try again later."
+        format!(
+            "Can't read the repo: 127.0.0.1 did not answer within 2 seconds. git or ssh may be waiting for a passphrase or sign-in the app can't show. Try git ls-remote https://127.0.0.1:{port}/client/library.git in a terminal."
+        )
     );
     // A port nobody listens on is refused. Windows tries for about two
     // seconds first, so this step gets a longer limit.

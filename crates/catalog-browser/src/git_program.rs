@@ -162,9 +162,6 @@ impl Git {
     /// PuTTY's plink for Pageant) is left exactly as it is: changing it
     /// would break their agent. Such a command that asks something still
     /// cannot wait for ever, because the time limit stops it.
-    ///
-    /// git's messages are read in English (`LC_ALL=C`), so the app can
-    /// tell what went wrong and say it in plain words.
     pub(crate) fn run_network<I, S>(
         &self,
         dir: Option<&Path>,
@@ -176,7 +173,6 @@ impl Git {
         S: AsRef<OsStr>,
     {
         let mut command = self.command(dir);
-        command.env("LC_ALL", "C");
         if !self.has_own_ssh_command(dir)? {
             command.env("GIT_SSH_COMMAND", BATCH_SSH);
         }
@@ -189,7 +185,7 @@ impl Git {
     /// which kind of SSH program to expect (`GIT_SSH_VARIANT` or
     /// `ssh.variant`, as for PuTTY) counts too: "ssh -o ..." might not suit
     /// it.
-    fn has_own_ssh_command(&self, dir: Option<&Path>) -> Result<bool, NotInstalled> {
+    pub(crate) fn has_own_ssh_command(&self, dir: Option<&Path>) -> Result<bool, NotInstalled> {
         if ["GIT_SSH_COMMAND", "GIT_SSH", "GIT_SSH_VARIANT"]
             .iter()
             .any(|name| self.env_var(name).is_some_and(|value| !value.is_empty()))
@@ -228,7 +224,10 @@ impl Git {
                 None => command.env_remove(name),
             };
         }
+        // git's messages are read in English, so the app can tell what
+        // went wrong and say it in plain words.
         command
+            .env("LC_ALL", "C")
             .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
