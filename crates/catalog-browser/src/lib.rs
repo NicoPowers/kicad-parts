@@ -100,6 +100,9 @@ pub struct CatalogBrowser {
     library_check: library::Cached,
     /// The Libraries browser's index, read in the background.
     libraries: libraries::LibraryIndex,
+    /// The linked teams' reviewed library layouts the browser lists, as
+    /// last found, and notes about repos whose files could not be written.
+    team_libraries: std::sync::Mutex<(Vec<library_repos::TeamLibraries>, Vec<String>)>,
 }
 
 impl CatalogBrowser {
@@ -124,6 +127,7 @@ impl CatalogBrowser {
             csv_ipns: csv_ipns::CsvIpns::new(&config.catalog_root),
             library_check: library::Cached::default(),
             libraries: libraries::LibraryIndex::new(config.cache_dir.clone()),
+            team_libraries: Default::default(),
             previews,
             catalog,
             kicad: RwLock::new(KicadState {
@@ -384,7 +388,8 @@ impl CatalogBrowser {
             reading.from = match pick.library.group {
                 desktop_contract::LibraryGroup::Ours => library_part::FROM_OUR_LIBRARIES.to_owned(),
                 desktop_contract::LibraryGroup::Kicad => pick::FROM_KICAD.to_owned(),
-                desktop_contract::LibraryGroup::Installed => {
+                desktop_contract::LibraryGroup::Installed
+                | desktop_contract::LibraryGroup::Team => {
                     pick::from_installed(&pick.library.nickname)
                 }
             };

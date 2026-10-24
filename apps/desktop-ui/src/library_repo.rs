@@ -5,13 +5,17 @@
 //! the repo's address. Linked: the repo's short name and host, what the
 //! app can do with it in one line, and "Check again" and "Remove". A
 //! problem keeps git's own words under "Details".
+//!
+//! Once the app has a copy, a line says whether the person reviewed the
+//! repo's library layout, with "Review library layout" (kicad-parts-e9a3).
 
 use crate::as_of::{Said, SaidView};
 use crate::backend;
 use crate::focus::{Scrolling, focus_found_later, focus_later};
+use crate::library_layout::{LayoutOpen, LayoutOpener};
 use desktop_contract::{
-    LibraryRepoLinking, LibraryRepoRequest, LibraryRepoStatus, RepoAccess, RepoProblem, RepoRemote,
-    TeamStatus, TeamsStatus,
+    LayoutState, LibraryRepoLinking, LibraryRepoRequest, LibraryRepoStatus, RepoAccess,
+    RepoProblem, RepoRemote, TeamStatus, TeamsStatus,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -256,6 +260,37 @@ pub(crate) fn library_repo_part(
             }
         }
     };
+    let layout =
+        Memo::new(move |_| repo.with(|repo| repo.as_ref().and_then(|repo| repo.layout.clone())));
+    let opener = use_context::<LayoutOpener>();
+    let review_id = format!("{row_id}-review-layout");
+    let layout_part = move || {
+        let state = layout.get()?;
+        let (words, button) = layout_words(&state);
+        let (server, review_id) = (server.clone(), review_id.clone());
+        let return_focus = review_id.clone();
+        Some(view! {
+            <div class="team-repo-layout">
+                <p class="team-state">{words}</p>
+                <div class="team-actions">
+                    <button
+                        type="button"
+                        id=review_id
+                        on:click=move |_| {
+                            if let Some(LayoutOpener(open)) = opener {
+                                open.set(Some(LayoutOpen {
+                                    server_url: server.clone(),
+                                    return_focus: return_focus.clone(),
+                                }));
+                            }
+                        }
+                    >
+                        {button}
+                    </button>
+                </div>
+            </div>
+        })
+    };
     let labelled_by = label_id.clone();
     view! {
         <div class="team-repo" role="group" aria-labelledby=labelled_by>
@@ -283,7 +318,39 @@ pub(crate) fn library_repo_part(
             <Show when=move || adding.get() fallback=actions.clone()>
                 {form.clone()}
             </Show>
+            {layout_part}
         </div>
+    }
+}
+
+/// What the row says about the repo's library layout, and its button.
+pub(crate) fn layout_words(state: &LayoutState) -> (String, &'static str) {
+    match state {
+        LayoutState::NotReviewed => (
+            "Library layout: not reviewed yet. Check where the repo keeps its libraries and 3D models."
+                .to_owned(),
+            "Review library layout",
+        ),
+        LayoutState::Reviewed {
+            symbol_libraries,
+            footprint_libraries,
+        } => (
+            format!(
+                "Library layout: {} and {}.",
+                crate::counted(*symbol_libraries, "symbol library", "symbol libraries"),
+                crate::counted(
+                    *footprint_libraries,
+                    "footprint library",
+                    "footprint libraries"
+                )
+            ),
+            "Review library layout",
+        ),
+        LayoutState::Changed => (
+            "The library changed since you reviewed it. The app uses the layout you reviewed until you review it again."
+                .to_owned(),
+            "Review again",
+        ),
     }
 }
 
@@ -403,6 +470,25 @@ mod tests {
                 .contains("Connection refused")
         );
         assert!(details_of(&repo(RepoAccess::CanReadAndWrite, None)).is_none());
+    }
+
+    #[test]
+    fn the_layout_line_says_what_to_do_next() {
+        assert_eq!(
+            layout_words(&LayoutState::NotReviewed).1,
+            "Review library layout"
+        );
+        assert_eq!(
+            layout_words(&LayoutState::Reviewed {
+                symbol_libraries: 1,
+                footprint_libraries: 3
+            })
+            .0,
+            "Library layout: 1 symbol library and 3 footprint libraries."
+        );
+        let (words, button) = layout_words(&LayoutState::Changed);
+        assert!(words.starts_with("The library changed since you reviewed it."));
+        assert_eq!(button, "Review again");
     }
 
     #[test]

@@ -13,13 +13,14 @@ use catalog_browser::teams::Teams;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use desktop_contract::{
     AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, FootprintDrawing,
-    KicadLibrariesStatus, LibrariesView, LibraryCheckView, LibraryItemDetail, LibraryItemRequest,
-    LibraryItems, LibraryItemsRequest, LibraryRepoLinking, LibraryRepoRequest, OurLibraries,
-    PartDetail, PartKey, PreviewOutcome, PreviewRequest, PublishResult, SearchRequest,
-    SearchResponse, SignInRequest, TeamArchiveRequest, TeamChoices, TeamCodeCheck,
-    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
-    TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
-    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus, UseNewServerRequest,
+    KicadLibrariesStatus, LayoutUseRequest, LibrariesView, LibraryCheckView, LibraryItemDetail,
+    LibraryItemRequest, LibraryItems, LibraryItemsRequest, LibraryLayoutReview, LibraryRepoLinking,
+    LibraryRepoRequest, OurLibraries, PartDetail, PartKey, PreviewOutcome, PreviewRequest,
+    PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamChoices,
+    TeamCodeCheck, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest,
+    TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest,
+    TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus,
+    UseNewServerRequest,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -626,10 +627,15 @@ async fn team_library_check(
 }
 
 #[tauri::command]
-async fn libraries(browser: State<'_, Browser>, refresh: bool) -> Result<LibrariesView, String> {
-    let browser = browser.inner().clone();
-    // With refresh, the index checks every library in the background.
-    blocking(move || browser.libraries(refresh)).await
+async fn libraries(
+    browser: State<'_, Browser>,
+    repos: State<'_, Repos>,
+    refresh: bool,
+) -> Result<LibrariesView, String> {
+    let (browser, repos) = (browser.inner().clone(), repos.inner().clone());
+    // With refresh, the index checks every library in the background, and
+    // each linked team's reviewed library layout is found again.
+    blocking(move || browser.libraries_with_teams(refresh, || repos.team_libraries())).await
 }
 
 /// The Libraries browser's items. The parts the part list shows mark the
@@ -808,6 +814,43 @@ async fn library_repo_unlink(
     .await?
 }
 
+/// Scans a team's library repo for its library layout, to review. With
+/// `fetch`, the app's copy is brought up to date first.
+#[tauri::command]
+async fn library_layout_review(
+    repos: State<'_, Repos>,
+    server_url: String,
+    fetch: bool,
+) -> Result<LibraryLayoutReview, String> {
+    let repos = repos.inner().clone();
+    blocking(move || {
+        repos
+            .review_layout(&server_url, fetch)
+            .map_err(|problem| problem.summary)
+    })
+    .await?
+}
+
+/// Keeps the library layout the person reviewed for a team's repo.
+#[tauri::command]
+async fn library_layout_use(
+    team: State<'_, Team>,
+    libraries: State<'_, Libraries>,
+    repos: State<'_, Repos>,
+    request: LayoutUseRequest,
+) -> Result<TeamsStatus, String> {
+    let (teams, libraries, repos) = (
+        team.inner().clone(),
+        libraries.inner().clone(),
+        repos.inner().clone(),
+    );
+    blocking(move || {
+        repos.use_layout(&request)?;
+        Ok(teams_status(&teams, &libraries, &repos))
+    })
+    .await?
+}
+
 /// Shows the KiCad libraries folder in the system's file manager.
 #[tauri::command]
 async fn kicad_libraries_open_folder(
@@ -981,6 +1024,8 @@ fn main() {
             library_repo_link,
             library_repo_check,
             library_repo_unlink,
+            library_layout_review,
+            library_layout_use,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the KiCad Parts desktop app");
@@ -1117,6 +1162,8 @@ mod tests {
             command::LIBRARY_REPO_LINK,
             command::LIBRARY_REPO_CHECK,
             command::LIBRARY_REPO_UNLINK,
+            command::LIBRARY_LAYOUT_REVIEW,
+            command::LIBRARY_LAYOUT_USE,
         ] {
             assert!(
                 source.contains(&format!("async fn {name}(")),

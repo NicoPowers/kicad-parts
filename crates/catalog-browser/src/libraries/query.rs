@@ -229,6 +229,7 @@ pub(crate) fn symbol_for(symbols: &[Library], reference: &str) -> SymbolForFootp
         let key = LibraryKey {
             group,
             nickname: nickname.to_owned(),
+            team: String::new(),
         };
         if let Some(SymbolOrFootprint::Symbol(item)) = find_item(symbols, &key, name) {
             return SymbolForFootprints {

@@ -1704,8 +1704,9 @@ pub fn unit_label(unit: u32) -> String {
 
 // ---- The Libraries browser -------------------------------------------------
 //
-// Ours (the CSV catalog's g- libraries), KiCad's own installed libraries,
-// and the other libraries the person added to KiCad (their library tables,
+// Ours (the CSV catalog's g- libraries), each linked team's library repo
+// as its library layout was reviewed, KiCad's own installed libraries, and
+// the other libraries the person added to KiCad (their library tables,
 // read only). Symbols and footprints are listed by an index the app builds
 // in the background and keeps in its data folder.
 
@@ -1715,6 +1716,9 @@ pub fn unit_label(unit: u32) -> String {
 pub enum LibraryGroup {
     /// The CSV catalog's own `g-` libraries.
     Ours,
+    /// A linked team's library repo, as its library layout was reviewed
+    /// (kicad-parts-e9a3). One group per team, named by [`LibraryKey::team`].
+    Team,
     /// KiCad's own installed libraries.
     Kicad,
     /// Other libraries in the person's KiCad library tables.
@@ -1722,12 +1726,15 @@ pub enum LibraryGroup {
 }
 
 impl LibraryGroup {
+    /// The groups with one heading each, in the order shown. Team groups
+    /// come after Ours, one per team.
     pub const ALL: [LibraryGroup; 3] = [Self::Ours, Self::Kicad, Self::Installed];
 
     /// The group's heading, such as `KiCad`.
     pub fn title(self) -> &'static str {
         match self {
             Self::Ours => "Ours",
+            Self::Team => "Team",
             Self::Kicad => "KiCad",
             Self::Installed => "Installed",
         }
@@ -1739,6 +1746,23 @@ impl LibraryGroup {
 pub struct LibraryKey {
     pub group: LibraryGroup,
     pub nickname: String,
+    /// For [`LibraryGroup::Team`], the team's server address: two teams'
+    /// repos may use one nickname. Blank for every other group.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub team: String,
+}
+
+/// A linked team whose library repo the browser lists, for the heading of
+/// its group.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryTeam {
+    pub server_url: String,
+    /// The team's code (or a short form of its address) and colour, for
+    /// its mark.
+    pub code: String,
+    pub colour: String,
+    /// The repo's short name, such as `acme/kicad-lib`.
+    pub repo_name: String,
 }
 
 /// One library in the browser's list.
@@ -1771,6 +1795,10 @@ pub struct LibrariesView {
     /// settings not being found.
     #[serde(default)]
     pub installed_note: Option<String>,
+    /// The linked teams whose reviewed library layouts are listed, in the
+    /// order their groups are shown.
+    #[serde(default)]
+    pub teams: Vec<LibraryTeam>,
 }
 
 impl LibrariesView {

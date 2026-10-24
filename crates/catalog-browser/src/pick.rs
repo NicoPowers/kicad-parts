@@ -234,6 +234,13 @@ impl CatalogBrowser {
 
     /// What choosing `request` in the Libraries browser does for a part.
     pub fn pick(&self, request: &TeamPickRequest, team: &TeamCatalog) -> Result<TeamPick, String> {
+        // Copying parts between teams comes later (kicad-parts-1a46).
+        if request.library.group == LibraryGroup::Team {
+            return Err(format!(
+                "{} is in another team's library repo. Choose from our libraries, KiCad's or your installed ones.",
+                request.library.nickname
+            ));
+        }
         let item = self.item(request)?;
         let mut pick = TeamPick {
             kind: request.kind,
@@ -290,7 +297,7 @@ impl CatalogBrowser {
                         .into(),
                 );
             }
-            LibraryGroup::Installed => {
+            LibraryGroup::Installed | LibraryGroup::Team => {
                 pick.use_as = PickUse::Copy;
                 pick.notes.push(format!(
                     "From the installed library {}, which teammates may not have. It is copied into one of our libraries when you save.",
@@ -440,6 +447,7 @@ impl CatalogBrowser {
         .map(|group| LibraryKey {
             group,
             nickname: nickname.to_owned(),
+            team: String::new(),
         })
         .find(|key| {
             self.libraries.wait_for(

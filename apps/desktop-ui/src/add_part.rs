@@ -269,6 +269,7 @@ impl Form {
                 library: LibraryKey {
                     group: LibraryGroup::Ours,
                     nickname: library.to_owned(),
+                    team: String::new(),
                 },
                 name: name.to_owned(),
             })
@@ -2137,13 +2138,14 @@ mod tests {
             library: LibraryKey {
                 group,
                 nickname: nickname.into(),
+                team: String::new(),
             },
             name: name.into(),
             reference: format!("{nickname}:{name}"),
             use_as: match group {
                 LibraryGroup::Ours => PickUse::Ours,
                 LibraryGroup::Kicad => PickUse::Kicad,
-                LibraryGroup::Installed => PickUse::Copy,
+                LibraryGroup::Installed | LibraryGroup::Team => PickUse::Copy,
             },
             file: None,
             models: Vec::new(),

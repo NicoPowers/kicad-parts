@@ -12,6 +12,7 @@ mod focus;
 mod kicad_libraries;
 mod libraries;
 mod library_check;
+mod library_layout;
 mod library_repo;
 mod list_controls;
 mod list_focus;
@@ -146,6 +147,9 @@ fn App() -> impl IntoView {
     let checking = RwSignal::new(false);
     // The Libraries browser, while it is open, and what it is open for.
     let libraries_open = RwSignal::new(None::<BrowseFor>);
+    // Review library layout, while it is open (kicad-parts-e9a3).
+    let layout_open = RwSignal::new(None::<library_layout::LayoutOpen>);
+    provide_context(library_layout::LayoutOpener(layout_open));
     // Edit part and Add part open it to choose a symbol or footprint, and
     // offer our libraries for a file (kicad-parts-bc6f).
     provide_context(cad_choice::LibrariesOpener(libraries_open));
@@ -438,6 +442,9 @@ fn App() -> impl IntoView {
                     library_add=library_add
                 />
             </main>
+            {move || layout_open.with(Option::is_some).then(|| view! {
+                <library_layout::LayoutDialog open=layout_open />
+            })}
             {move || libraries_open.with(Option::is_some).then(|| view! {
                 <LibrariesDialog
                     open=libraries_open

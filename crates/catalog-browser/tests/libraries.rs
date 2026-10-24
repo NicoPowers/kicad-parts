@@ -207,6 +207,7 @@ fn key(group: LibraryGroup, nickname: &str) -> LibraryKey {
     LibraryKey {
         group,
         nickname: nickname.to_owned(),
+        team: String::new(),
     }
 }
 
@@ -829,4 +830,92 @@ fn removes_old_cache_layouts_and_left_over_temporary_files() {
     assert!(!index.join("v1").exists());
     assert!(!current.join("abc.json.123.tmp").exists());
     assert!(current.read_dir().unwrap().count() > 0);
+}
+
+#[test]
+fn lists_each_linked_teams_reviewed_libraries_in_a_group_of_its_own() {
+    use catalog_browser::library_repos::TeamLibraries;
+    use kicad_integration::library_source::{LibraryList, SourceLibrary, SourceProfile};
+    let fixture = fixture();
+    // The files the app wrote out of a client repo's copy, at repo paths.
+    let files = fixture.root.join("acme-files");
+    write(
+        &files.join("lib").join("Device.kicad_sym"),
+        &library(&[symbol("Acme_R", "R", "", "Acme_FP:R_0603", &["1", "2"])]),
+    );
+    write(
+        &files
+            .join("lib")
+            .join("Acme.pretty")
+            .join("R_0603.kicad_mod"),
+        &footprint("R_0603", "smd", &["1", "2"]),
+    );
+    let listed = |nickname: &str, path: &str| LibraryList::Listed {
+        libraries: vec![SourceLibrary {
+            nickname: nickname.into(),
+            path: path.into(),
+        }],
+    };
+    let acme = TeamLibraries {
+        server_url: "https://acme.example.test".into(),
+        code: "AC".into(),
+        colour: "blue".into(),
+        repo_name: "acme/kicad-lib".into(),
+        profile: SourceProfile {
+            prefix: "AC".into(),
+            // A client's own Device library, beside KiCad's.
+            symbols: listed("Device", "lib/Device.kicad_sym"),
+            footprints: listed("Acme_FP", "lib/Acme.pretty"),
+            model_folders: vec![],
+            path_variables: vec![],
+            database_libraries: vec![],
+            models_by_library: None,
+        },
+        folder: files,
+    };
+    let browser = open(&fixture, None);
+    browser.libraries_with_teams(true, || (vec![acme.clone()], Vec::new()));
+    assert!(browser.wait_for_libraries(WAIT));
+    let view = browser.libraries(false);
+    assert_eq!(view.teams.len(), 1);
+    assert_eq!(view.teams[0].code, "AC");
+    assert_eq!(view.teams[0].repo_name, "acme/kicad-lib");
+    let symbols: Vec<(LibraryGroup, &str, &str, Option<usize>)> = view
+        .symbols
+        .iter()
+        .map(|entry| {
+            (
+                entry.key.group,
+                entry.key.nickname.as_str(),
+                entry.key.team.as_str(),
+                entry.items,
+            )
+        })
+        .collect();
+    // After ours and before KiCad's, with the repo's own nickname.
+    assert_eq!(
+        symbols,
+        [
+            (LibraryGroup::Ours, "g-pas", "", Some(2)),
+            (
+                LibraryGroup::Team,
+                "Device",
+                "https://acme.example.test",
+                Some(1)
+            ),
+            (LibraryGroup::Kicad, "Device", "", Some(3)),
+        ]
+    );
+    let team_key = view.symbols[1].key.clone();
+    let only_acme = LibraryItemsRequest {
+        library: Some(team_key),
+        ..request(PreviewKind::Symbol)
+    };
+    assert_eq!(names(&browser, &only_acme), ["Device:Acme_R"]);
+    // A later refresh with no teams lists none.
+    browser.libraries_with_teams(true, || (Vec::new(), vec!["A note".into()]));
+    assert!(browser.wait_for_libraries(WAIT));
+    let view = browser.libraries_with_teams(false, || unreachable!());
+    assert!(view.teams.is_empty());
+    assert!(view.notes.contains(&"A note".to_owned()));
 }

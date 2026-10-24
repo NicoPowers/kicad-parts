@@ -246,6 +246,38 @@ pub async fn library_repo_unlink(server_url: &str) -> Result<TeamsStatus, String
     call(command::LIBRARY_REPO_UNLINK, &ServerArgs { server_url }).await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LayoutReviewArgs<'a> {
+    server_url: &'a str,
+    fetch: bool,
+}
+
+/// Scans a team's library repo for its library layout, to review; with
+/// `fetch`, the app's copy is brought up to date first.
+pub async fn library_layout_review(
+    server_url: &str,
+    fetch: bool,
+) -> Result<desktop_contract::LibraryLayoutReview, String> {
+    call(
+        command::LIBRARY_LAYOUT_REVIEW,
+        &LayoutReviewArgs { server_url, fetch },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+struct LayoutUseArgs {
+    request: desktop_contract::LayoutUseRequest,
+}
+
+/// Keeps the library layout the person reviewed.
+pub async fn library_layout_use(
+    request: desktop_contract::LayoutUseRequest,
+) -> Result<TeamsStatus, String> {
+    call(command::LIBRARY_LAYOUT_USE, &LayoutUseArgs { request }).await
+}
+
 pub async fn team_part(team: &str, ipn: &str) -> Result<Option<TeamPart>, String> {
     call(command::TEAM_PART, &for_team(team, DetailArgs { ipn })).await
 }

@@ -418,6 +418,7 @@ fn request(kind: PreviewKind, group: LibraryGroup, library: &str, name: &str) ->
         library: LibraryKey {
             group,
             nickname: library.into(),
+            team: String::new(),
         },
         name: name.into(),
     }

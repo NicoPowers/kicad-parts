@@ -4,6 +4,7 @@
 use super::query::{self, SymbolOrFootprint, Uses};
 use super::read::{Links, MAX_SYMBOL_FILE_BYTES, read_limited};
 use super::sources::{Format, Places, is_link};
+use crate::library_repos::TeamLibraries;
 use crate::team::KnownParts;
 use crate::{CatalogBrowser, Drawn, export_problem, problem, ready};
 use desktop_contract::{
@@ -28,6 +29,31 @@ impl CatalogBrowser {
         self.libraries.view()
     }
 
+    /// [`Self::libraries`], with the linked teams' reviewed library
+    /// layouts found again first (`teams`, asked only with `refresh`), and
+    /// notes about repos whose files could not be written.
+    pub fn libraries_with_teams(
+        &self,
+        refresh: bool,
+        teams: impl FnOnce() -> (Vec<TeamLibraries>, Vec<String>),
+    ) -> LibrariesView {
+        if refresh {
+            let (found, notes) = teams();
+            *self
+                .team_libraries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = (found, notes);
+        }
+        let mut view = self.libraries(refresh);
+        let notes = &self
+            .team_libraries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .1;
+        view.notes.extend(notes.iter().cloned());
+        view
+    }
+
     /// Where the libraries are: our CSV catalog folder, KiCad's data
     /// folder (found even when kicad-cli cannot run) and the person's
     /// KiCad settings folder.
@@ -41,6 +67,12 @@ impl CatalogBrowser {
             kicad_config: self.config.kicad_config_dir.clone(),
             environment: std::env::vars().collect(),
             documents: self.config.kicad_documents_dir.clone(),
+            teams: self
+                .team_libraries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .0
+                .clone(),
         }
     }
 

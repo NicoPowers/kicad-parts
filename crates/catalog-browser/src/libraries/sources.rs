@@ -1,8 +1,11 @@
-//! Which libraries the browser lists, in three groups:
+//! Which libraries the browser lists, in these groups:
 //!
 //! - Ours: the CSV catalog's `symbols/g-*.kicad_sym` (or `.kicad_symdir`)
 //!   and `footprints/g-*.pretty`, found without following links, as the
 //!   library check reads them;
+//! - one group per linked team: the libraries of its library repo, as the
+//!   person reviewed its layout (kicad-parts-e9a3), from files the app
+//!   wrote out of its own copy;
 //! - KiCad: KiCad's own `symbols/` and `footprints/` in its installed data
 //!   folder, described by KiCad's template tables;
 //! - Installed: the other KiCad libraries in the person's library tables.
@@ -19,11 +22,12 @@
 //! file an installed library's row names may be one: the person chose it,
 //! and KiCad follows it.
 
-use desktop_contract::{LibraryGroup, LibraryKey, PreviewKind};
+use crate::library_repos::TeamLibraries;
+use desktop_contract::{LibraryGroup, LibraryKey, LibraryTeam, PreviewKind};
 use kicad_integration::lib_table::{
     LibTable, PathVariables, TableKind, VariableSources, is_inside, read_tables,
 };
-use kicad_integration::library_source::{SourceProfile, join};
+use kicad_integration::library_source::{LibraryList, SourceProfile, join};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -66,6 +70,8 @@ pub(crate) struct Places {
     pub environment: BTreeMap<String, String>,
     /// The person's Documents folder, for `KICAD10_3RD_PARTY`.
     pub documents: Option<PathBuf>,
+    /// Each linked team's reviewed library layout and its files.
+    pub teams: Vec<TeamLibraries>,
 }
 
 /// What [`find_sources`] found.
@@ -77,6 +83,8 @@ pub(crate) struct Found {
     /// Said in the Installed group when it lists nothing, such as KiCad's
     /// settings not being found.
     pub installed_note: Option<String>,
+    /// The teams whose libraries are listed, for their groups' headings.
+    pub teams: Vec<LibraryTeam>,
 }
 
 /// KiCad's version whose variables (`KICAD10_*`) are expanded.
@@ -88,6 +96,19 @@ pub(crate) fn find_sources(places: &Places) -> Found {
     let mut sources = Vec::new();
     let mut notes = Vec::new();
     ours(&places.catalog_root, &mut sources);
+    let teams = places
+        .teams
+        .iter()
+        .map(|team| {
+            team_libraries(team, &mut sources);
+            LibraryTeam {
+                server_url: team.server_url.clone(),
+                code: team.code.clone(),
+                colour: team.colour.clone(),
+                repo_name: team.repo_name.clone(),
+            }
+        })
+        .collect();
     if let Some(share) = &places.share {
         kicad(share, &mut sources);
     }
@@ -107,16 +128,53 @@ pub(crate) fn find_sources(places: &Places) -> Found {
         )),
     };
     sources.sort_by(|a, b| {
-        (a.kind as u8, a.key.group, a.key.nickname.to_lowercase()).cmp(&(
-            b.kind as u8,
-            b.key.group,
-            b.key.nickname.to_lowercase(),
-        ))
+        (
+            a.kind as u8,
+            a.key.group,
+            &a.key.team,
+            a.key.nickname.to_lowercase(),
+        )
+            .cmp(&(
+                b.kind as u8,
+                b.key.group,
+                &b.key.team,
+                b.key.nickname.to_lowercase(),
+            ))
     });
     Found {
         sources,
         notes,
         installed_note,
+        teams,
+    }
+}
+
+/// The libraries of one team's reviewed library layout, at their repo
+/// paths in the folder the app wrote them to. Nicknames stay as the repo
+/// names them.
+fn team_libraries(team: &TeamLibraries, sources: &mut Vec<Source>) {
+    for (kind, table) in [
+        (PreviewKind::Symbol, TableKind::Symbol),
+        (PreviewKind::Footprint, TableKind::Footprint),
+    ] {
+        let LibraryList::Listed { libraries } = team.profile.libraries(table) else {
+            continue;
+        };
+        for library in libraries {
+            sources.push(Source {
+                key: LibraryKey {
+                    group: LibraryGroup::Team,
+                    nickname: library.nickname.clone(),
+                    team: team.server_url.clone(),
+                },
+                kind,
+                description: String::new(),
+                path: native(&team.folder, &library.path),
+                format: format_of(kind, &library.path),
+                problem: None,
+                strict_links: true,
+            });
+        }
     }
 }
 
@@ -144,6 +202,7 @@ fn ours(root: &Path, sources: &mut Vec<Source>) {
                     key: LibraryKey {
                         group: LibraryGroup::Ours,
                         nickname,
+                        team: String::new(),
                     },
                     kind,
                     description: String::new(),
@@ -212,6 +271,7 @@ fn kicad(share: &Path, sources: &mut Vec<Source>) {
                 key: LibraryKey {
                     group: LibraryGroup::Kicad,
                     nickname: nickname.to_owned(),
+                    team: String::new(),
                 },
                 kind,
                 description: descriptions.get(nickname).cloned().unwrap_or_default(),
@@ -314,6 +374,7 @@ fn installed(places: &Places, config: &Path, sources: &mut Vec<Source>, notes: &
                 key: LibraryKey {
                     group: LibraryGroup::Installed,
                     nickname: library.row.name.clone(),
+                    team: String::new(),
                 },
                 kind,
                 description: library.row.descr.clone(),

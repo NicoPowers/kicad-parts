@@ -2744,3 +2744,231 @@ a {
 .library-preview .preview-meta .reference {
   display: none;
 }
+
+/* A linked team's library repo in the Libraries browser: its mark and the
+   repo's name, which keeps its own capitals. */
+.library-group-team {
+  text-transform: none;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+.library-group-team .team-chip {
+  letter-spacing: 0;
+}
+
+/* The repo's library layout on its team's row (kicad-parts-e9a3). */
+.team-repo-layout {
+  margin-top: 0.5rem;
+}
+
+.kicad-settings-body .team-repo-layout .team-state {
+  margin: 0 0 0.4rem;
+}
+
+/* Review library layout: one screen, two columns. */
+.layout-dialog {
+  width: min(calc(100vw - 2rem), 72rem);
+  height: calc(100vh - 2rem);
+  max-height: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  box-shadow: 0 16px 48px rgb(10 20 35 / 35%);
+  overflow: hidden;
+}
+
+.layout-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.layout-dialog::backdrop {
+  background: rgb(10 20 35 / 60%);
+}
+
+.layout-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.9rem 0.2rem;
+}
+
+.layout-header h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 1.15rem;
+  overflow-wrap: anywhere;
+}
+
+.layout-header .team-chip {
+  margin-right: 0;
+  font-size: 0.9rem;
+}
+
+.layout-commit {
+  margin: 0;
+  padding: 0 0.9rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.88rem;
+}
+
+.layout-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 0.9rem;
+}
+
+.layout-body > .hint,
+.layout-body > .problem {
+  margin: 0.9rem 0;
+}
+
+.layout-columns {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1.2rem;
+}
+
+.layout-column {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.6rem 0.2rem 0.8rem;
+}
+
+.layout-summary {
+  margin: 0 0 0.6rem;
+  font-weight: 600;
+}
+
+.layout-section {
+  margin-bottom: 0.9rem;
+}
+
+.layout-section h3 {
+  margin: 0 0 0.3rem;
+  font-size: 0.95rem;
+}
+
+.layout-section .hint {
+  margin: 0 0 0.35rem;
+  font-size: 0.85rem;
+}
+
+.layout-doubts {
+  padding: 0.5rem 0.75rem;
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn-line);
+  border-radius: 6px;
+}
+
+.layout-doubts h4 {
+  margin: 0.35rem 0 0.15rem;
+  font-size: 0.88rem;
+}
+
+.layout-doubts ul,
+.layout-paths,
+.layout-variables,
+.layout-library-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.layout-doubts li {
+  margin: 0 0 0.2rem;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+#layout-prefix,
+.layout-variables select {
+  font: inherit;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #9aa7b6;
+  border-radius: 6px;
+}
+
+#layout-prefix {
+  width: 8rem;
+  margin-bottom: 0.3rem;
+}
+
+.layout-variables li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
+}
+
+.layout-variables label {
+  overflow-wrap: anywhere;
+}
+
+.layout-variables select {
+  width: 100%;
+}
+
+.layout-paths li {
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.layout-library-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.layout-library-list input {
+  margin-top: 0.25rem;
+}
+
+.layout-library-list label {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.6rem;
+  min-width: 0;
+}
+
+.layout-nickname {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.layout-path {
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.layout-from-table {
+  font-size: 0.8rem;
+}
+
+.layout-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.9rem;
+  border-top: 1px solid var(--line);
+}
+
+.layout-footer-hint {
+  flex: 1;
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.layout-refused {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--danger);
+}

@@ -1,6 +1,7 @@
 //! The Libraries browser's index (kicad-parts-d152): every symbol and
-//! footprint of our libraries, KiCad's own and the person's installed
-//! libraries, with what the list and its filters need.
+//! footprint of our libraries, each linked team's reviewed library repo
+//! (kicad-parts-e9a3), KiCad's own and the person's installed libraries,
+//! with what the list and its filters need.
 //!
 //! Opening the browser asks for a refresh: the libraries are found again
 //! (a table may have changed) and a few background threads go through them,
@@ -15,7 +16,7 @@ pub(crate) mod query;
 pub(crate) mod read;
 pub(crate) mod sources;
 
-use desktop_contract::{LibrariesView, LibraryEntry, LibraryKey, PreviewKind};
+use desktop_contract::{LibrariesView, LibraryEntry, LibraryKey, LibraryTeam, PreviewKind};
 use read::Loaded;
 use sources::{Places, Source, find_sources};
 use std::collections::VecDeque;
@@ -43,6 +44,8 @@ struct State {
     libraries: Vec<Library>,
     notes: Vec<String>,
     installed_note: Option<String>,
+    /// The teams whose library repos are listed, in order.
+    teams: Vec<LibraryTeam>,
     /// Whether old cache layouts were removed this run.
     cleaned: bool,
     /// Places in `libraries` still to check, the next first.
@@ -98,6 +101,7 @@ impl LibraryIndex {
             read::clean_cache(&self.shared.cache_dir);
         }
         state.installed_note = found.installed_note;
+        state.teams = found.teams;
         let old = std::mem::take(&mut state.libraries);
         state.libraries = sources
             .into_iter()
@@ -116,7 +120,8 @@ impl LibraryIndex {
             })
             .collect();
         state.notes = notes;
-        // Ours first, then the person's installed libraries, then KiCad's.
+        // Ours first, then the teams' repos, then the person's installed
+        // libraries, then KiCad's.
         let mut order: Vec<usize> = (0..state.libraries.len())
             .filter(|&at| state.libraries[at].pending)
             .collect();
@@ -124,8 +129,9 @@ impl LibraryIndex {
             let group = state.libraries[at].source.key.group;
             match group {
                 desktop_contract::LibraryGroup::Ours => 0,
-                desktop_contract::LibraryGroup::Installed => 1,
-                desktop_contract::LibraryGroup::Kicad => 2,
+                desktop_contract::LibraryGroup::Team => 1,
+                desktop_contract::LibraryGroup::Installed => 2,
+                desktop_contract::LibraryGroup::Kicad => 3,
             }
         });
         state.queue = order.into();
@@ -213,6 +219,7 @@ impl LibraryIndex {
             total: state.libraries.len(),
             notes: state.notes.clone(),
             installed_note: state.installed_note.clone(),
+            teams: state.teams.clone(),
         }
     }
 

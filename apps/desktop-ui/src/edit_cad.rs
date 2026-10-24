@@ -339,6 +339,7 @@ pub(crate) fn CadFields(ui: TeamUi, ipn: String, before: Vec<(String, String)>) 
                 library: desktop_contract::LibraryKey {
                     group: desktop_contract::LibraryGroup::Installed,
                     nickname: installed.library,
+                    team: String::new(),
                 },
                 name,
             };
@@ -398,6 +399,7 @@ pub(crate) fn restored_copy(
             library: desktop_contract::LibraryKey {
                 group: desktop_contract::LibraryGroup::Installed,
                 nickname: library.clone(),
+                team: String::new(),
             },
             name: String::new(),
             reference: String::new(),
@@ -1038,6 +1040,7 @@ mod tests {
             library: desktop_contract::LibraryKey {
                 group: desktop_contract::LibraryGroup::Installed,
                 nickname: "MyFootprints".into(),
+                team: String::new(),
             },
             name: "C_0603_Lost".into(),
             reference: "MyFootprints:C_0603_Lost".into(),

@@ -1,6 +1,7 @@
 //! The Libraries browser (kicad-parts-d152): a dialog, opened from the
-//! header, over our libraries, KiCad's own and the person's installed
-//! ones. Libraries on the left in three groups, a searchable and filtered
+//! header, over our libraries, each linked team's library repo (as its
+//! library layout was reviewed, kicad-parts-e9a3), KiCad's own and the
+//! person's installed ones. Libraries on the left in three groups, a searchable and filtered
 //! list of symbols or footprints in the middle, and the chosen item's
 //! drawing and details on the right.
 //!
@@ -11,12 +12,13 @@
 //! one role, the current item selected, and a callback for the choice.
 
 use crate::focus::focus_later;
-use crate::team_marks::{CsvChip, ListTeams, TeamChip};
+use crate::team_marks::{CsvChip, ListTeams, TeamChip, TeamMark};
 use crate::{Load, PreviewSection, backend, cad_reference, counted, grouped, into_load};
 use desktop_contract::{
     LibrariesView, LibraryCheckView, LibraryEntry, LibraryFilters, LibraryGroup, LibraryItemDetail,
-    LibraryItemRequest, LibraryItemRow, LibraryItems, LibraryItemsRequest, LibraryKey, MountFilter,
-    PartKey, PreviewKind, PreviewOutcome, PreviewProblemReason, TeamLibraryChoice, TeamPickRequest,
+    LibraryItemRequest, LibraryItemRow, LibraryItems, LibraryItemsRequest, LibraryKey, LibraryTeam,
+    MountFilter, PartKey, PreviewKind, PreviewOutcome, PreviewProblemReason, TeamLibraryChoice,
+    TeamPickRequest,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -485,7 +487,13 @@ pub(crate) fn LibrariesDialog(
                         {tab_button(PreviewKind::Symbol, "Symbols", "library-tab-symbols")}
                         {tab_button(PreviewKind::Footprint, "Footprints", "library-tab-footprints")}
                     </div>
-                    <LibraryList view=view tab=tab library=library selected=selected />
+                    <LibraryList
+                        view=view
+                        tab=tab
+                        library=library
+                        selected=selected
+                        with_teams=choose.is_none()
+                    />
                 </nav>
                 <section
                     class="libraries-items"
@@ -569,6 +577,86 @@ fn poll_progress(view: RwSignal<Option<LibrariesView>>, alive: Arc<AtomicBool>) 
     );
 }
 
+/// One group of the library list: its heading and its libraries.
+struct ListGroup {
+    /// The heading's element ID.
+    id: String,
+    title: String,
+    /// The team's mark, for a team's library repo.
+    mark: Option<TeamMark>,
+    entries: Vec<LibraryEntry>,
+    note: Option<String>,
+}
+
+/// The groups of `entries` in the order shown: ours, each team's repo,
+/// KiCad's, then installed ones. Empty groups are left out, except
+/// Installed with `installed_note`, which says why it is empty. Teams'
+/// repos are left out without `with_teams`, such as while choosing an
+/// item for a part.
+fn list_groups(
+    entries: &[LibraryEntry],
+    teams: &[LibraryTeam],
+    installed_note: Option<String>,
+    with_teams: bool,
+) -> Vec<ListGroup> {
+    let mut groups = Vec::new();
+    let mut push = |id: String,
+                    title: String,
+                    mark: Option<TeamMark>,
+                    entries: Vec<LibraryEntry>,
+                    note: Option<String>| {
+        if !entries.is_empty() || note.is_some() {
+            groups.push(ListGroup {
+                id,
+                title,
+                mark,
+                entries,
+                note,
+            });
+        }
+    };
+    let of = |group: LibraryGroup, team: &str| -> Vec<LibraryEntry> {
+        entries
+            .iter()
+            .filter(|entry| entry.key.group == group && entry.key.team == team)
+            .cloned()
+            .collect()
+    };
+    for group in LibraryGroup::ALL {
+        let in_group = of(group, "");
+        let note = (group == LibraryGroup::Installed)
+            .then(|| installed_note.clone())
+            .flatten()
+            .filter(|_| in_group.is_empty());
+        let count = in_group.len();
+        push(
+            format!("library-group-{group:?}").to_lowercase(),
+            format!("{} ({count})", group.title()),
+            None,
+            in_group,
+            note,
+        );
+        if group == LibraryGroup::Ours && with_teams {
+            for (at, team) in teams.iter().enumerate() {
+                let in_team = of(LibraryGroup::Team, &team.server_url);
+                let count = in_team.len();
+                push(
+                    format!("library-group-team-{at}"),
+                    format!("{} ({count})", team.repo_name),
+                    Some(TeamMark {
+                        label: team.code.clone(),
+                        colour: team.colour.clone(),
+                        offline: false,
+                    }),
+                    in_team,
+                    None,
+                );
+            }
+        }
+    }
+    groups
+}
+
 /// The libraries of the tab, by group, with All libraries first.
 #[component]
 fn LibraryList(
@@ -576,6 +664,8 @@ fn LibraryList(
     tab: RwSignal<PreviewKind>,
     library: RwSignal<Option<LibraryKey>>,
     selected: RwSignal<Option<LibraryItemRow>>,
+    /// Lists the linked teams' library repos too.
+    with_teams: bool,
 ) -> impl IntoView {
     let entries = Memo::new(move |_| {
         view.with(|view| {
@@ -596,6 +686,13 @@ fn LibraryList(
     };
     let installed_note =
         move || view.with(|view| view.as_ref().and_then(|view| view.installed_note.clone()));
+    let teams = move || {
+        view.with(|view| {
+            view.as_ref()
+                .map(|view| view.teams.clone())
+                .unwrap_or_default()
+        })
+    };
     let pick = move |key: Option<LibraryKey>| {
         if library.get_untracked() != key {
             library.set(key);
@@ -614,24 +711,17 @@ fn LibraryList(
             </button>
             {move || {
                 let entries = entries.get();
-                let installed_note = installed_note();
-                LibraryGroup::ALL
+                list_groups(&entries, &teams(), installed_note(), with_teams)
                     .into_iter()
-                    .filter_map(|group| {
-                        let in_group: Vec<LibraryEntry> =
-                            entries.iter().filter(|entry| entry.key.group == group).cloned().collect();
-                        // Installed says why it is empty, such as KiCad's
-                        // settings not being found.
-                        let group_note = (group == LibraryGroup::Installed)
-                            .then(|| installed_note.clone())
-                            .flatten()
-                            .filter(|_| in_group.is_empty());
-                        (!in_group.is_empty() || group_note.is_some()).then(|| {
-                            let heading = format!("library-group-{group:?}").to_lowercase();
-                            let labelled = heading.clone();
+                    .map(|group| {
+                        let ListGroup { id, title, mark, entries: in_group, note: group_note } = group;
+                        let labelled = id.clone();
+                        let is_team = mark.is_some();
+                        {
                             view! {
-                                <h3 class="library-group" id=heading>
-                                    {format!("{} ({})", group.title(), in_group.len())}
+                                <h3 class="library-group" class:library-group-team=is_team id=id>
+                                    {mark.map(|mark| view! { <TeamChip mark=mark /> " " })}
+                                    {title}
                                 </h3>
                                 {group_note.map(|note| view! { <p class="hint library-note library-group-note">{note}</p> })}
                                 <ul class="library-entries" aria-labelledby=labelled>
@@ -669,7 +759,7 @@ fn LibraryList(
                                         .collect_view()}
                                 </ul>
                             }
-                        })
+                        }
                     })
                     .collect_view()
             }}
@@ -1309,6 +1399,7 @@ mod tests {
             key: LibraryKey {
                 group,
                 nickname: nickname.into(),
+                team: String::new(),
             },
             description: String::new(),
             items: Some(1),
@@ -1343,6 +1434,7 @@ mod tests {
                     library: LibraryKey {
                         group: LibraryGroup::Kicad,
                         nickname: "Device".into(),
+                        team: String::new(),
                     },
                     name: n.to_string(),
                     description: String::new(),

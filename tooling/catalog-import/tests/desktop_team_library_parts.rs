@@ -178,6 +178,7 @@ fn choice(symbol: Option<&str>, footprint: Option<&str>) -> Vec<TeamPickRequest>
             library: LibraryKey {
                 group: LibraryGroup::Ours,
                 nickname: library.into(),
+                team: String::new(),
             },
             name: name.into(),
         }
