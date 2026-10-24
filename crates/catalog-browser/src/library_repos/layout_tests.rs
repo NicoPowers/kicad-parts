@@ -319,3 +319,49 @@ fn removing_the_repo_forgets_its_layout() {
     // With no repo, there is nothing to review.
     assert!(repos.review_layout(BETA, false).is_err());
 }
+
+/// Gamma copies KiCad's own layout: `symbols/`, `footprints/` and one
+/// `<library>.3dshapes` folder per footprint library under `3dmodels/`,
+/// behind a variable that points to the model folder.
+#[test]
+fn a_repo_laid_out_like_kicads_own_libraries_is_read_too() {
+    let fixture = Fixture::new();
+    let soic = footprint(
+        "SOIC-8",
+        &["${GAMMA_3DMODEL_DIR}/Gamma_SO.3dshapes/SOIC-8.step"],
+    );
+    let qfn = footprint(
+        "QFN-16",
+        &["${GAMMA_3DMODEL_DIR}/Gamma_QFN.3dshapes/QFN-16.step"],
+    );
+    let gamma = fixture.client_repo(
+        "gamma-lib.git",
+        &[
+            ("symbols/Gamma_IC.kicad_sym", SYMBOLS),
+            ("symbols/Gamma_Passive.kicad_sym", SYMBOLS),
+            ("footprints/Gamma_SO.pretty/SOIC-8.kicad_mod", &soic),
+            ("footprints/Gamma_QFN.pretty/QFN-16.kicad_mod", &qfn),
+            ("3dmodels/Gamma_SO.3dshapes/SOIC-8.step", "ISO"),
+            ("3dmodels/Gamma_QFN.3dshapes/QFN-16.step", "ISO"),
+        ],
+    );
+    let repos = fixture.repos();
+    repos.link(ACME, &gamma.display().to_string()).unwrap();
+    repos.wait_until_idle();
+    let layout = repos.review_layout(ACME, false).unwrap().layout;
+    let nicknames: Vec<&str> = layout
+        .symbol_libraries
+        .iter()
+        .chain(&layout.footprint_libraries)
+        .map(|library| library.nickname.as_str())
+        .collect();
+    assert_eq!(
+        nicknames,
+        ["Gamma_IC", "Gamma_Passive", "Gamma_QFN", "Gamma_SO"]
+    );
+    assert_eq!(layout.model_folders, ["3dmodels"]);
+    assert_eq!(layout.model_files, 2);
+    assert_eq!(layout.path_variables.len(), 1);
+    assert_eq!(layout.path_variables[0].folder.as_deref(), Some("3dmodels"));
+    assert!(layout.doubts.is_empty(), "{:?}", layout.doubts);
+}
