@@ -157,18 +157,16 @@ describe('one part list over several teams', () => {
       ['AC', 'BE', 'CSV files'],
     );
     assert.equal(grouped[0].replace('AC', ''), grouped[1].replace('BE', ''), 'both teams have the same parts');
-    // A team section opens like a category's, its rows marked with the team.
+    // A team section opens like a category's. Its name says the team, so
+    // its rows repeat no team mark.
     await (await browser.$('.results .section-toggle')).click();
     await browser.waitUntil(
       async () => (await browser.execute(() => document.querySelectorAll('.results button.result').length)) > 0,
       { timeout: 10_000, timeoutMsg: "AC's section never opened" },
     );
-    assert.equal(
-      await browser.execute(() =>
-        [...document.querySelectorAll('.results button.result .team-chip')].every((chip) => chip.textContent === 'Team AC'),
-      ),
-      true,
-    );
+    assert.equal(await browser.execute(() => document.querySelectorAll('.results .team-chip').length), 0);
+    // The header says where the list's parts come from.
+    assert.equal(await textOf(browser, '.catalog-summary'), 'Parts from 2 teams and 21 CSV files');
     await assertAccessible(browser, '100-teams-group-by-team');
     await screenshot(browser, '100-teams-group-by-team', { blankOut: ['.team-server'] });
     // Back to categories, and the AC section closed again.
@@ -259,18 +257,51 @@ describe('one part list over several teams', () => {
     await browser.deleteSession();
     ({ browser } = await launchApp({ dataDir: app.dataDir }));
     // Sign-ins stayed in the last run's memory: sign in to both again.
-    await setMenuOpen(true);
-    for (const server of [acme, beta]) {
+    for (const [server, code] of [
+      [acme, 'AC'],
+      [beta, 'BE'],
+    ]) {
+      await setMenuOpen(true);
+      await browser.waitUntil(
+        async () =>
+          browser.execute(
+            (wanted) =>
+              [...document.querySelectorAll('.team-row')]
+                .find((row) => row.querySelector('.team-name strong')?.textContent === wanted)
+                ?.querySelector('.team-actions button')?.textContent.trim() === 'Sign in',
+            code,
+          ),
+        { timeout: 20_000, timeoutMsg: `${code} never offered Sign in` },
+      );
       await browser.execute(
-        (code) =>
+        (wanted) =>
           [...document.querySelectorAll('.team-row')]
-            .find((row) => row.querySelector('.team-name strong')?.textContent === code)
+            .find((row) => row.querySelector('.team-name strong')?.textContent === wanted)
             .querySelector('.team-actions button')
             .click(),
-        server === acme ? 'AC' : 'BE',
+        code,
       );
-      await browser.keys([...server.accounts[0].password, 'Enter']);
+      // The form fills in the address; wait until it is this team's.
+      await browser.waitUntil(async () => (await (await browser.$('#team-server')).getValue()) === server.url, {
+        timeout: 10_000,
+        timeoutMsg: `the form never offered ${code}`,
+      });
+      await (await browser.$('#team-password')).setValue(server.accounts[0].password);
+      await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();
       await setMenuOpen(true);
+      await browser.waitUntil(
+        async () =>
+          (
+            await browser.execute(
+              (wanted) =>
+                [...document.querySelectorAll('.team-row')]
+                  .find((row) => row.querySelector('.team-name strong')?.textContent === wanted)
+                  ?.querySelector('.team-state')?.textContent ?? '',
+              code,
+            )
+          ).startsWith('Signed in as'),
+        { timeout: 30_000, timeoutMsg: `${code} never signed in again` },
+      );
     }
     await browser
       .waitUntil(async () => (await textOf(browser, BADGE)) === 'Teams · 2 live', { timeout: 30_000 })
@@ -290,5 +321,26 @@ describe('one part list over several teams', () => {
     });
     assert.match((await sections())[0], /^BE \(/);
     assert.equal(await textOf(browser, '.results .section-name'), 'BE');
+  });
+
+  it("keeps a half-filled part on its team while that team is offline", async () => {
+    await (await browser.$('#add-part-open')).click();
+    await waitForText(browser, '#add-heading', 'Add part');
+    // The part list shows BE, so Add part starts on BE.
+    assert.equal(await (await browser.$('#add-team')).getValue(), beta.url);
+    await (await browser.$('#add-files')).addValue(download(tempDir('download')));
+    await waitForText(browser, '#add-guess', /^Best guess: Capacitors, because /);
+    const betaUrl = beta.url;
+    await beta.stop();
+    beta = null;
+    await waitForText(browser, '#add-team-problem', 'BE is offline. You can save when it is back.', 30_000);
+    // The form stays on BE, and Save waits for it.
+    assert.equal(await (await browser.$('#add-team')).getValue(), betaUrl);
+    assert.equal(
+      await browser.execute(() =>
+        [...document.querySelectorAll('.add-form button[type="submit"]')].every((button) => button.disabled),
+      ),
+      true,
+    );
   });
 });
