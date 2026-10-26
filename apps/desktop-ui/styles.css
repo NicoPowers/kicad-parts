@@ -1250,6 +1250,9 @@ a {
 
 .problem p {
   margin: 0 0 0.4rem;
+  /* A message may hold a long path with no spaces, such as where a
+     library was looked for; it wraps instead of widening the column. */
+  overflow-wrap: anywhere;
 }
 
 .problem.quiet {

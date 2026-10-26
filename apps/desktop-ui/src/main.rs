@@ -1084,6 +1084,29 @@ fn PartPanel(
         footprint.set(Load::Loading);
         let (team_revision, symbol_field, footprint_field) = match source {
             Some((revision, symbol, footprint)) => (Some(revision), Some(symbol), Some(footprint)),
+            // A part of a team: wait for its team revision while the team
+            // can be read, so a part only the team has never shows "not in
+            // the catalog" first. Offline, or if it cannot be read, draw
+            // its list row's symbol and footprint.
+            None if !team.is_empty() => {
+                if team_checkpoint.get().is_some() && !team_checked.get() {
+                    return;
+                }
+                let row = detail.with(|detail| match detail {
+                    Some(Load::Ready(Some(part))) => {
+                        Some((part.symbol.clone(), part.footprint.clone()))
+                    }
+                    _ => None,
+                });
+                let Some((symbol, footprint)) = row else {
+                    return;
+                };
+                (
+                    None,
+                    Some(symbol.unwrap_or_default()),
+                    Some(footprint.unwrap_or_default()),
+                )
+            }
             None => (None, None, None),
         };
         for (kind, target, field) in [
