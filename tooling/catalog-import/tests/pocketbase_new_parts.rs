@@ -6,17 +6,17 @@
 //! unsafe names, files nothing uses and people who cannot edit, and replays
 //! a repeated save.
 //!
-//! Each test starts its own disposable PocketBase on 127.0.0.1 and imports a
-//! temp copy of the resistor CSV file; the repository is only read.
+//! Each test starts its own disposable PocketBase on 127.0.0.1 with the
+//! sample library's resistors; the repository is only read.
 
 use catalog::cad_file::{footprint_upload, model_upload, symbol_upload};
 use catalog::pocketbase::{
-    CadUpload, CatalogReadback, CreateCommand, CreateOutcome, CreateReply, ImportCommand,
-    ImportOutcome, NEW_PART_ROUTE, read_back, read_import_state, submit_create, submit_import,
+    CadUpload, CatalogReadback, CreateCommand, CreateOutcome, CreateReply, NEW_PART_ROUTE,
+    read_back, submit_create,
 };
 use catalog::{
-    CadItemDetails, CadReferenceTarget, CsvCatalog, DetailField, ManufacturerPart, ModelTarget,
-    PartDetails, PartRevision,
+    CadItemDetails, CadReferenceTarget, DetailField, ManufacturerPart, ModelTarget, PartDetails,
+    PartRevision,
 };
 use catalog_import::services;
 use collaboration::{CollabError, PocketBaseClient};
@@ -32,7 +32,6 @@ const MODEL: &str = "3d-models/g-Resistor_SMD.3dshapes/R_0603_New.step";
 struct Team {
     server: PocketBaseServer,
     admin: PocketBaseClient,
-    _copy: tempfile::TempDir,
     _state: tempfile::TempDir,
 }
 
@@ -41,23 +40,10 @@ impl Team {
         let root = services::repository_root();
         let state = tempfile::tempdir().unwrap();
         let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-        let copy = tempfile::tempdir().unwrap();
-        for tree in ["database", "symbols", "footprints", "3d-models"] {
-            copy_tree(&root.join(tree), &copy.path().join(tree));
-        }
-        let import = CsvCatalog::new(copy.path()).import("g-res", None).unwrap();
-        let state_now = read_import_state(&admin).unwrap();
-        let command = ImportCommand::new(&import, "Import the resistors").expecting(&state_now);
-        let reply = submit_import(&admin, &command).unwrap();
-        assert!(
-            matches!(reply.outcome, ImportOutcome::Applied { .. }),
-            "{}",
-            reply.body
-        );
+        sample_library::seed(&admin, &["res"]).unwrap();
         Self {
             server,
             admin,
-            _copy: copy,
             _state: state,
         }
     }
@@ -75,38 +61,26 @@ impl Team {
     }
 }
 
-fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let destination = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_tree(&entry.path(), &destination);
-        } else {
-            fs::copy(entry.path(), destination).unwrap();
-        }
-    }
-}
-
-fn repository_file(path: &str) -> String {
-    String::from_utf8(fs::read(services::repository_root().join(path)).unwrap()).unwrap()
+/// A file of the sample library, which stands for our libraries.
+fn library_file(path: &str) -> String {
+    String::from_utf8(fs::read(sample_library::root().join(path)).unwrap()).unwrap()
 }
 
 /// The resistor symbol renamed R_New, with an MPN, as a vendor's library.
 fn symbol_library() -> String {
-    repository_file("symbols/g-res.kicad_sym").replace("(symbol \"R_US", "(symbol \"R_New")
+    library_file("symbols/g-res.kicad_sym").replace("(symbol \"R_US", "(symbol \"R_New")
 }
 
 /// The 0603 resistor footprint renamed R_0603_New, naming its own 3D model
 /// in the Catalog's folder.
 fn footprint_file() -> String {
-    repository_file("footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod")
+    library_file("footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod")
         .replace(
             "(footprint \"R_0603_1608Metric\"",
             "(footprint \"R_0603_New\"",
         )
         .replace(
-            "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+            "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
             &format!("${{GITPLM_PARTS}}/{MODEL}"),
         )
 }
@@ -561,7 +535,7 @@ fn a_changed_resave_after_a_lost_answer_says_you_added_it() {
         "{}",
         reply.body
     );
-    // An imported part is never "yours".
+    // A part someone else added is never "yours".
     let reply = submit_create(&ada, &new_part("RES-0000-0470")).unwrap();
     assert!(
         matches!(
@@ -620,7 +594,7 @@ fn a_new_part_whose_footprint_links_a_3d_model_outside_the_library_is_refused() 
     // KiCad's own model is fine.
     let kicad = footprint_file().replace(
         &link,
-        "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+        "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
     );
     applied(&submit_create(&editor, &with_footprint(kicad, false)).unwrap());
 }

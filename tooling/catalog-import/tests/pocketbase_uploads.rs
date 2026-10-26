@@ -3,18 +3,17 @@
 //! saved in the import's shape, numbering and IDs; a file with the content
 //! of the CAD item's current revision adds nothing; other parts that use the
 //! CAD item keep their exact binding. The server reads every file itself and
-//! refuses, plainly, one that is wrong or not used. CSV imports afterwards
-//! never replace a CAD item revision made in the app.
+//! refuses, plainly, one that is wrong or not used. (CSV imports afterwards
+//! are in `pocketbase_uploads_csv.rs`.)
 //!
-//! Each test starts its own disposable PocketBase on 127.0.0.1 and imports a
-//! temp copy of the resistor CSV file; the repository is only read.
+//! Each test starts its own disposable PocketBase on 127.0.0.1 with the
+//! sample library's resistors; the repository is only read.
 
 use catalog::cad_file::{footprint_upload, model_upload, symbol_upload};
 use catalog::pocketbase::{
-    CatalogReadback, EDIT_ROUTE, EditCommand, ImportCommand, ImportOutcome, PublishOutcome,
-    PublishReply, read_back, read_import_state, submit_edit, submit_import,
+    CatalogReadback, EDIT_ROUTE, EditCommand, PublishOutcome, PublishReply, read_back, submit_edit,
 };
-use catalog::{CadItemDetails, CadReferenceTarget, CsvCatalog, ModelTarget, PartRevision};
+use catalog::{CadItemDetails, CadReferenceTarget, ModelTarget, PartRevision};
 use catalog_import::services;
 use collaboration::{CollabError, PocketBaseClient};
 use native_services::PocketBaseServer;
@@ -26,31 +25,9 @@ const OTHER: &str = "RES-0000-1000";
 const FOOTPRINT: &str = "g-Resistor_SMD:R_0603_1608Metric";
 const FOOTPRINT_FILE: &str = "footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod";
 
-/// Copies the CSV catalog trees the import and the zero-loss oracle read
-/// into `target`.
-fn copy_catalog(target: &std::path::Path) {
-    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
-        fs::create_dir_all(to).unwrap();
-        for entry in fs::read_dir(from).unwrap() {
-            let entry = entry.unwrap();
-            let destination = to.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                copy_tree(&entry.path(), &destination);
-            } else {
-                fs::copy(entry.path(), destination).unwrap();
-            }
-        }
-    }
-    for tree in ["database", "symbols", "footprints", "3d-models"] {
-        copy_tree(&services::repository_root().join(tree), &target.join(tree));
-    }
-}
-
 struct Team {
     server: PocketBaseServer,
     admin: PocketBaseClient,
-    /// A copy of the CSV catalog, which the tests change.
-    copy: tempfile::TempDir,
     _state: tempfile::TempDir,
 }
 
@@ -59,16 +36,12 @@ impl Team {
         let root = services::repository_root();
         let state = tempfile::tempdir().unwrap();
         let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-        let copy = tempfile::tempdir().unwrap();
-        copy_catalog(copy.path());
-        let team = Self {
+        sample_library::seed(&admin, &["res"]).unwrap();
+        Self {
             server,
             admin,
-            copy,
             _state: state,
-        };
-        assert_eq!(team.import(), "applied");
-        team
+        }
     }
 
     fn member(&self, name: &str, can_edit: bool) -> PocketBaseClient {
@@ -83,33 +56,9 @@ impl Team {
         read_back(&self.admin).unwrap()
     }
 
-    /// Imports the copy as an importer does (reading the team catalog
-    /// first) and returns the outcome; the zero-loss report must hold.
-    fn import(&self) -> &'static str {
-        let import = CsvCatalog::new(self.copy.path())
-            .import("g-res", None)
-            .unwrap();
-        let state = read_import_state(&self.admin).unwrap();
-        let command = ImportCommand::new(&import, "Import the resistors").expecting(&state);
-        let reply = submit_import(&self.admin, &command).unwrap();
-        let outcome = match reply.outcome {
-            ImportOutcome::Applied { .. } => "applied",
-            ImportOutcome::NothingChanged { .. } => "nothing_changed",
-            ImportOutcome::Noop { .. } => "noop",
-            _ => panic!("the import did not go through: {}", reply.body),
-        };
-        let oracle = csv_catalog_fixture::build_manifest(self.copy.path()).unwrap();
-        let report = catalog_import::report(&oracle, "g-res", &self.read(), self.copy.path());
-        assert!(
-            report.is_lossless(),
-            "{}",
-            serde_json::to_string_pretty(&report.summary()).unwrap()
-        );
-        outcome
-    }
-
+    /// A file of the sample library, which the team's parts came from.
     fn file(&self, path: &str) -> Vec<u8> {
-        fs::read(self.copy.path().join(path)).unwrap()
+        fs::read(sample_library::root().join(path)).unwrap()
     }
 }
 
@@ -284,7 +233,7 @@ fn a_footprint_file_adds_a_revision_and_other_parts_keep_theirs() {
     assert_eq!(source["file_name"], "R_0603 corrected.kicad_mod");
     let snapshot: CadItemDetails = serde_json::from_str(&stored.snapshot).unwrap();
     assert_eq!(snapshot.blob_sha256, catalog::sha256_hex(&corrected));
-    assert_eq!(snapshot.format_version.as_deref(), Some("20241229"));
+    assert_eq!(snapshot.format_version.as_deref(), Some("20260206"));
     // KiCad's own 3D model stays external, as in the import.
     assert!(matches!(
         &snapshot.model_references[0].target,
@@ -393,7 +342,7 @@ fn a_footprint_names_its_3d_model_which_is_sent_or_the_edit_is_refused() {
             1,
         )
         .replace(
-            "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+            "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
             "${GITPLM_PARTS}/3d-models/g-Resistor_SMD.3dshapes/R_New.step",
         );
     let key = "3d-models/g-Resistor_SMD.3dshapes/R_New.step";
@@ -473,7 +422,7 @@ fn files_copied_from_an_installed_library_record_where_they_came_from() {
             1,
         )
         .replace(
-            "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+            "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
             "${GITPLM_PARTS}/3d-models/g-Resistor_SMD.3dshapes/R_Copied.step",
         );
     let key = "3d-models/g-Resistor_SMD.3dshapes/R_Copied.step";
@@ -635,7 +584,7 @@ fn a_footprint_file_linking_a_3d_model_outside_the_library_is_refused() {
     let editor = team.member("Ada Editor", true);
     let before = team.read();
     let original = String::from_utf8(team.file(FOOTPRINT_FILE)).unwrap();
-    let kicad = "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step";
+    let kicad = "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step";
     let linking = |link: &str| {
         let text = redrawn(original.replace(kicad, link).as_bytes());
         footprint_upload(&text, FOOTPRINT, "R.kicad_mod").unwrap()
@@ -943,227 +892,6 @@ fn wrong_or_unused_files_are_refused_plainly_and_nothing_is_written() {
     };
     let error = submit_edit(&editor, &cad_edit(&before, IPN, &[], vec![big])).unwrap_err();
     assert!(error.to_string().contains("nothing was sent"), "{error}");
-}
-
-/// The import problems with `code` the latest import run found, by subject.
-fn found(stored: &CatalogReadback, code: &str) -> Vec<catalog::pocketbase::StoredImportProblem> {
-    let run = stored
-        .audit_entries
-        .iter()
-        .filter(|entry| entry.csv_import_number > 0)
-        .max_by_key(|entry| entry.csv_import_number)
-        .and_then(|entry| entry.import_run())
-        .unwrap();
-    stored
-        .problems
-        .iter()
-        .filter(|problem| problem.code == code && run.problems.contains(&problem.id))
-        .cloned()
-        .collect()
-}
-
-/// The newest revision number of `reference`'s CAD item.
-fn newest(stored: &CatalogReadback, kind: catalog::CadItemKind, reference: &str) -> u32 {
-    let cad_item = catalog::CadItemId::new(kind, reference);
-    stored
-        .cad_item_revisions
-        .iter()
-        .filter(|revision| revision.cad_item == cad_item.as_str())
-        .map(|revision| revision.number)
-        .max()
-        .unwrap_or(0)
-}
-
-#[test]
-fn imports_never_replace_a_cad_item_revision_made_in_the_app() {
-    use catalog::pocketbase::{
-        CSV_CAD_DIFFERS, CSV_CAD_ITEM_KEPT, CsvReviewCommand, CsvReviewOutcome,
-        recorded_csv_document, submit_csv_review,
-    };
-    let team = Team::start();
-    let editor = team.member("Ada Editor", true);
-    let before = team.read();
-    let footprint_users = users(&before, FOOTPRINT);
-    let original = team.file(FOOTPRINT_FILE);
-    let upload = footprint_upload(&redrawn(&original), FOOTPRINT, "R_0603.kicad_mod").unwrap();
-    applied(&submit_edit(&editor, &cad_edit(&before, IPN, &[], vec![upload])).unwrap());
-    let edited = team.read();
-    let footprint = catalog::CadItemKind::Footprint;
-    assert_eq!(newest(&edited, footprint, FOOTPRINT), 2);
-
-    // The CSV's file has not changed since the import last applied it, so
-    // nothing happens: no new footprint revision, every part as it was.
-    assert_eq!(team.import(), "nothing_changed");
-    let after = team.read();
-    assert_eq!(newest(&after, footprint, FOOTPRINT), 2);
-    assert_eq!(
-        after.cad_item_revisions.len(),
-        edited.cad_item_revisions.len()
-    );
-    assert_eq!(after.part_revisions.len(), edited.part_revisions.len());
-    assert_eq!(number_of(&bound(&after, IPN, FOOTPRINT)), 2);
-    for ipn in footprint_users.iter().filter(|ipn| *ipn != IPN) {
-        assert_eq!(number_of(&bound(&after, ipn, FOOTPRINT)), 1, "{ipn}");
-    }
-    assert!(found(&after, CSV_CAD_ITEM_KEPT).is_empty());
-    // The edited part's row is kept, as for any edited CAD; what it records
-    // is exactly what the last import saved, so the app asks nothing.
-    let kept = found(&after, CSV_CAD_DIFFERS);
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0].subject, IPN);
-    let first = after
-        .part_revisions
-        .iter()
-        .find(|revision| revision.part == after.part(IPN).unwrap().id && revision.number == 1)
-        .unwrap();
-    assert_eq!(recorded_csv_document(&kept[0]).unwrap(), first.snapshot);
-    assert_eq!(team.import(), "noop");
-
-    // An importer that does not know the footprint was changed in the app
-    // would send a new revision of it: the server refuses.
-    let import = CsvCatalog::new(team.copy.path())
-        .import("g-res", None)
-        .unwrap();
-    let mut state = read_import_state(&team.admin).unwrap();
-    assert!(!state.current_cad.edited_in_app.is_empty());
-    state.current_cad.edited_in_app.clear();
-    let command = ImportCommand::new(&import, "Import the resistors").expecting(&state);
-    match submit_import(&team.admin, &command) {
-        Err(CollabError::Http {
-            status: 400,
-            message,
-        }) => {
-            assert!(message.contains("never replaces"), "{message}")
-        }
-        other => panic!("expected 400, got {other:?}"),
-    }
-    assert_eq!(team.read().counts(), after.counts());
-
-    // The CSV's file changes: still no new footprint revision, but every
-    // part whose row uses it keeps the row with a problem the app shows.
-    let changed = String::from_utf8(original).unwrap().replacen(
-        "(tags \"resistor\")",
-        "(tags \"resistor 0603\")",
-        1,
-    );
-    fs::write(team.copy.path().join(FOOTPRINT_FILE), changed).unwrap();
-    assert_eq!(team.import(), "nothing_changed");
-    let changed = team.read();
-    assert_eq!(newest(&changed, footprint, FOOTPRINT), 2);
-    assert_eq!(changed.part_revisions.len(), edited.part_revisions.len());
-    let problems = found(&changed, CSV_CAD_ITEM_KEPT);
-    let mut subjects: Vec<String> = problems.iter().map(|p| p.subject.clone()).collect();
-    subjects.sort();
-    let mut expected = footprint_users.clone();
-    expected.sort();
-    assert_eq!(subjects, expected);
-    let problem = problems.iter().find(|p| p.subject == OTHER).unwrap();
-    assert_eq!(problem.location, format!("rows[IPN={OTHER}].Footprint"));
-
-    // The CSV's file is not stored, so it can only be kept.
-    let (number, _) = current_revision(&changed, OTHER);
-    let take = CsvReviewCommand::new(
-        OTHER,
-        &problem.id,
-        vec!["Footprint".into()],
-        number,
-        "Take it",
-    );
-    match submit_csv_review(&editor, &take) {
-        Err(CollabError::Http {
-            status: 400,
-            message,
-        }) => {
-            assert!(
-                message.contains("choose the file in Edit part"),
-                "{message}"
-            )
-        }
-        other => panic!("expected 400, got {other:?}"),
-    }
-    let keep = CsvReviewCommand::new(OTHER, &problem.id, vec![], number, "Keep ours");
-    let reply = submit_csv_review(&editor, &keep).unwrap();
-    assert!(
-        matches!(
-            reply.outcome,
-            CsvReviewOutcome::Applied { revision: None, .. }
-        ),
-        "{}",
-        reply.body
-    );
-    // Importing the same CSV again finds the same problem, which the review
-    // covers.
-    assert_eq!(team.import(), "noop");
-}
-
-#[test]
-fn a_csv_that_caught_up_with_the_app_is_not_a_change() {
-    use catalog::pocketbase::CSV_CAD_ITEM_KEPT;
-    let team = Team::start();
-    let editor = team.member("Ada Editor", true);
-    // The CSV catalog's symbol library with a symbol the app adds first.
-    let library_path = team.copy.path().join("symbols/g-res.kicad_sym");
-    let library = fs::read_to_string(&library_path).unwrap();
-    let entry = "\t(symbol \"R_Added\"\n\t\t(in_bom yes)\n\t\t(property \"Reference\" \"R\" (at 0 0 0) (effects (font (size 1.27 1.27))))\n\t)\n";
-    let end = library.trim_end().len() - 1;
-    let caught_up = format!("{}{entry}{}", &library[..end], &library[end..]);
-    let symbol = symbol_upload(
-        caught_up.as_bytes(),
-        "R_Added",
-        "g-res:R_Added",
-        "added.kicad_sym",
-    )
-    .unwrap();
-    let before = team.read();
-    applied(
-        &submit_edit(
-            &editor,
-            &cad_edit(&before, IPN, &[("Symbol", "g-res:R_Added")], vec![symbol]),
-        )
-        .unwrap(),
-    );
-    // And a corrected footprint for the same part.
-    let corrected = redrawn(&team.file(FOOTPRINT_FILE));
-    let edited = team.read();
-    let footprint = footprint_upload(&corrected, FOOTPRINT, "R.kicad_mod").unwrap();
-    applied(&submit_edit(&editor, &cad_edit(&edited, IPN, &[], vec![footprint])).unwrap());
-
-    // The CSV catalog catches up with both, byte for byte, and another row
-    // uses the new symbol.
-    fs::write(&library_path, caught_up).unwrap();
-    fs::write(team.copy.path().join(FOOTPRINT_FILE), &corrected).unwrap();
-    let csv = team.copy.path().join("database/g-res.csv");
-    let text = fs::read_to_string(&csv).unwrap();
-    let row = text
-        .split_inclusive('\n')
-        .find(|line| line.starts_with(&format!("\"{OTHER}\"")))
-        .unwrap()
-        .to_owned();
-    fs::write(
-        &csv,
-        text.replacen(
-            &row,
-            &row.replacen("\"g-res:R_US\"", "\"g-res:R_Added\"", 1),
-            1,
-        ),
-    )
-    .unwrap();
-    let made = team.read();
-    team.import();
-    let after = team.read();
-    // Nothing to show, and no CAD item gets a revision.
-    assert!(
-        found(&after, CSV_CAD_ITEM_KEPT).is_empty(),
-        "{:?}",
-        found(&after, CSV_CAD_ITEM_KEPT)
-    );
-    assert_eq!(
-        after.cad_item_revisions.len(),
-        made.cad_item_revisions.len()
-    );
-    // The other row's part follows the CSV to the revisions the app made.
-    assert_eq!(number_of(&bound(&after, OTHER, "g-res:R_Added")), 1);
-    assert_eq!(number_of(&bound(&after, OTHER, FOOTPRINT)), 2);
 }
 
 #[test]
