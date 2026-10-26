@@ -53,7 +53,7 @@ describe('KiCad libraries made from the team catalog', () => {
   let otherToken;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res'] });
+    server = await startTeamServer();
     let other;
     [editor, other] = server.accounts;
     otherToken = await teamSignIn(server.url, other);
@@ -156,7 +156,7 @@ describe('KiCad libraries made from the team catalog', () => {
   }
 
   it('says to sign in first', async () => {
-    await waitForText(browser, '.kicad-badge-ready', /^KiCad 10\.\d+\.\d+$/);
+    await waitForText(browser, '.kicad-settings > .kicad-badge-ready', /^KiCad 10\.\d+\.\d+$/);
     await setOpen('.kicad-settings', true);
     await waitForText(browser, STATUS, 'Sign in to the team catalog to make the KiCad libraries.');
     assert.equal(await textOf(browser, '#kicad-libraries-heading'), 'KiCad libraries');
@@ -206,7 +206,7 @@ describe('KiCad libraries made from the team catalog', () => {
     const shown = await waitForState('up-to-date');
     assert.match(shown.text, /^Up to date: \d+ parts, 0 older revisions and 0 archived revisions\. Updated at \d\d:\d\d\.$/);
     // The files are in the team's folder in the app's data folder.
-    for (const file of ['MA-Parts.kicad_dbl', 'MA-Parts.sqlite', 'symbols/MA-res-20241209.kicad_sym']) {
+    for (const file of ['MA-Parts.kicad_dbl', 'MA-Parts.sqlite', 'symbols/MA-res-20251024.kicad_sym']) {
       assert.ok(fs.existsSync(path.join(folder(), file)), `${file} was written`);
     }
     const pretty = path.join(folder(), 'footprints', 'MA-Resistor_SMD.pretty');
@@ -222,7 +222,7 @@ describe('KiCad libraries made from the team catalog', () => {
     );
     assert.ok(
       symbols.includes(
-        `(lib (name "MA-res-20241209")(type "KiCad")(uri "${slashed}/symbols/MA-res-20241209.kicad_sym")(options "")(descr "Team symbols that MA-Parts uses")(hidden))`,
+        `(lib (name "MA-res-20251024")(type "KiCad")(uri "${slashed}/symbols/MA-res-20251024.kicad_sym")(options "")(descr "Team symbols that MA-Parts uses")(hidden))`,
       ),
       symbols,
     );
@@ -284,13 +284,13 @@ describe('KiCad libraries made from the team catalog', () => {
 
   it('updates by itself after someone else adds a revision', async () => {
     const before = (await state()).at;
-    const symbols = fs.readFileSync(path.join(folder(), 'symbols', 'MA-res-20241209.kicad_sym'));
+    const symbols = fs.readFileSync(path.join(folder(), 'symbols', 'MA-res-20251024.kicad_sym'));
     // KiCad's own resistor: a new revision whose symbol is linked, not copied.
     await editAsSomeoneElse(server.url, otherToken, IPN, { Symbol: 'Device:R' }, "Use KiCad's resistor");
     const shown = await waitForState('up-to-date', before);
     assert.match(shown.text, /: \d+ parts, 1 older revision and 0 archived revisions\. Updated at \d\d:\d\d\.$/);
     // Revision 1 keeps its files byte for byte.
-    assert.deepEqual(fs.readFileSync(path.join(folder(), 'symbols', 'MA-res-20241209.kicad_sym')), symbols);
+    assert.deepEqual(fs.readFileSync(path.join(folder(), 'symbols', 'MA-res-20251024.kicad_sym')), symbols);
   });
 
   it('updates at once on Update now, and names a file changed outside the app', async () => {

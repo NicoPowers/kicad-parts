@@ -112,7 +112,7 @@ describe('team catalog: the part list stays put when a teammate saves', () => {
   let teammateToken;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res', 'g-cap'] });
+    server = await startTeamServer();
     [editor, teammate] = server.accounts;
     teammateToken = await teamSignIn(server.url, teammate);
     ({ browser } = await launchApp({
@@ -158,15 +158,20 @@ describe('team catalog: the part list stays put when a teammate saves', () => {
     await waitForLiveUpdates(browser);
     await waitForText(browser, '#result-count', /^\d+ matching parts$/);
 
-    // Open both sections from the keyboard.
-    for (const id of ['parts-in-cap', 'parts-in-res']) {
+    // Open both sections from the keyboard: the sample team's three
+    // capacitors and six resistors.
+    for (const [id, count] of [
+      ['parts-in-cap', 3],
+      ['parts-in-res', 6],
+    ]) {
       await browser.execute((controls) => document.querySelector(`[aria-controls="${controls}"]`).focus(), id);
       await browser.keys('Enter');
       await browser.waitUntil(
         async () =>
           browser.execute(
-            (controls) => document.getElementById(controls).querySelectorAll('button.result').length > 10,
+            (controls, wanted) => document.getElementById(controls).querySelectorAll('button.result').length === wanted,
             id,
+            count,
           ),
         { timeout: 10_000, timeoutMsg: `${id} did not open with its parts` },
       );

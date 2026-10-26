@@ -1,7 +1,7 @@
 // A team part's 3D view (kicad-parts-c9c1) draws the 3D model the Catalog
 // stores for the exact footprint revision, after the same checks previews
-// use. The app browses a copy of the catalog without that model file, so
-// only the Catalog's stored copy can supply it. The view stays steady with
+// use. The app reads a copy of the sample library without that model file,
+// so only the Catalog's stored copy can supply it. The view stays steady with
 // this model too (kicad-parts-4588).
 
 import assert from 'node:assert/strict';
@@ -13,7 +13,7 @@ import {
   capture,
   launchApp,
   record,
-  repoRoot,
+  sampleLibrary,
   screenshotsDir,
   searchFor,
   selectResult,
@@ -28,13 +28,13 @@ import { checkSteady3d } from '../view3d-steady.mjs';
 const MPN = 'SN74LVC1G07DBVR';
 const BADGE = '.team-settings > summary';
 const CLOSE_UP = `${FOOTPRINT} dialog.zoom-dialog`;
-const MODEL = path.join('3d-models', 'g-Package_TO_SOT_SMD.3dshapes', 'SOT-23-5.step');
+const MODEL = path.join('3d-models', 'g-Package_TO_SOT_SMD.3dshapes', 'SOT-23-5.wrl');
 
-/** A copy of the catalog without the SOT-23-5 3D model file. */
+/** A copy of the sample library without the SOT-23-5 3D model file. */
 function catalogWithoutModel() {
   const root = tempDir('catalog-without-model');
-  for (const folder of ['database', 'symbols', 'footprints', '3d-models']) {
-    fs.cpSync(path.join(repoRoot, folder), path.join(root, folder), { recursive: true });
+  for (const folder of ['symbols', 'footprints', '3d-models']) {
+    fs.cpSync(path.join(sampleLibrary, folder), path.join(root, folder), { recursive: true });
   }
   fs.rmSync(path.join(root, MODEL));
   return root;
@@ -51,7 +51,7 @@ describe("team part 3D view: the Catalog's stored 3D model", () => {
   let account;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-ics'] });
+    server = await startTeamServer();
     [account] = server.accounts;
     ({ browser, dataDir } = await launchApp({
       args: [`--catalog-root=${catalogWithoutModel()}`, `--team-server=${server.url}`, `--team-email=${account.email}`],
@@ -106,15 +106,15 @@ describe("team part 3D view: the Catalog's stored 3D model", () => {
     record({ event: '3d-stored-model', ...shown });
     assert.equal(shown.state, 'ready', shown.status);
     assert.equal(shown.links.length, 1);
-    assert.equal(shown.links[0].link, '${GITPLM_PARTS}/3d-models/g-Package_TO_SOT_SMD.3dshapes/SOT-23-5.step');
+    assert.equal(shown.links[0].link, '${GITPLM_PARTS}/3d-models/g-Package_TO_SOT_SMD.3dshapes/SOT-23-5.wrl');
     assert.equal(shown.links[0].found, "From the Catalog's stored model for this revision.");
     assert.equal(shown.links[0].problem, null);
     // Named by where the Catalog keeps it.
-    assert.equal(shown.links[0].key, '3d-models/g-Package_TO_SOT_SMD.3dshapes/SOT-23-5.step');
+    assert.equal(shown.links[0].key, '3d-models/g-Package_TO_SOT_SMD.3dshapes/SOT-23-5.wrl');
     // The checked copy in the app's own cache, with the stored bytes.
     const copy = shown.links[0].path;
     assert.ok(copy.startsWith(dataDir), `${copy} is in the app's cache`);
-    assert.deepEqual(fs.readFileSync(copy), fs.readFileSync(path.join(repoRoot, MODEL)));
+    assert.deepEqual(fs.readFileSync(copy), fs.readFileSync(path.join(sampleLibrary, MODEL)));
     assert.ok(
       shown.meshNames.some((name) => !name.startsWith('board_')),
       `the model's own mesh is drawn: ${shown.meshNames}`,
