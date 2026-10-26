@@ -235,13 +235,10 @@ fn preview_problems_are_reported_with_their_cause() {
         other => panic!("expected an export failure, got {other:?}"),
     }
     // A footprint library that is nowhere.
-    match preview(&browser, "ICS-0002-0001", PreviewKind::Footprint) {
+    match preview(&browser, "ICS-0003-0001", PreviewKind::Footprint) {
         PreviewOutcome::Problem(problem) => {
             assert_eq!(problem.reason, PreviewProblemReason::Unresolved);
-            assert_eq!(
-                problem.reference.as_deref(),
-                Some("Sample_Missing:SOT-23-6")
-            );
+            assert_eq!(problem.reference.as_deref(), Some("Sample_Missing:SOT-353"));
         }
         other => panic!("expected an unresolved library, got {other:?}"),
     }

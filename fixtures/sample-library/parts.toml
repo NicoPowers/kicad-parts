@@ -122,8 +122,16 @@ ipn = "ICS-0002-0001"
 category = "ics"
 manufacturer_parts = [["TOPPOWER", "TP4333"]]
 symbol = "Device:TP4333"
-footprint = "Sample_Missing:SOT-23-6"
-fields = { Description = "IC BATTERY CHARGER, symbol and footprint missing" }
+footprint = "Package_TO_SOT_SMD:SOT-23-6"
+fields = { Description = "IC LI-ION CHARGER 1A SOT23-6" }
+
+[[part]]
+ipn = "ICS-0003-0001"
+category = "ics"
+manufacturer_parts = [["Texas Instruments", "SN74LVC1G07DCKR"]]
+symbol = "g-ics:74LVC1G07"
+footprint = "Sample_Missing:SOT-353"
+fields = { Description = "IC BUFFER NON-INVERT OPEN DRAIN SC70-5" }
 
 [[part]]
 ipn = "MCU-0000-0001"
@@ -131,7 +139,7 @@ category = "mcu"
 manufacturer_parts = [["Sample Semiconductor", "SAMPLE-MCU-32"]]
 symbol = "g-mcu:SAMPLE_MCU"
 footprint = "Package_QFP:LQFP-32_7x7mm_P0.8mm;Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm"
-fields = { Description = "MCU 32-BIT 32 PINS, two symbol units" }
+fields = { Description = "MCU 32-BIT 32KB FLASH 32LQFP" }
 
 [[part]]
 ipn = "REG-0000-0001"

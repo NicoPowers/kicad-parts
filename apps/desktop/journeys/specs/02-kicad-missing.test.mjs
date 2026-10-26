@@ -80,7 +80,7 @@ describe('KiCad is missing', () => {
 
   it('recovers when pointed at the installed kicad-cli', async () => {
     await useKicadPath(browser, installedKicadCli());
-    await waitForText(browser, '.kicad-badge-ready', /^KiCad 10\.\d+\.\d+$/);
+    await waitForText(browser, '.kicad-settings > .kicad-badge-ready', /^KiCad 10\.\d+\.\d+$/);
     assert.equal(await browser.execute((s) => document.querySelector(s), PROBLEM), null);
     // The selected part's previews reload by themselves.
     await waitForPreview(browser, SYMBOL);

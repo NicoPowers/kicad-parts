@@ -3,7 +3,7 @@
 // the preview cache are all real.
 
 import { remote } from 'webdriverio';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import axe from 'axe-core';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
@@ -15,6 +15,12 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(here, '../../..');
+/**
+ * The sample library (fixtures/sample-library, kicad-parts-fbc2): every
+ * journey reads it as our own libraries, never the repository's CSV
+ * catalog. Its parts.toml is what `startTeamServer` gives a team.
+ */
+export const sampleLibrary = path.join(repoRoot, 'fixtures', 'sample-library');
 export const outDir = process.env.JOURNEY_OUT ?? path.join(repoRoot, 'target', 'journeys', 'latest');
 export const appBinary = path.join(
   repoRoot,
@@ -128,11 +134,16 @@ export function installedKicadCli() {
 }
 
 /**
- * Launches the desktop app with isolated settings and cache.
+ * Launches the desktop app with isolated settings and cache. Its catalog
+ * folder is the sample library unless `args` names another with
+ * `--catalog-root=`.
  * @param {{ args?: string[], dataDir?: string }} options
  */
 export async function launchApp({ args = [], dataDir = tempDir('data') } = {}) {
   assert.ok(fs.existsSync(appBinary), `build the app first: ${appBinary}`);
+  if (!args.some((arg) => arg.startsWith('--catalog-root='))) {
+    args = [...args, `--catalog-root=${sampleLibrary}`];
+  }
   // The Libraries browser reads KiCad's settings folder for the person's
   // library tables; journeys never read the developer's own, so each
   // launch gets an empty folder unless the journey passes fixture tables.
@@ -788,11 +799,12 @@ async function waitForDrawnImages(browser, section, timeout) {
 
 /**
  * Starts `catalog-import local-team-server --json`: a disposable PocketBase
- * on 127.0.0.1 with every CSV file imported (or only `csv`, such as
- * `['g-res']`, which starts faster) and three accounts. With `teamCode`,
- * the team has that code from the start. It runs
- * windowless in a kill-on-close job and stops when its input closes, so it
- * cannot outlive this process.
+ * on 127.0.0.1 with three accounts and the sample library's parts
+ * (`--sample`). With `csv`, such as `['g-res']`, it imports those CSV
+ * files of the CSV catalog instead: only the CSV journeys do, until
+ * kicad-parts-e257 removes them. With `teamCode`, the team has that code
+ * from the start. It runs windowless in a kill-on-close job and stops when
+ * its input closes, so it cannot outlive this process.
  * @returns {Promise<{ url: string, accounts: { name: string, email: string, password: string, canEditCatalog: boolean }[], stop: () => Promise<void> }>}
  */
 export async function startTeamServer({ csv = [], teamCode } = {}) {
@@ -806,7 +818,7 @@ export async function startTeamServer({ csv = [], teamCode } = {}) {
   const args = [
     'local-team-server',
     '--json',
-    ...(csv.length > 0 ? ['--csv', csv.join(',')] : []),
+    ...(csv.length > 0 ? ['--csv', csv.join(',')] : ['--sample']),
     ...(teamCode ? ['--team-code', teamCode] : []),
   ];
   const child = spawn(exe, args, {
@@ -864,6 +876,84 @@ export async function startTeamServer({ csv = [], teamCode } = {}) {
       if ((await Promise.race([exited, timeout])) === 'timeout') child.kill();
     },
   };
+}
+
+/**
+ * Signs in to `server` as `account` (the first, an editor, by default)
+ * with the Teams menu's form, as a person would, waits until its parts
+ * follow live, and closes the menu.
+ */
+export async function signInToTeam(browser, server, account = server.accounts[0]) {
+  await browser.execute(() => {
+    document.querySelector('.team-settings').open = true;
+  });
+  await (await browser.$('#team-server')).setValue(server.url);
+  await (await browser.$('#team-email')).setValue(account.email);
+  await (await browser.$('#team-password')).setValue(account.password);
+  await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();
+  await waitForLiveUpdates(browser);
+  await browser.execute(() => {
+    document.querySelector('.team-settings').open = false;
+  });
+  record({ event: 'signed-in', server: server.url, account: account.email });
+}
+
+/**
+ * A copy of the sample library in a new temp folder, committed as a git
+ * repository of its own after `change(copy)` draws what the journey needs.
+ * The commit time is fixed, so the commit ID the app shows is the same
+ * every run. git reads only the run's own settings file (run-journeys.mjs).
+ * @returns {{ copy: string, head: string }}
+ */
+export function sampleLibraryCopy(prefix, change = () => {}) {
+  const copy = tempDir(prefix);
+  // Only the files git tracks: a leftover in a working copy, such as a
+  // .bak file, would change the commit ID.
+  const folder = path.relative(repoRoot, sampleLibrary).split(path.sep).join('/');
+  const tracked = spawnSync('git', ['-C', repoRoot, 'ls-files', '-z', '--', folder], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  assert.equal(tracked.status, 0, tracked.stderr);
+  for (const file of tracked.stdout.split(String.fromCharCode(0)).filter(Boolean)) {
+    const target = path.join(copy, path.relative(folder, file));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(repoRoot, file), target);
+  }
+  change(copy);
+  const git = (args) => {
+    const result = spawnSync(
+      'git',
+      [
+        '-C',
+        copy,
+        '-c',
+        'user.name=fixture',
+        '-c',
+        'user.email=fixture@example.test',
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        'core.autocrlf=false',
+        '-c',
+        'init.defaultBranch=main',
+        '-c',
+        `core.hooksPath=${path.join(copy, '.git', 'no-hooks')}`,
+        ...args,
+      ],
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        env: { ...process.env, GIT_AUTHOR_DATE: '2026-10-12T12:00:00Z', GIT_COMMITTER_DATE: '2026-10-12T12:00:00Z' },
+      },
+    );
+    assert.equal(result.status, 0, `git ${args.join(' ')}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  git(['init', '-q']);
+  git(['add', '-A']);
+  git(['commit', '-q', '-m', 'The sample library']);
+  return { copy, head: git(['rev-parse', 'HEAD']) };
 }
 
 /** Signs in to the team server as `account`; returns the auth token. */
@@ -1026,7 +1116,7 @@ export async function chooseInLibraries(browser, { group, library, name, enter =
 // ---- A small ZIP writer (stored entries only), enough for a download ------
 //
 // Add part journeys build vendor downloads at run time from the
-// repository's own CAD files, so no vendor download is committed.
+// sample library's CAD files, so no vendor download is committed.
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
   let c = n;

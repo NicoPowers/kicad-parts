@@ -78,7 +78,8 @@ capacitors have different fields on purpose.
 | `CAP-0000-0100` | A second capacitor of the same kind. |
 | `CAP-0003-0001` | The highest capacitor number, so Add part offers `CAP-0004-0001`. Its footprint `g-Capacitor_SMD:C_0805_2012Metric` links KiCad's own 3D model, so a capacitor can move to a second footprint the Catalog has. |
 | `ICS-0001-0001` | A buffer whose footprint `g-Package_TO_SOT_SMD:SOT-23-5` links our own VRML 3D model. |
-| `ICS-0002-0001` | A part whose symbol `Device:TP4333` is missing from its library and whose footprint library `Sample_Missing` does not exist, for preview problems. |
+| `ICS-0002-0001` | A part whose symbol `Device:TP4333` is missing from KiCad's `Device` library, for a preview kicad-cli cannot export. |
+| `ICS-0003-0001` | The buffer in another package, whose footprint library `Sample_Missing` does not exist, for a footprint library that is not found. |
 | `MCU-0000-0001` | A symbol with two units, `g-mcu:SAMPLE_MCU`, and two footprint choices from KiCad's own libraries. |
 | `REG-0000-0001` | A voltage regulator, so a third category with its own fields is there. |
 | `ART-0000-0001` | A test point whose symbol `g-art:TestPoint` says it is not in the BOM, and whose footprint `g-TestPoint:TestPoint_Pad_D1.5mm` says so too. |
