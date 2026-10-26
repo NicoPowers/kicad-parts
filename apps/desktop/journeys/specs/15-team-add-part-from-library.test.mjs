@@ -1,13 +1,12 @@
-// Add part from our libraries (kicad-parts-37a7, kicad-parts-bc6f): the app reads a copy of
-// the CSV catalog, committed in a git repository of its own, in which an
-// engineer drew a capacitor symbol and its footprint with a 3D model by
-// hand in KiCad. The Library check lists them as not in the Catalog yet;
+// Add part from our libraries (kicad-parts-37a7, kicad-parts-bc6f): the app
+// reads a copy of the sample library, committed in a git repository of its
+// own, in which an engineer drew a capacitor symbol and its footprint with a
+// 3D model by hand in KiCad. The Library check lists them as not in the Catalog yet;
 // Add part from it opens Add part with the symbol chosen, its footprint
 // and 3D model come along, and the part saves with the references exactly
 // as in the library. The Library check then no longer lists them.
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -18,10 +17,9 @@ import {
   images,
   launchApp,
   record,
-  repoRoot,
+  sampleLibraryCopy,
   screenshot,
   startTeamServer,
-  tempDir,
   textOf,
   waitForLibraries,
   waitForLiveUpdates,
@@ -35,41 +33,6 @@ const MPN = 'CL10B104KB8NNNC';
 const HAND_SYMBOL = 'g-cap:C_Hand';
 const HAND_FOOTPRINT = 'g-Capacitor_SMD:C_0603_Hand';
 const MODEL = '3d-models/g-Capacitor_SMD.3dshapes/C_0603_Hand.step';
-const FOLDERS = ['database', 'symbols', 'footprints', '3d-models'];
-
-/** Runs git in `root` with a fixture identity, no hooks and no signing. */
-function git(root, args) {
-  const result = spawnSync(
-    'git',
-    [
-      '-C',
-      root,
-      '-c',
-      'user.name=fixture',
-      '-c',
-      'user.email=fixture@example.test',
-      '-c',
-      'commit.gpgsign=false',
-      '-c',
-      'core.autocrlf=false',
-      '-c',
-      `core.hooksPath=${path.join(root, '.git', 'no-hooks')}`,
-      ...args,
-    ],
-    {
-      encoding: 'utf8',
-      windowsHide: true,
-      // A fixed time, so the commit ID the form shows is the same every run.
-      env: {
-        ...process.env,
-        GIT_AUTHOR_DATE: '2026-10-12T12:00:00Z',
-        GIT_COMMITTER_DATE: '2026-10-12T12:00:00Z',
-      },
-    },
-  );
-  assert.equal(result.status, 0, `git ${args.join(' ')}: ${result.stderr}`);
-  return result.stdout.trim();
-}
 
 /** Where the list starting at `open` (its "(") ends, past its ")". */
 function listEnd(text, open) {
@@ -87,49 +50,34 @@ function listEnd(text, open) {
   throw new Error('list not closed');
 }
 
-/** A committed copy of the CSV catalog with the hand-drawn items. */
+/** A committed copy of the sample library with the hand-drawn items. */
 function catalogCopy() {
-  const copy = tempDir('catalog');
-  // Only the files git tracks: a leftover in a working copy, such as a
-  // .bak file, would change the commit ID the form shows.
-  const tracked = spawnSync('git', ['-C', repoRoot, 'ls-files', '-z', '--', ...FOLDERS], {
-    encoding: 'utf8',
-    windowsHide: true,
-  });
-  assert.equal(tracked.status, 0, tracked.stderr);
-  for (const file of tracked.stdout.split('\0').filter(Boolean)) {
-    fs.mkdirSync(path.dirname(path.join(copy, file)), { recursive: true });
-    fs.copyFileSync(path.join(repoRoot, file), path.join(copy, file));
-  }
-  const symbols = path.join(copy, 'symbols/g-cap.kicad_sym');
-  const library = fs.readFileSync(symbols, 'utf8');
-  const start = library.indexOf('(symbol "C"');
-  assert.ok(start > 0);
-  const hand = library
-    .slice(start, listEnd(library, start))
-    .replaceAll('(symbol "C_', '(symbol "C_Hand_')
-    .replace('(symbol "C"', '(symbol "C_Hand"')
-    .replace('(property "Footprint" ""', `(property "Footprint" "${HAND_FOOTPRINT}"`)
-    .replace('"Description" "Unpolarized capacitor"', '"Description" "CAP CER 0.1UF 50V X7R 0603"')
-    .replace(
-      '\t\t(property "Reference"',
-      `\t\t(property "MPN" "${MPN}" (at 0 0 0) (effects (hide yes)))\n` +
-        '\t\t(property "Manufacturer" "Samsung Electro-Mechanics" (at 0 0 0) (effects (hide yes)))\n' +
+  return sampleLibraryCopy('catalog', (copy) => {
+    const symbols = path.join(copy, 'symbols/g-cap.kicad_sym');
+    const library = fs.readFileSync(symbols, 'utf8');
+    const start = library.indexOf('(symbol "C"');
+    assert.ok(start > 0);
+    const hand = library
+      .slice(start, listEnd(library, start))
+      .replaceAll('(symbol "C_', '(symbol "C_Hand_')
+      .replace('(symbol "C"', '(symbol "C_Hand"')
+      .replace('(property "Footprint" ""', `(property "Footprint" "${HAND_FOOTPRINT}"`)
+      .replace('"Description" "Capacitor, not polarised"', '"Description" "CAP CER 0.1UF 50V X7R 0603"')
+      .replace(
         '\t\t(property "Reference"',
-    );
-  const close = library.lastIndexOf(')');
-  fs.writeFileSync(symbols, `${library.slice(0, close)}\t${hand}\n${library.slice(close)}`);
-  const footprint = fs
-    .readFileSync(path.join(copy, 'footprints/g-Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod'), 'utf8')
-    .replace('(footprint "C_0603_1608Metric"', '(footprint "C_0603_Hand"')
-    .replace('${KICAD9_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0603_1608Metric.step', `\${GITPLM_PARTS}/${MODEL}`);
-  fs.writeFileSync(path.join(copy, 'footprints/g-Capacitor_SMD.pretty/C_0603_Hand.kicad_mod'), footprint);
-  fs.mkdirSync(path.join(copy, '3d-models/g-Capacitor_SMD.3dshapes'), { recursive: true });
-  fs.writeFileSync(path.join(copy, MODEL), 'ISO-10303-21;\nEND-ISO-10303-21;\n');
-  git(copy, ['init', '-q']);
-  git(copy, ['add', '--', ...FOLDERS]);
-  git(copy, ['commit', '-q', '-m', 'Drawn by hand in KiCad']);
-  return { copy, head: git(copy, ['rev-parse', 'HEAD']) };
+        `\t\t(property "MPN" "${MPN}" (at 0 0 0) (effects (hide yes)))\n` +
+          '\t\t(property "Manufacturer" "Samsung Electro-Mechanics" (at 0 0 0) (effects (hide yes)))\n' +
+          '\t\t(property "Reference"',
+      );
+    const close = library.lastIndexOf(')');
+    fs.writeFileSync(symbols, `${library.slice(0, close)}\t${hand}\n${library.slice(close)}`);
+    const footprint = fs
+      .readFileSync(path.join(copy, 'footprints/g-Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod'), 'utf8')
+      .replace('(footprint "C_0603_1608Metric"', '(footprint "C_0603_Hand"')
+      .replace('${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_1608Metric.step', `\${GITPLM_PARTS}/${MODEL}`);
+    fs.writeFileSync(path.join(copy, 'footprints/g-Capacitor_SMD.pretty/C_0603_Hand.kicad_mod'), footprint);
+    fs.writeFileSync(path.join(copy, MODEL), 'ISO-10303-21;\nEND-ISO-10303-21;\n');
+  });
 }
 
 describe('team catalog: add a part from our libraries', () => {
@@ -140,7 +88,7 @@ describe('team catalog: add a part from our libraries', () => {
   let newItems;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res', 'g-cap'] });
+    server = await startTeamServer();
     [editor] = server.accounts;
     const made = catalogCopy();
     head = made.head;
@@ -311,6 +259,12 @@ describe('team catalog: add a part from our libraries', () => {
     record({ event: 'library-history', rows });
     assert.equal(rows[0][0], 'Added from');
     assert.match(rows[0][1], /^Our libraries: symbols\/g-cap\.kicad_sym at [0-9a-f]{12}, /);
-    await waitForText(browser, LINE, `Library check: ${newItems - 2} new items`, 30_000);
+    // The two hand-drawn items were all that was new in the sample library,
+    // so with nothing left to say, the line goes.
+    assert.equal(newItems, 2);
+    await browser.waitUntil(async () => (await browser.$$(LINE)).length === 0, {
+      timeout: 30_000,
+      timeoutMsg: 'the library check line stayed after its items were added',
+    });
   });
 });

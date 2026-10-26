@@ -1,10 +1,11 @@
-// The library check (kicad-parts-da65): the app reads a copy of the CSV
-// catalog in which someone drew a footprint by hand in KiCad (no part uses
+// The library check (kicad-parts-da65): the app reads a copy of the sample
+// library in which someone drew a footprint by hand in KiCad (no part uses
 // it yet) and changed a footprint the Catalog has to link a 3D model on
 // their own drive. Signed in as someone who can edit, a short line under
 // the search box says so; it opens the Library check view, grouped as To
-// fix, Not in the Catalog yet, Worth a look and Clean-up. Choosing a part
-// closes it; someone who can only view sees no line.
+// fix and Not in the Catalog yet. (Clean-up lists only old problems of the
+// CSV catalog, and Did you mean only names in its CSV files.)
+// Choosing a part closes it; someone who can only view sees no line.
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -14,7 +15,7 @@ import {
   assertAccessible,
   launchApp,
   record,
-  repoRoot,
+  sampleLibrary,
   screenshot,
   searchFor,
   selectResult,
@@ -29,14 +30,14 @@ import {
 const BADGE = '.team-settings > summary';
 const LINE = '#library-check-open';
 const R0603 = 'footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod';
-const KICAD_MODEL = '${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step';
+const KICAD_MODEL = '${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step';
 const OWN_DRIVE = 'C:/Users/me/models/R_0603.step';
 
-/** A copy of the CSV catalog's folders, with the two changes made in KiCad. */
+/** A copy of the sample library's folders, with the two changes made in KiCad. */
 function catalogCopy() {
   const copy = tempDir('catalog');
-  for (const folder of ['database', 'symbols', 'footprints', '3d-models']) {
-    fs.cpSync(path.join(repoRoot, folder), path.join(copy, folder), { recursive: true });
+  for (const folder of ['symbols', 'footprints', '3d-models']) {
+    fs.cpSync(path.join(sampleLibrary, folder), path.join(copy, folder), { recursive: true });
   }
   const r0603 = path.join(copy, R0603);
   const text = fs.readFileSync(r0603, 'utf8');
@@ -46,7 +47,7 @@ function catalogCopy() {
     .readFileSync(path.join(copy, 'footprints/g-Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod'), 'utf8')
     .replace('(footprint "C_0603_1608Metric"', '(footprint "C_0603_Hand"')
     .replace(
-      '${KICAD9_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0603_1608Metric.step',
+      '${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_1608Metric.step',
       '${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_Hand.step',
     );
   fs.writeFileSync(path.join(copy, 'footprints/g-Capacitor_SMD.pretty/C_0603_Hand.kicad_mod'), hand);
@@ -65,7 +66,7 @@ describe('team catalog: the library check', () => {
   let viewer;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res'] });
+    server = await startTeamServer();
     [editor, , viewer] = server.accounts;
     ({ browser } = await launchApp({
       args: [`--team-server=${server.url}`, `--team-email=${editor.email}`, `--catalog-root=${catalogCopy()}`],
@@ -101,16 +102,16 @@ describe('team catalog: the library check', () => {
   }
 
   it('shows nothing until someone who can edit signs in', async () => {
-    await waitForText(browser, '#result-count', '178 matching parts');
+    await waitForText(browser, '#result-count', 'No parts match.');
     assert.equal((await browser.$$(LINE)).length, 0);
     assert.equal(await browser.execute(() => document.querySelector('.search-pane').dataset.libraryCheck), 'off');
   });
 
   it('says under the search box what to fix and what is new', async () => {
     await signIn(editor);
-    // R_0603_1608Metric changed since the resistors were imported; the
-    // hand-drawn footprint joins the symbols and footprints no part uses.
-    await waitForText(browser, LINE, /^Library check: 1 to fix, \d+ new items$/);
+    // R_0603_1608Metric changed since the resistors were added; the
+    // hand-drawn footprint joins the footprints no part uses.
+    await waitForText(browser, LINE, 'Library check: 1 to fix, 1 new item');
     record({ event: 'library-check-line', text: await textOf(browser, LINE) });
   });
 
@@ -122,11 +123,8 @@ describe('team catalog: the library check', () => {
       timeoutMsg: 'focus did not move to the view',
     });
     const groups = await headings();
-    assert.equal(groups.length, 4, `${groups}`);
-    assert.equal(groups[0], 'To fix (1)');
-    assert.match(groups[1], /^Not in the Catalog yet \(\d+\)$/);
-    assert.match(groups[2], /^Worth a look \(\d+\)$/);
-    assert.match(groups[3], /^Clean-up \(\d+\)$/);
+    // Every other item of the sample library is in the Catalog already.
+    assert.deepEqual(groups, ['To fix (1)', 'Not in the Catalog yet (1)']);
     const toFix = await textOf(browser, '.library-check-group.to-fix .library-check-item');
     assert.match(toFix, /g-Resistor_SMD:R_0603_1608Metric/);
     assert.match(toFix, /footprints\/g-Resistor_SMD\.pretty\/R_0603_1608Metric\.kicad_mod/);
@@ -138,10 +136,6 @@ describe('team catalog: the library check', () => {
       ),
     );
     assert.ok(newItems.includes('g-Capacitor_SMD:C_0603_Hand'), `${newItems}`);
-    // Today's g-ics.csv names g-ics:TP4333, while the library has IC_TP4333.
-    assert.match(await textOf(browser, '.library-check-body'), /Did you mean g-ics:IC_TP4333\?/);
-    // Clean-up starts folded: those old problems stop nothing.
-    assert.equal(await browser.execute(() => document.querySelector('details.library-check-group').open), false);
     // Only symbols and footprints not in the Catalog yet can start Add part
     // (kicad-parts-37a7); journey 15 does.
     const adds = await browser.execute(() =>
