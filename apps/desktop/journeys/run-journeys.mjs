@@ -1,9 +1,13 @@
-// Builds the desktop app, starts tauri-driver with an msedgedriver that
-// matches the installed WebView2 runtime, and runs every journey in specs/.
+// Builds what changed in the desktop app, starts tauri-driver with an
+// msedgedriver that matches the installed WebView2 runtime, and runs every
+// journey in specs/, several side by side.
 //
-//   npm run journeys                # build, then run on a hidden desktop
+//   npm run journeys                # build what changed, then run on hidden desktops
 //   npm run journeys -- --skip-build
+//   npm run journeys -- --build-only  # build what changed, run nothing
+//                                   # (tooling/gate.sh builds this way first)
 //   JOURNEYS_ONLY=06 npm run journeys  # only specs whose names contain 06
+//   npm run journeys -- --workers=1 # one spec at a time (JOURNEYS_WORKERS=1 too)
 //   npm run journeys -- --visible   # show the app windows (debugging);
 //                                   # JOURNEYS_VISIBLE=1 does the same
 //   npm run journeys -- --update-baselines
@@ -16,9 +20,17 @@
 // downloads it once into target/journey-tools/node. Node.js before 24.16.0
 // crashes now and then on a TCP connect (libuv #5106).
 //
-// By default tauri-driver, msedgedriver, the app and WebView2 run on a
-// hidden, run-scoped Win32 desktop (tooling/journey-desktop), so no window
-// appears or takes focus on the user's desktop.
+// Building: cargo rebuilds only what changed, and trunk runs only when a UI
+// input changed (app-build.mjs), so a run after editing only specs starts
+// in about 2 s.
+//
+// Running: DEFAULT_WORKERS workers run specs side by side, each with its
+// own tauri-driver on its own hidden, run-scoped Win32 desktop
+// (tooling/journey-desktop), so no window appears or takes focus on the
+// user's desktop. The specs in RUN_ALONE check how fast the app answers;
+// they run one at a time after the others, so other apps do not slow them.
+// See journey-workers.mjs for what keeps specs apart, and
+// docs/operations/TEST_TIMES.md for the timings behind these choices.
 //
 // Every screenshot is compared with its reviewed, approved screenshot in
 // baselines/. A missing one, or one that differs by more than
@@ -26,20 +38,19 @@
 // the run; a normal run never changes baselines/.
 //
 // Evidence (JUnit results, screenshots, images of the differences,
-// visual-summary.json, axe results, evidence.jsonl) goes to
-// target/journeys/latest, or JOURNEY_OUT.
+// visual-summary.json, axe results, evidence.jsonl, each spec's console
+// output in logs/) goes to target/journeys/latest, or JOURNEY_OUT.
 
 import { download } from 'edgedriver';
-import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildForJourneys } from './app-build.mjs';
 import {
   VISUAL_LIMITS,
   appBinary,
   baselinesDir,
-  driverPort,
   outDir,
   repoRoot,
   runTempRoot,
@@ -49,6 +60,31 @@ import {
   visualResultsFile,
 } from './harness.mjs';
 import { NODE_CRASH_EXIT_CODE, currentNode, runUnderPinnedNode, specsKilledByNodeCrash } from './journey-node.mjs';
+import {
+  checkSpecNumbers,
+  countTests,
+  mergeSpecOutputs,
+  runQueue,
+  runSpecFile,
+  startWorker,
+} from './journey-workers.mjs';
+
+/**
+ * How many specs run side by side by default, at most a quarter of the
+ * cores (see chooseWorkerCount). Measured on a 24-core PC
+ * (docs/operations/TEST_TIMES.md): 6 workers took 100 s, 8 only 10 s less.
+ */
+const DEFAULT_WORKERS = 6;
+
+/**
+ * Specs that run alone, one at a time after the others, so other apps do
+ * not slow them and their limits stay as strict as before:
+ * - 04 and 17 check how fast the app answers (search within 500 ms; a
+ *   close-up within 5 s, a zoom step within 500 ms).
+ * - 06 waits only 5 s for some live updates and menus.
+ * - 09 has a known race (kicad-parts-ca8e) that a busy PC makes likelier.
+ */
+const RUN_ALONE = ['04-', '06-', '09-', '17-'];
 
 // First, before any TCP connection: a connection made under an affected
 // Node.js can crash this runner too.
@@ -57,93 +93,21 @@ const testNode = currentNode();
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skipBuild = process.argv.includes('--skip-build');
+const buildOnly = process.argv.includes('--build-only');
 const updateBaselines = process.argv.includes('--update-baselines');
 const visible =
   process.argv.includes('--visible') || process.env.JOURNEYS_VISIBLE === '1' || process.platform !== 'win32';
 const journeyDesktop = path.join(repoRoot, 'target', 'debug', 'journey-desktop.exe');
+const workerCount = chooseWorkerCount();
+/** Each spec's seconds in the last runs; the longest start first. */
+const timesFile = path.join(repoRoot, 'target', 'journey-tools', 'journey-seconds.json');
 
-function run(command, args, cwd) {
-  console.log(`> ${command} ${args.join(' ')}  (in ${path.relative(repoRoot, cwd) || '.'})`);
-  const result = spawnSync(command, args, { cwd, stdio: 'inherit' });
-  if (result.status !== 0) {
-    console.error(`${command} failed with ${result.status}`);
-    process.exit(result.status ?? 1);
-  }
-}
-
-function webview2Version() {
-  if (process.env.WEBVIEW2_VERSION) return process.env.WEBVIEW2_VERSION;
-  const roots = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles].filter(Boolean);
-  for (const root of roots) {
-    const dir = path.join(root, 'Microsoft', 'EdgeWebView', 'Application');
-    if (!fs.existsSync(dir)) continue;
-    const versions = fs
-      .readdirSync(dir)
-      .filter((name) => /^\d+\.\d+\.\d+\.\d+$/.test(name))
-      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
-    if (versions.length > 0) return versions[0];
-  }
-  throw new Error('WebView2 runtime not found; set WEBVIEW2_VERSION');
-}
-
-function portInUse(port) {
-  return new Promise((resolve) => {
-    const socket = net.connect(port, '127.0.0.1');
-    socket.once('connect', () => {
-      socket.end();
-      resolve(true);
-    });
-    socket.once('error', () => {
-      socket.destroy();
-      resolve(false);
-    });
-  });
-}
-
-function waitForPort(port, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  return new Promise((resolve, reject) => {
-    const attempt = () => {
-      const socket = net.connect(port, '127.0.0.1');
-      socket.once('connect', () => {
-        socket.end();
-        resolve();
-      });
-      socket.once('error', () => {
-        socket.destroy();
-        if (Date.now() > deadline) reject(new Error(`port ${port} never opened`));
-        else setTimeout(attempt, 200);
-      });
-    };
-    attempt();
-  });
-}
-
-if (!skipBuild) {
-  run('trunk', ['build'], path.join(repoRoot, 'apps', 'desktop-ui'));
-  run('cargo', ['build', '--locked', '-p', 'kicad-parts-desktop', '--features', 'custom-protocol'], repoRoot);
-  run('cargo', ['build', '--locked', '-p', 'fake-kicad-cli'], repoRoot);
-  run('cargo', ['build', '--locked', '-p', 'catalog-import'], repoRoot);
-  if (!visible) run('cargo', ['build', '--locked', '-p', 'journey-desktop'], repoRoot);
-}
+if (!skipBuild) buildForJourneys({ repoRoot, hiddenDesktop: !visible });
+if (buildOnly) process.exit(0);
 if (!fs.existsSync(appBinary)) {
   console.error(`missing ${appBinary}; run without --skip-build`);
   process.exit(1);
 }
-
-// A driver left over from an earlier run would answer instead of ours. A
-// run still going holds the port too, so check before emptying its folders.
-if (await portInUse(driverPort)) {
-  console.error(
-    `port ${driverPort} is already in use, probably by a tauri-driver from an earlier run. ` +
-      'Stop it (for example: taskkill /IM tauri-driver.exe /F) or set TAURI_DRIVER_PORT, then run again.',
-  );
-  process.exit(1);
-}
-
-fs.rmSync(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-fs.mkdirSync(outDir, { recursive: true });
-fs.rmSync(runTempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 if (!visible && !fs.existsSync(journeyDesktop)) {
   console.error(
     `missing ${journeyDesktop}, which runs the journeys on a hidden desktop. ` +
@@ -151,6 +115,23 @@ if (!visible && !fs.existsSync(journeyDesktop)) {
   );
   process.exit(1);
 }
+
+const specNames = fs
+  .readdirSync(path.join(here, 'specs'))
+  .filter((name) => name.endsWith('.test.mjs'))
+  .sort();
+checkSpecNumbers(specNames);
+const chosen = specNames.filter((name) => !process.env.JOURNEYS_ONLY || name.includes(process.env.JOURNEYS_ONLY));
+if (chosen.length === 0) {
+  console.error(`No spec name contains JOURNEYS_ONLY=${process.env.JOURNEYS_ONLY}.`);
+  process.exit(1);
+}
+
+// Two runs at once would empty each other's folders.
+const lock = takeRunLock(`${outDir}.lock`);
+fs.rmSync(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+fs.mkdirSync(outDir, { recursive: true });
+fs.rmSync(runTempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 
 const version = webview2Version();
 const driverCache = path.join(repoRoot, 'target', 'journey-tools', 'msedgedriver');
@@ -169,60 +150,64 @@ process.env.GIT_CONFIG_NOSYSTEM = '1';
 delete process.env.GIT_SSH_COMMAND;
 delete process.env.GIT_SSH;
 
-const driverArgs = ['--port', String(driverPort), '--native-driver', nativeDriver];
-console.log(`mode: ${visible ? 'visible desktop' : 'hidden desktop (journey-desktop)'}`);
-// Killing journey-desktop closes its job, which ends tauri-driver and
-// everything it started.
-// In hidden mode journey-desktop also ends everything if this runner is
-// killed outright, because it watches its parent process.
-const tauriDriver = visible
-  ? spawn('tauri-driver', driverArgs, { stdio: ['ignore', 'inherit', 'inherit'] })
-  : spawn(journeyDesktop, ['tauri-driver', ...driverArgs], { stdio: ['ignore', 'inherit', 'inherit'] });
-const started = Date.now();
-tauriDriver.on('error', (error) => {
-  const what = visible ? 'tauri-driver (cargo install tauri-driver --locked)' : `journey-desktop (${journeyDesktop})`;
-  console.error(`could not start ${what}: ${error.message}`);
-  process.exit(1);
-});
+const together = chosen.filter((name) => !RUN_ALONE.some((prefix) => name.startsWith(prefix)));
+const alone = chosen.filter((name) => RUN_ALONE.some((prefix) => name.startsWith(prefix)));
+const workersNeeded = Math.max(1, Math.min(workerCount, together.length));
+console.log(
+  `mode: ${visible ? 'visible desktop' : 'hidden desktops (journey-desktop)'}; ` +
+    `${chosen.length} specs, ${workersNeeded} side by side` +
+    (alone.length > 0 ? `, then ${alone.map((n) => n.slice(0, 2)).join(', ')} alone` : ''),
+);
 
+const started = Date.now();
+const bySpecDir = path.join(outDir, 'by-spec');
+const lastTimes = readTimes(timesFile);
+const results = new Map();
+let workers = [];
 let status = 1;
 try {
-  await waitForPort(driverPort, 20_000);
-  const specs = fs
-    .readdirSync(path.join(here, 'specs'))
-    .filter((name) => name.endsWith('.test.mjs'))
-    // JOURNEYS_ONLY=06 runs only the specs whose names contain it.
-    .filter((name) => !process.env.JOURNEYS_ONLY || name.includes(process.env.JOURNEYS_ONLY))
-    .sort()
-    .map((name) => path.join(here, 'specs', name));
-  const result = spawnSync(
-    testNode.path,
-    [
-      '--test',
-      '--test-concurrency=1',
-      '--test-reporter=spec',
-      '--test-reporter-destination=stdout',
-      '--test-reporter=junit',
-      `--test-reporter-destination=${path.join(outDir, 'junit.xml')}`,
-      ...specs,
-    ],
-    {
+  workers = await Promise.all(
+    Array.from({ length: workersNeeded }, (_, i) => startWorker(i + 1, { visible, journeyDesktop, nativeDriver })),
+  );
+  const runSpec = async (worker, name) => {
+    const result = await runSpecFile({
+      testNode,
+      spec: path.join(here, 'specs', name),
+      specOut: path.join(bySpecDir, stem(name)),
+      worker,
       cwd: here,
-      stdio: 'inherit',
-      env: { ...process.env, JOURNEY_OUT: outDir, JOURNEYS_UPDATE_BASELINES: updateBaselines ? '1' : '0' },
-    },
-  );
-  status = result.status ?? 1;
-  explainNodeCrashes(path.join(outDir, 'junit.xml'), testNode);
-  const seconds = ((Date.now() - started) / 1000).toFixed(1);
-  console.log(`journeys took ${seconds} s on the ${visible ? 'visible' : 'hidden'} desktop`);
-  fs.appendFileSync(
-    path.join(outDir, 'evidence.jsonl'),
-    `${JSON.stringify({ event: 'run', mode: visible ? 'visible' : 'hidden', seconds: Number(seconds), node: testNode })}\n`,
-  );
+      env: { ...process.env, JOURNEYS_UPDATE_BASELINES: updateBaselines ? '1' : '0' },
+      live: workersNeeded === 1,
+    });
+    results.set(name, result);
+  };
+  // Longest first, so no long spec starts last while the others wait.
+  const longestFirst = [...together].sort((a, b) => (lastTimes[b] ?? 999) - (lastTimes[a] ?? 999));
+  await runQueue(workers, longestFirst, runSpec);
+  for (const name of alone) await runSpec(workers[0], name);
+  status = [...results.values()].every((r) => r.status === 0) && results.size === chosen.length ? 0 : 1;
+} catch (error) {
+  console.error(error.message);
 } finally {
-  tauriDriver.kill();
+  for (const worker of workers) worker.stop();
 }
+
+mergeSpecOutputs(bySpecDir, chosen.map(stem), outDir);
+writeTimes(timesFile, lastTimes, results);
+const junit = fs.readFileSync(path.join(outDir, 'junit.xml'), 'utf8');
+explainNodeCrashes(junit, testNode);
+const seconds = ((Date.now() - started) / 1000).toFixed(1);
+fs.appendFileSync(
+  path.join(outDir, 'evidence.jsonl'),
+  `${JSON.stringify({
+    event: 'run',
+    mode: visible ? 'visible' : 'hidden',
+    seconds: Number(seconds),
+    workers: workersNeeded,
+    specSeconds: Object.fromEntries([...results].map(([name, r]) => [stem(name), Number(r.seconds.toFixed(1))])),
+    node: testNode,
+  })}\n`,
+);
 try {
   fs.rmSync(runTempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 } catch (error) {
@@ -231,13 +216,105 @@ try {
 
 if (!reportVisualResults(status === 0)) status = status || 1;
 
-const shots = fs.existsSync(path.join(outDir, 'screenshots'))
-  ? fs.readdirSync(path.join(outDir, 'screenshots')).sort()
-  : [];
+const shots = fs.existsSync(screenshotsDir) ? fs.readdirSync(screenshotsDir).sort() : [];
+const failedSpecs = chosen.filter((name) => results.get(name)?.status !== 0);
+const counts = countTests(junit);
 console.log(`\nEvidence in ${outDir}`);
-console.log(`  junit.xml, evidence.jsonl, accessibility/*.json, ${shots.length} screenshots:`);
-for (const shot of shots) console.log(`    screenshots/${shot}`);
+console.log(`  junit.xml, evidence.jsonl, logs/*.txt, accessibility/*.json, ${shots.length} screenshots`);
+for (const name of failedSpecs) {
+  console.error(`  FAILED ${name}: ${results.has(name) ? `see logs/${stem(name)}.txt` : 'it did not run'}`);
+}
+console.log(
+  `journeys: ${counts.tests} tests, ${counts.passed} passed, ${counts.failed} failed, ${counts.skipped} skipped; ` +
+    `${chosen.length} specs in ${seconds} s with ${workersNeeded} worker(s) on the ${visible ? 'visible' : 'hidden'} desktop`,
+);
+lock.release();
 process.exit(status);
+
+/** "06-team-catalog" for "06-team-catalog.test.mjs". */
+function stem(name) {
+  return name.replace(/\.test\.mjs$/, '');
+}
+
+/**
+ * --workers=N, else JOURNEYS_WORKERS, else DEFAULT_WORKERS (1 with
+ * visible windows, which would take focus from each other). At most a
+ * quarter of the cores: each worker runs the app, WebView2, a team server
+ * and kicad-cli at once.
+ */
+function chooseWorkerCount() {
+  const given = process.argv.find((arg) => arg.startsWith('--workers='))?.slice('--workers='.length) ?? process.env.JOURNEYS_WORKERS;
+  if (given !== undefined) {
+    const count = Number(given);
+    if (!Number.isInteger(count) || count < 1) {
+      console.error(`--workers needs a whole number of 1 or more, not ${given}`);
+      process.exit(1);
+    }
+    return count;
+  }
+  if (visible) return 1;
+  return Math.max(1, Math.min(DEFAULT_WORKERS, Math.floor(os.availableParallelism() / 4)));
+}
+
+/**
+ * Makes `file` hold this process's ID, unless a run that is still going
+ * holds it. A lock left by a run that ended without releasing it is taken
+ * over.
+ */
+function takeRunLock(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const holder = fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0;
+  if (holder && holder !== process.pid && processIsRunning(holder)) {
+    console.error(`Another journey run (process ${holder}) is using ${outDir}. Wait for it, or set JOURNEY_OUT.`);
+    process.exit(1);
+  }
+  fs.writeFileSync(file, String(process.pid));
+  return { release: () => fs.rmSync(file, { force: true }) };
+}
+
+function processIsRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+/** Spec file name to seconds; empty when there is no file yet or it is damaged. */
+function readTimes(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+/** Keeps the latest seconds of every spec that still exists. */
+function writeTimes(file, times, results) {
+  const updated = {};
+  for (const name of specNames) {
+    const seconds = results.get(name)?.seconds ?? times[name];
+    if (seconds !== undefined) updated[name] = Number(seconds.toFixed(1));
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(updated, null, 2)}\n`);
+}
+
+function webview2Version() {
+  if (process.env.WEBVIEW2_VERSION) return process.env.WEBVIEW2_VERSION;
+  const roots = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles].filter(Boolean);
+  for (const root of roots) {
+    const dir = path.join(root, 'Microsoft', 'EdgeWebView', 'Application');
+    if (!fs.existsSync(dir)) continue;
+    const versions = fs
+      .readdirSync(dir)
+      .filter((name) => /^\d+\.\d+\.\d+\.\d+$/.test(name))
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+    if (versions.length > 0) return versions[0];
+  }
+  throw new Error('WebView2 runtime not found; set WEBVIEW2_VERSION');
+}
 
 /**
  * Says in plain words when a spec failed because its Node.js process
@@ -245,9 +322,8 @@ process.exit(status);
  * reports "test failed" for it, and tauri-driver may log "os error 10054"
  * for the connection the process had just opened.
  */
-function explainNodeCrashes(junitFile, testNode) {
-  if (!fs.existsSync(junitFile)) return;
-  const crashed = specsKilledByNodeCrash(fs.readFileSync(junitFile, 'utf8'));
+function explainNodeCrashes(junitXml, testNode) {
+  const crashed = specsKilledByNodeCrash(junitXml);
   const code = `0x${NODE_CRASH_EXIT_CODE.toString(16).toUpperCase()}`;
   for (const spec of crashed) {
     console.error(
