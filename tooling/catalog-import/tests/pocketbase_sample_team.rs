@@ -56,6 +56,17 @@ fn a_superuser_sets_up_a_category_once_and_only_a_superuser_may() {
         .unwrap_err()
         .to_string();
     assert!(refused.contains("Symbol or Footprint"), "{refused}");
+    // So is one with a field named Category, in any case: that is the
+    // part's category in this app.
+    let mut named = sample.category("cap").details();
+    named.fields.push(" category".into());
+    let refused = submit_category(&admin, &CategoryCommand::new(named, "Wrong"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("Category, which is the part's category in this app"),
+        "{refused}"
+    );
 
     // A member who can edit the Catalog still cannot set up categories.
     let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
