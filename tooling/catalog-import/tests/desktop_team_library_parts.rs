@@ -10,7 +10,7 @@
 use catalog::pocketbase::read_back;
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
-use catalog_import::services::{self};
+use catalog_import::services;
 use collaboration::PocketBaseClient;
 use desktop_contract::{
     LibraryCheckView, LibraryGroup, LibraryKey, LiveUpdates, ManufacturerPart, PickUse,
@@ -22,7 +22,6 @@ use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use native_services::PocketBaseServer;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 const MPN: &str = "CL10B104KB8NNNC";
@@ -32,7 +31,6 @@ const SYMBOL_FILE: &str = "symbols/g-cap.kicad_sym";
 const FOOTPRINT_FILE: &str = "footprints/g-Capacitor_SMD.pretty/C_0603_Hand.kicad_mod";
 const MODEL_FILE: &str = "3d-models/g-Capacitor_SMD.3dshapes/C_0603_Hand.step";
 const MODEL: &[u8] = b"ISO-10303-21;\nEND-ISO-10303-21;\n";
-const FOLDERS: [&str; 3] = ["symbols", "footprints", "3d-models"];
 
 fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -40,41 +38,6 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(50));
     }
-}
-
-/// Runs git in `root` with a fixture identity and none of this computer's
-/// hooks, line-ending changes or signing.
-fn git(root: &Path, args: &[&str]) -> String {
-    let hooks = format!("core.hooksPath={}", root.join(".git/no-hooks").display());
-    let mut command = Command::new("git");
-    command.arg("-C").arg(root).args([
-        "-c",
-        "user.name=fixture",
-        "-c",
-        "user.email=fixture@example.test",
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "core.autocrlf=false",
-        "-c",
-        hooks.as_str(),
-    ]);
-    command.args(args);
-    let output = native_services::run_hidden("git", &mut command).unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
-
-fn commit_all(root: &Path, message: &str) -> String {
-    let mut add = vec!["add", "--"];
-    add.extend_from_slice(&FOLDERS);
-    git(root, &add);
-    git(root, &["commit", "-q", "-m", message]);
-    git(root, &["rev-parse", "HEAD"])
 }
 
 fn text(root: &Path, path: &str) -> String {
@@ -212,7 +175,7 @@ impl Team {
         let copy = sample_library::SampleRepo::new();
         sample_library::seed(&admin, &["res", "cap"]).unwrap();
         draw(copy.path());
-        let head = commit_all(copy.path(), "Drawn by hand in KiCad");
+        let head = copy.commit_all("Drawn by hand in KiCad");
         let member = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
         let url = server.url().to_owned();
         let team = TeamCatalog::new();
