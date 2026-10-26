@@ -46,7 +46,7 @@ describe('team catalog: edge cases', () => {
   let otherToken;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res'] });
+    server = await startTeamServer();
     [editor, other] = server.accounts;
     otherToken = await teamSignIn(server.url, other);
     ({ browser } = await launchApp({
@@ -156,7 +156,8 @@ describe('team catalog: edge cases', () => {
   const FITS = { windowScrolls: false, scrollsSideways: [], stickingOut: [] };
 
   it('saves unusual and very long values exactly', async () => {
-    await waitForText(browser, '#result-count', '178 matching parts');
+    // Without a team, the sample library has no parts to list.
+    await waitForText(browser, '#result-count', 'No parts match.');
     await signIn(editor);
     await searchFor(browser, MPN, '1 matching part');
     await selectResult(browser, MPN);

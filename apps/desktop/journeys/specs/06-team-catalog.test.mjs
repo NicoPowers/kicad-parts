@@ -46,7 +46,7 @@ describe('team catalog: history, edits and conflicts', () => {
   let otherToken;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res'] });
+    server = await startTeamServer();
     [editor, other, viewer] = server.accounts;
     otherToken = await teamSignIn(server.url, other);
     ({ browser } = await launchApp({
@@ -167,7 +167,8 @@ describe('team catalog: history, edits and conflicts', () => {
   }
 
   it('starts signed out and explains how to sign in', async () => {
-    await waitForText(browser, '#result-count', '178 matching parts');
+    // Without a team, the sample library has no parts to list.
+    await waitForText(browser, '#result-count', 'No parts match.');
     await waitForText(browser, BADGE, 'Team catalog: not signed in');
     await openTeamMenu();
     assert.equal(await (await browser.$('aria/Team server address')).getValue(), server.url);
@@ -278,8 +279,8 @@ describe('team catalog: history, edits and conflicts', () => {
     assert.equal(await fieldValue('Description'), 'Thick film resistor, 47 ohm, 1%');
     await assertAccessible(browser, '44-team-live-update');
     await screenshot(browser, '44-team-live-update');
-    // Searching uses the team catalog's details too: 47R and "thick" are
-    // only in the team catalog, and the CSV-only "1/10W" no longer matches.
+    // Searching uses the team catalog's details: 47R and "thick" are new,
+    // and "1/10W", only in the old description, no longer matches.
     await searchFor(browser, '47R thick', '1 matching part');
     await searchFor(browser, '1/10W 47', /^(No parts match\.|\d+ matching parts?)$/);
     assert.equal(
@@ -362,7 +363,7 @@ describe('team catalog: history, edits and conflicts', () => {
       `Part details · Edited by ${other.name}`,
       `Part details · Edited by ${other.name}`,
       `Part details · Edited by ${editor.name}`,
-      'Revision 1 (current) · Imported by an administrator',
+      'Revision 1 (current) · Added by an administrator',
     ]);
     assert.match(await textOf(browser, '.history li:nth-child(4) .history-reason'), /^“Write the value the way the BOM does”$/);
     await (await browser.$('.history li:nth-child(4) button')).click();
@@ -433,7 +434,7 @@ describe('team catalog: history, edits and conflicts', () => {
       `Part details · Edited by ${other.name}`,
       `Part details · Edited by ${other.name}`,
       `Part details · Edited by ${editor.name}`,
-      'Revision 1 · Imported by an administrator',
+      'Revision 1 · Added by an administrator',
     ]);
     await waitForText(browser, '#revision-heading', 'What changed in revision 2');
     const rows = await browser.execute(() =>
@@ -479,7 +480,7 @@ describe('team catalog: history, edits and conflicts', () => {
       `Part details · Edited by ${other.name}`,
       `Part details · Edited by ${other.name}`,
       `Part details · Edited by ${editor.name}`,
-      'Revision 1 (current) · Imported by an administrator',
+      'Revision 1 (current) · Added by an administrator',
     ]);
     await waitForText(browser, '#revision-heading', 'Revision 2 archived');
     assert.equal(
@@ -547,7 +548,8 @@ describe('team catalog: history, edits and conflicts', () => {
     const last = await browser.$('.history li:last-child button');
     await last.click();
     await waitForText(browser, '#revision-heading', 'What changed in revision 1');
-    assert.equal(await textOf(browser, '.revision .hint'), 'The first revision of this part.');
+    // The sample part was added from the sample library's files.
+    assert.equal(await textOf(browser, '.revision .hint'), 'The first revision of this part, made from these files:');
     await clickButton(COLUMN, 'Details');
     // The previews redraw after signing in again. Until they do, the cards
     // from the signed-out moment ("Sign in to see this symbol") are still
@@ -556,14 +558,5 @@ describe('team catalog: history, edits and conflicts', () => {
     await waitForPreviewImages(browser, FOOTPRINT);
     await assertAccessible(browser, '49-team-read-only');
     await screenshot(browser, '49-team-read-only');
-  });
-
-  it('says when a part is not in the team catalog', async () => {
-    // This team server has only the resistors, so a regulator from
-    // g-reg.csv is not in it yet.
-    await searchFor(browser, 'KF33BD', '1 matching part');
-    await selectResult(browser, 'KF33BD-TR');
-    await waitForText(browser, '.part-fields .hint', 'This part is not in the team catalog yet, so it has no history.');
-    assert.match(await textOf(browser, '#fields-heading'), /^Catalog fields \(\d+\)$/);
   });
 });

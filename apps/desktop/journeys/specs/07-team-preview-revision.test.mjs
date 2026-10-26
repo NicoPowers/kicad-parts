@@ -1,9 +1,10 @@
 // Team catalog previews come from the exact CAD item revision: the app
-// browses a temporary copy of the catalog in which someone has since
+// reads a temporary copy of the sample library in which someone has since
 // redrawn the R_US symbol and the 0603 footprint, while the team catalog
-// stores the original bytes. Signed out, the part shows the local library;
-// signed in, it shows the stored revision. When the stored bytes cannot be
-// fetched, the local library is drawn with a note saying it differs.
+// stores the original bytes. Signed in, the part shows the stored revision.
+// When the stored bytes cannot be fetched, the local library is drawn with
+// a note saying it differs. (Screenshot 50 showed a CSV catalog part while
+// signed out; without the CSV catalog there is no such part, so it went.)
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -15,7 +16,7 @@ import {
   assertAccessible,
   launchApp,
   record,
-  repoRoot,
+  sampleLibrary,
   screenshot,
   searchFor,
   selectResult,
@@ -30,11 +31,11 @@ import {
 const MPN = 'RC0603FR-0747RL';
 const BADGE = '.team-settings > summary';
 
-/** A copy of the catalog with R_US and R_0603_1608Metric redrawn. */
+/** A copy of the sample library with R_US and R_0603_1608Metric redrawn. */
 function changedCatalog() {
   const root = tempDir('changed-catalog');
-  for (const folder of ['database', 'symbols', 'footprints']) {
-    fs.cpSync(path.join(repoRoot, folder), path.join(root, folder), { recursive: true });
+  for (const folder of ['symbols', 'footprints']) {
+    fs.cpSync(path.join(sampleLibrary, folder), path.join(root, folder), { recursive: true });
   }
   const edit = (file, from, to) => {
     const text = fs.readFileSync(file, 'utf8');
@@ -66,10 +67,10 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
   let browser;
   let dataDir;
   let account;
-  const local = {};
+  const stored = {};
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res'] });
+    server = await startTeamServer();
     [account] = server.accounts;
     ({ browser, dataDir } = await launchApp({
       args: [
@@ -107,28 +108,18 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
     });
   }
 
-  it('signed out, draws the part from the local library', async () => {
-    await waitForText(browser, '#result-count', '178 matching parts');
-    await waitForText(browser, BADGE, 'Team catalog: not signed in');
-    await searchFor(browser, MPN, '1 matching part');
-    await selectResult(browser, MPN);
-    await waitForPreview(browser, SYMBOL);
-    await waitForPreview(browser, FOOTPRINT);
-    for (const [name, section] of [['symbol', SYMBOL], ['footprint', FOOTPRINT]]) {
-      const shown = await preview(section);
-      assert.match(shown.provenance, /^project library · kicad-cli 10\./, name);
-      assert.equal(shown.note, null);
-      local[name] = drawing(shown.src);
-    }
-    await screenshot(browser, '50-local-library-preview');
-  });
-
   it('signed in, draws the stored revision, not the changed local file', async () => {
+    // Without a team, the sample library has no parts to list.
+    await waitForText(browser, '#result-count', 'No parts match.');
+    await waitForText(browser, BADGE, 'Team catalog: not signed in');
     await browser.execute(() => document.querySelector('.team-settings').open = true);
     await (await browser.$('aria/Password')).setValue(account.password);
     await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();
     await waitForText(browser, BADGE, `Team catalog · ${account.name}`);
     await waitForLiveUpdates(browser);
+    await browser.execute(() => document.querySelector('.team-settings').open = false);
+    await searchFor(browser, MPN, '1 matching part');
+    await selectResult(browser, MPN);
     await browser.waitUntil(async () => (await sourceFact()) === 'Team catalog, revision 1 of this part', {
       timeout: 20_000,
       timeoutMsg: 'the part never showed the team catalog revision',
@@ -140,7 +131,7 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
       record({ event: 'team-preview', name, provenance: shown.provenance, title: shown.title });
       assert.match(shown.title, /^Stored bytes with SHA-256 [0-9a-f]{64}$/, name);
       assert.equal(shown.note, null, name);
-      assert.notEqual(drawing(shown.src), local[name], `the ${name} is not the changed local file`);
+      stored[name] = drawing(shown.src);
     }
     assert.match(await textOf(browser, '.part-fields'), /g-res:R_US, symbol revision 1/);
     assert.equal(await browser.execute(() => document.querySelectorAll('[role="alert"]').length), 0);
@@ -182,9 +173,12 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
       return previews.scrollWidth <= previews.clientWidth + 1;
     });
     assert.equal(fits, true, 'the note fits the column without sideways scrolling');
-    const shown = await preview(SYMBOL);
-    assert.match(shown.provenance, /^project library · /);
-    assert.equal(drawing(shown.src), local.symbol, 'the drawing is the local library');
+    // The changed local file, not the stored revision.
+    for (const [name, section] of [['symbol', SYMBOL], ['footprint', FOOTPRINT]]) {
+      const shown = await preview(section);
+      assert.match(shown.provenance, /^project library · /, name);
+      assert.notEqual(drawing(shown.src), stored[name], `the ${name} is the changed local file`);
+    }
     // A note, not an error: the drawing is still useful.
     assert.equal(await browser.execute(() => document.querySelectorAll('.part-previews [role="alert"]').length), 0);
     await browser.execute(() => document.querySelector('.kicad-settings').open = false);

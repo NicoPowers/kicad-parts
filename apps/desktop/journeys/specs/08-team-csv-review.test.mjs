@@ -71,8 +71,10 @@ describe('team catalog: reviewing new CSV values that were not applied', () => {
     server = await startTeamServer({ csv: ['g-res'] });
     [editor, other] = server.accounts;
     otherToken = await teamSignIn(server.url, other);
+    // This journey tests the CSV review, which kicad-parts-e257 removes
+    // with the CSV catalog, so it still reads the repository's CSV catalog.
     ({ browser } = await launchApp({
-      args: [`--team-server=${server.url}`, `--team-email=${editor.email}`],
+      args: [`--team-server=${server.url}`, `--team-email=${editor.email}`, `--catalog-root=${repoRoot}`],
     }));
   });
 
