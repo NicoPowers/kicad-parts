@@ -90,7 +90,9 @@ capacitors have different fields on purpose.
 Keep it small: add a part only when a test needs something no part shows.
 Write new KiCad files by hand or in KiCad, then save them with
 `kicad-cli sym upgrade --force` or `fp upgrade --force` so they stay real
-KiCad 10 files. Run kicad-cli with `KICAD_CONFIG_HOME` and
-`KICAD_CACHE_HOME` set to folders under `target/`, so it never writes your
-own KiCad settings. Then update this README and run the whole workspace
-tests and the journeys.
+KiCad 10 files. Run kicad-cli with `KICAD_CONFIG_HOME`,
+`KICAD_CACHE_HOME` and `KICAD_DOCUMENTS_HOME` set to folders under
+`target/`, so it never writes your own KiCad settings or documents. On
+Windows, kicad-cli writes CRLF line ends: turn them into LF before you
+commit, so the files match on every computer (mx-59d92f). Then update this
+README and run the whole workspace tests and the journeys.

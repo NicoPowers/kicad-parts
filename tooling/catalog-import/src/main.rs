@@ -243,8 +243,8 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     // With CSV files: what is imported, and the resistors `reimport`
     // imports again.
     let csv = match &from {
-        From::Sample => None,
-        From::Csv(chosen) => {
+        ServerFrom::Sample => None,
+        ServerFrom::Csv(chosen) => {
             let every = services::csv_files(&root)?;
             let csv_files = if chosen.is_empty() {
                 every
@@ -278,7 +278,7 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         // importer does.
         Some((csv_files, planned, _)) => {
             import_all(&admin, planned)?;
-            if from == From::Csv(Vec::new()) {
+            if from == ServerFrom::Csv(Vec::new()) {
                 format!(
                     "All {} CSV files in database/ are imported, one category each.",
                     csv_files.len()
@@ -415,7 +415,7 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                         "--data-dir={}",
                         folder.path().join("desktop").display()
                     ));
-                if from == From::Sample {
+                if from == ServerFrom::Sample {
                     command.arg(format!(
                         "--catalog-root={}",
                         sample_library::root().display()
@@ -641,7 +641,7 @@ fn kicad_libraries(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 /// What a local team server starts with.
 #[derive(Clone, Debug, PartialEq)]
-enum From {
+enum ServerFrom {
     /// The CSV files `--csv` names, or every file when empty.
     Csv(Vec<String>),
     /// The sample library (`--sample`).
@@ -650,7 +650,7 @@ enum From {
 
 /// What to do after starting, and what to start with; `None` for
 /// arguments that are not understood, or `--sample` with `--csv`.
-fn server_options(args: &[String]) -> Option<(Then, From)> {
+fn server_options(args: &[String]) -> Option<(Then, ServerFrom)> {
     let mut then = None;
     let mut chosen: Vec<String> = Vec::new();
     let mut sample = false;
@@ -682,8 +682,8 @@ fn server_options(args: &[String]) -> Option<(Then, From)> {
     }
     let from = match (sample, chosen.is_empty()) {
         (true, false) => return None,
-        (true, true) => From::Sample,
-        (false, _) => From::Csv(chosen),
+        (true, true) => ServerFrom::Sample,
+        (false, _) => ServerFrom::Csv(chosen),
     };
     Some((then.unwrap_or(Then::WaitForEnter), from))
 }
@@ -819,20 +819,20 @@ mod tests {
         let options = |text: &str| server_options(&args(text));
         assert_eq!(
             options(""),
-            Some((Then::WaitForEnter, From::Csv(Vec::new())))
+            Some((Then::WaitForEnter, ServerFrom::Csv(Vec::new())))
         );
         let (then, from) = options("--json --csv g-res,g-cap --csv g-reg.csv,g-res").unwrap();
         assert!(then == Then::PrintJson);
         assert_eq!(
             from,
-            From::Csv(vec!["g-res".into(), "g-cap".into(), "g-reg".into()])
+            ServerFrom::Csv(vec!["g-res".into(), "g-cap".into(), "g-reg".into()])
         );
         assert!(
             options("--csv g-res --desktop").is_some_and(|(then, _)| then == Then::OpenDesktop)
         );
         assert_eq!(
             options("--sample --json"),
-            Some((Then::PrintJson, From::Sample))
+            Some((Then::PrintJson, ServerFrom::Sample))
         );
         for refused in [
             "--csv",
