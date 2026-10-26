@@ -15,7 +15,7 @@ import {
   editAsSomeoneElse,
   launchApp,
   record,
-  repoRoot,
+  sampleLibrary,
   screenshotsDir,
   startTeamServer,
   teamSignIn,
@@ -35,13 +35,13 @@ const NOTICE = '.team-notice';
 
 /** An Ultra Librarian style download with a long symbol name and file names. */
 function download(folder) {
-  const read = (file) => fs.readFileSync(path.join(repoRoot, file), 'utf8');
+  const read = (file) => fs.readFileSync(path.join(sampleLibrary, file), 'utf8');
   const name = 'GRM188R71H104KA93D_Murata_Electronics_Chip_Monolithic_Ceramic_Capacitor';
   const symbol = read('symbols/g-cap.kicad_sym')
     .replaceAll('(symbol "C_', `(symbol "${name}_`)
     .replace('(symbol "C"', `(symbol "${name}"`)
-    .replace('"Value" ".Value"', '"Value" "0.1uF"')
-    .replace('"Description" "Unpolarized capacitor"', '"Description" "CAP CER 0.1UF 50V X7R 0603"')
+    .replace('"Value" "C"', '"Value" "0.1uF"')
+    .replace('"Description" "Capacitor, not polarised"', '"Description" "CAP CER 0.1UF 50V X7R 0603"')
     .replace(
       '\t\t(property "Reference"',
       `\t\t(property "Manufacturer" "Murata Electronics" (at 0 0 0) (effects (hide yes)))\n` +
@@ -51,7 +51,7 @@ function download(folder) {
   const footprint = read('footprints/g-Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod')
     .replace('(footprint "C_0603_1608Metric"', '(footprint "CAP_GRM18_MUR_0603_Long_Vendor_Name"')
     .replace(
-      '${KICAD9_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0603_1608Metric.step',
+      '${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_1608Metric.step',
       'CAP_GRM18_MUR_0603_Long_Vendor_Name.step',
     );
   const zip = zipOf([
@@ -66,7 +66,7 @@ function download(folder) {
 
 /** A download whose footprint has no package group in its name and pads no Catalog footprint has. */
 function oddPads(folder) {
-  const read = (file) => fs.readFileSync(path.join(repoRoot, file), 'utf8');
+  const read = (file) => fs.readFileSync(path.join(sampleLibrary, file), 'utf8');
   const symbol = read('symbols/g-cap.kicad_sym')
     .replaceAll('(symbol "C_', '(symbol "C_OddPads_')
     .replace('(symbol "C"', '(symbol "C_OddPads"')
@@ -98,7 +98,7 @@ describe('team catalog: Add part in real workflows', () => {
   let files;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res', 'g-cap'] });
+    server = await startTeamServer();
     const [first, other] = server.accounts;
     editor = first;
     otherToken = await teamSignIn(server.url, other);
@@ -210,7 +210,7 @@ describe('team catalog: Add part in real workflows', () => {
       timeout: 5_000,
       timeoutMsg: 'the search box did not take the focus',
     });
-    await browser.keys('Unpolarized capacitor'.split(''));
+    await browser.keys('Capacitor, not polarised'.split(''));
     // To the list, then down to g-cap's C, and Enter chooses it.
     await tabUntil((id) => id === 'library-items');
     let stops = 0;
@@ -277,13 +277,13 @@ describe('team catalog: Add part in real workflows', () => {
     });
     // The footprint's library is chosen from our libraries, never typed.
     assert.equal(await browser.execute(() => document.getElementById('add-footprint').readOnly), true);
-    await (await browser.$('#add-footprint-library')).selectByAttribute('value', 'g-Package_SO');
-    await browser.waitUntil(async () => (await valueOf('#add-footprint')) === 'g-Package_SO:CAP_ODD_PADS', {
+    await (await browser.$('#add-footprint-library')).selectByAttribute('value', 'g-Package_TO_SOT_SMD');
+    await browser.waitUntil(async () => (await valueOf('#add-footprint')) === 'g-Package_TO_SOT_SMD:CAP_ODD_PADS', {
       timeout: 5_000,
       timeoutMsg: `the library chosen did not show: ${await valueOf('#add-footprint')}`,
     });
     await (await browser.$('#add-category')).selectByAttribute('value', 'cap');
     await waitForText(browser, '#add-ipn-hint', 'The next free IPN in this category. An IPN is never reused.');
-    assert.equal(await valueOf('#add-footprint'), 'g-Package_SO:CAP_ODD_PADS');
+    assert.equal(await valueOf('#add-footprint'), 'g-Package_TO_SOT_SMD:CAP_ODD_PADS');
   });
 });

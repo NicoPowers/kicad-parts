@@ -1,7 +1,6 @@
-// Categories (kicad-parts-ae44): the local team server imports each CSV
-// file as one category (here the resistors, capacitors and regulators), so
-// every part in it shows its category by name. Edit
-// part offers every category; choosing another keeps the IPN and every
+// Categories (kicad-parts-ae44): the local team server starts with the
+// sample library's categories, so every part shows its category by name.
+// Edit part offers every category; choosing another keeps the IPN and every
 // field and adds the new category's fields, and the history says what
 // changed in plain names.
 
@@ -36,7 +35,7 @@ describe('team catalog: categories', () => {
   let editor;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res', 'g-cap', 'g-reg'] });
+    server = await startTeamServer();
     [editor] = server.accounts;
     ({ browser } = await launchApp({
       args: [`--team-server=${server.url}`, `--team-email=${editor.email}`],
@@ -93,13 +92,13 @@ describe('team catalog: categories', () => {
     });
   }
 
-  it('shows the category of a part from each CSV file', async () => {
+  it('shows the category of a part from each category', async () => {
     await (await browser.$(BADGE)).click();
     await (await browser.$('aria/Password')).setValue(editor.password);
     await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();
     await waitForText(browser, BADGE, `Team catalog · ${editor.name}`);
     await waitForLiveUpdates(browser);
-    // A regulator, from g-reg.csv.
+    // A regulator.
     await searchFor(browser, 'KF33BD', '1 matching part');
     await selectResult(browser, 'KF33BD-TR');
     await waitForTeamPart();
@@ -121,8 +120,16 @@ describe('team catalog: categories', () => {
     const options = await browser.execute(() =>
       [...document.querySelectorAll('#edit-category option')].map((o) => o.textContent.trim()),
     );
-    // One choice per imported CSV file, by name.
-    assert.deepEqual(options, ['Capacitors', 'Resistors', 'Voltage regulators']);
+    // One choice per category of the team, by name.
+    assert.deepEqual(options, [
+      'Bare boards',
+      'Board features',
+      'Capacitors',
+      'Integrated circuits',
+      'Microcontrollers',
+      'Resistors',
+      'Voltage regulators',
+    ]);
     assert.deepEqual(await editLabels(), ['Category', 'Description', 'Value', 'Tolerance', 'Datasheet']);
     assert.equal(await browser.$('#edit-category-hint').isExisting(), false, 'no hint before a change');
 

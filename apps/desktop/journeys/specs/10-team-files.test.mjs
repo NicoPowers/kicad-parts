@@ -15,7 +15,7 @@ import {
   editAsSomeoneElse,
   images,
   launchApp,
-  repoRoot,
+  sampleLibrary,
   screenshot,
   searchFor,
   selectResult,
@@ -39,7 +39,7 @@ const FOOTPRINT_REFERENCE = 'g-Resistor_SMD:R_0603_1608Metric';
 /** The resistor footprint with a circle added to its silkscreen. */
 function correctedFootprint(folder) {
   const original = fs.readFileSync(
-    path.join(repoRoot, 'footprints', 'g-Resistor_SMD.pretty', 'R_0603_1608Metric.kicad_mod'),
+    path.join(sampleLibrary, 'footprints', 'g-Resistor_SMD.pretty', 'R_0603_1608Metric.kicad_mod'),
     'utf8',
   );
   const corrected = original.replace(
@@ -55,13 +55,13 @@ function correctedFootprint(folder) {
 /** The resistor footprint renamed R_Journey, naming a Catalog 3D model the Catalog lacks. */
 function footprintWithModel(folder) {
   const original = fs.readFileSync(
-    path.join(repoRoot, 'footprints', 'g-Resistor_SMD.pretty', 'R_0603_1608Metric.kicad_mod'),
+    path.join(sampleLibrary, 'footprints', 'g-Resistor_SMD.pretty', 'R_0603_1608Metric.kicad_mod'),
     'utf8',
   );
   const changed = original
     .replace('(footprint "R_0603_1608Metric"', '(footprint "R_Journey"')
     .replace(
-      '${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step',
+      '${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step',
       '${GITPLM_PARTS}/3d-models/g-Resistor_SMD.3dshapes/R_Journey.step',
     );
   const file = path.join(folder, 'R_Journey.kicad_mod');
@@ -99,7 +99,7 @@ describe('team catalog: edit a part with files', () => {
   let files;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res'] });
+    server = await startTeamServer();
     [editor] = server.accounts;
     files = tempDir('files');
     ({ browser } = await launchApp({
@@ -142,7 +142,7 @@ describe('team catalog: edit a part with files', () => {
   }
 
   it('signs in and opens the resistor', async () => {
-    await waitForText(browser, '#result-count', '178 matching parts');
+    await waitForText(browser, '#result-count', 'No parts match.');
     await browser.execute(() => document.querySelector('.team-settings').open = true);
     await (await browser.$('aria/Password')).setValue(editor.password);
     await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();

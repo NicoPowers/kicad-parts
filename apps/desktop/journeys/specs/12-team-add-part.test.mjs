@@ -16,7 +16,7 @@ import {
   images,
   launchApp,
   record,
-  repoRoot,
+  sampleLibrary,
   screenshot,
   searchFor,
   startTeamServer,
@@ -35,15 +35,15 @@ const BADGE = '.team-settings > summary';
 const COLUMN = '.part-fields';
 const NOTICE = '.team-notice';
 
-/** The repository's capacitor symbol and footprint, renamed, as a vendor ZIP. */
+/** The sample library's capacitor symbol and footprint, renamed, as a vendor ZIP. */
 function download(folder, mpn) {
-  const read = (file) => fs.readFileSync(path.join(repoRoot, file), 'utf8');
+  const read = (file) => fs.readFileSync(path.join(sampleLibrary, file), 'utf8');
   const symbol = read('symbols/g-cap.kicad_sym')
     .replaceAll('(symbol "C_', '(symbol "C_New_')
     .replace('(symbol "C"', '(symbol "C_New"')
-    .replace('"Value" ".Value"', '"Value" "100n"')
-    .replace('"Datasheet" ".Datasheet"', '"Datasheet" "https://example.test/cl10b104.pdf"')
-    .replace('"Description" "Unpolarized capacitor"', '"Description" "CAP CER 0.1UF 50V X7R 0603"')
+    .replace('"Value" "C"', '"Value" "100n"')
+    .replace('"Datasheet" ""', '"Datasheet" "https://example.test/cl10b104.pdf"')
+    .replace('"Description" "Capacitor, not polarised"', '"Description" "CAP CER 0.1UF 50V X7R 0603"')
     .replace(
       '\t\t(property "Reference"',
       `\t\t(property "Manufacturer_Name" "Samsung Electro-Mechanics" (at 0 0 0) (effects (hide yes)))\n` +
@@ -53,7 +53,7 @@ function download(folder, mpn) {
     );
   const footprint = read('footprints/g-Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod')
     .replace('(footprint "C_0603_1608Metric"', '(footprint "C_0603_New"')
-    .replace('${KICAD9_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0603_1608Metric.step', '${KIPRJMOD}/3D/C_0603_New.stp');
+    .replace('${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_1608Metric.step', '${KIPRJMOD}/3D/C_0603_New.stp');
   const zip = zipOf([
     ['CL10B104/KiCad/C_New.kicad_sym', Buffer.from(symbol, 'utf8')],
     ['CL10B104/KiCad/C_0603_New.kicad_mod', Buffer.from(footprint, 'utf8')],
@@ -72,7 +72,7 @@ describe('team catalog: add a part from a download', () => {
   let files;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res', 'g-cap'] });
+    server = await startTeamServer();
     [editor] = server.accounts;
     files = tempDir('download');
     ({ browser } = await launchApp({
@@ -142,7 +142,9 @@ describe('team catalog: add a part from a download', () => {
 
   it('reads a ZIP file, guesses the category with its reason and offers the next free IPN', async () => {
     await (await browser.$('#add-files')).addValue(download(files, MPN));
-    await waitForText(browser, '#add-guess', /^Best guess: Capacitors, because .*C_0603_New/);
+    // The sample capacitors were added by people, so their reference
+    // letter C is a remembered clue, which ranks first.
+    await waitForText(browser, '#add-guess', /^Best guess: Capacitors, because people chose this category \d+ times for reference letter C\.$/);
     record({ event: 'guess', text: await textOf(browser, '#add-guess') });
     assert.equal(await valueOf('#add-category'), 'cap');
     assert.equal(await valueOf('#add-ipn'), IPN);
