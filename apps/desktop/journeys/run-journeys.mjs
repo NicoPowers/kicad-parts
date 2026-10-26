@@ -102,6 +102,11 @@ const workerCount = chooseWorkerCount();
 /** Each spec's seconds in the last runs; the longest start first. */
 const timesFile = path.join(repoRoot, 'target', 'journey-tools', 'journey-seconds.json');
 
+// One journey run at a time on this computer. Every run shares the
+// temporary folder runTempRoot, whatever its JOURNEY_OUT, and empties it.
+// The lock comes before the build, so no other run rebuilds the app or
+// replaces dist/ while this one starts it.
+if (!buildOnly) takeRunLock(`${runTempRoot}.lock`);
 if (!skipBuild) buildForJourneys({ repoRoot, hiddenDesktop: !visible });
 if (buildOnly) process.exit(0);
 if (!fs.existsSync(appBinary)) {
@@ -127,8 +132,6 @@ if (chosen.length === 0) {
   process.exit(1);
 }
 
-// Two runs at once would empty each other's folders.
-const lock = takeRunLock(`${outDir}.lock`);
 fs.rmSync(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 fs.mkdirSync(outDir, { recursive: true });
 fs.rmSync(runTempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -228,7 +231,6 @@ console.log(
   `journeys: ${counts.tests} tests, ${counts.passed} passed, ${counts.failed} failed, ${counts.skipped} skipped; ` +
     `${chosen.length} specs in ${seconds} s with ${workersNeeded} worker(s) on the ${visible ? 'visible' : 'hidden'} desktop`,
 );
-lock.release();
 process.exit(status);
 
 /** "06-team-catalog" for "06-team-catalog.test.mjs". */
@@ -258,18 +260,28 @@ function chooseWorkerCount() {
 
 /**
  * Makes `file` hold this process's ID, unless a run that is still going
- * holds it. A lock left by a run that ended without releasing it is taken
- * over.
+ * holds it, and deletes it when this process exits. A lock left by a run
+ * that ended without deleting it is taken over. Creating the file with
+ * 'wx' fails if it exists, so two runs starting at once cannot both win.
  */
 function takeRunLock(file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const holder = fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0;
-  if (holder && holder !== process.pid && processIsRunning(holder)) {
-    console.error(`Another journey run (process ${holder}) is using ${outDir}. Wait for it, or set JOURNEY_OUT.`);
-    process.exit(1);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      fs.writeFileSync(file, String(process.pid), { flag: 'wx' });
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST' || attempt > 2) throw error;
+    }
+    // An empty file is a run that has just created it.
+    const holder = Number(fs.readFileSync(file, 'utf8'));
+    if (!holder || processIsRunning(holder)) {
+      console.error(`Another journey run (process ${holder || 'starting'}) is running on this computer. Wait for it to finish.`);
+      process.exit(1);
+    }
+    fs.rmSync(file, { force: true });
   }
-  fs.writeFileSync(file, String(process.pid));
-  return { release: () => fs.rmSync(file, { force: true }) };
+  process.on('exit', () => fs.rmSync(file, { force: true }));
 }
 
 function processIsRunning(pid) {
