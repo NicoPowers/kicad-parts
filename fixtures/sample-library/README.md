@@ -81,7 +81,7 @@ capacitors have different fields on purpose.
 | `ICS-0002-0001` | A part whose symbol `Device:TP4333` is missing from its library and whose footprint library `Sample_Missing` does not exist, for preview problems. |
 | `MCU-0000-0001` | A symbol with two units, `g-mcu:SAMPLE_MCU`, and two footprint choices from KiCad's own libraries. |
 | `REG-0000-0001` | A voltage regulator, so a third category with its own fields is there. |
-| `ART-0000-0001` | A test point whose symbol says it is not in the BOM. |
+| `ART-0000-0001` | A test point whose symbol `g-art:TestPoint` says it is not in the BOM, and whose footprint `g-TestPoint:TestPoint_Pad_D1.5mm` says so too. |
 | `PCB-0000-0001` | A bare board with no symbol and no footprint. |
 
 ## Changing it

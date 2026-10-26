@@ -145,7 +145,7 @@ fields = { Description = "IC REG LINEAR 3.3V 500MA 8SO", Voltage = "3.3V", Curre
 ipn = "ART-0000-0001"
 category = "art"
 symbol = "g-art:TestPoint"
-footprint = "TestPoint:TestPoint_Pad_D1.5mm"
+footprint = "g-TestPoint:TestPoint_Pad_D1.5mm"
 fields = { Description = "SMT Test Point 1.5mm round", Comments = "Artwork part only, does not appear in BOM" }
 
 [[part]]
