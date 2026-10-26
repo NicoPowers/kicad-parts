@@ -1,10 +1,11 @@
 //! The desktop draws a team part's symbol and footprint from the stored
 //! bytes of the exact CAD item revisions it uses, not from the library on
-//! this computer. These tests import the resistors into a disposable
-//! PocketBase, then change a temporary copy of the catalog's libraries, and
-//! check which drawing each request gets.
+//! this computer. These tests start a disposable PocketBase with the sample
+//! library's resistors, then change a temporary copy of the sample library,
+//! and check which drawing each request gets.
 
-use catalog::pocketbase::{ImportCommand, read_back, submit_import};
+use catalog::cad_file::{footprint_upload, symbol_upload};
+use catalog::pocketbase::{EditCommand, read_back, submit_edit};
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use catalog_import::services;
@@ -69,10 +70,16 @@ fn copy_folder(from: &Path, to: &Path) {
     }
 }
 
-/// A temporary copy of the catalog in which someone has since redrawn the
-/// R_US symbol and the R_0603_1608Metric footprint.
+/// The symbol and footprint of the part the tests draw.
+const SYMBOL: &str = "g-res:R_US";
+const FOOTPRINT: &str = "g-Resistor_SMD:R_0603_1608Metric";
+const SYMBOL_FILE: &str = "symbols/g-res.kicad_sym";
+const FOOTPRINT_FILE: &str = "footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod";
+
+/// A temporary copy of the sample library in which someone has since
+/// redrawn the R_US symbol and the R_0603_1608Metric footprint.
 fn changed_catalog(root: &Path, into: &Path) {
-    for folder in ["database", "symbols", "footprints"] {
+    for folder in ["symbols", "footprints"] {
         copy_folder(&root.join(folder), &into.join(folder));
     }
     let symbols = into.join("symbols").join("g-res.kicad_sym");
@@ -98,11 +105,17 @@ fn changed_catalog(root: &Path, into: &Path) {
     fs::write(&footprint, changed).unwrap();
 }
 
+/// What the app asks for: the part's Symbol or Footprint field, and the
+/// team revision when it draws a team part's own.
 fn request(kind: PreviewKind, team_revision: Option<u32>) -> PreviewRequest {
+    let field = match kind {
+        PreviewKind::Symbol => SYMBOL,
+        PreviewKind::Footprint => FOOTPRINT,
+    };
     PreviewRequest {
         ipn: IPN.into(),
         kind,
-        field: None,
+        field: Some(field.into()),
         team_revision,
         selection: Some(1),
     }
@@ -133,13 +146,7 @@ fn a_stored_revision_record_that_does_not_match_its_hash_is_not_drawn() {
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-    let import = services::plan(&root, "g-res").unwrap();
-    submit_import(
-        &admin,
-        &ImportCommand::new(&import, "Import the resistors")
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-    )
-    .unwrap();
+    sample_library::seed(&admin, &["res"]).unwrap();
     let member = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     // Find the stored revision of the R_US symbol, then change its snapshot
     // in the stopped server's database, keeping the hash the part names.
@@ -169,7 +176,7 @@ fn a_stored_revision_record_that_does_not_match_its_hash_is_not_drawn() {
     let url = server.url().to_owned();
 
     let data = tempfile::tempdir().unwrap();
-    let browser = open_browser(&root, data.path());
+    let browser = open_browser(&sample_library::root(), data.path());
     let team = TeamCatalog::new();
     sign_in_live(&team, &url, &member);
     let revision = team.part(IPN).unwrap().unwrap().revision.number;
@@ -202,21 +209,16 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-    let import = services::plan(&root, "g-res").unwrap();
-    submit_import(
-        &admin,
-        &ImportCommand::new(&import, "Import the resistors")
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-    )
-    .unwrap();
+    sample_library::seed(&admin, &["res"]).unwrap();
     let member = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     let url = server.url().to_owned();
 
+    let library = sample_library::root();
     let changed = tempfile::tempdir().unwrap();
-    changed_catalog(&root, changed.path());
+    changed_catalog(&library, changed.path());
     let data = tempfile::tempdir().unwrap();
     let browser = open_browser(changed.path(), data.path());
-    let unchanged = open_browser(&root, &data.path().join("unchanged"));
+    let unchanged = open_browser(&library, &data.path().join("unchanged"));
 
     let team = TeamCatalog::new();
     // Signed out, a team preview is a plain message, never the local file.
@@ -274,7 +276,7 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
          reached. This drawing is from your local library, which differs from that revision."
     );
     // With an unchanged local library, the note says the bytes match.
-    let same = open_browser(&root, &data.path().join("same"));
+    let same = open_browser(&library, &data.path().join("same"));
     let note = ready(same.preview_request(
         &request(PreviewKind::Footprint, Some(revision)),
         Some(&team),
@@ -286,7 +288,7 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     // A revision this app never fetched cannot be looked up at all.
     let unknown = ready(fresh.preview_request(
         &PreviewRequest {
-            field: Some("g-res:R_US".into()),
+            field: Some(SYMBOL.into()),
             ..request(PreviewKind::Symbol, Some(revision + 1))
         },
         Some(&team),
@@ -307,33 +309,39 @@ fn after_going_back_to_earlier_content_previews_draw_each_revisions_own_cad() {
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
     let member = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
+    let library = sample_library::root();
     let changed = tempfile::tempdir().unwrap();
-    changed_catalog(&root, changed.path());
-    // Content A, then B (the redrawn symbol and footprint), then A again:
-    // CAD item revisions 1, 2 and 3, and part revisions 1, 2 and 3.
-    for (step, catalog_root) in [
-        ("A", &root),
-        ("B", &changed.path().to_path_buf()),
-        ("A again", &root),
-    ] {
-        let import = catalog::CsvCatalog::new(catalog_root)
-            .import("g-res", None)
-            .unwrap();
-        let state = catalog::pocketbase::read_import_state(&admin).unwrap();
-        let mut command = ImportCommand::new(&import, "Import the resistors")
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import))
-            .expecting(&state);
-        command
-            .correlation_id
-            .push_str(&format!("-{}", step.replace(' ', "-")));
-        let reply = submit_import(&admin, &command).unwrap();
+    changed_catalog(&library, changed.path());
+    // Content A (the sample part), then B (the redrawn symbol and
+    // footprint, sent as files with an edit), then A again: CAD item
+    // revisions 1, 2 and 3, and part revisions 1, 2 and 3.
+    sample_library::seed(&admin, &["res"]).unwrap();
+    for (step, folder) in [("B", changed.path()), ("A again", library.as_path())] {
+        let stored = read_back(&admin).unwrap();
+        let part = stored.part(IPN).unwrap();
+        let revision: catalog::PartRevision = serde_json::from_str(
+            &stored
+                .part_revision(&part.current_revision)
+                .unwrap()
+                .snapshot,
+        )
+        .unwrap();
+        let mut edit = EditCommand::new(IPN, &format!("Content {step}"))
+            .editing_cad(&revision, part.current_revision_number);
+        let symbols = fs::read(folder.join(SYMBOL_FILE)).unwrap();
+        let footprint = fs::read(folder.join(FOOTPRINT_FILE)).unwrap();
+        edit.cad.as_mut().unwrap().uploads = vec![
+            symbol_upload(&symbols, "R_US", SYMBOL, SYMBOL_FILE).unwrap(),
+            footprint_upload(&footprint, FOOTPRINT, FOOTPRINT_FILE).unwrap(),
+        ];
+        let reply = submit_edit(&admin, &edit).unwrap();
         assert_eq!(reply.status, 200, "{step}: {}", reply.body);
     }
     let url = server.url().to_owned();
     let data = tempfile::tempdir().unwrap();
     // The local library is the redrawn one, so a drawing from it would show.
     let browser = open_browser(changed.path(), data.path());
-    let original = open_browser(&root, &data.path().join("original"));
+    let original = open_browser(&library, &data.path().join("original"));
     let redrawn = open_browser(changed.path(), &data.path().join("redrawn"));
     let team = TeamCatalog::new();
     sign_in_live(&team, &url, &member);
