@@ -175,32 +175,74 @@ export function runSpecFile({ testNode, spec, specOut, worker, cwd, env, live })
  * file (screenshots, accessibility results, images of the differences,
  * and so on) moves to the same place under outDir. Two specs writing the
  * same file is a mistake, so it stops the run.
+ *
+ * `statuses` maps each spec's stem to its process's exit code. A spec that
+ * failed or never ran, yet has no failing test in its JUnit result, gets
+ * a made-up failing test, so junit.xml never shows 0 failures for it.
  */
-export function mergeSpecOutputs(bySpecDir, specStems, outDir) {
+export function mergeSpecOutputs(bySpecDir, specStems, outDir, statuses) {
   const suites = [];
   for (const stem of specStems) {
     const specOut = path.join(bySpecDir, stem);
-    if (!fs.existsSync(specOut)) continue;
-    for (const relative of filesUnder(specOut)) {
+    let junit = '';
+    for (const relative of fs.existsSync(specOut) ? filesUnder(specOut) : []) {
       const from = path.join(specOut, relative);
       if (relative === 'junit.xml') {
-        suites.push(junitSuites(fs.readFileSync(from, 'utf8')));
+        junit = junitSuites(fs.readFileSync(from, 'utf8'));
       } else if (relative === 'output.txt') {
         moveFile(from, path.join(outDir, 'logs', `${stem}.txt`));
       } else if (JOINED_FILES.has(relative)) {
-        fs.appendFileSync(path.join(outDir, relative), fs.readFileSync(from));
+        fs.appendFileSync(path.join(outDir, relative), movePaths(fs.readFileSync(from, 'utf8'), specOut, outDir));
       } else {
         const to = path.join(outDir, relative);
         if (fs.existsSync(to)) throw new Error(`two specs wrote ${relative}; ${stem} is the second`);
         moveFile(from, to);
       }
     }
+    const status = statuses.get(stem);
+    if (status !== 0 && !junit.includes('<failure')) junit += `\n${madeUpFailure(stem, status)}`;
+    if (junit) suites.push(junit.trim());
   }
   fs.writeFileSync(
     path.join(outDir, 'junit.xml'),
     `<?xml version="1.0" encoding="utf-8"?>\n<testsuites>\n${suites.join('\n')}\n</testsuites>\n`,
   );
   fs.rmSync(bySpecDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+}
+
+/**
+ * The JSON lines of a joined file, with every path under `specOut` (which
+ * the merge deletes) changed to the same path under `outDir`.
+ */
+function movePaths(jsonLines, specOut, outDir) {
+  const moved = (value) => {
+    if (typeof value === 'string') {
+      return value.startsWith(specOut + path.sep) ? path.join(outDir, value.slice(specOut.length + 1)) : value;
+    }
+    if (Array.isArray(value)) return value.map(moved);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, moved(inner)]));
+    }
+    return value;
+  };
+  return jsonLines
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => `${JSON.stringify(moved(JSON.parse(line)))}\n`)
+    .join('');
+}
+
+/** A JUnit suite with one failing test that says why the spec failed. */
+function madeUpFailure(stem, status) {
+  const why =
+    status === undefined
+      ? 'The spec did not run, because the run stopped first. See the run output.'
+      : `The spec's process ended with exit code ${status}, but no test in it failed. See logs/${stem}.txt.`;
+  return (
+    `<testsuite name="${stem}" tests="1" failures="1">\n` +
+    `<testcase name="${stem} finished" classname="${stem}"><failure message="${why}">${why}</failure></testcase>\n` +
+    '</testsuite>'
+  );
 }
 
 /** What is inside <testsuites> of one node --test JUnit file. */

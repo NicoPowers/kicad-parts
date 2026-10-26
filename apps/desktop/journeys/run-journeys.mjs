@@ -195,7 +195,12 @@ try {
   for (const worker of workers) worker.stop();
 }
 
-mergeSpecOutputs(bySpecDir, chosen.map(stem), outDir);
+mergeSpecOutputs(
+  bySpecDir,
+  chosen.map(stem),
+  outDir,
+  new Map([...results].map(([name, r]) => [stem(name), r.status])),
+);
 writeTimes(timesFile, lastTimes, results);
 const junit = fs.readFileSync(path.join(outDir, 'junit.xml'), 'utf8');
 explainNodeCrashes(junit, testNode);
