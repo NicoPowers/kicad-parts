@@ -1,11 +1,11 @@
 //! Edge cases of the desktop's team catalog use cases (catalog-browser's
-//! TeamCatalog) against a disposable PocketBase with the resistors
-//! imported: spaces around typed values, blank manufacturer rows, and a team
+//! TeamCatalog) against a disposable PocketBase with the sample library's
+//! resistors: spaces around typed values, blank manufacturer rows, and a team
 //! server that stops while the app is open or loses the answer to a save
 //! (through a small proxy that can drop connections).
 
 use catalog::PartDetails;
-use catalog::pocketbase::{EditCommand, ImportCommand, read_back, submit_edit, submit_import};
+use catalog::pocketbase::{EditCommand, read_back, submit_edit};
 use catalog_browser::team::TeamCatalog;
 use catalog_import::services;
 use desktop_contract::{
@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 const IPN: &str = "RES-0000-0470";
 
-/// A started team server with the resistors imported, the desktop's team
+/// A started team server with the sample resistors, the desktop's team
 /// catalog signed in as an editor, and the state folder that must outlive
 /// them.
 struct Desktop {
@@ -136,13 +136,7 @@ fn start_through(through: Option<&mut Option<Arc<Mutex<Fault>>>>) -> Desktop {
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-    let import = services::plan(&root, "g-res").unwrap();
-    submit_import(
-        &admin,
-        &ImportCommand::new(&import, "Import the resistors")
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-    )
-    .unwrap();
+    sample_library::seed(&admin, &["res"]).unwrap();
     let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     let url = match through {
         Some(slot) => {

@@ -1,26 +1,21 @@
 //! The desktop's Edit part with files (seed kicad-parts-3b8b), through
-//! catalog-browser against a disposable PocketBase with a temp copy of the
-//! resistors imported: a chosen file is read and a reference suggested, it
+//! catalog-browser against a disposable PocketBase with the sample
+//! library's resistors: a chosen file is read and a reference suggested, it
 //! is drawn with kicad-cli before saving, saving makes a new CAD item
 //! revision that the history shows with the file's name, and the message
-//! says how many other parts keep the older revision. A later CSV import
-//! never replaces it: an unchanged CSV shows nothing, a changed CSV file
-//! shows a notice whose value can only be kept.
+//! says how many other parts keep the older revision. (Later CSV imports
+//! are in `desktop_team_files_csv.rs`.)
 
 use base64::Engine;
-use catalog::CsvCatalog;
-use catalog::pocketbase::{ImportCommand, ImportOutcome, read_import_state, submit_import};
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
 use catalog_import::services;
-use collaboration::PocketBaseClient;
 use desktop_contract::{
     FileKind, FilePreviewRequest, LiveUpdates, PreviewOutcome, PublishResult, SignInRequest,
-    TeamCsvReviewRequest, TeamEditRequest, TeamFile, TeamFileRequest, TeamPart, TeamSession,
+    TeamEditRequest, TeamFile, TeamFileRequest, TeamPart, TeamSession,
 };
 use kicad_integration::SearchLocations;
 use std::fs;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 const IPN: &str = "RES-0000-0470";
@@ -35,27 +30,6 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(50));
     }
-}
-
-fn copy_folder(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_folder(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
-
-/// Imports the copy as an importer does, reading the team catalog first.
-fn import(admin: &PocketBaseClient, copy: &Path) -> ImportOutcome {
-    let import = CsvCatalog::new(copy).import("g-res", None).unwrap();
-    let state = read_import_state(admin).unwrap();
-    let command = ImportCommand::new(&import, "Import the resistors").expecting(&state);
-    submit_import(admin, &command).unwrap().outcome
 }
 
 fn encoded(bytes: &[u8]) -> String {
@@ -103,18 +77,12 @@ fn read_request(kind: FileKind, name: &str, bytes: &[u8], current: &str) -> Team
 }
 
 #[test]
-fn the_desktop_uses_files_and_imports_never_replace_them() {
+fn the_desktop_uses_files_and_keeps_other_parts_on_their_revision() {
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-    let copy = tempfile::tempdir().unwrap();
-    for folder in ["database", "symbols", "footprints", "3d-models"] {
-        copy_folder(&root.join(folder), &copy.path().join(folder));
-    }
-    assert!(matches!(
-        import(&admin, copy.path()),
-        ImportOutcome::Applied { .. }
-    ));
+    sample_library::seed(&admin, &["res"]).unwrap();
+    let library = sample_library::root();
     let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     let url = server.url().to_owned();
     let team = TeamCatalog::new();
@@ -135,7 +103,7 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
     });
 
     // A footprint file: its name, the current library, nothing missing.
-    let original = fs::read(copy.path().join(FOOTPRINT_FILE)).unwrap();
+    let original = fs::read(library.join(FOOTPRINT_FILE)).unwrap();
     let corrected = String::from_utf8(original.clone()).unwrap().replacen(
         "\t(fp_line",
         "\t(fp_circle (center 0 0) (end 2 0) (stroke (width 0.3) (type solid)) (fill no) (layer \"F.SilkS\"))\n\t(fp_line",
@@ -156,7 +124,7 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
     // From KiCad's own library, the library is suggested from the package;
     // a Catalog 3D model the Catalog lacks is asked for.
     let with_model = corrected.replace(
-        "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
+        "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step",
         "${GITPLM_PARTS}/3d-models/g-Resistor_SMD.3dshapes/R_0603_1608Metric.step",
     );
     let reading = team
@@ -173,8 +141,10 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
         ["3d-models/g-Resistor_SMD.3dshapes/R_0603_1608Metric.step"]
     );
     // A symbol library with two symbols: the first is chosen (none is named
-    // like the current symbol) and the library is the current one, or the
-    // part's CSV file's when the current symbol is KiCad's own.
+    // like the current symbol) and the library is the current one. When the
+    // current symbol is KiCad's own, only a part imported from a CSV file
+    // gets a library (its file's, desktop_team_files_csv.rs); a part added
+    // in the app gets none, and the person types one.
     let reading = team
         .read_file(read_request(
             FileKind::Symbol,
@@ -196,7 +166,7 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
         .unwrap();
     assert_eq!(
         (reading.chosen.as_str(), reading.library.as_str()),
-        ("R_Second", "g-res")
+        ("R_Second", "")
     );
     let error = team
         .read_file(read_request(FileKind::Symbol, "x.kicad_sym", b"hello", ""))
@@ -206,7 +176,7 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
     // Both are drawn with kicad-cli before saving.
     let data = tempfile::tempdir().unwrap();
     let browser = CatalogBrowser::open(BrowserConfig {
-        catalog_root: copy.path().to_path_buf(),
+        catalog_root: library.clone(),
         cache_dir: data.path().join("cache"),
         settings_file: data.path().join("settings.json"),
         kicad_locations: SearchLocations::Standard,
@@ -323,7 +293,7 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
         row.after,
         format!("R_0603_1608Metric.kicad_mod (footprint revision 2 of {FOOTPRINT})")
     );
-    // It replaced the file the import read.
+    // It replaced the file the sample part was added with.
     assert_eq!(
         row.before,
         format!("{FOOTPRINT_FILE} (footprint revision 1 of {FOOTPRINT})")
@@ -380,60 +350,5 @@ fn the_desktop_uses_files_and_imports_never_replace_them() {
                 && change.after == "two.kicad_sym (symbol revision 1 of g-res:R_Second)")
     );
 
-    // The CSV has not changed since it was imported: nothing to review.
-    assert!(matches!(
-        import(&admin, copy.path()),
-        ImportOutcome::NothingChanged { .. }
-    ));
-    assert!(team.part(IPN).unwrap().unwrap().csv_changes.is_empty());
-    assert!(team.part(OTHER).unwrap().unwrap().csv_changes.is_empty());
-
-    // The CSV's footprint file changes: parts that use it show it, and its
-    // value can only be kept.
-    let changed = String::from_utf8(original).unwrap().replacen(
-        "(tags \"resistor\")",
-        "(tags \"resistor 0603\")",
-        1,
-    );
-    fs::write(copy.path().join(FOOTPRINT_FILE), changed).unwrap();
-    assert!(matches!(
-        import(&admin, copy.path()),
-        ImportOutcome::NothingChanged { .. }
-    ));
-    let other = team.part(OTHER).unwrap().unwrap();
-    assert_eq!(other.csv_changes.len(), 1, "{:?}", other.csv_changes);
-    let changes = &other.csv_changes[0];
-    assert!(changes.cad);
-    assert_eq!(changes.rows.len(), 1);
-    let row = &changes.rows[0];
-    assert_eq!(row.field, "Footprint");
-    assert!(row.keep_only);
-    assert_eq!(row.now, format!("{FOOTPRINT}, footprint revision 1"));
-    assert!(row.csv.contains("changed in this app"), "{}", row.csv);
-    let edited = team.part(IPN).unwrap().unwrap();
-    assert!(
-        edited
-            .csv_changes
-            .iter()
-            .any(|changes| changes.rows.iter().any(
-                |row| row.keep_only && row.now == format!("{FOOTPRINT}, footprint revision 2")
-            )),
-        "{:?}",
-        edited.csv_changes
-    );
-    let PublishResult::CsvReviewed { accepted, part, .. } = team
-        .csv_review(TeamCsvReviewRequest {
-            correlation_id: None,
-            ipn: OTHER.into(),
-            problem: changes.problem.clone(),
-            accept: Vec::new(),
-            expected: changes.expected,
-            reason: "Keep the footprint".into(),
-        })
-        .unwrap()
-    else {
-        panic!("not reviewed");
-    };
-    assert!(accepted.is_empty());
-    assert!(part.csv_changes.is_empty(), "{:?}", part.csv_changes);
+    server.stop();
 }
