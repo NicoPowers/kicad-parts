@@ -55,7 +55,7 @@ _Avoid_: Audit Event, log entry
 ### Grouping and sourcing
 
 **Category**:
-A group of similar parts that share the same fields, such as resistors. It is the only grouping people see: KiCad's part chooser shows one group per category, and the symbols the team makes are grouped the same way. Footprints are grouped by package instead, because one package serves many categories, and each 3D model goes with its footprint. Each CSV file of the CSV catalog makes one category. A part's category is part of its details, so changing it never changes the part's IPN. A supplier's category is only a suggestion until someone confirms it.
+A group of similar parts that share the same fields, such as resistors. It is the only grouping people see: KiCad's part chooser shows one group per category, and the symbols the team makes are grouped the same way. Footprints are grouped by package instead, because one package serves many categories, and each 3D model goes with its footprint. Each CSV file of the CSV catalog makes one category when it is imported; the team server's administrator can also set up a category without a CSV file. A part's category is part of its details, so changing it never changes the part's IPN. A supplier's category is only a suggestion until someone confirms it.
 _Avoid_: Catalog Category, type, class, IPN prefix
 
 **Remembered match**:
@@ -111,3 +111,9 @@ _Avoid_: lint, audit, validation
 **CSV review**:
 A person's answer to new CSV values that an import did not apply because the part, or a symbol or footprint it uses, was edited in this app: they accept some of the CSV's values and keep the rest, or keep all the current values. It covers what the CSV said, so the app does not ask again about the same CSV values; it asks again when the CSV changes.
 _Avoid_: merge, sync, override
+
+### Testing
+
+**Sample library**:
+A small made-up library in `fixtures/sample-library`: real KiCad 10 symbols, footprints and 3D models, and the parts that use them. Tests and journeys use it instead of the CSV catalog, and set up team servers from it without a CSV import.
+_Avoid_: test catalog, demo data, mock library

@@ -26,7 +26,7 @@ cargo run --locked -p catalog-import -- local-team-server --desktop
 The command:
 
 1. starts PocketBase on `127.0.0.1` with a random port, with no window and no browser;
-2. imports every CSV file in `database/` (`g-*.csv`), so all 178 parts and all 21 categories are there, one category per CSV file; this takes about 12 seconds (add `--csv g-res,g-cap` to import only some files, which is faster);
+2. imports every CSV file in `database/` (`g-*.csv`), so all 178 parts and all 21 categories are there, one category per CSV file; this takes about 12 seconds (add `--csv g-res,g-cap` to import only some files, which is faster; add `--sample` instead to set up the 16 made-up parts of the [sample library](../../fixtures/sample-library/README.md) without any CSV import, and the app then reads that library's folder);
 3. creates three accounts with new random passwords and prints them;
 4. opens the desktop app with the server address and the first email already filled in.
 

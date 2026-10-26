@@ -21,6 +21,8 @@ cargo run --locked -p catalog-import -- local-team-server --desktop
 
 The console prints three accounts and their passwords, which are new each time. Sign in at the top right of the app. Add `--csv g-res,g-cap` to import only some CSV files, which is faster. Close the app to stop the server and delete its data.
 
+To try the app without the CSV catalog, add `--sample` instead. The team server then holds the 16 made-up parts of the [sample library](fixtures/sample-library/README.md), set up without any CSV import, and the app reads that library's folder.
+
 See [Try the team catalog by hand](docs/operations/TRY_THE_TEAM_CATALOG.md) for what to try.
 
 To check that the whole CSV catalog can move into a team catalog without losing anything, see [Check that your CSV catalog can move to a team catalog](docs/operations/MOVE_THE_CSV_CATALOG.md).
