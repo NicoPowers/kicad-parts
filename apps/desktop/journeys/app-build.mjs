@@ -13,6 +13,12 @@
 // deleted before trunk starts, so a failed build always builds again.
 // Content, not file times: switching git branches back and forth changes
 // file times but not content.
+//
+// The stamp also holds a hash of dist/ as trunk left it. Other tools write
+// dist/ too: `cargo tauri dev` and `cargo tauri build` run trunk their own
+// way, and apps/desktop/build.rs (run by clippy) writes a placeholder page
+// when dist/ is missing. Embedding either could fail every journey, so
+// trunk runs again whenever dist/ is not exactly what it made.
 
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -27,16 +33,17 @@ import path from 'node:path';
 export function buildForJourneys({ repoRoot, hiddenDesktop }) {
   const uiDir = path.join(repoRoot, 'apps', 'desktop-ui');
   const stamp = path.join(repoRoot, 'target', 'journey-tools', 'trunk-inputs.sha256');
+  const dist = path.relative(repoRoot, path.join(uiDir, 'dist'));
   const inputsHash = hashFiles(repoRoot, trunkInputs(repoRoot));
-  const distBuilt = fs.existsSync(path.join(uiDir, 'dist', 'index.html'));
-  const stampHash = fs.existsSync(stamp) ? fs.readFileSync(stamp, 'utf8').trim() : '';
-  if (distBuilt && stampHash === inputsHash) {
-    console.log('> trunk build skipped: no UI input changed since its last build');
+  // Two lines: the hash of trunk's inputs, then the hash of what it made.
+  const stamped = fs.existsSync(stamp) ? fs.readFileSync(stamp, 'utf8') : '';
+  if (stamped === `${inputsHash}\n${hashFiles(repoRoot, [dist])}\n`) {
+    console.log('> trunk build skipped: no UI input changed since its last build, and dist/ is as it left it');
   } else {
     fs.rmSync(stamp, { force: true });
     run('trunk', ['build'], uiDir, repoRoot);
     fs.mkdirSync(path.dirname(stamp), { recursive: true });
-    fs.writeFileSync(stamp, `${inputsHash}\n`);
+    fs.writeFileSync(stamp, `${inputsHash}\n${hashFiles(repoRoot, [dist])}\n`);
   }
   run('cargo', ['build', '--locked', '-p', 'kicad-parts-desktop', '--features', 'custom-protocol'], repoRoot, repoRoot);
   run('cargo', ['build', '--locked', '-p', 'fake-kicad-cli'], repoRoot, repoRoot);
@@ -95,7 +102,7 @@ function uiCrateFolders(repoRoot) {
 /**
  * A SHA-256 over the relative path and content of every file under
  * `entries`, in a fixed order. Build output (dist/, target/, node_modules/)
- * is left out; a missing entry counts as empty.
+ * inside an entry is left out; a missing entry counts as empty.
  */
 function hashFiles(repoRoot, entries) {
   const skipped = new Set(['dist', 'target', 'node_modules']);
