@@ -960,11 +960,18 @@ fn PartPanel(
     // For a part the team catalog has: the revision shown, whose exact CAD
     // item revisions the previews are drawn from, and its Symbol and
     // Footprint in case those cannot be fetched. Otherwise the CSV catalog's.
+    // It names the part's IPN, because the part chosen before can still be
+    // here for a moment after another is selected.
     let preview_source = Memo::new(move |_| {
         team_part.with(|part| {
             part.as_ref().map(|part| {
                 let field = |name: &str| part.revision.field(name).unwrap_or_default().to_owned();
-                (part.revision.number, field("Symbol"), field("Footprint"))
+                (
+                    part.ipn.clone(),
+                    part.revision.number,
+                    field("Symbol"),
+                    field("Footprint"),
+                )
             })
         })
     });
@@ -1075,6 +1082,11 @@ fn PartPanel(
         let Some(PartKey { team, ipn }) = selected.get() else {
             return;
         };
+        // Never draw the part chosen before: drawing it would only fill the
+        // cache, so whether this part says "from cache" would be luck.
+        let source = source
+            .filter(|(source_ipn, ..)| *source_ipn == ipn)
+            .map(|(_, revision, symbol, footprint)| (revision, symbol, footprint));
         let current = preview_seq.get_value() + 1;
         preview_seq.set_value(current);
         let now = js_sys::Date::now() as u64;
