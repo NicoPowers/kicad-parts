@@ -4,15 +4,15 @@
 //! exactly like the server, and the realtime copies of those Changes must
 //! change nothing. A proxy on 127.0.0.1 saves Changes just before the
 //! second page is read; a disposable PocketBase on 127.0.0.1 has the
-//! resistors.
+//! sample library's resistors.
 
 mod support;
 
 use catalog::PartDetails;
 use catalog::PartRevision;
 use catalog::pocketbase::{
-    ArchiveCommand, CatalogReadback, EditCommand, ImportCommand, PublishOutcome, StoredChange,
-    latest_change_seq, read_back, submit_archive, submit_edit, submit_import,
+    ArchiveCommand, CatalogReadback, EditCommand, PublishOutcome, StoredChange, latest_change_seq,
+    read_back, submit_archive, submit_edit,
 };
 use catalog::replica::CatalogReplica;
 use catalog_import::services;
@@ -24,7 +24,10 @@ use support::proxy::Proxy;
 const IPN: &str = "RES-0000-0470";
 /// Small pages, so the resistors take several and others can save between
 /// two of them.
-const PARTS_PER_PAGE: usize = 10;
+const PARTS_PER_PAGE: usize = 4;
+/// Every sample category but the resistors, which others add during a
+/// sign-in.
+const OTHERS: [&str; 6] = ["cap", "ics", "mcu", "reg", "art", "pcb"];
 
 fn signed_in(url: &str, member: &services::Member) -> PocketBaseClient {
     PocketBaseClient::new(url)
@@ -113,13 +116,7 @@ fn signing_in_while_others_save_ends_like_the_server() {
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-    let import = services::plan(&root, "g-res").unwrap();
-    submit_import(
-        &admin,
-        &ImportCommand::new(&import, "Import the resistors")
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-    )
-    .unwrap();
+    sample_library::seed(&admin, &["res"]).unwrap();
     let editor = signed_in(
         server.url(),
         &services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap(),
@@ -139,7 +136,7 @@ fn signing_in_while_others_save_ends_like_the_server() {
     let before = read_back(&admin).unwrap();
     let mut ids: Vec<&str> = before.parts.iter().map(|part| part.id.as_str()).collect();
     ids.sort();
-    assert!(ids.len() > 2 * PARTS_PER_PAGE, "the resistors fill pages");
+    assert!(ids.len() > PARTS_PER_PAGE, "the resistors fill pages");
     let first_page_ipn = before
         .parts
         .iter()
@@ -150,14 +147,14 @@ fn signing_in_while_others_save_ends_like_the_server() {
     // The ID the second page starts after: the last one the first page read.
     let cursor = ids[PARTS_PER_PAGE - 1].to_owned();
 
-    // Just before the second page is read, others save three Changes: new
+    // Just before the second page is read, others save Changes: new
     // details for a part the first page already read, an archive that
-    // moves a part's current revision back, and an import of the
-    // capacitors, whose new parts land before and after the pages read.
-    let saved = Arc::new(Mutex::new(false));
+    // moves a part's current revision back, and the other sample
+    // categories with their parts, which land before and after the pages
+    // read.
+    let saved = Arc::new(Mutex::new(0));
     let marked = saved.clone();
     let (hook_editor, hook_admin) = (editor.clone(), admin.clone());
-    let capacitors = services::plan(&root, "g-cap").unwrap();
     let proxy = Proxy::start(
         server.url(),
         "/api/collections/catalog_parts/records",
@@ -178,13 +175,8 @@ fn signing_in_while_others_save_ends_like_the_server() {
             )
             .unwrap();
             assert_eq!(archived.status, 200, "{}", archived.body);
-            submit_import(
-                &hook_admin,
-                &ImportCommand::new(&capacitors, "Import the capacitors")
-                    .allowing_uncommitted_changes(services::has_uncommitted_changes(&capacitors)),
-            )
-            .unwrap();
-            *marked.lock().unwrap() = true;
+            let more = sample_library::seed(&hook_admin, &OTHERS).unwrap();
+            *marked.lock().unwrap() = 2 + more.categories.len() + more.parts.len();
         }),
     );
 
@@ -198,7 +190,8 @@ fn signing_in_while_others_save_ends_like_the_server() {
         PARTS_PER_PAGE,
     )
     .unwrap();
-    assert!(*saved.lock().unwrap(), "the saves ran during the sign-in");
+    let during = *saved.lock().unwrap() as u64;
+    assert!(during > 0, "the saves ran during the sign-in");
 
     // It ends exactly like the server: every part, its current revision
     // and its current details, and the newest Change.
@@ -212,29 +205,27 @@ fn signing_in_while_others_save_ends_like_the_server() {
         .map(|part| part.id.as_str())
         .filter(|id| !ids.contains(id))
         .collect();
-    assert!(!added.is_empty(), "the capacitors came");
+    assert!(!added.is_empty(), "the other parts came");
     assert!(
         added.iter().any(|id| *id < cursor.as_str()),
         "no part added during the sign-in sorts before the cursor {cursor}"
     );
     assert_eq!(replica_state(&replica), server_state(&after));
     assert_eq!(replica.checkpoint(), latest_change_seq(&viewer).unwrap());
-    assert_eq!(replica.checkpoint(), noted + 3);
+    assert_eq!(replica.checkpoint(), noted + during);
     let archived = replica.part_by_ipn(IPN).unwrap();
     assert_eq!(archived.number, 1, "the archive moved it back");
     // The same as replaying every Change from the first.
     let mut replayed = CatalogReplica::new();
     replayed.catch_up(&viewer).unwrap();
     assert_eq!(replica.parts(), replayed.parts());
-    // Only the three Changes saved during the sign-in were replayed.
-    assert_eq!(
-        replica.applied_sequences(),
-        [noted + 1, noted + 2, noted + 3]
-    );
+    // Only the Changes saved during the sign-in were replayed.
+    let replayed_now: Vec<u64> = (noted + 1..=noted + during).collect();
+    assert_eq!(replica.applied_sequences(), replayed_now);
 
     // Their realtime notifications arrive afterwards and change nothing.
     let signed_in_state = replica.clone();
-    for _ in 0..3 {
+    for _ in 0..during {
         let event = connection
             .next_on("catalog_changes", wait)
             .unwrap()
@@ -278,13 +269,7 @@ fn signing_in_reads_the_current_state_in_a_few_requests() {
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-    let import = services::plan(&root, "g-res").unwrap();
-    submit_import(
-        &admin,
-        &ImportCommand::new(&import, "Import the resistors")
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-    )
-    .unwrap();
+    let seeded = sample_library::seed(&admin, &["res"]).unwrap().last_seq;
     let editor = signed_in(
         server.url(),
         &services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap(),
@@ -306,7 +291,7 @@ fn signing_in_reads_the_current_state_in_a_few_requests() {
     let replica = CatalogReplica::from_server_in_pages(&client, PARTS_PER_PAGE).unwrap();
     let parts = read_back(&admin).unwrap().parts.len();
     assert_eq!(replica.parts().len(), parts);
-    assert_eq!(replica.checkpoint(), 6);
+    assert_eq!(replica.checkpoint(), seeded + 5);
     assert_eq!(
         proxy.requests() - before,
         1 + (parts / PARTS_PER_PAGE + 1) + 1,

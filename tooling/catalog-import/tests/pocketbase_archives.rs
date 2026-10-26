@@ -3,12 +3,12 @@
 //! revision that is not archived, archived revisions stay readable and are
 //! never deleted, and a second client follows archive-only Changes live and
 //! through its checkpoint. Each test starts its own disposable PocketBase on
-//! 127.0.0.1 with the resistor CSV file imported; the repository is only
+//! 127.0.0.1 with the sample library's resistors; the repository is only
 //! read.
 
 use catalog::pocketbase::{
-    ArchiveCommand, ArchiveOutcome, ArchiveReply, CatalogReadback, EditCommand, ImportCommand,
-    StoredChange, read_back, submit_archive, submit_edit, submit_import,
+    ArchiveCommand, ArchiveOutcome, ArchiveReply, CatalogReadback, EditCommand, StoredChange,
+    read_back, submit_archive, submit_edit,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{PartDetails, PartRevision};
@@ -22,6 +22,8 @@ const IPN: &str = "RES-0000-0470";
 struct Team {
     server: PocketBaseServer,
     admin: PocketBaseClient,
+    /// The Changes the sample resistors made: one category, then each part.
+    seeded: u64,
     _state: tempfile::TempDir,
 }
 
@@ -30,16 +32,11 @@ impl Team {
         let root = services::repository_root();
         let state = tempfile::tempdir().unwrap();
         let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-        let import = services::plan(&root, "g-res").unwrap();
-        submit_import(
-            &admin,
-            &ImportCommand::new(&import, "Import the resistors")
-                .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-        )
-        .unwrap();
+        let seeded = sample_library::seed(&admin, &["res"]).unwrap().last_seq;
         Self {
             server,
             admin,
+            seeded,
             _state: state,
         }
     }
@@ -291,12 +288,12 @@ fn archiving_moves_the_current_revision_and_never_deletes() {
     let kinds: Vec<&str> = last
         .changes
         .iter()
+        .skip(team.seeded as usize)
         .map(|change| change.kind.as_str())
         .collect();
     assert_eq!(
         kinds,
         [
-            "csv-import",
             "edit",
             "archive",
             "edit",
@@ -332,9 +329,12 @@ fn a_second_client_follows_archive_only_changes() {
     let wait = Duration::from_secs(20);
     change_symbol(&editor, &team.read(), IPN, "Device:R");
 
-    // Catching up from nothing applies the import and the edit.
+    // Catching up from nothing applies the sample parts and the edit.
     let mut replica = CatalogReplica::new();
-    assert_eq!(replica.catch_up(&watcher).unwrap(), 2);
+    assert_eq!(
+        replica.catch_up(&watcher).unwrap(),
+        team.seeded as usize + 1
+    );
     let part_id = team.read().part(IPN).unwrap().id.clone();
     assert_eq!(replica.parts()[&part_id].number, 2);
     let mut connection = RealtimeConnection::connect(&watcher, wait).unwrap();
@@ -377,7 +377,9 @@ fn a_second_client_follows_archive_only_changes() {
     // The details were never touched.
     let details: &PartDetails = known.details.as_ref().unwrap();
     assert_eq!(details.ipn, IPN);
-    assert_eq!(replica.applied_sequences(), [1, 2, 3, 4]);
+    // The sample parts, the edit, the archive and the unarchive.
+    let every: Vec<u64> = (1..=team.seeded + 3).collect();
+    assert_eq!(replica.applied_sequences(), every);
     team.server.stop();
 }
 
@@ -489,13 +491,7 @@ fn server_code_can_only_add_the_next_revision_and_point_at_the_newest_not_archiv
     let admin = PocketBaseClient::new(server.url())
         .authenticate("_superusers", &superuser.email, &superuser.password)
         .unwrap();
-    let import = services::plan(&root, "g-res").unwrap();
-    submit_import(
-        &admin,
-        &ImportCommand::new(&import, "Import the resistors")
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-    )
-    .unwrap();
+    sample_library::seed(&admin, &["res"]).unwrap();
     // Revisions 2 and 3, with 3 archived: revision 2 is current.
     change_symbol(&admin, &read_back(&admin).unwrap(), IPN, "Device:R");
     change_symbol(&admin, &read_back(&admin).unwrap(), IPN, "Device:R_Small");

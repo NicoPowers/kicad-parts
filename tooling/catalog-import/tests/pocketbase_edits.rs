@@ -3,11 +3,11 @@
 //! records that never change once written, and a second client that
 //! converges through realtime notifications and catching up from its
 //! checkpoint. Each test starts its own disposable PocketBase on 127.0.0.1
-//! with the resistor CSV file imported; the repository is only read.
+//! with the sample library's resistors; the repository is only read.
 
 use catalog::pocketbase::{
-    CatalogReadback, EditCommand, ImportCommand, ImportOutcome, PublishOutcome, PublishReply,
-    StoredChange, read_back, submit_edit, submit_import,
+    CatalogReadback, EditCommand, PublishOutcome, PublishReply, StoredChange, read_back,
+    submit_edit,
 };
 use catalog::replica::CatalogReplica;
 use catalog::{
@@ -21,11 +21,13 @@ use std::time::Duration;
 
 const IPN: &str = "RES-0000-0470";
 
-/// A started PocketBase with the resistors imported, its superuser client,
+/// A started PocketBase with the sample resistors, its superuser client,
 /// and the state directory that must outlive it.
 struct Team {
     server: PocketBaseServer,
     admin: PocketBaseClient,
+    /// The Changes the sample resistors made: one category, then each part.
+    seeded: u64,
     _state: tempfile::TempDir,
 }
 
@@ -34,21 +36,13 @@ impl Team {
         let root = services::repository_root();
         let state = tempfile::tempdir().unwrap();
         let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-        let import = services::plan(&root, "g-res").unwrap();
-        let reply = submit_import(
-            &admin,
-            &ImportCommand::new(&import, "Import the resistors")
-                .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-        )
-        .unwrap_or_else(|error| panic!("{error}\n{}", server_errors(&admin)));
-        assert!(
-            matches!(reply.outcome, ImportOutcome::Applied { .. }),
-            "{}",
-            reply.body
-        );
+        let seeded = sample_library::seed(&admin, &["res"])
+            .unwrap_or_else(|error| panic!("{error}\n{}", server_errors(&admin)))
+            .last_seq;
         Self {
             server,
             admin,
+            seeded,
             _state: state,
         }
     }
@@ -219,11 +213,11 @@ fn an_editor_publishes_details_and_cad_edits_separately() {
     let saved = applied(&first);
     assert_eq!(
         (saved.seq, saved.details, saved.revision),
-        (2, Some(2), None)
+        (team.seeded + 1, Some(2), None)
     );
     let after = team.read();
-    assert_eq!(after.changes.len(), 2);
-    let change = &after.changes[1];
+    assert_eq!(after.changes.len() as u64, team.seeded + 1);
+    let change = after.changes.last().unwrap();
     assert_eq!(
         (
             change.id.as_str(),
@@ -521,7 +515,8 @@ fn an_editor_publishes_details_and_cad_edits_separately() {
     // Changes stay numbered without gaps, and the part's details and
     // revisions are each a chain of predecessors.
     let sequences: Vec<u64> = last.changes.iter().map(|change| change.seq).collect();
-    assert_eq!(sequences, [1, 2, 3, 4, 5]);
+    let every: Vec<u64> = (1..=team.seeded + 4).collect();
+    assert_eq!(sequences, every);
     let part = last.part(IPN).unwrap();
     let mut cursor = part.current_revision.clone();
     let mut numbers = Vec::new();
@@ -601,11 +596,6 @@ fn catalog_records_never_change_even_for_superusers() {
             &stored.blobs[0].id,
             json!({ "sha256": "f".repeat(64) }),
         ),
-        (
-            "catalog_import_problems",
-            &stored.problems[0].id,
-            json!({ "detail": "{}" }),
-        ),
     ];
     // Turn PocketBase's batch API on (it is off by default), and show it
     // works for an ordinary write, so its refusal below comes from the
@@ -680,10 +670,11 @@ fn a_second_client_converges_through_realtime_and_its_checkpoint() {
     let watcher = team.member("Vic Viewer", false);
     let wait = Duration::from_secs(20);
 
-    // The second client starts from its checkpoint: the import.
+    // The second client starts from its checkpoint: the sample resistors.
     let mut replica = CatalogReplica::new();
-    assert_eq!(replica.catch_up(&watcher).unwrap(), 1);
-    assert_eq!((replica.checkpoint(), replica.parts().len()), (1, 29));
+    let seeded = team.seeded;
+    assert_eq!(replica.catch_up(&watcher).unwrap() as u64, seeded);
+    assert_eq!((replica.checkpoint(), replica.parts().len()), (seeded, 6));
     let mut connection = RealtimeConnection::connect(&watcher, wait).unwrap();
     connection
         .subscribe(&watcher, &["catalog_changes"])
@@ -732,7 +723,7 @@ fn a_second_client_converges_through_realtime_and_its_checkpoint() {
             .unwrap()
             .unwrap(),
     );
-    assert_eq!(change.seq, 6);
+    assert_eq!(change.seq, seeded + 5);
     assert_eq!(
         replica.receive(&change, &watcher).unwrap(),
         ApplyResult::Applied
@@ -754,7 +745,7 @@ fn a_second_client_converges_through_realtime_and_its_checkpoint() {
             .unwrap()
             .unwrap(),
     );
-    assert_eq!((seventh.seq, eighth.seq), (7, 8));
+    assert_eq!((seventh.seq, eighth.seq), (seeded + 6, seeded + 7));
     assert_eq!(
         replica.receive(&eighth, &watcher).unwrap(),
         ApplyResult::Applied
@@ -766,7 +757,8 @@ fn a_second_client_converges_through_realtime_and_its_checkpoint() {
 
     // Every Change applied exactly once, in order, and the replica agrees
     // with the server about every part's current revision and details.
-    assert_eq!(replica.applied_sequences(), [1, 2, 3, 4, 5, 6, 7, 8]);
+    let every: Vec<u64> = (1..=seeded + 7).collect();
+    assert_eq!(replica.applied_sequences(), every);
     let server = team.read();
     for part in &server.parts {
         let known = &replica.parts()[&part.id];
@@ -1146,7 +1138,7 @@ fn simultaneous_edits_apply_once_and_the_rest_conflict() {
         .count();
     assert_eq!((applied_count, conflicts), (1, 9));
     let after = team.read();
-    assert_eq!(after.changes.len(), 2);
+    assert_eq!(after.changes.len() as u64, team.seeded + 1);
     assert_eq!(current(&after, IPN).details_number, 2);
     team.server.stop();
 }
@@ -1291,13 +1283,7 @@ fn server_code_cannot_move_a_part_backwards_or_skip_a_revision() {
     let admin = PocketBaseClient::new(server.url())
         .authenticate("_superusers", &superuser.email, &superuser.password)
         .unwrap();
-    let import = services::plan(&root, "g-res").unwrap();
-    submit_import(
-        &admin,
-        &ImportCommand::new(&import, "Import the resistors")
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-    )
-    .unwrap();
+    sample_library::seed(&admin, &["res"]).unwrap();
     let readback = read_back(&admin).unwrap();
     applied(&submit_edit(&admin, &edit(&readback, IPN, "Symbol", "Device:R")).unwrap());
     applied(&submit_edit(&admin, &edit(&readback, IPN, "Value", "47R")).unwrap());

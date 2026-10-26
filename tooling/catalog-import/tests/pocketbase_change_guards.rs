@@ -4,8 +4,8 @@
 //! them. The write guards (`catalog_write_guards.pb.js`) refuse such a save
 //! from the record API, superusers included, and from server code. These
 //! tests play buggy server code through a test route. Each test starts its
-//! own disposable PocketBase on 127.0.0.1 with the resistor CSV file
-//! imported; the repository is only read.
+//! own disposable PocketBase on 127.0.0.1 with the sample library's
+//! resistors; the repository is only read.
 //!
 //! The CSV review and remembered-match cases need more setup, so they live
 //! with their own guard tests: `pocketbase_csv_reviews.rs` and
@@ -13,8 +13,7 @@
 
 use catalog::PartRevision;
 use catalog::pocketbase::{
-    ArchiveCommand, CatalogReadback, EditCommand, ImportCommand, read_back, submit_archive,
-    submit_edit, submit_import,
+    ArchiveCommand, CatalogReadback, EditCommand, read_back, submit_archive, submit_edit,
 };
 use catalog_import::services;
 use collaboration::{HttpReply, PocketBaseClient};
@@ -147,7 +146,7 @@ struct Team {
 
 impl Team {
     /// A team server with the repository's hooks plus `SAVE_HOOK`, and
-    /// the resistors imported.
+    /// the sample resistors.
     fn start() -> Self {
         let root = services::repository_root();
         let state = tempfile::tempdir().unwrap();
@@ -166,13 +165,7 @@ impl Team {
         let admin = PocketBaseClient::new(server.url())
             .authenticate("_superusers", &superuser.email, &superuser.password)
             .unwrap();
-        let import = services::plan(&root, "g-res").unwrap();
-        submit_import(
-            &admin,
-            &ImportCommand::new(&import, "Import the resistors")
-                .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-        )
-        .unwrap();
+        sample_library::seed(&admin, &["res"]).unwrap();
         Self {
             server,
             admin,
@@ -266,11 +259,11 @@ fn the_record_api_refuses_every_record_that_names_a_change() {
         .collect();
     assert_eq!(change_fields(&team.admin), expected);
     let before = team.read();
-    let import_change = &before.changes[0].id;
+    let first_change_id = &before.changes[0].id;
     // A superuser, who passes every collection rule, still gets 403.
     for (collection, field) in CHANGE_FIELDS {
         let mut body = serde_json::Map::new();
-        body.insert(field.to_string(), json!(import_change));
+        body.insert(field.to_string(), json!(first_change_id));
         let reply = team
             .admin
             .post_json(
@@ -299,7 +292,7 @@ fn server_code_must_name_the_change_saved_in_its_own_transaction() {
     .unwrap();
     assert_eq!(reply.status, 200, "{}", reply.body);
     let before = team.read();
-    let import_change = before.changes[0].id.clone();
+    let first_change_id = before.changes[0].id.clone();
     let archive_change = before
         .changes
         .iter()
@@ -381,11 +374,11 @@ fn server_code_must_name_the_change_saved_in_its_own_transaction() {
             ),
         ]
     };
-    for (collection, record) in records(&import_change) {
+    for (collection, record) in records(&first_change_id) {
         let mut record = record.clone();
         record["collection"] = json!(collection);
         // The archive entry must name the archive Change to pass its own
-        // checks; every other record names the import's Change.
+        // checks; every other record names the first Change.
         if collection == "catalog_archive_entries" {
             record["fields"]["change"] = json!(archive_change.id);
         }
@@ -637,12 +630,12 @@ fn refused_as_programming_error(team: &Team, body: Value) -> String {
 fn every_guard_refusal_answers_500_and_is_logged_as_an_error() {
     let team = Team::start();
     let part = team.read().part(IPN).unwrap().clone();
-    let import_change = team.read().changes[0].id.clone();
+    let first_change_id = team.read().changes[0].id.clone();
     // The rule of this seed: details that name an old Change.
     let message = refused_as_programming_error(
         &team,
         json!({ "records": [
-            { "collection": "catalog_part_details", "next": part.id, "fields": { "change": import_change } },
+            { "collection": "catalog_part_details", "next": part.id, "fields": { "change": first_change_id } },
         ] }),
     );
     assert!(
