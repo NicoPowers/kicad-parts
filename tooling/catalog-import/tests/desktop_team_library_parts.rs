@@ -1,19 +1,21 @@
 //! Add part from symbols and footprints already in our libraries
-//! (kicad-parts-37a7), chosen in the Libraries browser (kicad-parts-bc6f), through catalog-browser against a disposable
-//! PocketBase: a temp copy of the CSV catalog, committed in a git
-//! repository of its own, in which an engineer drew a capacitor symbol and
-//! a footprint with its 3D model by hand in KiCad. The resistors and
-//! capacitors are imported first; the repository is only read.
+//! (kicad-parts-37a7), chosen in the Libraries browser (kicad-parts-bc6f),
+//! through catalog-browser against a disposable PocketBase. Our libraries
+//! are a throwaway git repo of the sample library, in which an engineer
+//! drew a capacitor symbol and a footprint with its 3D model by hand in
+//! KiCad. The team starts with the sample resistors and capacitors. (CSV
+//! imports that name the added items are in
+//! `desktop_team_library_parts_csv.rs`.)
 
-use catalog::pocketbase::{ImportOutcome, read_back, submit_import};
+use catalog::pocketbase::read_back;
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
-use catalog_import::services::{self, Allow};
+use catalog_import::services::{self};
 use collaboration::PocketBaseClient;
 use desktop_contract::{
     LibraryCheckView, LibraryGroup, LibraryKey, LiveUpdates, ManufacturerPart, PickUse,
-    PreviewKind, PublishResult, SignInRequest, TeamCsvReviewRequest, TeamDownload,
-    TeamDownloadRequest, TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSession,
+    PreviewKind, PublishResult, SignInRequest, TeamDownload, TeamDownloadRequest,
+    TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSession,
 };
 use kicad_integration::SearchLocations;
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
@@ -30,26 +32,13 @@ const SYMBOL_FILE: &str = "symbols/g-cap.kicad_sym";
 const FOOTPRINT_FILE: &str = "footprints/g-Capacitor_SMD.pretty/C_0603_Hand.kicad_mod";
 const MODEL_FILE: &str = "3d-models/g-Capacitor_SMD.3dshapes/C_0603_Hand.step";
 const MODEL: &[u8] = b"ISO-10303-21;\nEND-ISO-10303-21;\n";
-const FOLDERS: [&str; 4] = ["database", "symbols", "footprints", "3d-models"];
+const FOLDERS: [&str; 3] = ["symbols", "footprints", "3d-models"];
 
 fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while !done() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-fn copy_folder(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_folder(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).unwrap();
-        }
     }
 }
 
@@ -104,7 +93,7 @@ fn hand_footprint(root: &Path, name: &str, link: &str) -> String {
         &format!("(footprint \"{name}\""),
     )
     .replace(
-        "${KICAD9_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0603_1608Metric.step",
+        "${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_1608Metric.step",
         link,
     )
 }
@@ -128,7 +117,7 @@ fn draw_by_hand(root: &Path) {
             1,
         )
         .replacen(
-            "\"Description\" \"Unpolarized capacitor\"",
+            "\"Description\" \"Capacitor, not polarised\"",
             "\"Description\" \"CAP CER 0.1UF 50V X7R 0603\"",
             1,
         )
@@ -157,15 +146,6 @@ fn draw_by_hand(root: &Path) {
     .unwrap();
     fs::create_dir_all(root.join("3d-models/g-Capacitor_SMD.3dshapes")).unwrap();
     fs::write(root.join(MODEL_FILE), MODEL).unwrap();
-}
-
-/// Imports `csv_file` from the copy as the CSV import does it: from its
-/// commit, refused for uncommitted changes and the library check's errors.
-fn import(admin: &PocketBaseClient, root: &Path, csv_file: &str) -> ImportOutcome {
-    let import = services::plan(root, csv_file).unwrap();
-    let command =
-        services::prepare_import(admin, root, &import, "Import", Allow::default()).unwrap();
-    submit_import(admin, &command).unwrap().outcome
 }
 
 /// The symbol and footprint chosen in our libraries in the Libraries
@@ -209,13 +189,13 @@ fn problems(reading: &TeamDownload) -> Vec<String> {
         .collect()
 }
 
-/// A team server with the resistors and capacitors imported from the
-/// committed copy, an editor signed in, and the desktop's browser over the
-/// copy.
+/// A team server with the sample resistors and capacitors, our libraries in
+/// a committed copy of the sample library, an editor signed in, and the
+/// desktop's browser over the copy.
 struct Team {
     _server: PocketBaseServer,
     admin: PocketBaseClient,
-    copy: tempfile::TempDir,
+    copy: sample_library::SampleRepo,
     head: String,
     _state: tempfile::TempDir,
     _data: tempfile::TempDir,
@@ -229,18 +209,8 @@ impl Team {
         let root = services::repository_root();
         let state = tempfile::tempdir().unwrap();
         let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-        let copy = tempfile::tempdir().unwrap();
-        for folder in FOLDERS {
-            copy_folder(&root.join(folder), &copy.path().join(folder));
-        }
-        git(copy.path(), &["init", "-q"]);
-        commit_all(copy.path(), "Today's CSV catalog");
-        for csv in ["g-res", "g-cap"] {
-            assert!(matches!(
-                import(&admin, copy.path(), csv),
-                ImportOutcome::Applied { .. }
-            ));
-        }
+        let copy = sample_library::SampleRepo::new();
+        sample_library::seed(&admin, &["res", "cap"]).unwrap();
         draw(copy.path());
         let head = commit_all(copy.path(), "Drawn by hand in KiCad");
         let member = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
@@ -261,9 +231,7 @@ impl Team {
                 }
             )
         });
-        wait_until("every imported part", || {
-            team.current_values().len() >= 29 + 17
-        });
+        wait_until("every sample part", || team.current_values().len() >= 9);
         let data = tempfile::tempdir().unwrap();
         let browser = CatalogBrowser::open(BrowserConfig {
             catalog_root: copy.path().to_path_buf(),
@@ -365,34 +333,6 @@ fn new_part(reading: &TeamDownload, ipn: &str, category: &str) -> TeamNewPartReq
     }
 }
 
-/// Appends `part`'s CSV row to the copy's g-cap.csv, with the part's own
-/// values and its Symbol and Footprint, as someone would by hand.
-fn add_csv_row(root: &Path, part: &TeamPart) {
-    let field = |name: &str| {
-        part.details
-            .fields
-            .iter()
-            .find(|field| field.name == name)
-            .map(|field| field.value.clone())
-            .unwrap_or_default()
-    };
-    let mut csv = text(root, "database/g-cap.csv");
-    csv.push_str(&format!(
-        "\"{}\",\"{MPN}\",\"Samsung Electro-Mechanics\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"\",\"\",\"\",\"\",\"\",\"\",\"\"
-",
-        part.ipn,
-        field("Description"),
-        part.revision.field("Symbol").unwrap_or_default(),
-        part.revision.field("Footprint").unwrap_or_default(),
-        field("Value"),
-        field("Voltage"),
-        field("Material"),
-        field("Tolerance"),
-        field("Datasheet"),
-    ));
-    fs::write(root.join("database/g-cap.csv"), csv).unwrap();
-}
-
 fn added(result: PublishResult) -> TeamPart {
     match result {
         PublishResult::Added { part } => part,
@@ -402,8 +342,8 @@ fn added(result: PublishResult) -> TeamPart {
 
 /// An engineer adds a part from a symbol drawn by hand: its footprint and
 /// 3D model come along, the checks run, the files are saved exactly as in
-/// the library with the commit they came from, the library check no longer
-/// lists them, and a later CSV import naming them finds nothing to change.
+/// the library with the commit they came from, and the library check no
+/// longer lists them.
 #[test]
 fn a_part_from_our_libraries_end_to_end() {
     let team = Team::start(draw_by_hand);
@@ -549,24 +489,6 @@ fn a_part_from_our_libraries_end_to_end() {
     assert!(!still_new.contains(&FOOTPRINT.to_owned()), "{still_new:?}");
     assert_eq!(after.not_in_catalog, before.not_in_catalog - 2);
     assert_eq!(after.to_fix, 0, "{after:#?}");
-
-    // Someone adds the part's CSV row by hand, naming the same symbol and
-    // footprint with the same bytes, and imports: nothing to change.
-    let revisions = team.stored_revisions();
-    add_csv_row(&root, &part);
-    commit_all(&root, "The new capacitor's CSV row");
-    let outcome = import(&team.admin, &root, "g-cap");
-    assert!(
-        matches!(
-            outcome,
-            ImportOutcome::NothingChanged { .. } | ImportOutcome::Noop { .. }
-        ),
-        "{outcome:?}"
-    );
-    assert_eq!(team.stored_revisions(), revisions);
-    let now = team.team.part(&part.ipn).unwrap().unwrap();
-    assert!(now.csv_changes.is_empty(), "{:?}", now.csv_changes);
-    assert_eq!(now.revision.number, 1);
 }
 
 /// What stops a part from our libraries being saved, each said plainly
@@ -675,125 +597,4 @@ fn problems_stop_the_save_and_the_catalogs_own_items_are_used() {
     let part = added(team.add(request));
     assert_eq!(part.revision.field("Symbol"), Some("g-cap:C"));
     assert_eq!(team.stored_revisions(), revisions + 2);
-}
-
-/// Items added from our libraries are imported CAD, not CAD made in the
-/// app: someone redraws the footprint in KiCad and commits, and the next CSV
-/// import that names it gives it a new revision, with no false "changed in
-/// this app" notice. The part itself was added in the app, so it keeps its
-/// revision and offers the new footprint as a CSV change to accept.
-#[test]
-fn a_later_csv_import_updates_items_added_from_our_libraries() {
-    let team = Team::start(draw_by_hand);
-    let root = team.root().to_path_buf();
-    let reading = team.read(choice(Some(SYMBOL), None));
-    let cap = reading
-        .categories
-        .iter()
-        .find(|category| category.code == "cap")
-        .unwrap();
-    let part = added(team.add(new_part(&reading, &cap.next_ipn, "cap")));
-
-    // Redrawn in KiCad with a link only one computer has: like any imported
-    // footprint changed since its import, it is to fix.
-    let footprint = root.join(FOOTPRINT_FILE);
-    let saved = fs::read_to_string(&footprint).unwrap();
-    let redrawn = saved.replacen(
-        "(attr",
-        "(descr \"redrawn\")
-	(attr",
-        1,
-    );
-    fs::write(
-        &footprint,
-        redrawn.replace(
-            &format!("${{GITPLM_PARTS}}/{MODEL_FILE}"),
-            "/home/me/C_0603_Hand.step",
-        ),
-    )
-    .unwrap();
-    let check = team.check();
-    let to_fix = group(&check, "To fix");
-    assert_eq!(to_fix, [FOOTPRINT], "{check:#?}");
-    assert!(
-        check.groups[0].items[0]
-            .message
-            .ends_with("The footprint changed since the last import."),
-        "{check:#?}"
-    );
-
-    // Fixed, committed, and its CSV row added: the import gives the
-    // footprint revision 2.
-    fs::write(&footprint, &redrawn).unwrap();
-    add_csv_row(&root, &part);
-    commit_all(&root, "Redrawn in KiCad, with its CSV row");
-    let outcome = import(&team.admin, &root, "g-cap");
-    assert!(
-        matches!(outcome, ImportOutcome::Applied { .. }),
-        "{outcome:?}"
-    );
-    let stored = read_back(&team.admin).unwrap();
-    let item = stored
-        .cad_items
-        .iter()
-        .find(|item| item.key == FOOTPRINT)
-        .unwrap();
-    let newest = stored
-        .cad_item_revisions
-        .iter()
-        .filter(|revision| revision.cad_item == item.id)
-        .max_by_key(|revision| revision.number)
-        .unwrap();
-    assert_eq!(newest.number, 2);
-    assert!(
-        newest.source.contains("\"source\":\"csv-catalog\""),
-        "{}",
-        newest.source
-    );
-    assert!(
-        !stored
-            .problems
-            .iter()
-            .any(|problem| problem.code == catalog::CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM),
-        "{:?}",
-        stored.problems
-    );
-
-    // The part keeps its revision and offers the new footprint, which can
-    // be accepted.
-    let now = team.team.part(&part.ipn).unwrap().unwrap();
-    assert_eq!(now.revision.number, 1);
-    let cad = now
-        .csv_changes
-        .iter()
-        .find(|changes| changes.cad)
-        .unwrap_or_else(|| panic!("{:?}", now.csv_changes));
-    let row = cad
-        .rows
-        .iter()
-        .find(|row| row.field == "Footprint")
-        .unwrap_or_else(|| panic!("{cad:?}"));
-    assert!(!row.keep_only, "{row:?}");
-    let reply = team
-        .team
-        .csv_review(TeamCsvReviewRequest {
-            correlation_id: None,
-            ipn: part.ipn.clone(),
-            problem: cad.problem.clone(),
-            accept: vec!["Footprint".into()],
-            expected: cad.expected,
-            reason: "Take the redrawn footprint".into(),
-        })
-        .unwrap();
-    assert!(
-        matches!(
-            reply,
-            PublishResult::CsvReviewed {
-                revision: Some(2),
-                ..
-            }
-        ),
-        "{reply:?}"
-    );
-    assert_eq!(team.check().to_fix, 0);
 }

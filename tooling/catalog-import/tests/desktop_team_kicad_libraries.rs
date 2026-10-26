@@ -2,12 +2,12 @@
 //! (kicad-parts-f397): nothing is made until the team has a code; then
 //! after the sign-in catches up, after a Change by someone else, and on
 //! Update now. Each team gets its own folder, and a code another team's
-//! libraries use stops the updates. A disposable PocketBase on
-//! 127.0.0.1 has the resistors imported; the libraries are written under
+//! libraries use stops the updates. A disposable PocketBase on 127.0.0.1
+//! has the sample library's resistors; the libraries are written under
 //! target/.
 
 use catalog::PartRevision;
-use catalog::pocketbase::{EditCommand, ImportCommand, read_back, submit_edit, submit_import};
+use catalog::pocketbase::{EditCommand, read_back, submit_edit};
 use catalog_browser::kicad_libraries::TeamLibraries;
 use catalog_browser::team::TeamCatalog;
 use catalog_import::services;
@@ -65,13 +65,7 @@ fn the_libraries_follow_the_team_catalog() {
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-    let import = services::plan(&root, "g-res").unwrap();
-    submit_import(
-        &admin,
-        &ImportCommand::new(&import, "Import the resistors")
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-    )
-    .unwrap();
+    sample_library::seed(&admin, &["res"]).unwrap();
     let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     let viewer = services::add_member(&admin, "Vic Viewer", "vic@example.test", false).unwrap();
     let folder = root
@@ -151,7 +145,7 @@ fn the_libraries_follow_the_team_catalog() {
     else {
         unreachable!()
     };
-    assert!(current > 10, "{current}");
+    assert_eq!(current, 6, "one entry per sample resistor");
     assert_eq!((older, archived), (0, 0));
     let status = libraries.status();
     assert!(!status.restart_kicad);
@@ -171,7 +165,7 @@ fn the_libraries_follow_the_team_catalog() {
     assert!(
         team_folder
             .join("symbols")
-            .join("MA-res-20241209.kicad_sym")
+            .join("MA-res-20251024.kicad_sym")
             .is_file()
     );
     assert!(
