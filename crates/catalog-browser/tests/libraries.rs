@@ -613,10 +613,10 @@ fn never_follows_links_out_of_our_libraries() {
 fn indexes_and_draws_kicads_own_libraries() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = fixture();
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/sample-library");
     let open_real = || {
         CatalogBrowser::open(BrowserConfig {
-            catalog_root: repo.clone(),
+            catalog_root: sample.clone(),
             cache_dir: dir.path().join("cache"),
             settings_file: dir.path().join("settings.json"),
             kicad_locations: SearchLocations::Standard,
