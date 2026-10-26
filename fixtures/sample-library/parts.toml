@@ -88,7 +88,7 @@ fields = { Description = "RES 10K OHM 1% 1/10W 0402", Value = "10k", Tolerance =
 [[part]]
 ipn = "CAP-0000-0020"
 category = "cap"
-manufacturer_parts = [["Samsung", "CL10C020CB8NNNC"]]
+manufacturer_parts = [["Samsung Electro-Mechanics", "CL10C020CB8NNNC"]]
 symbol = "g-cap:C"
 footprint = "g-Capacitor_SMD:C_0603_1608Metric"
 fields = { Description = "CAP CER 2PF 50V C0G/NP0 0603", Value = "2pF", Voltage = "50V", Material = "C0G", Tolerance = "0.25pF" }
@@ -96,7 +96,7 @@ fields = { Description = "CAP CER 2PF 50V C0G/NP0 0603", Value = "2pF", Voltage 
 [[part]]
 ipn = "CAP-0000-0100"
 category = "cap"
-manufacturer_parts = [["Samsung", "CL10C100JB8NNNC"]]
+manufacturer_parts = [["Samsung Electro-Mechanics", "CL10C100JB8NNNC"]]
 symbol = "g-cap:C"
 footprint = "g-Capacitor_SMD:C_0603_1608Metric"
 fields = { Description = "CAP CER 10PF 50V C0G/NP0 0603", Value = "10pF", Voltage = "50V", Material = "C0G", Tolerance = "5%" }
