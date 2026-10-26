@@ -6,14 +6,15 @@
 //! another installed library's is copied into one of our libraries with its
 //! 3D model, the Source naming the library and file.
 //!
-//! The CSV catalog is a temp copy committed in a git repository of its
-//! own; KiCad is a fake install (its data folder only) and the person's
+//! Our libraries are the sample library, committed in a throwaway git
+//! repository of its own (`sample_library::SampleRepo`); KiCad is a fake
+//! install (its data folder only) and the person's
 //! KiCad settings are fixture tables, never the developer's own.
 
-use catalog::pocketbase::{ImportOutcome, read_back, submit_import};
+use catalog::pocketbase::read_back;
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
-use catalog_import::services::{self, Allow};
+use catalog_import::services::{self};
 use collaboration::PocketBaseClient;
 use desktop_contract::{
     Field, LibraryGroup, LibraryKey, LiveUpdates, ManufacturerPart, PickUse, PreviewKind,
@@ -32,7 +33,7 @@ const HAND: &str = "g-Capacitor_SMD:C_0603_Hand";
 const HAND_FILE: &str = "footprints/g-Capacitor_SMD.pretty/C_0603_Hand.kicad_mod";
 const HAND_MODEL: &str = "3d-models/g-Capacitor_SMD.3dshapes/C_0603_Hand.step";
 const MODEL: &[u8] = b"ISO-10303-21;\nEND-ISO-10303-21;\n";
-const FOLDERS: [&str; 4] = ["database", "symbols", "footprints", "3d-models"];
+const FOLDERS: [&str; 3] = ["symbols", "footprints", "3d-models"];
 
 fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -45,19 +46,6 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
 fn write(path: &Path, bytes: impl AsRef<[u8]>) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, bytes).unwrap();
-}
-
-fn copy_folder(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_folder(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).unwrap();
-        }
-    }
 }
 
 /// Runs git in `root` with a fixture identity and none of this computer's
@@ -99,8 +87,8 @@ fn text(root: &Path, path: &str) -> String {
     String::from_utf8(fs::read(root.join(path)).unwrap()).unwrap()
 }
 
-/// The 0603 capacitor footprint of the copy, named `name` and linking the
-/// 3D model `link`.
+/// The 0603 capacitor footprint of the library, named `name` and linking
+/// the 3D model `link`.
 fn footprint_like(root: &Path, name: &str, link: &str) -> String {
     text(
         root,
@@ -111,12 +99,13 @@ fn footprint_like(root: &Path, name: &str, link: &str) -> String {
         &format!("(footprint \"{name}\""),
     )
     .replace(
-        "${KICAD9_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0603_1608Metric.step",
+        "${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_1608Metric.step",
         link,
     )
 }
 
-/// The copy's capacitor symbol `C` as a library of its own, named `name`.
+/// The library's capacitor symbol `C` as a library of its own, named
+/// `name`.
 fn symbol_like(root: &Path, name: &str) -> String {
     let library = fs::read(root.join("symbols/g-cap.kicad_sym")).unwrap();
     let parsed = kicad_integration::library_file::SymbolLibrary::parse(&library).unwrap();
@@ -240,22 +229,14 @@ fn kicad(root: &Path, catalog: &Path) -> Kicad {
     }
 }
 
-/// Imports `csv_file` from the copy as the CSV import does it.
-fn import(admin: &PocketBaseClient, root: &Path, csv_file: &str) -> ImportOutcome {
-    let import = services::plan(root, csv_file).unwrap();
-    let command =
-        services::prepare_import(admin, root, &import, "Import", Allow::default()).unwrap();
-    submit_import(admin, &command).unwrap().outcome
-}
-
-/// A team server with the capacitors imported from the committed copy (in
-/// which someone drew the footprint C_0603_Hand with its own 3D model and
-/// committed it), an editor signed in, and the desktop's browser over the
-/// copy with the libraries read.
+/// A team server with the sample capacitors, our libraries in a committed
+/// copy of the sample library (in which someone drew the footprint
+/// C_0603_Hand with its own 3D model and committed it), an editor signed
+/// in, and the desktop's browser over the copy with the libraries read.
 struct Team {
     _server: PocketBaseServer,
     admin: PocketBaseClient,
-    copy: tempfile::TempDir,
+    copy: sample_library::SampleRepo,
     head: String,
     _state: tempfile::TempDir,
     _data: tempfile::TempDir,
@@ -269,16 +250,8 @@ impl Team {
         let root = services::repository_root();
         let state = tempfile::tempdir().unwrap();
         let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-        let copy = tempfile::tempdir().unwrap();
-        for folder in FOLDERS {
-            copy_folder(&root.join(folder), &copy.path().join(folder));
-        }
-        git(copy.path(), &["init", "-q"]);
-        commit_all(copy.path(), "Today's CSV catalog");
-        assert!(matches!(
-            import(&admin, copy.path(), "g-cap"),
-            ImportOutcome::Applied { .. }
-        ));
+        let copy = sample_library::SampleRepo::new();
+        sample_library::seed(&admin, &["cap"]).unwrap();
         write(
             &copy.path().join(HAND_FILE),
             footprint_like(
@@ -307,7 +280,9 @@ impl Team {
                 }
             )
         });
-        wait_until("every imported part", || team.current_values().len() >= 17);
+        wait_until("every sample capacitor", || {
+            team.current_values().len() >= 3
+        });
         let data = tempfile::tempdir().unwrap();
         let kicad = kicad(data.path(), copy.path());
         let browser = CatalogBrowser::open(BrowserConfig {
@@ -465,13 +440,13 @@ fn edit_part_uses_a_choice_by_where_it_lives() {
         PreviewKind::Footprint,
         LibraryGroup::Ours,
         "g-Capacitor_SMD",
-        "C_1210_3225Metric",
+        "C_0805_2012Metric",
     );
     assert_eq!(pick.use_as, PickUse::Catalog);
-    assert_eq!(pick.reference, "g-Capacitor_SMD:C_1210_3225Metric");
+    assert_eq!(pick.reference, "g-Capacitor_SMD:C_0805_2012Metric");
     assert!(pick.file.is_none() && pick.problems.is_empty(), "{pick:?}");
     saved(team.edit(IPN, "Footprint", &pick.reference, Vec::new()));
-    assert_eq!(footprint(), "g-Capacitor_SMD:C_1210_3225Metric");
+    assert_eq!(footprint(), "g-Capacitor_SMD:C_0805_2012Metric");
 
     // Ours, which the Catalog lacks: added from the commit that holds it.
     let pick = team.pick(

@@ -104,10 +104,10 @@ fields = { Description = "CAP CER 10PF 50V C0G/NP0 0603", Value = "10pF", Voltag
 [[part]]
 ipn = "CAP-0003-0001"
 category = "cap"
-manufacturer_parts = [["Murata", "GRM188R61A106KE69D"]]
+manufacturer_parts = [["Murata", "GRM21BR61A106KE19L"]]
 symbol = "g-cap:C"
-footprint = "g-Capacitor_SMD:C_0603_1608Metric"
-fields = { Description = "CAP CER 10UF 10V X5R 0603", Value = "10uF", Voltage = "10V", Material = "X5R", Tolerance = "10%" }
+footprint = "g-Capacitor_SMD:C_0805_2012Metric"
+fields = { Description = "CAP CER 10UF 10V X5R 0805", Value = "10uF", Voltage = "10V", Material = "X5R", Tolerance = "10%" }
 
 [[part]]
 ipn = "ICS-0001-0001"

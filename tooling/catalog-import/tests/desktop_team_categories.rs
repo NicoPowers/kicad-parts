@@ -1,14 +1,12 @@
 //! The desktop's team catalog use cases for categories (catalog-browser's
-//! TeamCatalog) against a disposable PocketBase with the resistors and
-//! capacitors imported: a part shows its category by name, Edit part offers
+//! TeamCatalog) against a disposable PocketBase with the sample library's
+//! resistors and capacitors: a part shows its category by name, Edit part offers
 //! every category, choosing another keeps the IPN and every field and adds
 //! the new category's fields, the history says so in plain names, and a
 //! conflict over the category can be saved on top.
 
 use catalog::PartDetails;
-use catalog::pocketbase::{
-    EditCommand, ImportCommand, current_categories, read_import_state, submit_edit, submit_import,
-};
+use catalog::pocketbase::{EditCommand, current_categories, submit_edit};
 use catalog_browser::team::TeamCatalog;
 use catalog_import::services;
 use collaboration::PocketBaseClient;
@@ -40,18 +38,7 @@ fn the_desktop_shows_and_changes_a_parts_category() {
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-    for csv_file in ["g-res", "g-cap"] {
-        let import = services::plan(&root, csv_file).unwrap();
-        let state = read_import_state(&admin).unwrap();
-        let reply = submit_import(
-            &admin,
-            &ImportCommand::new(&import, "Import")
-                .expecting(&state)
-                .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-        )
-        .unwrap();
-        assert_eq!(reply.status, 200, "{}", reply.body);
-    }
+    sample_library::seed(&admin, &["res", "cap"]).unwrap();
     let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
     let other = services::add_member(&admin, "Grace Editor", "grace@example.test", true).unwrap();
     let url = server.url().to_owned();

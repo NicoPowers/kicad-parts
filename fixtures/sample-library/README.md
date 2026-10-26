@@ -76,7 +76,7 @@ capacitors have different fields on purpose.
 | `RES-0000-1002` | A resistor with KiCad's own `Device:R` and `Resistor_SMD:R_0402_1005Metric`, which stay outside the Catalog. |
 | `CAP-0000-0020` | A capacitor with a known MPN, `CL10C020CB8NNNC`, for Add part's "already in the Catalog" check. Our own symbol `g-cap:C` and footprint `g-Capacitor_SMD:C_0603_1608Metric`, whose 3D model is our own STEP file. |
 | `CAP-0000-0100` | A second capacitor of the same kind. |
-| `CAP-0003-0001` | The highest capacitor number, so Add part offers `CAP-0004-0001`. |
+| `CAP-0003-0001` | The highest capacitor number, so Add part offers `CAP-0004-0001`. Its footprint `g-Capacitor_SMD:C_0805_2012Metric` links KiCad's own 3D model, so a capacitor can move to a second footprint the Catalog has. |
 | `ICS-0001-0001` | A buffer whose footprint `g-Package_TO_SOT_SMD:SOT-23-5` links our own VRML 3D model. |
 | `ICS-0002-0001` | A part whose symbol `Device:TP4333` is missing from its library and whose footprint library `Sample_Missing` does not exist, for preview problems. |
 | `MCU-0000-0001` | A symbol with two units, `g-mcu:SAMPLE_MCU`, and two footprint choices from KiCad's own libraries. |
