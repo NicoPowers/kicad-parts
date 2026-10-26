@@ -33,6 +33,15 @@ go_url = "https://go.dev/dl/go1.24.8.linux-amd64.tar.gz"
 # same Go release.
 go_windows_x64_sha256 = "0de7b65422d9377404a22f3903f17b20e4065f6c43e136ae2de16494c8c6b057"
 go_windows_x64_url = "https://go.dev/dl/go1.24.8.windows-amd64.zip"
+# tooling/gate.sh runs the Rust tests with this cargo-nextest. It downloads
+# it once into target/tools/nextest and falls back to cargo test without it.
+nextest = "0.9.150"
+nextest_windows_x64_sha256 = "6fd8f9ba48c946a79a5bcdd35bf4f922447b149f7ca6c3ff7f39e12f32ef78db"
+nextest_windows_x64_url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-pc-windows-msvc.zip"
+nextest_linux_x64_sha256 = "b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f"
+nextest_linux_x64_url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-unknown-linux-gnu.tar.gz"
+nextest_macos_sha256 = "82a759b4d218d38359424196ab244c470e8f7c7d149c814fbbeef4d67c3c301a"
+nextest_macos_url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-universal-apple-darwin.tar.gz"
 
 [images.busybox]
 version = "1.37.0-musl"

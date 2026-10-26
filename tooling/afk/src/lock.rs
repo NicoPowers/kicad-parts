@@ -43,6 +43,13 @@ pub struct ToolchainLock {
     pub go_url: String,
     pub go_windows_x64_sha256: String,
     pub go_windows_x64_url: String,
+    pub nextest: String,
+    pub nextest_windows_x64_sha256: String,
+    pub nextest_windows_x64_url: String,
+    pub nextest_linux_x64_sha256: String,
+    pub nextest_linux_x64_url: String,
+    pub nextest_macos_sha256: String,
+    pub nextest_macos_url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -163,6 +170,18 @@ impl VersionsLock {
             (
                 "toolchain.go_windows_x64_sha256",
                 self.toolchain.go_windows_x64_sha256.as_str(),
+            ),
+            (
+                "toolchain.nextest_windows_x64_sha256",
+                self.toolchain.nextest_windows_x64_sha256.as_str(),
+            ),
+            (
+                "toolchain.nextest_linux_x64_sha256",
+                self.toolchain.nextest_linux_x64_sha256.as_str(),
+            ),
+            (
+                "toolchain.nextest_macos_sha256",
+                self.toolchain.nextest_macos_sha256.as_str(),
             ),
             (
                 "toolchain.tauri_cli_sha512",
@@ -287,6 +306,30 @@ impl VersionsLock {
                 format!("/go{}.windows-amd64.zip", self.toolchain.go),
             ),
             (
+                "toolchain.nextest_windows_x64_url",
+                self.toolchain.nextest_windows_x64_url.as_str(),
+                format!(
+                    "/cargo-nextest-{0}/cargo-nextest-{0}-x86_64-pc-windows-msvc.zip",
+                    self.toolchain.nextest
+                ),
+            ),
+            (
+                "toolchain.nextest_linux_x64_url",
+                self.toolchain.nextest_linux_x64_url.as_str(),
+                format!(
+                    "/cargo-nextest-{0}/cargo-nextest-{0}-x86_64-unknown-linux-gnu.tar.gz",
+                    self.toolchain.nextest
+                ),
+            ),
+            (
+                "toolchain.nextest_macos_url",
+                self.toolchain.nextest_macos_url.as_str(),
+                format!(
+                    "/cargo-nextest-{0}/cargo-nextest-{0}-universal-apple-darwin.tar.gz",
+                    self.toolchain.nextest
+                ),
+            ),
+            (
                 "components.pocketbase.url",
                 self.components.pocketbase.url.as_str(),
                 format!(
@@ -395,6 +438,19 @@ impl VersionsLock {
             (
                 "toolchain.go_windows_x64_url",
                 self.toolchain.go_windows_x64_url.as_str(),
+            ),
+            ("toolchain.nextest", self.toolchain.nextest.as_str()),
+            (
+                "toolchain.nextest_windows_x64_url",
+                self.toolchain.nextest_windows_x64_url.as_str(),
+            ),
+            (
+                "toolchain.nextest_linux_x64_url",
+                self.toolchain.nextest_linux_x64_url.as_str(),
+            ),
+            (
+                "toolchain.nextest_macos_url",
+                self.toolchain.nextest_macos_url.as_str(),
             ),
             (
                 "components.pocketbase.version",
@@ -645,6 +701,20 @@ mod tests {
         }
         let mut lock = load();
         lock.toolchain.node_windows_x64_sha256 = "short".into();
+        assert!(lock.validate().is_err());
+        // Each nextest download names the pinned nextest release.
+        for field in ["windows_x64", "linux_x64", "macos"] {
+            let mut lock = load();
+            let url = match field {
+                "windows_x64" => &mut lock.toolchain.nextest_windows_x64_url,
+                "linux_x64" => &mut lock.toolchain.nextest_linux_x64_url,
+                _ => &mut lock.toolchain.nextest_macos_url,
+            };
+            *url = url.replace("0.9.150", "0.9.149");
+            assert!(lock.validate().is_err(), "nextest {field} URL was accepted");
+        }
+        let mut lock = load();
+        lock.toolchain.nextest_macos_sha256 = "short".into();
         assert!(lock.validate().is_err());
         let mut lock = load();
         lock.components.pocketbase.windows_amd64_sha256 = "short".into();
