@@ -1482,6 +1482,93 @@ pub fn submit_archive(
     }
 }
 
+/// The route that sets up a category without a CSV file.
+pub const CATEGORY_ROUTE: &str = "/api/catalog/categories";
+
+/// Sets up one new category, as a superuser: its revision 1 is `category`,
+/// saved in one Change of kind category (kicad-parts-fbc2). Test team
+/// servers and `local-team-server --sample` start this way, without the
+/// CSV import.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CategoryCommand {
+    pub correlation_id: CorrelationId,
+    pub reason: String,
+    pub category: crate::CategoryDetails,
+}
+
+impl CategoryCommand {
+    /// A command with a fresh correlation ID.
+    pub fn new(category: crate::CategoryDetails, reason: &str) -> Self {
+        Self {
+            correlation_id: CorrelationId::generate(),
+            reason: reason.to_owned(),
+            category,
+        }
+    }
+
+    pub fn body(&self) -> Value {
+        json!({
+            "correlationId": self.correlation_id,
+            "reason": self.reason,
+            "category": self.category,
+        })
+    }
+}
+
+/// What the category route answered.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CategoryReply {
+    pub status: u16,
+    pub outcome: CategoryOutcome,
+    /// The answer was replayed from the correlation-ID ledger.
+    pub replayed: bool,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum CategoryOutcome {
+    /// 200: one Change with the new category, its revision 1 and one audit
+    /// entry.
+    #[serde(rename_all = "camelCase")]
+    Applied {
+        correlation_id: String,
+        change_id: String,
+        seq: u64,
+        audit_entry_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    CorrelationReused {
+        correlation_id: String,
+        message: String,
+    },
+}
+
+/// Submits a new category. Applied and correlation-reuse answers are `Ok`;
+/// bad input (400, including a category the Catalog has) and 401 are
+/// errors.
+pub fn submit_category(
+    client: &PocketBaseClient,
+    command: &CategoryCommand,
+) -> CollabResult<CategoryReply> {
+    let reply = client.post_json(CATEGORY_ROUTE, &command.body())?;
+    match reply.status {
+        200 | 409 => {
+            let outcome: CategoryOutcome = serde_json::from_str(&reply.body)
+                .map_err(|parse| CollabError::Protocol(format!("{parse}: {}", reply.body)))?;
+            Ok(CategoryReply {
+                status: reply.status,
+                outcome,
+                replayed: reply.replayed,
+                body: reply.body,
+            })
+        }
+        _ => Err(reply.success().err().unwrap_or_else(|| {
+            CollabError::Protocol(format!("unexpected status {}", reply.status))
+        })),
+    }
+}
+
 /// The route that reviews CSV changes that were not applied to an edited
 /// part.
 pub const CSV_REVIEW_ROUTE: &str = "/api/catalog/csv-reviews";

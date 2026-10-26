@@ -14,6 +14,7 @@ const CHANGE_KINDS = Object.freeze({
   unarchive: "unarchive",
   csvReview: "csv-review",
   create: "create",
+  category: "category",
 });
 
 // The `source` value of rows read from the CSV catalog.
@@ -3399,6 +3400,133 @@ function publishArchive(e) {
   return e.json(reply.status, reply.body);
 }
 
+// ---- Setting up a category (kicad-parts-fbc2) ----------------------------------
+//
+// A superuser sets up a team's categories without a CSV file: one new
+// category per request, saved as its revision 1 in one Change of kind
+// category. Test team servers and local-team-server --sample start this
+// way, so they need no CSV import. A category that exists is refused, so
+// this never changes one.
+
+// The `source` of a category revision a superuser set up.
+const CATEGORY_SETUP_SOURCE = "setup";
+
+function publishCategory(e) {
+  const kind = CHANGE_KINDS.category;
+  const actor = catalogEditor(e);
+  const body = e.requestInfo().body || {};
+  const correlationId = body.correlationId;
+  if (typeof correlationId !== "string" || !/^[A-Za-z0-9_.:-]{1,100}$/.test(correlationId)) {
+    fail("correlationId is required, at most 100 letters, digits and _ . : -");
+  }
+  const reason = body.reason;
+  if (typeof reason !== "string" || trimSpace(reason).length === 0 || reason.length > 2000) {
+    fail("reason is required, at most 2000 characters");
+  }
+  const document = categoryDocument(body.category);
+  if (typeof document === "string") {
+    fail(`the category cannot be saved: ${document}`);
+  }
+  const snapshot = JSON.stringify(document);
+  const sha = $security.sha256(snapshot);
+  const requestHash = $security.sha256(JSON.stringify([kind, reason, snapshot]));
+
+  let reply = null;
+  $app.runInTransaction((txApp) => {
+    const first = (collection, filter, params, sort) => {
+      const found = txApp.findRecordsByFilter(collection, filter, sort || "", 1, 0, params);
+      return found.length > 0 ? found[0] : null;
+    };
+    const prior = first("catalog_commands", "correlation_id = {:id}", { id: correlationId });
+    if (prior) {
+      if (prior.getString("actor") !== actor.id || prior.getString("request_hash") !== requestHash) {
+        reply = {
+          status: 409,
+          body: {
+            outcome: "correlation_reused",
+            correlationId: correlationId,
+            message: "this correlation ID was already used for a different command",
+          },
+        };
+        return;
+      }
+      reply = { status: prior.getInt("status"), body: JSON.parse(prior.getString("result")), replayed: true };
+      return;
+    }
+    const categoryId = deriveId("category", document.code);
+    if (recordById(txApp, "catalog_categories", categoryId)) {
+      throw new BadRequestError(`the Catalog already has the category ${document.code}`);
+    }
+    const record = (name, id) => {
+      const made = new Record(txApp.findCollectionByNameOrId(name));
+      made.set("id", id);
+      return made;
+    };
+    const last = first("catalog_changes", "seq > 0", {}, "-seq");
+    const seq = last ? last.getInt("seq") + 1 : 1;
+    const changeId = deriveId("change", correlationId);
+    const summary = JSON.stringify({ category: document.code, revision: 1 });
+    const change = record("catalog_changes", changeId);
+    change.set("seq", seq);
+    change.set("kind", kind);
+    change.set("reason", reason);
+    change.set("correlation_id", correlationId);
+    change.set("actor", actor.id);
+    change.set("actor_name", actor.name);
+    change.set("sources", JSON.stringify({ categories: [document.code] }));
+    change.set("summary", summary);
+    txApp.save(change);
+
+    const category = record("catalog_categories", categoryId);
+    category.set("code", document.code);
+    category.set("first_change", changeId);
+    txApp.save(category);
+    const revisionId = deriveId("category-revision", categoryId + "\n" + 1);
+    const revision = record("catalog_category_revisions", revisionId);
+    revision.set("category", categoryId);
+    revision.set("number", 1);
+    revision.set("predecessor", "");
+    revision.set("change", changeId);
+    revision.set("snapshot", snapshot);
+    revision.set("snapshot_sha256", sha);
+    revision.set("source", JSON.stringify({ schema: SOURCE_SCHEMA, source: CATEGORY_SETUP_SOURCE }));
+    txApp.save(revision);
+
+    const auditEntryId = deriveId("audit-entry", correlationId);
+    const audit = record("catalog_audit_entries", auditEntryId);
+    audit.set("action", "catalog." + kind);
+    audit.set("actor", actor.id);
+    audit.set("actor_name", actor.name);
+    audit.set("change", changeId);
+    audit.set("reason", reason);
+    audit.set("correlation_id", correlationId);
+    audit.set("summary", summary);
+    txApp.save(audit);
+
+    const result = {
+      outcome: "applied",
+      correlationId: correlationId,
+      changeId: changeId,
+      seq: seq,
+      auditEntryId: auditEntryId,
+      category: { id: categoryId, code: document.code, revisionId: revisionId, snapshotSha256: sha },
+    };
+    const ledger = new Record(txApp.findCollectionByNameOrId("catalog_commands"));
+    ledger.set("correlation_id", correlationId);
+    ledger.set("actor", actor.id);
+    ledger.set("request_hash", requestHash);
+    ledger.set("status", 200);
+    ledger.set("result", JSON.stringify(result));
+    txApp.save(ledger);
+    reply = { status: 200, body: result };
+  });
+
+  if (reply.replayed) {
+    e.response.header().set("X-Collab-Replayed", "true");
+  }
+  return e.json(reply.status, reply.body);
+}
+
 // ---- A CSV row for another part (kicad-parts-3b72) ----------------------------
 //
 // While a team moves from the CSV catalog to the app, both can give out new
@@ -3993,6 +4121,7 @@ module.exports = {
   classifyModelReference: classifyModelReference,
   modelLinkProblem: modelLinkProblem,
   publishArchive: publishArchive,
+  publishCategory: publishCategory,
   publishCsvReview: publishCsvReview,
   excludedFromBom: excludedFromBom,
   storedBomMarks: storedBomMarks,

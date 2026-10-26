@@ -9,7 +9,8 @@
 //   API (`/api/collections/catalog_*/records`, the batch API or the
 //   dashboard). The protected routes are the only way in:
 //   POST /api/catalog/csv-imports, /api/catalog/edits, /api/catalog/parts,
-//   /api/catalog/archives and /api/catalog/csv-reviews.
+//   /api/catalog/archives, /api/catalog/csv-reviews and
+//   /api/catalog/categories.
 // - Revisions, saved part details, archive entries, CSV reviews, CAD items, blobs,
 //   categories and their revisions, remembered matches, Changes, audit
 //   entries, import problems and the command ledger refuse every update and
