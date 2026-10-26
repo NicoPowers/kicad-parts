@@ -24,8 +24,11 @@ import {
   repoRoot,
   screenshot,
   screenshotsDir,
+  sampleLibrary,
   searchFor,
   selectResult,
+  signInToTeam,
+  startTeamServer,
   tempDir,
   waitForPreview,
   waitForText,
@@ -48,6 +51,26 @@ function kicadSettings() {
     `(fp_lib_table (version 7)\n  (lib (name "Journey3d")(type "KiCad")(uri "${fixtures}")(options "")(descr "3D view fixtures"))\n)\n`,
   );
   return config;
+}
+
+/**
+ * A copy of the sample library with one more footprint of ours, drawn for
+ * a crystal, whose 3D model link names a file the library does not have.
+ */
+function libraryWithMissingModel() {
+  const copy = tempDir('library-missing-model');
+  fs.cpSync(sampleLibrary, copy, { recursive: true });
+  const footprint = fs
+    .readFileSync(path.join(copy, 'footprints/g-Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod'), 'utf8')
+    .replace('(footprint "C_0603_1608Metric"', '(footprint "ABS07L-32.768KHZ-T"')
+    .replace(
+      '${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_1608Metric.step',
+      '${GITPLM_PARTS}/3d-models/ABS07L-32.768KHZ-T.step',
+    );
+  assert.ok(footprint.includes('ABS07L-32.768KHZ-T.step'));
+  fs.mkdirSync(path.join(copy, 'footprints/g-Crystal.pretty'), { recursive: true });
+  fs.writeFileSync(path.join(copy, 'footprints/g-Crystal.pretty/ABS07L-32.768KHZ-T.kicad_mod'), footprint);
+  return copy;
 }
 
 async function isOpen(browser, dialog) {
@@ -192,14 +215,20 @@ async function openFixture(browser, name, { group = 'installed', library = 'Jour
 }
 
 describe('footprint 3D view', () => {
+  let server;
   let browser;
 
   before(async () => {
-    ({ browser } = await launchApp({ args: [`--kicad-config-dir=${kicadSettings()}`] }));
+    server = await startTeamServer();
+    ({ browser } = await launchApp({
+      args: [`--kicad-config-dir=${kicadSettings()}`, `--catalog-root=${libraryWithMissingModel()}`],
+    }));
+    await signInToTeam(browser, server);
   });
 
   after(async () => {
     await browser?.deleteSession();
+    await server?.stop();
   });
 
   it("turns a footprint's close-up into a 3D view of its model", async () => {
@@ -280,7 +309,7 @@ describe('footprint 3D view', () => {
     const said = await panel(browser, CLOSE_UP);
     record({ event: '3d-panel', ...said });
     assert.equal(said.links.length, 1);
-    assert.equal(said.links[0].link, '${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step');
+    assert.equal(said.links[0].link, '${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step');
     assert.equal(said.links[0].found, "From KiCad's own library.");
     assert.equal(said.links[0].problem, null);
     assert.match(said.links[0].path, /3dmodels[\\/]Resistor_SMD\.3dshapes[\\/]R_0603_1608Metric\.step$/);
@@ -460,36 +489,38 @@ describe('footprint 3D view', () => {
     await browser.waitUntil(async () => !(await isOpen(browser, CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
   });
 
-  it("says where it looked for a part's missing 3D model", async () => {
-    // Our Abracon_ABS07L links ${GITPLM_3DMODELS}/ABS07L-32.768KHZ-T.step,
+  it("says where it looked for a footprint's missing 3D model", async () => {
+    // Our ABS07L-32.768KHZ-T links ${GITPLM_PARTS}/3d-models/ABS07L-32.768KHZ-T.step,
     // which our library does not have.
-    await searchFor(browser, 'ABS07L-32.768KHZ-T', '1 matching part');
-    await selectResult(browser, 'ABS07L-32.768KHZ-T');
-    await waitForPreview(browser, FOOTPRINT);
-    await (await browser.$(`${FOOTPRINT} figure button`)).click();
-    await browser.waitUntil(async () => isOpen(browser, CLOSE_UP), { timeout: 5_000, timeoutMsg: 'the close-up did not open' });
-    await browser.waitUntil(async () => browser.execute((s) => document.querySelector(`${s} .viewer`)?.dataset.ready === 'true', CLOSE_UP), {
-      timeout: 10_000,
-      timeoutMsg: 'the close-up never got its drawing',
-    });
-    await turn3dOn(browser, CLOSE_UP);
-    const said = await panel(browser, CLOSE_UP);
+    await openFixture(browser, 'ABS07L-32.768KHZ-T', { group: 'ours', library: 'g-Crystal' });
+    await turn3dOn(browser, LIBRARY_CLOSE_UP);
+    const said = await panel(browser, LIBRARY_CLOSE_UP);
     record({ event: '3d-part-missing-model', ...said });
     assert.deepEqual(
       said.links.map(({ link, found, problem }) => ({ link, found, problem })),
-      [{ link: '${GITPLM_3DMODELS}/ABS07L-32.768KHZ-T.step', found: null, problem: 'The file is missing.' }],
+      [{ link: '${GITPLM_PARTS}/3d-models/ABS07L-32.768KHZ-T.step', found: null, problem: 'The file is missing.' }],
     );
     // Outside a footprint library's folder, saving would not keep it.
     assert.match(
-      await browser.execute((s) => document.querySelector(`${s} .model-link-note`)?.textContent ?? '', CLOSE_UP),
+      await browser.execute((s) => document.querySelector(`${s} .model-link-note`)?.textContent ?? '', LIBRARY_CLOSE_UP),
       /^Edit part would save this link as missing/,
     );
     assert.match(said.links[0].path, /[\\/]3d-models[\\/]ABS07L-32\.768KHZ-T\.step$/);
     assert.deepEqual(said.notes, ['No 3D model can be shown, so only the board with its pads, silkscreen and mask is shown.']);
     await assertAccessible(browser, '85-footprint-3d-missing-model');
     await screenshotHiding3d(browser, '85-footprint-3d-missing-model');
+    // Close the close-up and the browser, so the next footprint opens from
+    // its own library.
     await browser.keys('Escape');
-    await browser.waitUntil(async () => !(await isOpen(browser, CLOSE_UP)), { timeout: 5_000, timeoutMsg: 'Escape did not close the close-up' });
+    await browser.waitUntil(async () => !(await isOpen(browser, LIBRARY_CLOSE_UP)), {
+      timeout: 5_000,
+      timeoutMsg: 'Escape did not close the close-up',
+    });
+    await browser.keys('Escape');
+    await browser.waitUntil(async () => !(await isOpen(browser, LIBRARIES)), {
+      timeout: 5_000,
+      timeoutMsg: 'Escape did not close the Libraries browser',
+    });
   });
 
   it('shows the board alone for a footprint with no 3D model', async () => {

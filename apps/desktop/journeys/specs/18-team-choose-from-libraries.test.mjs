@@ -17,7 +17,7 @@ import {
   chooseInLibraries,
   launchApp,
   record,
-  repoRoot,
+  sampleLibrary,
   screenshot,
   startTeamServer,
   tempDir,
@@ -42,9 +42,9 @@ function kicadSettings() {
   const pretty = path.join(mine, 'Mine.pretty');
   fs.mkdirSync(pretty, { recursive: true });
   const footprint = fs
-    .readFileSync(path.join(repoRoot, 'footprints/g-Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod'), 'utf8')
+    .readFileSync(path.join(sampleLibrary, 'footprints/g-Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod'), 'utf8')
     .replace('(footprint "C_0603_1608Metric"', '(footprint "C_0603_Mine"')
-    .replace('${KICAD9_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0603_1608Metric.step', '${MY_LIBS}/models/C_0603_Mine.step');
+    .replace('${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_1608Metric.step', '${MY_LIBS}/models/C_0603_Mine.step');
   assert.ok(footprint.includes('${MY_LIBS}/models/C_0603_Mine.step'));
   fs.writeFileSync(path.join(pretty, 'C_0603_Mine.kicad_mod'), footprint);
   fs.mkdirSync(path.join(mine, 'models'), { recursive: true });
@@ -66,7 +66,7 @@ describe('team catalog: choose symbols and footprints from the libraries', () =>
   let ipn;
 
   before(async () => {
-    server = await startTeamServer({ csv: ['g-res', 'g-cap'] });
+    server = await startTeamServer();
     [editor] = server.accounts;
     ({ browser } = await launchApp({
       args: [`--team-server=${server.url}`, `--team-email=${editor.email}`, `--kicad-config-dir=${kicadSettings()}`],

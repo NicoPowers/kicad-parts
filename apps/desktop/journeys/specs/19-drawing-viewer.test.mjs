@@ -20,6 +20,8 @@ import {
   screenshot,
   searchFor,
   selectResult,
+  signInToTeam,
+  startTeamServer,
   tempDir,
   textOf,
   waitForPreview,
@@ -153,30 +155,38 @@ async function isOpen(browser, dialog) {
   return browser.execute((s) => document.querySelector(s)?.open === true, dialog);
 }
 
+/** The first footprint of the sample microcontroller, MCU-0000-0001. */
+const QFN = 'Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm';
+
 function near(a, b, tolerance, message) {
   assert.ok(Math.abs(a - b) <= tolerance, `${message}: ${a} is not ${b}`);
 }
 
 describe('drawing close-up', () => {
+  let server;
   let browser;
   let dataDir;
 
   before(async () => {
+    server = await startTeamServer();
     ({ browser, dataDir } = await launchApp({ args: [`--kicad-config-dir=${kicadSettings()}`] }));
+    await signInToTeam(browser, server);
   });
 
   after(async () => {
     await browser?.deleteSession();
+    await server?.stop();
   });
 
   it('opens a footprint drawn layer by layer, front copper active', async () => {
-    await searchFor(browser, 'LTC4364', '1 matching part');
-    await selectResult(browser, 'LTC4364HDE-2#TRPBF');
+    // The sample microcontroller's first footprint, a QFN of KiCad's.
+    await searchFor(browser, 'sample-mcu', '1 matching part');
+    await selectResult(browser, 'SAMPLE-MCU-32');
     await waitForPreview(browser, FOOTPRINT);
     await (await browser.$(`${FOOTPRINT} figure button`)).click();
     await browser.waitUntil(async () => isOpen(browser, CLOSE_UP), { timeout: 5_000, timeoutMsg: 'the close-up did not open' });
     await waitForDrawing(browser, CLOSE_UP);
-    assert.equal(await textOf(browser, `${CLOSE_UP} h4`), 'Footprint Package_DFN_QFN:DFN-14-1EP_3x4mm_P0.5mm_EP1.7x3.3mm');
+    assert.equal(await textOf(browser, `${CLOSE_UP} h4`), `Footprint ${QFN}`);
     const shown = await browser.execute((s) => {
       const dialog = document.querySelector(s);
       return {
@@ -196,10 +206,10 @@ describe('drawing close-up', () => {
     assert.deepEqual(shown.listed, ['F.Cu', 'F.Paste', 'F.SilkS', 'F.Mask', 'F.CrtYd', 'F.Fab']);
     // Front copper, the active layer, is drawn last, on top.
     assert.equal(shown.drawn.at(-1), 'F.Cu');
-    assert.equal(shown.pads, 15, '14 pads and the exposed pad');
-    // Paste for the 14 pads, and the exposed pad's paste in openings.
-    assert.ok(shown.pasteShapes > 15, `${shown.pasteShapes} paste shapes`);
-    assert.equal(shown.name, 'Footprint Package_DFN_QFN:DFN-14-1EP_3x4mm_P0.5mm_EP1.7x3.3mm');
+    assert.equal(shown.pads, 33, '32 pads and the exposed pad');
+    // Paste for the 32 pads, and the exposed pad's paste in openings.
+    assert.ok(shown.pasteShapes > 33, `${shown.pasteShapes} paste shapes`);
+    assert.equal(shown.name, `Footprint ${QFN}`);
     assert.equal(shown.role, 'application');
     assert.match(shown.help, /zoom/);
     assert.deepEqual(shown.note, ["A board's own settings can change paste and mask openings."]);

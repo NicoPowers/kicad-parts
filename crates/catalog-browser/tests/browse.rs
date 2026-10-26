@@ -153,7 +153,10 @@ fn search_select_and_preview_a_multi_unit_part() {
     );
     let footprint = ready(preview(&browser, &ipn, PreviewKind::Footprint));
     assert!(footprint.from_kicad_bundle);
-    assert_eq!(footprint.reference, "Package_QFP:LQFP-32_7x7mm_P0.8mm");
+    assert_eq!(
+        footprint.reference,
+        "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm"
+    );
     assert_eq!(footprint.images.len(), 1);
     assert_eq!(footprint.images[0].unit, None);
     let exports = browser.export_count();
@@ -245,7 +248,10 @@ fn preview_problems_are_reported_with_their_cause() {
 
     // A footprint list uses its first entry and keeps the alternates.
     let listed = ready(preview(&browser, "MCU-0000-0001", PreviewKind::Footprint));
-    assert_eq!(listed.reference, "Package_QFP:LQFP-32_7x7mm_P0.8mm");
+    assert_eq!(
+        listed.reference,
+        "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm"
+    );
     assert_eq!(listed.alternates.len(), 1);
 
     match preview(&browser, "PCB-0000-0001", PreviewKind::Symbol) {

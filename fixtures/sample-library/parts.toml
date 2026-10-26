@@ -138,7 +138,7 @@ ipn = "MCU-0000-0001"
 category = "mcu"
 manufacturer_parts = [["Sample Semiconductor", "SAMPLE-MCU-32"]]
 symbol = "g-mcu:SAMPLE_MCU"
-footprint = "Package_QFP:LQFP-32_7x7mm_P0.8mm;Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm"
+footprint = "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm;Package_QFP:LQFP-32_7x7mm_P0.8mm"
 fields = { Description = "MCU 32-BIT 32KB FLASH 32LQFP" }
 
 [[part]]

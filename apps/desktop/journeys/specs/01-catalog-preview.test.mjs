@@ -143,7 +143,7 @@ describe('catalog search with exact KiCad previews', () => {
     const footprint = await images(browser, `${FOOTPRINT} figure img`);
     assert.equal(footprint.length, 1);
     assert.ok(footprint[0].loaded && footprint[0].svg);
-    assert.equal(footprint[0].alt, 'Footprint Package_QFP:LQFP-32_7x7mm_P0.8mm');
+    assert.equal(footprint[0].alt, 'Footprint Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm');
 
     assert.match(
       await textOf(browser, `${SYMBOL} .provenance`),
@@ -287,6 +287,7 @@ describe('catalog search with exact KiCad previews', () => {
     await searchFor(browser, 'sample-mcu', '1 matching part');
     await selectResult(browser, 'SAMPLE-MCU-32');
     await waitForText(browser, '#part-title', 'SAMPLE-MCU-32');
+    await waitForText(browser, '#cad-items-heading', 'Symbol and footprint (revision 1 of this part)');
     const rows = await browser.execute(() =>
       [...document.querySelectorAll('.part-fields tbody tr')]
         .filter((tr) => tr.querySelector('th')?.textContent.trim() === 'Footprint')
@@ -302,10 +303,10 @@ describe('catalog search with exact KiCad previews', () => {
     // <wbr> add no characters.
     assert.deepEqual(
       rows.map((row) => row.libraries),
-      [['Package_QFP:'], ['Package_DFN_QFN:']],
+      [['Package_DFN_QFN:'], ['Package_QFP:']],
       JSON.stringify(rows),
     );
-    assert.ok(rows[0].text.startsWith('Package_QFP:LQFP-32_7x7mm_P0.8mm'), rows[0].text);
-    assert.ok(rows[1].text.startsWith('Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm'), rows[1].text);
+    assert.ok(rows[0].text.startsWith('Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm'), rows[0].text);
+    assert.ok(rows[1].text.startsWith('Package_QFP:LQFP-32_7x7mm_P0.8mm'), rows[1].text);
   });
 });
