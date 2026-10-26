@@ -907,15 +907,17 @@ export async function signInToTeam(browser, server, account = server.accounts[0]
  */
 export function sampleLibraryCopy(prefix, change = () => {}) {
   const copy = tempDir(prefix);
-  // Only the files git tracks: a leftover in a working copy, such as a
-  // .bak file, would change the commit ID.
+  // Only the KiCad files git tracks: a leftover in a working copy, such as
+  // a .bak file, would change the commit ID. The README and parts.toml are
+  // left out, so changing them changes no screenshot.
   const folder = path.relative(repoRoot, sampleLibrary).split(path.sep).join('/');
   const tracked = spawnSync('git', ['-C', repoRoot, 'ls-files', '-z', '--', folder], {
     encoding: 'utf8',
     windowsHide: true,
   });
   assert.equal(tracked.status, 0, tracked.stderr);
-  for (const file of tracked.stdout.split(String.fromCharCode(0)).filter(Boolean)) {
+  const notKicad = new Set([`${folder}/README.md`, `${folder}/parts.toml`]);
+  for (const file of tracked.stdout.split(String.fromCharCode(0)).filter((file) => file && !notKicad.has(file))) {
     const target = path.join(copy, path.relative(folder, file));
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.join(repoRoot, file), target);

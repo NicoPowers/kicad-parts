@@ -34,7 +34,7 @@ const BADGE = '.team-settings > summary';
 /** A copy of the sample library with R_US and R_0603_1608Metric redrawn. */
 function changedCatalog() {
   const root = tempDir('changed-catalog');
-  for (const folder of ['symbols', 'footprints']) {
+  for (const folder of ['symbols', 'footprints', '3d-models']) {
     fs.cpSync(path.join(sampleLibrary, folder), path.join(root, folder), { recursive: true });
   }
   const edit = (file, from, to) => {
