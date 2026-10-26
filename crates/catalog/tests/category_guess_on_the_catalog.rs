@@ -1,114 +1,69 @@
-//! How well the category guess does on the real CSV catalog, leave one out:
-//! each part is guessed from only the clues a downloaded part would give
-//! (its symbol's reference letter, its footprint name, MPN, manufacturer
-//! and description), with that part taken out of the examples. The CSV
-//! catalog is only read.
+//! How well the category guess does on the 178 parts of the old CSV
+//! catalog, leave one out: each part is guessed from only the clues a
+//! downloaded part would give (its symbol's reference letter, its footprint
+//! name, MPN, manufacturer and description), with that part taken out of
+//! the examples. The clues are in `fixtures/category-guess/parts.json`.
 //!
 //! Run with `--nocapture` to see top-1 and top-3 accuracy per category.
 
-use catalog::category::{CategoryDetails, category_code};
-use catalog::csv_import::{ColumnRoute, parse_csv, read_input, route_column};
+use catalog::category::CategoryDetails;
 use catalog::guess::{Clues, ExamplePart, guess_category};
-use kicad_integration::library_file::{SymbolLibrary, SymbolLookup, symbol_reference};
+use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-fn repository() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+/// `fixtures/category-guess/parts.json`.
+#[derive(Deserialize)]
+struct Fixture {
+    categories: Vec<FixtureCategory>,
+    parts: Vec<FixturePart>,
 }
 
-/// The reference of `g-<library>:<name>`, read from the CSV catalog's own
-/// symbol library (following `extends`). KiCad's own libraries are not in
-/// the repository, so their symbols give no reference: a pessimistic
-/// stand-in for a download, which always has one.
-fn reference_of(
-    root: &Path,
-    symbol: &str,
-    libraries: &mut BTreeMap<String, Option<Vec<u8>>>,
-) -> String {
-    let Some((library, name)) = symbol.split_once(':') else {
-        return String::new();
-    };
-    if !library.starts_with("g-") {
-        return String::new();
-    }
-    let bytes = libraries
-        .entry(library.to_owned())
-        .or_insert_with(|| read_input(root, &format!("symbols/{library}.kicad_sym")).ok());
-    let Some(bytes) = bytes.as_ref() else {
-        return String::new();
-    };
-    let Ok(parsed) = SymbolLibrary::parse(bytes) else {
-        return String::new();
-    };
-    let mut name = name.to_owned();
-    for _ in 0..4 {
-        let SymbolLookup::Found(entry) = parsed.find(&name) else {
-            return String::new();
-        };
-        if let Some(reference) = symbol_reference(&bytes[entry.span.clone()]) {
-            return reference;
-        }
-        match &entry.extends {
-            Some(parent) => name.clone_from(parent),
-            None => return String::new(),
-        }
-    }
-    String::new()
+#[derive(Deserialize)]
+struct FixtureCategory {
+    code: String,
+    fields: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct FixturePart {
+    ipn: String,
+    category: String,
+    reference: String,
+    footprints: Vec<String>,
+    description: String,
+    manufacturer: String,
+    mpn: String,
+}
+
+fn fixture() -> Fixture {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/category-guess/parts.json");
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
 #[test]
 fn the_guess_finds_most_categories_in_its_top_three_leave_one_out() {
-    let root = repository();
-    let mut csv_files: Vec<String> = std::fs::read_dir(root.join("database"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with("g-") && name.ends_with(".csv"))
-        .map(|name| name.trim_end_matches(".csv").to_owned())
+    let fixture = fixture();
+    let categories: Vec<CategoryDetails> = fixture
+        .categories
+        .into_iter()
+        .map(|category| CategoryDetails::starting(&category.code, category.fields))
         .collect();
-    csv_files.sort();
-    assert_eq!(csv_files.len(), 21);
-
-    let mut libraries = BTreeMap::new();
-    let mut categories = Vec::new();
-    let mut parts = Vec::new();
-    for csv_file in &csv_files {
-        let path = format!("database/{csv_file}.csv");
-        let table = parse_csv(&path, &read_input(&root, &path).unwrap()).unwrap();
-        let code = category_code(csv_file).to_owned();
-        let fields = table
-            .headers
-            .iter()
-            .filter(|header| route_column(header) == ColumnRoute::PartDetails)
-            .cloned()
-            .collect();
-        categories.push(CategoryDetails::starting(&code, fields));
-        let column = |name: &str| table.headers.iter().position(|header| header == name);
-        for record in &table.records {
-            let value = |name: &str| {
-                column(name)
-                    .and_then(|index| record.fields.get(index))
-                    .cloned()
-                    .unwrap_or_default()
-            };
-            let symbol = value("Symbol");
-            let symbol = symbol.split(';').next().unwrap_or_default().trim();
-            parts.push(ExamplePart {
-                ipn: value("IPN"),
-                category: code.clone(),
-                reference: reference_of(&root, symbol, &mut libraries),
-                footprints: value("Footprint")
-                    .split(';')
-                    .map(str::trim)
-                    .filter(|footprint| !footprint.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-                description: value("Description"),
-                manufacturers: vec![value("Manufacturer")],
-                mpns: vec![value("MPN")],
-            });
-        }
-    }
+    assert_eq!(categories.len(), 21);
+    let parts: Vec<ExamplePart> = fixture
+        .parts
+        .into_iter()
+        .map(|part| ExamplePart {
+            ipn: part.ipn,
+            category: part.category,
+            reference: part.reference,
+            footprints: part.footprints,
+            description: part.description,
+            manufacturers: vec![part.manufacturer],
+            mpns: vec![part.mpn],
+        })
+        .collect();
     assert_eq!(parts.len(), 178);
 
     let (tally, misses) = measure(&categories, &parts, true);
