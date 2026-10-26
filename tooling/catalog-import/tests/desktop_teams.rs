@@ -1,6 +1,6 @@
 //! Several teams at once (kicad-parts-f10d): the desktop's list of teams
 //! against two real, disposable PocketBase servers on 127.0.0.1, each with
-//! the resistors imported. Both teams are followed live at the same time,
+//! the sample library's resistors. Both teams are followed live at the same time,
 //! and a change on one reaches only that team. Both teams' KiCad libraries
 //! are kept up to date, each in its own folder. A restart carries on both
 //! sign-ins from the kept tokens, with no password; a rejected token asks
@@ -20,7 +20,7 @@
 //! The kept tokens live in a store in memory, never the system's
 //! credential store.
 
-use catalog::pocketbase::{ImportCommand, submit_import, submit_team_code};
+use catalog::pocketbase::submit_team_code;
 use catalog_browser::kicad_libraries::KicadLibraries;
 use catalog_browser::team::{SIGN_IN_AGAIN, TeamCatalog};
 use catalog_browser::teams::{MemorySignIns, SignInStore, SignIns, Teams};
@@ -48,7 +48,7 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
-/// One client's team server, with the resistors imported and the team code
+/// One client's team server, with the sample resistors and the team code
 /// chosen.
 struct Client {
     server: Option<PocketBaseServer>,
@@ -63,13 +63,7 @@ impl Client {
     fn start(root: &Path, code: &str) -> Self {
         let state = tempfile::tempdir().unwrap();
         let (server, admin, superuser) = services::start(root, state.path()).unwrap();
-        let import = services::plan(root, "g-res").unwrap();
-        submit_import(
-            &admin,
-            &ImportCommand::new(&import, "Import the resistors")
-                .allowing_uncommitted_changes(services::has_uncommitted_changes(&import)),
-        )
-        .unwrap();
+        sample_library::seed(&admin, &["res"]).unwrap();
         let ada = services::add_member(&admin, "Ada Editor", EMAIL, true).unwrap();
         let url = server.url().to_owned();
         let member = PocketBaseClient::new(&url)
@@ -596,7 +590,7 @@ fn one_list_holds_both_teams_and_each_edit_goes_to_its_own_server() {
     });
     let cache = tempfile::tempdir().unwrap();
     let browser = CatalogBrowser::open(BrowserConfig {
-        catalog_root: root.clone(),
+        catalog_root: sample_library::root(),
         cache_dir: cache.path().join("cache"),
         settings_file: cache.path().join("settings.json"),
         kicad_locations: kicad_integration::SearchLocations::Only(Vec::new()),
@@ -605,7 +599,8 @@ fn one_list_holds_both_teams_and_each_edit_goes_to_its_own_server() {
     });
 
     // Both teams' parts are in one list: the same IPN once per team, in
-    // team order, and the CSV catalog's other parts beside them.
+    // team order. The sample library has no CSV catalog, so every row is a
+    // team's.
     let rows = list(&browser, &teams, IPN);
     let both: Vec<&str> = rows
         .iter()
@@ -615,9 +610,10 @@ fn one_list_holds_both_teams_and_each_edit_goes_to_its_own_server() {
     assert_eq!(both, [acme.url.as_str(), beta.url.as_str()]);
     let everything = list(&browser, &teams, "");
     assert!(
-        everything.iter().any(|row| row.team.is_empty()),
-        "CSV parts no team has"
+        everything.iter().all(|row| !row.team.is_empty()),
+        "every row is a team's"
     );
+    assert_eq!(everything.len(), 2 * 6, "both teams' sample resistors");
 
     // Editing acme's part saves to acme's server only.
     let acme_team = teams.team(&acme.url).unwrap();
@@ -724,7 +720,7 @@ fn a_team_down_at_start_shows_its_parts_file_until_its_server_is_back() {
     let parts_folder = data.path().join("parts-files");
     let cache = tempfile::tempdir_in(&scratch).unwrap();
     let browser = CatalogBrowser::open(BrowserConfig {
-        catalog_root: root.clone(),
+        catalog_root: sample_library::root(),
         cache_dir: cache.path().join("cache"),
         settings_file: cache.path().join("settings.json"),
         kicad_locations: kicad_integration::SearchLocations::Only(Vec::new()),
