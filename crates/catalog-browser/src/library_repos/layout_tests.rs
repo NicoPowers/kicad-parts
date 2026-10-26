@@ -400,3 +400,47 @@ fn a_repo_laid_out_like_kicads_own_libraries_is_read_too() {
     assert_eq!(layout.path_variables[0].folder.as_deref(), Some("3dmodels"));
     assert!(layout.doubts.is_empty(), "{:?}", layout.doubts);
 }
+
+/// The sample library, committed in a repo of its own, can be linked as a
+/// team's library repo: the scan finds every library, points
+/// `${GITPLM_PARTS}` at the top folder, and has nothing to check.
+#[test]
+fn the_sample_library_links_as_a_teams_repo_with_nothing_to_check() {
+    let fixture = Fixture::new();
+    let sample = sample_library::SampleRepo::new();
+    // As on a git host: a bare clone of it.
+    let bare = fixture.path("sample-library.git");
+    let from = sample.path().display().to_string();
+    let to = bare.display().to_string();
+    fixture.git(fixture.dir.path(), &["clone", "-q", "--bare", &from, &to]);
+    let repos = fixture.repos();
+    repos.link(ACME, &to).unwrap();
+    repos.wait_until_idle();
+    let layout = repos.review_layout(ACME, false).unwrap().layout;
+    let nicknames = |libraries: &[desktop_contract::LayoutLibrary]| -> Vec<String> {
+        libraries
+            .iter()
+            .map(|library| library.nickname.clone())
+            .collect()
+    };
+    assert_eq!(
+        nicknames(&layout.symbol_libraries),
+        ["g-art", "g-cap", "g-ics", "g-mcu", "g-reg", "g-res"]
+    );
+    assert_eq!(
+        nicknames(&layout.footprint_libraries),
+        [
+            "g-Capacitor_SMD",
+            "g-Package_TO_SOT_SMD",
+            "g-Resistor_SMD",
+            "g-TestPoint"
+        ]
+    );
+    let parts = layout
+        .path_variables
+        .iter()
+        .find(|variable| variable.name == "GITPLM_PARTS")
+        .unwrap_or_else(|| panic!("GITPLM_PARTS: {:?}", layout.path_variables));
+    assert_eq!(parts.folder.as_deref(), Some(""), "the repo's top folder");
+    assert_eq!(layout.doubts, []);
+}
