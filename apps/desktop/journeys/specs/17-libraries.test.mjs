@@ -3,13 +3,25 @@
 // library tables (fixture tables here, never the developer's own), with a
 // search, filters, KiCad's footprint filters for a symbol, a drawing of the
 // chosen item and its details. It closes with Close, Escape or a click
-// outside it.
+// outside it. Our libraries are the sample library's, and a team with the
+// sample parts says which items the Catalog uses.
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { assertAccessible, launchApp, record, screenshot, tempDir, textOf, waitForPreviewImages, waitForText } from '../harness.mjs';
+import {
+  assertAccessible,
+  launchApp,
+  record,
+  screenshot,
+  signInToTeam,
+  startTeamServer,
+  tempDir,
+  textOf,
+  waitForPreviewImages,
+  waitForText,
+} from '../harness.mjs';
 
 const DIALOG = 'dialog.libraries-dialog';
 const PREVIEW = '.libraries-detail .preview';
@@ -141,18 +153,22 @@ async function fact(browser, name) {
 }
 
 describe('Libraries browser', () => {
+  let server;
   let browser;
 
   before(async () => {
+    server = await startTeamServer();
     ({ browser } = await launchApp({ args: [`--kicad-config-dir=${kicadSettings()}`] }));
+    await signInToTeam(browser, server);
   });
 
   after(async () => {
     await browser?.deleteSession();
+    await server?.stop();
   });
 
   it('opens from the header on every library, grouped', async () => {
-    await waitForText(browser, '#result-count', '178 matching parts');
+    await waitForText(browser, '#result-count', '16 matching parts');
     await openBrowser(browser);
     // The cursor starts in the search box.
     await browser.waitUntil(async () => browser.execute(() => document.activeElement?.id === 'library-search'), {
@@ -403,9 +419,10 @@ describe('Libraries browser', () => {
     assert.equal(await browser.execute(() => document.getElementById('part-search').value), '');
     await waitForText(browser, '#uses-chip span', 'Parts using g-res:R_US');
     // The answer limited to the reference, not the one before it.
-    await waitForText(browser, '#result-count', /^(?!178 )\d+ matching parts$/);
+    await waitForText(browser, '#result-count', /^(?!16 )\d+ matching parts$/);
     const using = Number((await textOf(browser, '#result-count')).replace(/\D/g, ''));
-    assert.ok(using > 10 && using < 178, `${using}`);
+    // The five sample resistors drawn with R_US.
+    assert.equal(using, 5);
     await browser.waitUntil(async () => browser.execute(() => document.activeElement?.id === 'part-search'), {
       timeout: 5_000,
       timeoutMsg: 'focus did not move to the part search',
@@ -413,7 +430,7 @@ describe('Libraries browser', () => {
     await assertAccessible(browser, '69-parts-using-symbol');
     await screenshot(browser, '69-parts-using-symbol');
     await (await browser.$('#uses-chip-remove')).click();
-    await waitForText(browser, '#result-count', '178 matching parts');
+    await waitForText(browser, '#result-count', '16 matching parts');
     assert.equal(await browser.execute(() => document.getElementById('uses-chip')), null);
   });
 

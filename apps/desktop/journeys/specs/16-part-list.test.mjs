@@ -1,7 +1,8 @@
-// The part list groups the catalog by category in sections that open and
-// close: by hand (mouse or keyboard), by themselves while searching, and
+// The part list groups a team's parts by category in sections that open
+// and close: by hand (mouse or keyboard), by themselves while searching, and
 // when a part is selected. Also: the drawing close-up closes on a click
-// outside it, and focus goes back to the drawing that opened it.
+// outside it, and focus goes back to the drawing that opened it. The team
+// has the sample library's parts.
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -13,6 +14,8 @@ import {
   screenshot,
   searchFor,
   selectResult,
+  signInToTeam,
+  startTeamServer,
   waitForPreview,
   waitForSelectedInList,
   waitForText,
@@ -53,25 +56,29 @@ async function toggleOf(browser, name) {
 const opened = (list) => list.filter(([, , expanded]) => expanded === 'true').map(([name]) => name);
 
 describe('part list grouped by category', () => {
+  let server;
   let browser;
 
   before(async () => {
+    server = await startTeamServer();
     ({ browser } = await launchApp());
+    await signInToTeam(browser, server);
   });
 
   after(async () => {
     await browser?.deleteSession();
+    await server?.stop();
   });
 
   it('opens with every category closed, each with its number of parts', async () => {
-    await waitForText(browser, '#result-count', '178 matching parts');
+    await waitForText(browser, '#result-count', '16 matching parts');
     const list = await sections(browser);
-    // g-mec.csv has no parts, so 20 of the 21 CSV files make a section.
-    assert.equal(list.length, 20);
+    // Each of the seven sample categories has parts, so each is a section.
+    assert.equal(list.length, 7);
     assert.deepEqual(opened(list), []);
     const names = list.map(([name]) => name);
     assert.deepEqual(names, [...names].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())));
-    assert.equal(list.reduce((sum, [, count]) => sum + Number(count.replace(/\D/g, '')), 0), 178);
+    assert.equal(list.reduce((sum, [, count]) => sum + Number(count.replace(/\D/g, '')), 0), 16);
     assert.ok(names.includes('Resistors') && names.includes('Voltage regulators'), names.join(', '));
     assert.equal(await browser.execute(() => document.querySelectorAll('.results button.result').length), 0);
     // Each header is a real button that names its section and count.
@@ -116,7 +123,7 @@ describe('part list grouped by category', () => {
   });
 
   it('opens the sections with matches while searching, and goes back when cleared', async () => {
-    await searchFor(browser, 'stm32h723', '1 matching part');
+    await searchFor(browser, 'sample-mcu', '1 matching part');
     assert.deepEqual(await sections(browser), [['Microcontrollers', '1 part', 'true']]);
 
     await searchFor(browser, '0603', /^\d+ matching parts$/);
@@ -137,7 +144,7 @@ describe('part list grouped by category', () => {
     assert.deepEqual(opened(await sections(browser)), found.slice(1).map(([name]) => name));
 
     // Clearing the search goes back to what was open before it.
-    await searchFor(browser, '', '178 matching parts');
+    await searchFor(browser, '', '16 matching parts');
     assert.deepEqual(opened(await sections(browser)), ['Resistors']);
   });
 
@@ -148,7 +155,7 @@ describe('part list grouped by category', () => {
     // Closed by hand during the search, the section still opens once the
     // search is cleared, with the part scrolled into view.
     await (await toggleOf(browser, 'Voltage regulators')).click();
-    await searchFor(browser, '', '178 matching parts');
+    await searchFor(browser, '', '16 matching parts');
     await waitForSelectedInList(browser, 'KF33BD-TR', 'Voltage regulators');
     assert.deepEqual(opened(await sections(browser)).sort(), ['Resistors', 'Voltage regulators']);
     await waitForPreview(browser, SYMBOL);
