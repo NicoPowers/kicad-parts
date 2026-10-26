@@ -1,6 +1,7 @@
 // KiCad-missing journey: the app is told to search only an empty folder, so
-// it finds no kicad-cli. It must say how to fix that, keep search working,
-// reject a wrong path, and recover once the user points it at kicad-cli.
+// it finds no kicad-cli. It must say how to fix that, keep searching a
+// team's parts working, reject a wrong path, and recover once the user
+// points it at kicad-cli. The team has the sample library's parts.
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
@@ -14,6 +15,8 @@ import {
   screenshot,
   searchFor,
   selectResult,
+  signInToTeam,
+  startTeamServer,
   tempDir,
   textOf,
   waitForPreview,
@@ -30,15 +33,19 @@ async function useKicadPath(browser, value) {
 }
 
 describe('KiCad is missing', () => {
+  let server;
   let browser;
   const emptyRoot = tempDir('no-kicad');
 
   before(async () => {
+    server = await startTeamServer();
     ({ browser } = await launchApp({ args: [`--kicad-search-root=${emptyRoot}`] }));
+    await signInToTeam(browser, server);
   });
 
   after(async () => {
     await browser?.deleteSession();
+    await server?.stop();
   });
 
   it('explains how to install KiCad or point to kicad-cli', async () => {
@@ -46,15 +53,15 @@ describe('KiCad is missing', () => {
     assert.match(await textOf(browser, PROBLEM), /Install KiCad 10 from kicad\.org\/download/);
     assert.match(await textOf(browser, `${PROBLEM} .kicad-problem-details`), /no-kicad/);
     assert.equal(await textOf(browser, '.kicad-badge-problem'), 'KiCad needs attention');
-    // Browsing the catalog does not need KiCad.
-    await waitForText(browser, '#result-count', '178 matching parts');
+    // Browsing the team's parts does not need KiCad.
+    await waitForText(browser, '#result-count', '16 matching parts');
     await assertAccessible(browser, '10-kicad-missing');
     await screenshot(browser, '10-kicad-missing');
   });
 
   it('tells the user previews need KiCad when a part is selected', async () => {
-    await searchFor(browser, 'stm32h723', '1 matching part');
-    await selectResult(browser, 'STM32H723ZGT6');
+    await searchFor(browser, 'sample-mcu', '1 matching part');
+    await selectResult(browser, 'SAMPLE-MCU-32');
     await waitForPreview(browser, SYMBOL);
     await waitForPreview(browser, FOOTPRINT);
     assert.equal(await textOf(browser, `${SYMBOL} .problem.quiet .problem-title`), 'Previews need KiCad 10');
