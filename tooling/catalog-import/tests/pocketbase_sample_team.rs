@@ -1,0 +1,137 @@
+//! A team server seeded from the sample library (kicad-parts-fbc2): a
+//! superuser sets up categories without a CSV file, and the sample parts
+//! are added as Add part adds a part. Every test team server starts so.
+
+use catalog::pocketbase::{
+    CategoryCommand, CategoryOutcome, changes_since, current_categories, read_back, submit_category,
+};
+use catalog::{CadReferenceTarget, ChangeKind, PartDetails, PartRevision};
+use catalog_import::services;
+use collaboration::PocketBaseClient;
+use sample_library::Sample;
+
+#[test]
+fn a_superuser_sets_up_a_category_once_and_only_a_superuser_may() {
+    let root = services::repository_root();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let sample = Sample::load();
+    let resistors = sample.category("res").details();
+
+    let command = CategoryCommand::new(resistors.clone(), "Set up the resistors");
+    let reply = submit_category(&admin, &command).unwrap();
+    let CategoryOutcome::Applied { seq, .. } = &reply.outcome else {
+        panic!("{}", reply.body);
+    };
+    assert_eq!(*seq, 1);
+    let categories = current_categories(&admin).unwrap();
+    assert_eq!(categories, vec![resistors.clone()]);
+    assert_eq!(categories[0].name, "Resistors");
+    assert_eq!(categories[0].ipn_prefix, "RES");
+    let changes = changes_since(&admin, 0).unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].kind, ChangeKind::Category.as_str());
+
+    // The same command again is replayed; another command with its
+    // correlation ID is refused.
+    let again = submit_category(&admin, &command).unwrap();
+    assert!(again.replayed);
+    assert_eq!(again.body, reply.body);
+    let mut other = CategoryCommand::new(sample.category("cap").details(), "Capacitors");
+    other.correlation_id = command.correlation_id.clone();
+    assert!(matches!(
+        submit_category(&admin, &other).unwrap().outcome,
+        CategoryOutcome::CorrelationReused { .. }
+    ));
+
+    // A category the Catalog has is never changed this way.
+    let twice = submit_category(&admin, &CategoryCommand::new(resistors, "Again"))
+        .unwrap_err()
+        .to_string();
+    assert!(twice.contains("already has the category res"), "{twice}");
+    // A category with a CAD field is refused.
+    let mut wrong = sample.category("cap").details();
+    wrong.fields.push("Symbol".into());
+    let refused = submit_category(&admin, &CategoryCommand::new(wrong, "Wrong"))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("Symbol or Footprint"), "{refused}");
+
+    // A member who can edit the Catalog still cannot set up categories.
+    let editor = services::add_member(&admin, "Ada Editor", "ada@example.test", true).unwrap();
+    let client = PocketBaseClient::new(server.url())
+        .authenticate("users", &editor.email, &editor.password)
+        .unwrap();
+    let capacitors = CategoryCommand::new(sample.category("cap").details(), "Capacitors");
+    assert!(submit_category(&client, &capacitors).is_err());
+    assert_eq!(current_categories(&admin).unwrap().len(), 1);
+    server.stop();
+}
+
+#[test]
+fn the_sample_parts_are_added_with_their_files_and_kicads_own_items_stay_external() {
+    let root = services::repository_root();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    let sample = Sample::load();
+
+    let seeded = sample_library::seed(&admin, &[]).unwrap();
+    assert_eq!(seeded.categories.len(), sample.categories.len());
+    assert_eq!(seeded.parts.len(), sample.parts.len());
+    assert_eq!(
+        seeded.last_seq,
+        (sample.categories.len() + sample.parts.len()) as u64
+    );
+    let changes = changes_since(&admin, 0).unwrap();
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.kind == ChangeKind::Category.as_str()
+                || change.kind == ChangeKind::Create.as_str()),
+        "never a CSV import"
+    );
+
+    let readback = read_back(&admin).unwrap();
+    for part in &sample.parts {
+        let stored = readback.part(&part.ipn).unwrap();
+        let details: PartDetails = serde_json::from_str(
+            &readback
+                .part_details(&stored.current_details)
+                .unwrap()
+                .snapshot,
+        )
+        .unwrap();
+        assert_eq!(details.category, part.category, "{}", part.ipn);
+        for (name, value) in &part.fields {
+            assert_eq!(details.field(name), Some(value.as_str()), "{}", part.ipn);
+        }
+        let revision: PartRevision = serde_json::from_str(
+            &readback
+                .part_revision(&stored.current_revision)
+                .unwrap()
+                .snapshot,
+        )
+        .unwrap();
+        // References to the sample library's own g- libraries are bound to
+        // revision 1 of a CAD item; KiCad's own stay external.
+        for reference in &revision.cad_references {
+            let own = reference.reference.starts_with("g-");
+            match &reference.target {
+                CadReferenceTarget::CadItemRevision { number, .. } => {
+                    assert!(own, "{}", reference.reference);
+                    assert_eq!(*number, 1);
+                }
+                CadReferenceTarget::External => assert!(!own, "{}", reference.reference),
+                other => panic!("{}: {other:?}", reference.reference),
+            }
+        }
+    }
+    // The capacitor footprint's own 3D model went with it.
+    assert!(
+        readback
+            .cad_items
+            .iter()
+            .any(|item| item.key == "3d-models/g-Capacitor_SMD.3dshapes/C_0603_1608Metric.step")
+    );
+    server.stop();
+}

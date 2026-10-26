@@ -15,6 +15,7 @@ members = [
     "tooling/fake-kicad-cli",
     "tooling/journey-desktop",
     "tooling/native-services",
+    "tooling/sample-library",
     "tooling/xtask",
 ]
 resolver = "2"

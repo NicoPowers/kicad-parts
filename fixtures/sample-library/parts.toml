@@ -1,0 +1,154 @@
+# The parts a test team server starts with, made from the sample library.
+# The README says what each part is for and which tests use it.
+#
+# Each category lists its fields in order. Its name, IPN prefix and the
+# rules that guess a category come from the app's starting categories
+# (crates/catalog/src/category.rs). A part gives a value for some of its
+# category's fields; the rest stay blank.
+#
+# A symbol or footprint in a g- library is a file of this library, sent to
+# the team server with the part. Any other library is KiCad's own.
+
+[[category]]
+code = "res"
+fields = ["Description", "Value", "Tolerance", "Datasheet"]
+
+[[category]]
+code = "cap"
+fields = ["Description", "Value", "Voltage", "Material", "Tolerance", "Datasheet"]
+
+[[category]]
+code = "ics"
+fields = ["Description", "Datasheet"]
+
+[[category]]
+code = "mcu"
+fields = ["Description", "Datasheet"]
+
+[[category]]
+code = "reg"
+fields = ["Description", "Voltage", "Current", "Datasheet"]
+
+[[category]]
+code = "art"
+fields = ["Description", "Comments"]
+
+[[category]]
+code = "pcb"
+fields = ["Description", "Project link"]
+
+[[part]]
+ipn = "RES-0000-0470"
+category = "res"
+manufacturer_parts = [["Yageo", "RC0603FR-0747RL"]]
+symbol = "g-res:R_US"
+footprint = "g-Resistor_SMD:R_0603_1608Metric"
+fields = { Description = "RES 47 OHM 1% 1/10W 0603", Value = "47", Tolerance = "1%", Datasheet = "https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L" }
+
+[[part]]
+ipn = "RES-0000-1000"
+category = "res"
+manufacturer_parts = [["Yageo", "RC0603FR-07100RL"]]
+symbol = "g-res:R_US"
+footprint = "g-Resistor_SMD:R_0603_1608Metric"
+fields = { Description = "RES 100 OHM 1% 1/10W 0603", Value = "100", Tolerance = "1%", Datasheet = "https://www.yageogroup.com/content/datasheet/asset/file/PYU-RC_GROUP_51_ROHS_L" }
+
+[[part]]
+ipn = "RES-0000-1500"
+category = "res"
+manufacturer_parts = [["Yageo", "RC0603FR-07150RL"]]
+symbol = "g-res:R_US"
+footprint = "g-Resistor_SMD:R_0603_1608Metric"
+fields = { Description = "RES 150 OHM 1% 1/10W 0603", Value = "150", Tolerance = "1%" }
+
+[[part]]
+ipn = "RES-0000-1800"
+category = "res"
+manufacturer_parts = [["Yageo", "RC0603FR-07180RL"]]
+symbol = "g-res:R_US"
+footprint = "g-Resistor_SMD:R_0603_1608Metric"
+fields = { Description = "RES 180 OHM 1% 1/10W 0603", Value = "180", Tolerance = "1%" }
+
+[[part]]
+ipn = "RES-0000-2001"
+category = "res"
+manufacturer_parts = [["Yageo", "RC0603FR-072KL"]]
+symbol = "g-res:R_US"
+footprint = "g-Resistor_SMD:R_0603_1608Metric"
+fields = { Description = "RES 2K OHM 1% 1/10W 0603", Value = "2k", Tolerance = "1%" }
+
+[[part]]
+ipn = "RES-0000-1002"
+category = "res"
+manufacturer_parts = [["Panasonic", "ERJ-2RKF1002X"]]
+symbol = "Device:R"
+footprint = "Resistor_SMD:R_0402_1005Metric"
+fields = { Description = "RES 10K OHM 1% 1/10W 0402", Value = "10k", Tolerance = "1%" }
+
+[[part]]
+ipn = "CAP-0000-0020"
+category = "cap"
+manufacturer_parts = [["Samsung", "CL10C020CB8NNNC"]]
+symbol = "g-cap:C"
+footprint = "g-Capacitor_SMD:C_0603_1608Metric"
+fields = { Description = "CAP CER 2PF 50V C0G/NP0 0603", Value = "2pF", Voltage = "50V", Material = "C0G", Tolerance = "0.25pF" }
+
+[[part]]
+ipn = "CAP-0000-0100"
+category = "cap"
+manufacturer_parts = [["Samsung", "CL10C100JB8NNNC"]]
+symbol = "g-cap:C"
+footprint = "g-Capacitor_SMD:C_0603_1608Metric"
+fields = { Description = "CAP CER 10PF 50V C0G/NP0 0603", Value = "10pF", Voltage = "50V", Material = "C0G", Tolerance = "5%" }
+
+[[part]]
+ipn = "CAP-0003-0001"
+category = "cap"
+manufacturer_parts = [["Murata", "GRM188R61A106KE69D"]]
+symbol = "g-cap:C"
+footprint = "g-Capacitor_SMD:C_0603_1608Metric"
+fields = { Description = "CAP CER 10UF 10V X5R 0603", Value = "10uF", Voltage = "10V", Material = "X5R", Tolerance = "10%" }
+
+[[part]]
+ipn = "ICS-0001-0001"
+category = "ics"
+manufacturer_parts = [["Texas Instruments", "SN74LVC1G07DBVR"]]
+symbol = "g-ics:74LVC1G07"
+footprint = "g-Package_TO_SOT_SMD:SOT-23-5"
+fields = { Description = "IC BUFFER NON-INVERT OPEN DRAIN SOT23-5" }
+
+[[part]]
+ipn = "ICS-0002-0001"
+category = "ics"
+manufacturer_parts = [["TOPPOWER", "TP4333"]]
+symbol = "Device:TP4333"
+footprint = "Sample_Missing:SOT-23-6"
+fields = { Description = "IC BATTERY CHARGER, symbol and footprint missing" }
+
+[[part]]
+ipn = "MCU-0000-0001"
+category = "mcu"
+manufacturer_parts = [["Sample Semiconductor", "SAMPLE-MCU-32"]]
+symbol = "g-mcu:SAMPLE_MCU"
+footprint = "Package_QFP:LQFP-32_7x7mm_P0.8mm;Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm"
+fields = { Description = "MCU 32-BIT 32 PINS, two symbol units" }
+
+[[part]]
+ipn = "REG-0000-0001"
+category = "reg"
+manufacturer_parts = [["STMicroelectronics", "KF33BD-TR"]]
+symbol = "g-reg:LDO_3V3"
+footprint = "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+fields = { Description = "IC REG LINEAR 3.3V 500MA 8SO", Voltage = "3.3V", Current = "500mA" }
+
+[[part]]
+ipn = "ART-0000-0001"
+category = "art"
+symbol = "g-art:TestPoint"
+footprint = "TestPoint:TestPoint_Pad_D1.5mm"
+fields = { Description = "SMT Test Point 1.5mm round", Comments = "Artwork part only, does not appear in BOM" }
+
+[[part]]
+ipn = "PCB-0000-0001"
+category = "pcb"
+fields = { Description = "Sample bare board" }

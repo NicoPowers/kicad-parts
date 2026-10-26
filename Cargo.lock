@@ -560,6 +560,7 @@ dependencies = [
  "kicad-libraries",
  "native-services",
  "rusqlite",
+ "sample-library",
  "serde",
  "serde_json",
  "tempfile",
@@ -4141,6 +4142,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "sample-library"
+version = "0.1.0"
+dependencies = [
+ "catalog",
+ "collaboration",
+ "native-services",
+ "serde",
+ "tempfile",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

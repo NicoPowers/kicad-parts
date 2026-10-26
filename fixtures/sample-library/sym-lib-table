@@ -1,0 +1,9 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "g-art")(type "KiCad")(uri "${KIPRJMOD}/symbols/g-art.kicad_sym")(options "")(descr "Sample test points"))
+	(lib (name "g-cap")(type "KiCad")(uri "${KIPRJMOD}/symbols/g-cap.kicad_sym")(options "")(descr "Sample capacitors"))
+	(lib (name "g-ics")(type "KiCad")(uri "${KIPRJMOD}/symbols/g-ics.kicad_sym")(options "")(descr "Sample logic"))
+	(lib (name "g-mcu")(type "KiCad")(uri "${KIPRJMOD}/symbols/g-mcu.kicad_sym")(options "")(descr "Sample microcontrollers"))
+	(lib (name "g-reg")(type "KiCad")(uri "${KIPRJMOD}/symbols/g-reg.kicad_sym")(options "")(descr "Sample regulators"))
+	(lib (name "g-res")(type "KiCad")(uri "${KIPRJMOD}/symbols/g-res.kicad_sym")(options "")(descr "Sample resistors"))
+)
