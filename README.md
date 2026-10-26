@@ -28,7 +28,13 @@ See [Try the team catalog by hand](docs/operations/TRY_THE_TEAM_CATALOG.md) for 
 To check that the whole CSV catalog can move into a team catalog without losing anything, see [Check that your CSV catalog can move to a team catalog](docs/operations/MOVE_THE_CSV_CATALOG.md).
 
 ### Checks before a change is done
-Build the desktop app as above, then run these from the repository root. All must pass.
+Run the gate from the repository root once, at the end. It builds what changed, runs every check below and times each one. All must pass.
+
+```bash
+tooling/gate.sh
+```
+
+It writes one line per check to `target/gate/summary.txt`, and each check's output to `target/gate/<check>.txt`. It takes about 5 minutes. These are the checks it runs, if you want to run one by hand:
 
 ```bash
 cargo fmt --all --check
@@ -44,6 +50,22 @@ ml doctor
 ```
 
 The JavaScript tests check the 3D view's camera rules and the team server's own rules, under the journeys' pinned Node.js. The pilots check each CSV file on its own, in an empty team catalog. The full pilot checks the whole CSV catalog together, and the KiCad libraries made from it.
+
+### Fast test loop
+While you work, run only the test you are changing. Run the gate once at the end.
+
+```bash
+# One journey: the specs whose names contain 06. It rebuilds only what changed.
+JOURNEYS_ONLY=06 npm run journeys --prefix apps/desktop/journeys
+
+# One Rust test file, or one test by name
+cargo test --locked -p <crate> --test <file name without .rs>
+cargo test --locked -p <crate> <part of the test name>
+```
+
+With cargo-nextest on your PATH (the gate downloads it into `target/tools/nextest/`), `cargo nextest run -p <crate> -E 'test(<part of the name>)'` does the same and runs tests side by side.
+
+The journeys run 6 at a time by default. Add `-- --workers=1` to run them one at a time. Timings are in [Test times](docs/operations/TEST_TIMES.md).
 
 ## API credentials (optional)
 Some scripts use DigiKey and Mouser APIs. To use them, copy the example secrets file and add your keys:
