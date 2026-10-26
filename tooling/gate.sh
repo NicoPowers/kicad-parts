@@ -16,12 +16,14 @@
 #      ml doctor side by side. Nothing builds here, so nothing waits for
 #      the cargo lock.
 #   4. The journeys, with nothing else running: some of them check how
-#      fast the app answers.
+#      fast the app answers. They need WebView2, so on macOS and Linux the
+#      gate skips them and says so.
 #
 # The Rust tests run under cargo-nextest, pinned in infra/versions.lock and
 # downloaded once into target/tools/nextest. nextest runs each test in its
 # own process, all side by side, which takes about 65 s instead of 340 s.
 # Without it (no download, or an unknown platform) the gate uses cargo test.
+# nextest does not run doc tests, so the gate runs those with cargo test.
 #
 # Works in Git Bash on Windows and in bash on macOS and Linux (bash 3.2 up).
 
@@ -32,6 +34,12 @@ out=target/gate
 summary=$out/summary.txt
 mkdir -p "$out"
 : >"$summary"
+# Results of an earlier gate must never count for this one.
+rm -f "$out"/*.result
+
+# Ctrl+C stops the checks running in the background too, and the gate.
+trap 'kill $(jobs -p) 2>/dev/null' EXIT
+trap 'exit 130' INT TERM
 
 exe=''
 case "$(uname -s)" in
@@ -55,10 +63,14 @@ check() {
   echo "$name: $result $((SECONDS - started)) s$(detail "$name")" >"$out/$name.result"
 }
 
-# report <name...>: prints the results of checks that have finished.
+# report <name...>: prints the results of checks that have finished. A
+# check with no result stopped before it could write one, so it failed.
 report() {
   local name
   for name in "$@"; do
+    if [ ! -f "$out/$name.result" ]; then
+      echo "$name: FAILED (it gave no result)" >"$out/$name.result"
+    fi
     cat "$out/$name.result" | tee -a "$summary"
     if grep -q ': FAILED' "$out/$name.result"; then
       failed=1
@@ -72,6 +84,7 @@ detail() {
   local log=$out/$1.txt line=''
   case $1 in
     rust-tests) line=$(grep -E '^ *Summary \[|^test result:' "$log" | tail -1) ;;
+    doc-tests) line=$(grep -E '^test result:' "$log" | awk '{p += $4; f += $6} END {print p " passed, " f " failed"}') ;;
     js-tests) line=$(grep -E '^ℹ (pass|fail) ' "$log" | tr '\n' ' ') ;;
     pilots) line=$(tail -1 "$log") ;;
     full-pilot) line=$(grep -m1 -E '^(PASSED|FAILED)' "$log" | cut -c1-60) ;;
@@ -175,17 +188,22 @@ pilots() {
   [ "$failures" -eq 0 ]
 }
 check rust-tests run_rust_tests &
+check doc-tests cargo test --doc --workspace --locked &
 check js-tests npm run -s js-tests --prefix apps/desktop/journeys &
 check csv-fixture "target/debug/csv-catalog-fixture$exe" check . &
 check pilots pilots &
 check full-pilot "target/debug/catalog-import$exe" full-pilot &
 check ml-doctor ml doctor &
 wait
-report rust-tests js-tests csv-fixture pilots full-pilot ml-doctor
+report rust-tests doc-tests js-tests csv-fixture pilots full-pilot ml-doctor
 
-# 4. Journeys, alone.
-check journeys node apps/desktop/journeys/run-journeys.mjs --skip-build
-report journeys
+# 4. Journeys, alone. They run the app in WebView2, which only Windows has.
+if [ -n "$exe" ]; then
+  check journeys node apps/desktop/journeys/run-journeys.mjs --skip-build
+  report journeys
+else
+  say "journeys: skipped, they need WebView2 on Windows"
+fi
 
 total=$((SECONDS - gate_started))
 if [ "$failed" -eq 0 ]; then
