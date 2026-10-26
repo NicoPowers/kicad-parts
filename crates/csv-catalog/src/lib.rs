@@ -117,8 +117,17 @@ pub struct SearchResults {
 
 impl CsvCatalog {
     /// Reads every `database/g-*.csv` table under `root`, in file-name order.
+    /// A folder with no `database/` folder, such as the sample library, has
+    /// no CSV catalog: it is an empty catalog, not an error.
     pub fn load(root: &Path) -> Result<Self, CatalogError> {
         let database = root.join("database");
+        if !database.exists() && root.is_dir() {
+            return Ok(Self {
+                parts: Vec::new(),
+                categories: Vec::new(),
+                index: Vec::new(),
+            });
+        }
         let entries = fs::read_dir(&database).map_err(|error| CatalogError::Io {
             path: database.clone(),
             error,
@@ -347,6 +356,18 @@ mod tests {
             datasheet: String::new(),
             fields: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_folder_without_database_has_an_empty_catalog() {
+        let folder = tempfile::tempdir().unwrap();
+        let catalog = CsvCatalog::load(folder.path()).unwrap();
+        assert!(catalog.parts().is_empty() && catalog.categories().is_empty());
+        // A database folder without CSV files is still a mistake.
+        fs::create_dir(folder.path().join("database")).unwrap();
+        assert!(CsvCatalog::load(folder.path()).is_err());
+        // So is a catalog folder that is not there.
+        assert!(CsvCatalog::load(&folder.path().join("nope")).is_err());
     }
 
     #[test]

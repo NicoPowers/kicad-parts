@@ -548,8 +548,16 @@ fn into_load<T>(result: Result<T, String>) -> Load<T> {
 
 /// The header's words about where the list's parts come from. With two
 /// teams or more showing parts, the CSV count alone would not match the
-/// list, so it says the teams instead of a number.
+/// list, so it says the teams instead of a number. A catalog folder with no
+/// CSV files gets no words, unless two teams or more show parts.
 fn catalog_words(csv_parts: usize, csv_files: usize, teams: usize) -> String {
+    if csv_files == 0 {
+        return if teams >= 2 {
+            format!("Parts from {teams} teams")
+        } else {
+            String::new()
+        };
+    }
     let files = counted(csv_files, "CSV file", "CSV files");
     if teams >= 2 {
         format!("Parts from {teams} teams and {files}")
@@ -568,12 +576,16 @@ fn CatalogBadge(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
     };
     move || match status.get() {
         Load::Ready(status) => match status.catalog.error {
-            None => view! {
-                <p class="catalog-summary">
-                    {move || catalog_words(status.catalog.parts, status.catalog.csv_files, teams())}
-                </p>
+            None => {
+                let words =
+                    move || catalog_words(status.catalog.parts, status.catalog.csv_files, teams());
+                view! {
+                    <Show when=move || !words().is_empty()>
+                        <p class="catalog-summary">{words}</p>
+                    </Show>
+                }
+                .into_any()
             }
-            .into_any(),
             Some(error) => view! {
                 <p class="catalog-summary catalog-error" role="alert">
                     {format!("Catalog not loaded: {error}")}
@@ -1742,5 +1754,9 @@ mod tests {
             super::catalog_words(178, 21, 2),
             "Parts from 2 teams and 21 CSV files"
         );
+        // A folder with no CSV catalog, such as the sample library.
+        assert_eq!(super::catalog_words(0, 0, 0), "");
+        assert_eq!(super::catalog_words(0, 0, 1), "");
+        assert_eq!(super::catalog_words(0, 0, 2), "Parts from 2 teams");
     }
 }
