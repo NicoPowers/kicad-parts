@@ -14,7 +14,7 @@ import {
   SYMBOL,
   assertAccessible,
   launchApp,
-  repoRoot,
+  sampleLibrary,
   screenshot,
   searchFor,
   startTeamServer,
@@ -31,12 +31,12 @@ const BADGE = '.team-settings > summary';
 
 /** The repository's capacitor symbol and footprint, renamed, as a vendor ZIP. */
 function download(folder) {
-  const read = (file) => fs.readFileSync(path.join(repoRoot, file), 'utf8');
+  const read = (file) => fs.readFileSync(path.join(sampleLibrary, file), 'utf8');
   const symbol = read('symbols/g-cap.kicad_sym')
     .replaceAll('(symbol "C_', '(symbol "C_New_')
     .replace('(symbol "C"', '(symbol "C_New"')
-    .replace('"Value" ".Value"', '"Value" "100n"')
-    .replace('"Description" "Unpolarized capacitor"', '"Description" "CAP CER 0.1UF 50V X7R 0603"')
+    .replace('"Value" "C"', '"Value" "100n"')
+    .replace('"Description" "Capacitor, not polarised"', '"Description" "CAP CER 0.1UF 50V X7R 0603"')
     .replace(
       '\t\t(property "Reference"',
       `\t\t(property "Manufacturer_Name" "Samsung Electro-Mechanics" (at 0 0 0) (effects (hide yes)))\n` +
@@ -45,7 +45,7 @@ function download(folder) {
     );
   const footprint = read('footprints/g-Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod')
     .replace('(footprint "C_0603_1608Metric"', '(footprint "C_0603_New"')
-    .replace('${KICAD9_3DMODEL_DIR}/Capacitor_SMD.3dshapes/C_0603_1608Metric.step', '${KIPRJMOD}/3D/C_0603_New.stp');
+    .replace('${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_1608Metric.step', '${KIPRJMOD}/3D/C_0603_New.stp');
   const file = path.join(folder, `${MPN}.zip`);
   fs.writeFileSync(
     file,
@@ -58,18 +58,36 @@ function download(folder) {
   return file;
 }
 
+/**
+ * A copy of the sample library with a footprint drawn by hand that no team
+ * has yet, so the library check has something to say for each team.
+ */
+function libraryWithHandDrawnFootprint() {
+  const copy = tempDir('library');
+  fs.cpSync(sampleLibrary, copy, { recursive: true });
+  const pretty = path.join(copy, 'footprints', 'g-Capacitor_SMD.pretty');
+  const footprint = fs
+    .readFileSync(path.join(pretty, 'C_0603_1608Metric.kicad_mod'), 'utf8')
+    .replace('(footprint "C_0603_1608Metric"', '(footprint "C_0603_Hand"');
+  fs.writeFileSync(path.join(pretty, 'C_0603_Hand.kicad_mod'), footprint);
+  return copy;
+}
+
 describe('one part list over several teams', () => {
   let acme;
   let beta;
   let app;
   let browser;
+  const library = libraryWithHandDrawnFootprint();
 
   before(async () => {
     [acme, beta] = await Promise.all([
-      startTeamServer({ csv: ['g-res', 'g-cap'], teamCode: 'AC' }),
-      startTeamServer({ csv: ['g-res', 'g-cap'], teamCode: 'BE' }),
+      startTeamServer({ teamCode: 'AC' }),
+      startTeamServer({ teamCode: 'BE' }),
     ]);
-    app = await launchApp({ args: [`--team-server=${acme.url}`, `--team-email=${acme.accounts[0].email}`] });
+    app = await launchApp({
+      args: [`--team-server=${acme.url}`, `--team-email=${acme.accounts[0].email}`, `--catalog-root=${library}`],
+    });
     ({ browser } = app);
     await signInToBoth();
   });
@@ -96,7 +114,7 @@ describe('one part list over several teams', () => {
 
   /** Signs in to acme, then adds beta, and waits until both are live. */
   async function signInToBoth() {
-    await waitForText(browser, '#result-count', /matching parts$/);
+    await waitForText(browser, '#result-count', 'No parts match.');
     await setMenuOpen(true);
     await signInWithForm(acme);
     await waitForText(browser, BADGE, `Team catalog · ${acme.accounts[0].name}`);
@@ -145,16 +163,18 @@ describe('one part list over several teams', () => {
     assert.equal(await (await browser.$('label[for="group-by"]')).getText(), 'Group by');
     assert.equal(await (await browser.$('#group-by')).getValue(), 'category');
     await choose('group-by', 'team');
-    // One section per team, in the order of the Teams menu, and the parts
-    // only the CSV files have.
-    await browser.waitUntil(async () => (await sections())[0]?.startsWith('AC ('), {
-      timeout: 10_000,
-      timeoutMsg: 'the list never grouped by team',
-    });
+    // One section per team, in the order of the Teams menu. The sample
+    // library has no CSV files, so there is no section of their parts.
+    // Each team's section is named by its code once the team's settings
+    // are read.
+    await browser.waitUntil(
+      async () => (await sections()).map((section) => section.replace(/ \(.*/, '')).join() === 'AC,BE',
+      { timeout: 10_000, timeoutMsg: `the list never grouped by team: ${JSON.stringify(await sections())}` },
+    );
     const grouped = await sections();
     assert.deepEqual(
       grouped.map((section) => section.replace(/ \(.*/, '')),
-      ['AC', 'BE', 'CSV files'],
+      ['AC', 'BE'],
     );
     assert.equal(grouped[0].replace('AC', ''), grouped[1].replace('BE', ''), 'both teams have the same parts');
     // A team section opens like a category's. Its name says the team, so
@@ -166,7 +186,7 @@ describe('one part list over several teams', () => {
     );
     assert.equal(await browser.execute(() => document.querySelectorAll('.results .team-chip').length), 0);
     // The header says where the list's parts come from.
-    assert.equal(await textOf(browser, '.catalog-summary'), 'Parts from 2 teams and 21 CSV files');
+    assert.equal(await textOf(browser, '.catalog-summary'), 'Parts from 2 teams');
     await assertAccessible(browser, '100-teams-group-by-team');
     await screenshot(browser, '100-teams-group-by-team', { blankOut: ['.team-server'] });
     // Back to categories, and the AC section closed again.
@@ -179,9 +199,11 @@ describe('one part list over several teams', () => {
     await waitForText(browser, '#add-heading', 'Add part');
     // Every team the person can add to; the first one at first.
     assert.equal(await (await browser.$('label[for="add-team"]')).getText(), 'Team');
-    assert.deepEqual(
-      await browser.execute(() => [...document.querySelectorAll('#add-team option')].map((o) => o.textContent)),
-      ['AC', 'BE'],
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(() => [...document.querySelectorAll('#add-team option')].map((o) => o.textContent))).join() ===
+        'AC,BE',
+      { timeout: 10_000, timeoutMsg: 'Add part never offered AC and BE' },
     );
     assert.equal(await (await browser.$('#add-team')).getValue(), acme.url);
     // Files chosen, then another team at once, before they are read: they
@@ -261,7 +283,7 @@ describe('one part list over several teams', () => {
     await choose('team-filter', beta.url);
     await choose('group-by', 'team');
     await browser.deleteSession();
-    ({ browser } = await launchApp({ dataDir: app.dataDir }));
+    ({ browser } = await launchApp({ dataDir: app.dataDir, args: [`--catalog-root=${library}`] }));
     // Sign-ins stayed in the last run's memory: sign in to both again.
     for (const [server, code] of [
       [acme, 'AC'],

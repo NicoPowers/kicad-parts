@@ -62,7 +62,7 @@ describe('a client library repo laid out its own way', () => {
   let bare;
 
   before(async () => {
-    acme = await startTeamServer({ csv: ['g-res'], teamCode: 'AC' });
+    acme = await startTeamServer({ teamCode: 'AC' });
     const repos = tempDir('repos');
     bare = path.join(repos, 'acme-library.git');
     fs.mkdirSync(bare);
@@ -102,7 +102,7 @@ describe('a client library repo laid out its own way', () => {
   }
 
   it('links the repo, and the row offers to review its library layout', async () => {
-    await waitForText(browser, '#result-count', '178 matching parts');
+    await waitForText(browser, '#result-count', 'No parts match.');
     await setMenuOpen(true);
     await (await browser.$('#team-password')).setValue(acme.accounts[0].password);
     await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();

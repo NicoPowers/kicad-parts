@@ -50,8 +50,8 @@ describe('several teams at once', () => {
 
   before(async () => {
     [acme, beta] = await Promise.all([
-      startTeamServer({ csv: ['g-res'], teamCode: 'AC' }),
-      startTeamServer({ csv: ['g-res'], teamCode: 'BE' }),
+      startTeamServer({ teamCode: 'AC' }),
+      startTeamServer({ teamCode: 'BE' }),
     ]);
     editor = acme.accounts[0];
     // Acme's value differs, so each team's part can be told apart.
@@ -129,7 +129,7 @@ describe('several teams at once', () => {
   }
 
   it('adds a second team without signing out of the first', async () => {
-    await waitForText(browser, '#result-count', '178 matching parts');
+    await waitForText(browser, '#result-count', 'No parts match.');
     await setMenuOpen(true);
     await signInWithForm(acme, editor);
     await waitForText(browser, BADGE, `Team catalog · ${editor.name}`);
@@ -313,7 +313,7 @@ describe('several teams at once', () => {
     ({ browser } = await launchApp({
       args: ['--sign-ins=until-closed', `--team-server=${acme.url}`, `--team-email=${editor.email}`],
     }));
-    await waitForText(browser, '#result-count', '178 matching parts');
+    await waitForText(browser, '#result-count', 'No parts match.');
     await setMenuOpen(true);
     await waitForText(
       browser,
@@ -343,7 +343,7 @@ describe('several teams at once', () => {
       dataDir,
       args: [`--team-server=${acme.url}`, `--team-email=${editor.email}`],
     }));
-    await waitForText(browser, '#result-count', '178 matching parts');
+    await waitForText(browser, '#result-count', 'No parts match.');
     await setMenuOpen(true);
     await signInWithForm(acme, editor);
     // The badge says a team needs a look, with the problem look.
@@ -405,7 +405,7 @@ describe('several teams at once', () => {
   it('says plainly when two team servers in your teams claim one team', async () => {
     // A second server in the person's teams says it is AC, and AC's
     // libraries came from it last.
-    const gamma = await startTeamServer({ csv: ['g-res'], teamCode: 'GA' });
+    const gamma = await startTeamServer({ teamCode: 'GA' });
     try {
       await setMenuOpen(true);
       await (await browser.$('#team-add')).click();

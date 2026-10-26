@@ -43,8 +43,8 @@ describe('a team server down when the app starts', () => {
 
   before(async () => {
     [acme, beta] = await Promise.all([
-      startTeamServer({ csv: ['g-res'], teamCode: 'AC' }),
-      startTeamServer({ csv: ['g-res'], teamCode: 'BE' }),
+      startTeamServer({ teamCode: 'AC' }),
+      startTeamServer({ teamCode: 'BE' }),
     ]);
     dataDir = tempDir('data');
     await launch();
@@ -96,7 +96,7 @@ describe('a team server down when the app starts', () => {
   };
 
   it('keeps each team\'s parts on disk while its server answers', async () => {
-    await waitForText(browser, '#result-count', '178 matching parts');
+    await waitForText(browser, '#result-count', 'No parts match.');
     await setMenuOpen(true);
     await signInWithForm(acme, acme.accounts[0]);
     await waitForText(browser, BADGE, `Team catalog · ${acme.accounts[0].name}`);
