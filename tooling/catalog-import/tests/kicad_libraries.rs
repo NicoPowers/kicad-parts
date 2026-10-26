@@ -12,14 +12,14 @@
 //!
 //! The libraries are written to a folder whose name is not plain ASCII, as
 //! a Windows user name may be. kicad-cli runs only through run_kicad_cli,
-//! with a settings folder of the test's own. The resistors and inductors
-//! are imported into a disposable PocketBase on 127.0.0.1; the libraries
-//! are written under target/.
+//! with a settings folder of the test's own. A disposable PocketBase on
+//! 127.0.0.1 has the sample library's resistors and capacitors; the
+//! libraries are written under target/.
 
 use catalog::PartRevision;
 use catalog::pocketbase::{
-    ArchiveCommand, CatalogReadback, EditCommand, ImportCommand, read_back, read_import_state,
-    read_team, submit_archive, submit_edit, submit_import, submit_team_code,
+    ArchiveCommand, CatalogReadback, EditCommand, read_back, read_team, submit_archive,
+    submit_edit, submit_team_code,
 };
 use catalog_import::services;
 use collaboration::PocketBaseClient;
@@ -34,20 +34,6 @@ use support::kicad::{
     draw_every_footprint, draw_every_symbol, erc, installed_kicad, plain_box, run, saved_copy,
     schematic, target_folder,
 };
-
-/// Imports `csv_files` one after another, as the local team server does.
-fn import(admin: &PocketBaseClient, csv_files: &[&str]) {
-    let root = services::repository_root();
-    for csv_file in csv_files {
-        let plan = services::plan(&root, csv_file).unwrap();
-        let state = read_import_state(admin).unwrap();
-        let command = ImportCommand::new(&plan, &format!("Import {csv_file}"))
-            .expecting(&state)
-            .allowing_uncommitted_changes(services::has_uncommitted_changes(&plan));
-        let reply = submit_import(admin, &command).unwrap();
-        assert!(reply.status == 200, "{}", reply.body);
-    }
-}
 
 /// Changes the symbol of `ipn` to `symbol`, which adds a revision.
 fn change_symbol(admin: &PocketBaseClient, ipn: &str, symbol: &str) {
@@ -81,16 +67,16 @@ fn kicad_loads_every_generated_library_and_resolves_every_entry() {
     let root = services::repository_root();
     let state = tempfile::tempdir().unwrap();
     let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
-    import(&admin, &["g-res", "g-ind"]);
+    sample_library::seed(&admin, &["res", "cap"]).unwrap();
     submit_team_code(&admin, "MA").unwrap();
     // RES-0000-0470 gets revision 2, so revision 1 is older.
     change_symbol(&admin, "RES-0000-0470", "Device:R");
-    // RES-0000-0000 gets revision 2, which is archived, so revision 1 is
+    // RES-0000-1000 gets revision 2, which is archived, so revision 1 is
     // current again.
-    change_symbol(&admin, "RES-0000-0000", "Device:R_Small");
+    change_symbol(&admin, "RES-0000-1000", "Device:R_Small");
     let reply = submit_archive(
         &admin,
-        &ArchiveCommand::new("RES-0000-0000", 2, true, "Archive the trial symbol"),
+        &ArchiveCommand::new("RES-0000-1000", 2, true, "Archive the trial symbol"),
     )
     .unwrap();
     assert_eq!(reply.status, 200, "{}", reply.body);
@@ -123,7 +109,7 @@ fn kicad_loads_every_generated_library_and_resolves_every_entry() {
         "{symbols} symbols, {footprints} footprints"
     );
     let (footprint_link, footprint_file) =
-        with_model.expect("an inductor footprint has a 3D model from the team catalog");
+        with_model.expect("the capacitor footprint has a 3D model from the team catalog");
     check_footprint_link(
         &kicad,
         &settings,
@@ -159,11 +145,11 @@ fn kicad_loads_every_generated_library_and_resolves_every_entry() {
         // Current, using KiCad's own symbol.
         "MA-Parts:RES-0000-0470_v2",
         // Archived.
-        "MA-Parts:RES-0000-0000_v2",
+        "MA-Parts:RES-0000-1000_v2",
         // Current again after its newer revision was archived.
-        "MA-Parts:RES-0000-0000_v1",
-        // An inductor, in another category.
-        "MA-Parts:IND-0000-0221_v1",
+        "MA-Parts:RES-0000-1000_v1",
+        // A capacitor, in another category.
+        "MA-Parts:CAP-0000-0020_v1",
     ];
     let mut placed: Vec<(&str, String)> = real
         .iter()
@@ -172,8 +158,8 @@ fn kicad_loads_every_generated_library_and_resolves_every_entry() {
     // A wrong copy, which KiCad must tell apart from the library's symbol,
     // and an entry that does not exist.
     placed.push((
-        "MA-Parts:IND-0001-0101_v1",
-        plain_box("MA-Parts:IND-0001-0101_v1"),
+        "MA-Parts:CAP-0000-0100_v1",
+        plain_box("MA-Parts:CAP-0000-0100_v1"),
     ));
     placed.push((
         "MA-Parts:RES-0000-9999_v1",
@@ -201,7 +187,7 @@ fn kicad_loads_every_generated_library_and_resolves_every_entry() {
     assert!(
         said(
             "lib_symbol_mismatch",
-            "Symbol 'IND-0001-0101_v1' doesn't match copy in library 'MA-Parts'"
+            "Symbol 'CAP-0000-0100_v1' doesn't match copy in library 'MA-Parts'"
         ),
         "{found:#?}"
     );

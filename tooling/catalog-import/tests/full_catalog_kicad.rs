@@ -1,5 +1,6 @@
-//! Every entry of the KiCad libraries made from the whole CSV catalog,
-//! checked by the installed KiCad 10 (kicad-parts-357b):
+//! Every entry of the KiCad libraries made from the whole sample library
+//! (fixtures/sample-library), checked by the installed KiCad 10
+//! (kicad-parts-357b; kicad-parts-fbc2 moved it off the CSV catalog):
 //!
 //! - kicad-cli draws every generated symbol and every generated footprint;
 //! - a schematic places every database library entry, each saved with an
@@ -7,22 +8,21 @@
 //!   electrical rules check finds every entry and its exact symbol, through
 //!   the SQLite3 ODBC driver and KiCad's own libraries.
 //!
-//! KiCad finds every entry: one per CSV row with a symbol. Two kinds of entry get a symbol other
-//! than the saved copy, each named by the test: the two whose symbol the
-//! CSV catalog itself lacks (the CSV catalog fixture lists them as
-//! missing-member symbol references), and the two that use a symbol of
-//! KiCad's own that extends another, which this test cannot copy as KiCad
-//! does.
+//! KiCad finds every entry: one per sample part with a symbol. Two kinds
+//! of entry get a symbol other than the saved copy, each named by the test:
+//! those whose symbol is missing from its library (ICS-0002-0001 names
+//! Device:TP4333 on purpose), and any that use a symbol of KiCad's own that
+//! extends another, which this test cannot copy as KiCad does.
 //!
-//! Every CSV file is imported into a disposable PocketBase on 127.0.0.1;
-//! the libraries and kicad-cli's settings are written under target/. The
-//! test takes about 30 seconds and prints its times, so it runs with the
-//! other tests.
+//! Every sample part is added to a disposable PocketBase on 127.0.0.1; the
+//! libraries and kicad-cli's settings are written under target/. The test
+//! takes a few seconds and prints its times, so it runs with the other
+//! tests.
 
 mod support;
 
 use catalog::pocketbase::read_back;
-use catalog_import::{imports, libraries, services};
+use catalog_import::{libraries, services};
 use kicad_integration::CliSettingsFolder;
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use kicad_libraries::{LibraryKind, Naming, setup};
@@ -35,7 +35,7 @@ use support::kicad::{
 };
 
 #[test]
-fn kicad_finds_every_entry_of_the_whole_catalog() {
+fn kicad_finds_every_entry_of_the_whole_sample_library() {
     let started = Instant::now();
     let folder = target_folder("full-catalog");
     let settings = CliSettingsFolder::new(folder.join("kicad-cli-settings"));
@@ -47,18 +47,11 @@ fn kicad_finds_every_entry_of_the_whole_catalog() {
         .clone()
         .expect("KiCad's own libraries next to kicad-cli");
     let root = services::repository_root();
-    let oracle =
-        csv_catalog_fixture::load_manifest(&root.join("fixtures/import/csv-catalog/manifest.json"))
-            .unwrap();
+    let sample = sample_library::Sample::load();
 
-    // Every CSV file, imported as a team would.
-    let planned = services::plan_all(&root, &services::csv_files(&root).unwrap()).unwrap();
+    // Every sample part, added as a team would.
     let (server, admin, _superuser) = services::start(&root, &folder.join("server")).unwrap();
-    let allow = services::Allow {
-        uncommitted_changes: true,
-        ..services::Allow::default()
-    };
-    imports::import_in_order(&admin, &root, &planned, allow).unwrap();
+    sample_library::seed(&admin, &[]).unwrap();
     let readback = read_back(&admin).unwrap();
     server.stop();
     let team = libraries::disposable_team(Naming::new("MA").unwrap());
@@ -94,39 +87,25 @@ fn kicad_finds_every_entry_of_the_whole_catalog() {
         );
     }
     drop(connection);
-    // One entry per CSV row with a symbol, as the CSV catalog fixture
-    // records the rows.
-    let rows_with_a_symbol = oracle
-        .catalog
-        .categories
+    // One entry per sample part with a symbol.
+    let with_a_symbol = sample
+        .parts
         .iter()
-        .flat_map(|category| {
-            let symbol = category
-                .document
-                .headers
-                .iter()
-                .position(|header| header == "Symbol");
-            category.document.rows.iter().filter(move |row| {
-                symbol
-                    .and_then(|column| row.get(column))
-                    .is_some_and(|cell| !cell.trim().is_empty())
-            })
-        })
+        .filter(|part| !part.symbol.is_empty())
         .count();
     assert_eq!(
         entries.len(),
-        rows_with_a_symbol,
-        "every row with a symbol has an entry"
+        with_a_symbol,
+        "every part with a symbol has an entry"
     );
 
-    // The entries whose symbol the CSV catalog lacks.
-    let missing: BTreeSet<String> = oracle
-        .assets
-        .symbol_references
+    // The entries whose symbol is missing from its library: the sample
+    // library's own, or KiCad's.
+    let missing: BTreeSet<String> = sample
+        .parts
         .iter()
-        .filter(|reference| reference.local && reference.status != "resolved")
-        .flat_map(|reference| reference.source_ipns.iter())
-        .map(|ipn| format!("{ipn}_v1"))
+        .filter(|part| !part.symbol.is_empty() && !symbol_exists(&share, &part.symbol))
+        .map(|part| format!("{}_v1", part.ipn))
         .collect();
     assert!(!missing.is_empty());
 
@@ -195,8 +174,8 @@ fn kicad_finds_every_entry_of_the_whole_catalog() {
         "{library_issues:#?}"
     );
     // And each with exactly the symbol it should have, apart from two
-    // kinds of entry. One is the entries whose symbol the CSV catalog
-    // lacks: KiCad cannot give them their real symbol. The other is the
+    // kinds of entry. One is the entries whose symbol is missing from its
+    // library: KiCad cannot give them their real symbol. The other is the
     // entries using a symbol of KiCad's own that extends another symbol:
     // KiCad gives them the whole symbol, which this test cannot write as
     // the saved copy, so their copies differ.
@@ -239,4 +218,24 @@ fn extends_another(share: &std::path::Path, symbol: &str) -> bool {
     SymbolLibrary::parse(&bytes).is_ok_and(
         |parsed| matches!(parsed.find(name), SymbolLookup::Found(entry) if entry.extends.is_some()),
     )
+}
+
+/// Whether `symbol`, a link such as `g-res:R_US` or `Device:R`, names a
+/// symbol in the sample library or in KiCad's own libraries in `share`.
+fn symbol_exists(share: &std::path::Path, symbol: &str) -> bool {
+    let Some((library, name)) = symbol.split_once(':') else {
+        return false;
+    };
+    let file = if library.starts_with("g-") {
+        sample_library::root()
+            .join("symbols")
+            .join(format!("{library}.kicad_sym"))
+    } else {
+        share.join("symbols").join(format!("{library}.kicad_sym"))
+    };
+    let Ok(bytes) = fs::read(file) else {
+        return false;
+    };
+    SymbolLibrary::parse(&bytes)
+        .is_ok_and(|parsed| matches!(parsed.find(name), SymbolLookup::Found(_)))
 }
