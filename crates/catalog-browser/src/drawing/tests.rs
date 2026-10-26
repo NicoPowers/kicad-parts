@@ -373,14 +373,28 @@ fn arcs_go_the_way_through_their_middle() {
     );
 }
 
-/// Every footprint in our libraries: each pad is where the file says, and
-/// a rectangle's copper is its size, turned with the pad.
+/// Every footprint of the sample library (fixtures/sample-library), and of
+/// a few of KiCad's own libraries with turned and odd pads when KiCad is
+/// installed: each pad is where the file says, and a rectangle's copper is
+/// its size, turned with the pad.
 #[test]
-fn our_footprints_draw_their_pads_where_the_file_says() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../footprints");
+fn footprints_draw_their_pads_where_the_file_says() {
+    let mut libraries: Vec<std::path::PathBuf> = std::fs::read_dir(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/sample-library/footprints"),
+    )
+    .unwrap()
+    .map(|library| library.unwrap().path())
+    .collect();
+    let kicad = kicad_integration::installed_share_dir(&Default::default());
+    if let Some(share) = &kicad {
+        for name in ["Package_SO", "Package_DFN_QFN", "Connector_JST", "Crystal"] {
+            libraries.push(share.join("footprints").join(format!("{name}.pretty")));
+        }
+    } else {
+        eprintln!("KiCad is not installed; only the sample library is checked");
+    }
     let mut checked = 0;
-    for library in std::fs::read_dir(&root).unwrap() {
-        let library = library.unwrap().path();
+    for library in libraries {
         for file in std::fs::read_dir(&library).unwrap() {
             let file = file.unwrap().path();
             if file.extension().and_then(|e| e.to_str()) != Some("kicad_mod") {
@@ -424,7 +438,8 @@ fn our_footprints_draw_their_pads_where_the_file_says() {
             checked += 1;
         }
     }
-    assert!(checked > 50, "only {checked} footprints");
+    let least = if kicad.is_some() { 50 } else { 3 };
+    assert!(checked >= least, "only {checked} footprints");
 }
 
 #[test]
@@ -943,13 +958,15 @@ fn a_polygon_with_a_point_in_a_side_still_shrinks_and_grows() {
     );
 }
 
-/// The Measure tool on a real footprint (kicad-parts-e95e): our 0603
-/// resistor's pads are 1.65 mm apart, with 0.85 mm between their copper.
+/// The Measure tool on a real footprint (kicad-parts-e95e): the sample
+/// library's 0603 resistor's pads are 1.65 mm apart, with 0.85 mm between
+/// their copper.
 #[test]
 fn measures_between_the_pads_of_our_0603_resistor() {
     use desktop_contract::measure::{SnapKind, nearest_snap, pad_gap, snap_points};
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../fixtures/sample-library/footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
+    );
     let drawing = footprint_drawing(&std::fs::read(path).unwrap()).unwrap();
     let points = snap_points(&drawing, "F.Cu");
     let centre = |x: f64| {

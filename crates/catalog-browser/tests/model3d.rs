@@ -1,6 +1,7 @@
 //! Footprints' 3D views (kicad-parts-c9c1), exported by the installed
 //! KiCad 10's kicad-cli. Each test skips, and says so, when KiCad is not
 //! installed. kicad-cli keeps its settings in the test's own cache folder.
+//! Our own libraries are the sample library's (fixtures/sample-library).
 
 use catalog_browser::team::TeamCatalog;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
@@ -12,19 +13,16 @@ use kicad_integration::SearchLocations;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .unwrap()
-        .to_path_buf()
+/// The sample library, read as our own libraries.
+fn sample_library() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/sample-library")
 }
 
 /// The browser, and a team catalog nobody is signed in to; `None`, after
 /// saying why, when KiCad 10 is not installed.
 fn open(dir: &Path) -> Option<(CatalogBrowser, TeamCatalog)> {
     let browser = CatalogBrowser::open(BrowserConfig {
-        catalog_root: repo_root(),
+        catalog_root: sample_library(),
         cache_dir: dir.join("cache"),
         settings_file: dir.join("config").join("settings.json"),
         kicad_locations: SearchLocations::Standard,
@@ -121,7 +119,7 @@ fn our_r_0603_is_exported_with_kicads_own_model() {
     };
     assert_eq!(
         model.link,
-        "${KICAD9_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step"
+        "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.step"
     );
     assert_eq!(model.source, Some(ModelSource::Kicad));
     let path = PathBuf::from(model.path.as_deref().unwrap());
@@ -148,6 +146,46 @@ fn our_r_0603_is_exported_with_kicads_own_model() {
     assert!(again.from_cache && again.key == glb.key);
     eprintln!("R_0603 3D view: made in {first:.2} s, from the cache in {second:.3} s");
     assert!(browser.footprint_glb("v2/../../secrets.env").is_none());
+}
+
+#[test]
+fn our_own_step_and_vrml_models_are_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some((browser, team)) = open(dir.path()) else {
+        return;
+    };
+    for (reference, link, mesh) in [
+        (
+            "g-Capacitor_SMD:C_0603_1608Metric",
+            "${GITPLM_PARTS}/3d-models/g-Capacitor_SMD.3dshapes/C_0603_1608Metric.step",
+            "C_0603_1608Metric",
+        ),
+        (
+            "g-Package_TO_SOT_SMD:SOT-23-5",
+            "${GITPLM_PARTS}/3d-models/g-Package_TO_SOT_SMD.3dshapes/SOT-23-5.wrl",
+            "SOT-23-5",
+        ),
+    ] {
+        let key = drawing_key(&browser, reference);
+        let (view, _) = made(&browser, &team, &key);
+        assert_eq!(view.problem, None, "{view:?}");
+        let [model] = view.models.as_slice() else {
+            panic!("one model: {view:?}");
+        };
+        assert_eq!(model.link, link);
+        assert_eq!(model.source, Some(ModelSource::Ours), "{reference}");
+        assert_eq!(model.problem, None, "{reference}");
+        let path = PathBuf::from(model.path.as_deref().unwrap());
+        assert!(path.is_file(), "{path:?}");
+        let bytes = browser
+            .footprint_glb(&view.glb.expect("a 3D view").key)
+            .expect("the GLB");
+        let names = mesh_names(&glb_json(&bytes));
+        assert!(
+            names.iter().any(|name| name.starts_with(mesh)),
+            "{reference}: {names:?}"
+        );
+    }
 }
 
 #[test]

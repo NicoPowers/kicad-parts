@@ -1,6 +1,7 @@
 //! The app's own footprint drawing (kicad-parts-34df), checked against the
 //! footprint file and, roughly, against kicad-cli's SVG of it, for real
-//! footprints of ours and KiCad's. Runs the installed KiCad 10.
+//! footprints of KiCad's and of the sample library (fixtures/sample-library),
+//! which stands for ours. Runs the installed KiCad 10.
 
 use base64::Engine;
 use catalog_browser::{BrowserConfig, CatalogBrowser};
@@ -11,17 +12,14 @@ use kicad_integration::library_file::footprint_pads;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .unwrap()
-        .to_path_buf()
+/// The sample library, read as our own libraries.
+fn sample_library() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/sample-library")
 }
 
 fn open_browser(dir: &Path) -> CatalogBrowser {
     CatalogBrowser::open(BrowserConfig {
-        catalog_root: repo_root(),
+        catalog_root: sample_library(),
         cache_dir: dir.join("cache"),
         settings_file: dir.join("config").join("settings.json"),
         kicad_locations: SearchLocations::Standard,
@@ -363,8 +361,8 @@ fn real_footprints_match_their_files_and_kicad_cli() {
         "Package_SO:Texas_HTSOP-8-1EP_3.9x4.9mm_P1.27mm_EP2.95x4.9mm_Mask2.4x3.1mm_ThermalVias",
         // Ours.
         "g-Resistor_SMD:R_0603_1608Metric",
-        "g-Package_DFN_QFN:RSL0048B-IPC_A",
-        "g-Package_SO:TI_SO-PowerPAD-8",
+        "g-Capacitor_SMD:C_0603_1608Metric",
+        "g-Package_TO_SOT_SMD:SOT-23-5",
     ] {
         check(&browser, reference);
     }

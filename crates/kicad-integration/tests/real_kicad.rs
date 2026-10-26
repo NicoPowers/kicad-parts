@@ -1,5 +1,6 @@
 //! These tests run the installed KiCad 10 kicad-cli. KiCad is a required
-//! dependency for development and CI (see docs/operations).
+//! dependency for development and CI (see docs/operations). Our own
+//! libraries are the sample library's (fixtures/sample-library).
 
 use kicad_integration::{
     CacheOutcome, CliSettingsFolder, Discovery, DiscoveryOptions, InstallSource, KicadInstall,
@@ -8,10 +9,14 @@ use kicad_integration::{
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn repo_root() -> PathBuf {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-        .canonicalize()
-        .unwrap()
+/// The sample library, laid out as our own libraries are.
+fn sample_library() -> PathBuf {
+    Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/sample-library"
+    ))
+    .canonicalize()
+    .unwrap()
 }
 
 /// A settings folder of the tests' own, so kicad-cli never loads or saves
@@ -39,7 +44,7 @@ fn installed_kicad() -> KicadInstall {
 }
 
 fn resolver(kicad: &KicadInstall) -> LibraryResolver {
-    LibraryResolver::new(Some(repo_root()), kicad.share_dir.clone())
+    LibraryResolver::new(Some(sample_library()), kicad.share_dir.clone())
 }
 
 #[test]
@@ -92,13 +97,13 @@ fn exports_every_symbol_unit_once_then_serves_the_cache() {
     let kicad = installed_kicad();
     let cache_dir = tempfile::tempdir().unwrap();
     let cache = PreviewCache::new(cache_dir.path().to_path_buf());
-    let symbol = resolver(&kicad).symbol("g-mpu:JETSON_NANO").unwrap();
+    let symbol = resolver(&kicad).symbol("g-mcu:SAMPLE_MCU").unwrap();
     assert_eq!(symbol.origin, LibraryOrigin::Project);
 
     let first = cache.symbol(&kicad, &symbol).unwrap();
     assert_eq!(first.cache, CacheOutcome::Exported);
     let units: Vec<_> = first.images.iter().map(|image| image.unit).collect();
-    assert_eq!(units, [Some(1), Some(2), Some(3)]);
+    assert_eq!(units, [Some(1), Some(2)]);
     for image in &first.images {
         assert!(image.svg.contains("<svg"), "{:?}", image.file);
         assert!(image.file.starts_with(cache_dir.path()));
@@ -191,7 +196,7 @@ fn editing_a_library_changes_the_cache_key() {
     let project = tempfile::tempdir().unwrap();
     let pretty = project.path().join("footprints").join("t.pretty");
     fs::create_dir_all(&pretty).unwrap();
-    let source = repo_root()
+    let source = sample_library()
         .join("footprints")
         .join("g-Resistor_SMD.pretty")
         .join("R_0603_1608Metric.kicad_mod");
@@ -303,7 +308,7 @@ fn names_that_look_like_options_never_reach_kicad_cli() {
 #[test]
 fn names_kicad_cli_writes_with_spaces_still_export() {
     // kicad-cli writes `A*B` as `A B_unit1.svg`; a synthetic library keeps
-    // the repository catalog out of it.
+    // the sample library out of it.
     let kicad = installed_kicad();
     let project = tempfile::tempdir().unwrap();
     let symbols = project.path().join("symbols");
@@ -360,8 +365,8 @@ fn stored_bytes_are_drawn_even_after_the_local_library_changes() {
 
     let kicad = installed_kicad();
     // What the team catalog stored: the R_US entry exactly as the
-    // repository's library has it.
-    let original = fs::read(repo_root().join("symbols").join("g-res.kicad_sym")).unwrap();
+    // sample library has it.
+    let original = fs::read(sample_library().join("symbols").join("g-res.kicad_sym")).unwrap();
     let library = SymbolLibrary::parse(&original).unwrap();
     let kicad_integration::library_file::SymbolLookup::Found(entry) = library.find("R_US") else {
         panic!("g-res has R_US");
@@ -422,7 +427,7 @@ fn stored_footprints_are_drawn_from_their_bytes() {
     use kicad_integration::{LibRef, StoredItem, sha256_hex};
 
     let kicad = installed_kicad();
-    let file = repo_root()
+    let file = sample_library()
         .join("footprints")
         .join("g-Resistor_SMD.pretty")
         .join("R_0603_1608Metric.kicad_mod");
