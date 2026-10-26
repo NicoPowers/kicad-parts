@@ -47,8 +47,23 @@ fn team(server: &str, label: &str, parts: &[(&str, &str, &str)]) -> Arc<KnownPar
     Arc::new(KnownParts::new(server, label, values, BTreeMap::new()))
 }
 
+/// The answer to `request` over `teams`, as the app gives it.
+fn search(teams: &[Arc<KnownParts>], request: &SearchRequest) -> SearchResponse {
+    let at = csv_rows_by_ipn(None);
+    let listed = ListedTeams::default();
+    let csv = CsvRows {
+        catalog: None,
+        at: &at,
+    };
+    let sources = Sources {
+        csv: None,
+        teams: listed.rows_of(teams, &csv),
+    };
+    answer(&sources, request)
+}
+
 /// The answer to `request` over `catalog` and `teams`, as the app gives it.
-fn search(
+fn search_with_csv(
     catalog: &CsvCatalog,
     teams: &[Arc<KnownParts>],
     request: &SearchRequest,
@@ -97,32 +112,20 @@ fn rows(response: &SearchResponse) -> Vec<String> {
 
 #[test]
 fn every_teams_parts_are_in_one_list_with_the_same_ipn_once_per_team() {
-    let catalog = csv(&[
-        ("RES-1", "R1", "g-res"),
-        ("RES-2", "R2", "g-res"),
-        ("RES-3", "R3", "g-res"),
-    ]);
     let ma = team(MA, "MA", &[("RES-1", "R1", "res"), ("RES-9", "R9", "res")]);
     let ac = team(
         AC,
         "AC",
         &[("RES-1", "R1-AC", "res"), ("RES-5", "R5", "res")],
     );
-    let found = search(&catalog, &[ma, ac], &request(""));
-    // RES-1 is in both teams: one row each, in team order. RES-2 and RES-3
-    // only the CSV catalog has. Then the parts only teams have, by IPN.
+    let found = search(&[ma, ac], &request(""));
+    // RES-1 is in both teams: one row each, in team order. Then the other
+    // parts, by IPN.
     assert_eq!(
         rows(&found),
-        [
-            "MA:RES-1",
-            "AC:RES-1",
-            "CSV:RES-2",
-            "CSV:RES-3",
-            "AC:RES-5",
-            "MA:RES-9"
-        ]
+        ["MA:RES-1", "AC:RES-1", "AC:RES-5", "MA:RES-9"]
     );
-    assert_eq!(found.total, 6);
+    assert_eq!(found.total, 4);
     // Each team's row shows that team's own values.
     let mpns: Vec<&str> = found.hits().take(2).map(|hit| hit.mpn.as_str()).collect();
     assert_eq!(mpns, ["R1", "R1-AC"]);
@@ -138,7 +141,7 @@ fn with_one_team_the_list_is_as_before() {
         "MA",
         &[("RES-1", "R1-new", "res"), ("RES-0", "R0", "res")],
     );
-    let found = search(&catalog, &[ma], &request(""));
+    let found = search_with_csv(&catalog, &[ma], &request(""));
     assert_eq!(rows(&found), ["CSV:RES-2", "MA:RES-1", "MA:RES-0"]);
     assert_eq!(found.sections[0].hits[1].mpn, "R1-new");
     // A team's part over a CSV row keeps the CSV file it came from.
@@ -154,18 +157,17 @@ fn with_two_teams_a_team_part_never_takes_the_csv_rows_values() {
     let mut ac_values = (*team(AC, "AC", &[("RES-1", "R1-AC", "res")])).clone();
     ac_values.values.get_mut("RES-1").unwrap().symbol = Some("AC-Lib:R".into());
     let ma = team(MA, "MA", &[("RES-1", "R1", "res")]);
-    let found = search(&catalog, &[ma, Arc::new(ac_values.clone())], &request(""));
+    let found = search_with_csv(&catalog, &[ma, Arc::new(ac_values.clone())], &request(""));
     let ac_row = found.hits().find(|hit| hit.team == AC).unwrap();
     assert_eq!(ac_row.csv_file, "Team catalog");
     assert_eq!(ac_row.description, "R1-AC in AC");
     // With one team, the CSV row fills it in, as before several teams.
-    let found = search(&catalog, &[Arc::new(ac_values)], &request(""));
+    let found = search_with_csv(&catalog, &[Arc::new(ac_values)], &request(""));
     assert_eq!(found.hits().next().unwrap().csv_file, "g-res.csv");
 }
 
 #[test]
 fn search_ranks_as_before_and_ties_on_one_part_go_by_team_order() {
-    let catalog = csv(&[("CAP-1", "C100N", "g-cap")]);
     let ma = team(
         MA,
         "MA",
@@ -176,7 +178,7 @@ fn search_ranks_as_before_and_ties_on_one_part_go_by_team_order() {
         "AC",
         &[("CAP-1", "C100N", "cap"), ("CAP-3", "XC100N", "cap")],
     );
-    let found = search(&catalog, &[ma, ac], &request("c100n"));
+    let found = search(&[ma, ac], &request("c100n"));
     // Exact MPN first (in team order), then an MPN prefix, then any match.
     assert_eq!(
         rows(&found),
@@ -193,7 +195,7 @@ fn search_ranks_as_before_and_ties_on_one_part_go_by_team_order() {
         "AC",
         &[("CAP-1", "C100N", "cap"), ("CAP-3", "XC100N", "cap")],
     );
-    let found = search(&catalog, &[ac, ma], &request("c100n"));
+    let found = search(&[ac, ma], &request("c100n"));
     assert_eq!(
         rows(&found),
         ["AC:CAP-1", "MA:CAP-1", "MA:CAP-7", "AC:CAP-3"]
@@ -202,33 +204,30 @@ fn search_ranks_as_before_and_ties_on_one_part_go_by_team_order() {
 
 #[test]
 fn the_team_filter_shows_only_that_teams_parts() {
-    let catalog = csv(&[("RES-1", "R1", "g-res"), ("RES-2", "R2", "g-res")]);
     let ma = team(MA, "MA", &[("RES-1", "R1", "res")]);
     let ac = team(AC, "AC", &[("RES-1", "R1", "res"), ("RES-5", "R5", "res")]);
     let only_ac = SearchRequest {
         team: Some(AC.into()),
         ..request("")
     };
-    let found = search(&catalog, &[ma.clone(), ac.clone()], &only_ac);
-    // No CSV rows: they belong to no team.
+    let found = search(&[ma.clone(), ac.clone()], &only_ac);
     assert_eq!(rows(&found), ["AC:RES-1", "AC:RES-5"]);
     let only_ma = SearchRequest {
         team: Some(MA.into()),
         ..request("")
     };
-    assert_eq!(rows(&search(&catalog, &[ma, ac], &only_ma)), ["MA:RES-1"]);
+    assert_eq!(rows(&search(&[ma, ac], &only_ma)), ["MA:RES-1"]);
 }
 
 #[test]
 fn grouping_by_team_makes_one_section_per_team_in_team_order() {
-    let catalog = csv(&[("RES-2", "R2", "g-res")]);
     let ma = team(MA, "MA", &[("RES-1", "R1", "res"), ("CAP-1", "C1", "cap")]);
     let ac = team(AC, "AC", &[("RES-1", "R1", "res")]);
     let by_team = SearchRequest {
         group_by: GroupBy::Team,
         ..request("")
     };
-    let found = search(&catalog, &[ac, ma], &by_team);
+    let found = search(&[ac, ma], &by_team);
     let sections: Vec<(&str, &str, usize)> = found
         .sections
         .iter()
@@ -239,12 +238,10 @@ fn grouping_by_team_makes_one_section_per_team_in_team_order() {
         [
             ("team:https://ac.example.com", "AC", 1),
             ("team:https://ma.example.com", "MA", 2),
-            ("team:", CSV_SECTION, 1),
         ]
     );
     // The same parts grouped by category.
     let found = search(
-        &catalog,
         &[team(
             MA,
             "MA",
@@ -258,7 +255,6 @@ fn grouping_by_team_makes_one_section_per_team_in_team_order() {
 
 #[test]
 fn the_selected_part_is_found_in_its_own_team() {
-    let catalog = csv(&[]);
     let parts: Vec<(String, String)> = (0..30)
         .map(|n| (format!("RES-{n:02}"), format!("R{n}")))
         .collect();
@@ -274,7 +270,6 @@ fn the_selected_part_is_found_in_its_own_team() {
         ipn: "RES-29".into(),
     };
     let found = search(
-        &catalog,
         &[ma, ac],
         &SearchRequest {
             limit: 2,
@@ -305,7 +300,7 @@ fn a_part_selected_while_signed_out_becomes_the_first_teams_part() {
         }),
         ..request("")
     };
-    let found = search(&catalog, &[ac.clone(), ma], &asked("RES-1"));
+    let found = search_with_csv(&catalog, &[ac.clone(), ma], &asked("RES-1"));
     assert_eq!(
         found.selected_part,
         Some(PartKey {
@@ -314,7 +309,7 @@ fn a_part_selected_while_signed_out_becomes_the_first_teams_part() {
         })
     );
     // A part still only in the CSV files stays as it is.
-    let found = search(&catalog, &[ac], &asked("RES-2"));
+    let found = search_with_csv(&catalog, &[ac], &asked("RES-2"));
     assert_eq!(
         found.selected_part.map(|part| part.team),
         Some(String::new())
@@ -323,10 +318,9 @@ fn a_part_selected_while_signed_out_becomes_the_first_teams_part() {
 
 #[test]
 fn a_team_with_new_parts_makes_its_rows_again_and_others_keep_theirs() {
-    let catalog = csv(&[]);
-    let at = csv_rows_by_ipn(Some(&catalog));
+    let at = csv_rows_by_ipn(None);
     let csv = CsvRows {
-        catalog: Some(&catalog),
+        catalog: None,
         at: &at,
     };
     let listed = ListedTeams::default();
@@ -346,7 +340,6 @@ fn a_team_with_new_parts_makes_its_rows_again_and_others_keep_theirs() {
 
 #[test]
 fn ten_teams_of_three_thousand_parts_search_quickly() {
-    let catalog = csv(&[]);
     let teams: Vec<Arc<KnownParts>> = (0..10)
         .map(|n| {
             let parts: Vec<(String, String)> = (0..3000)
@@ -363,14 +356,14 @@ fn ten_teams_of_three_thousand_parts_search_quickly() {
             )
         })
         .collect();
-    let at = csv_rows_by_ipn(Some(&catalog));
+    let at = csv_rows_by_ipn(None);
     let csv = CsvRows {
-        catalog: Some(&catalog),
+        catalog: None,
         at: &at,
     };
     let listed = ListedTeams::default();
     let sources = Sources {
-        csv: Some(&catalog),
+        csv: None,
         teams: listed.rows_of(&teams, &csv),
     };
     // Rows are made once; each keystroke only compares text.
@@ -386,13 +379,17 @@ fn ten_teams_of_three_thousand_parts_search_quickly() {
 
 // ---- Sections ----------------------------------------------------------
 
-/// Ranked matches as (section, CSV position, rank), best first.
+/// Ranked matches as (section, position in the first team, rank), best
+/// first.
 fn ranked(items: &[(&str, usize, u8)]) -> Vec<Ranked> {
     items
         .iter()
         .map(|(code, position, rank)| Ranked {
             section: (*code).to_owned(),
-            row: Row::Csv(*position),
+            row: Row::Team {
+                team: 0,
+                part: *position,
+            },
             rank: *rank,
         })
         .collect()
@@ -484,7 +481,7 @@ fn each_section_shows_at_most_the_limit_but_counts_every_match() {
     let many: Vec<Ranked> = (0..5)
         .map(|n| Ranked {
             section: "res".to_owned(),
-            row: Row::Csv(n),
+            row: Row::Team { team: 0, part: n },
             rank: 2,
         })
         .collect();
@@ -497,7 +494,7 @@ fn each_section_shows_at_most_the_limit_but_counts_every_match() {
     let groups = group_rows(
         many,
         &Grouping {
-            selected: Some(Row::Csv(4)),
+            selected: Some(Row::Team { team: 0, part: 4 }),
             ..grouping(2, false)
         },
     );
@@ -527,7 +524,7 @@ fn the_first_team_to_name_a_category_names_its_section() {
     ma.category_names = [("res".to_owned(), "MA resistors".to_owned())].into();
     let mut ac = (*team(AC, "AC", &[("RES-2", "R2", "res")])).clone();
     ac.category_names = [("res".to_owned(), "AC resistors".to_owned())].into();
-    let found = search(&csv(&[]), &[Arc::new(ma), Arc::new(ac)], &request(""));
+    let found = search(&[Arc::new(ma), Arc::new(ac)], &request(""));
     assert_eq!(found.sections[0].name, "MA resistors");
 }
 

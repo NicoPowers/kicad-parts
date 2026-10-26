@@ -54,7 +54,8 @@ fn footprint(name: &str, attr: &str, pads: &[&str]) -> String {
     )
 }
 
-/// A CSV catalog folder, a fake KiCad install and fixture KiCad settings.
+/// A folder of our own libraries, a fake KiCad install and fixture KiCad
+/// settings.
 struct Fixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -403,7 +404,25 @@ fn filters_footprints_for_a_symbol_like_kicad() {
 fn marks_items_the_catalog_uses_and_lists_its_parts() {
     let fixture = fixture();
     let browser = indexed(&fixture);
-    let items = browser.library_items(&request(PreviewKind::Symbol), &[], None);
+    // The team's RES-1 uses our g-pas:R_US.
+    let team = |symbol: &str| {
+        let values = BTreeMap::from([(
+            "RES-1".to_owned(),
+            PartValues {
+                symbol: Some(symbol.into()),
+                footprint: Some("g-Resistor_SMD:R_0603".into()),
+                ..PartValues::default()
+            },
+        )]);
+        Arc::new(KnownParts::new(
+            "https://ma.example.com",
+            "MA",
+            values,
+            BTreeMap::new(),
+        ))
+    };
+    let ours = team("g-pas:R_US");
+    let items = browser.library_items(&request(PreviewKind::Symbol), &[ours.clone()], None);
     let in_catalog: Vec<String> = items
         .rows
         .iter()
@@ -419,7 +438,7 @@ fn marks_items_the_catalog_uses_and_lists_its_parts() {
                 name: "R_US".into(),
                 selection: None,
             },
-            &[],
+            &[ours],
             None,
         )
         .unwrap();
@@ -430,20 +449,8 @@ fn marks_items_the_catalog_uses_and_lists_its_parts() {
     assert_eq!(detail.footprint_filters, ["R_*"]);
     assert_eq!(detail.used_by.len(), 1);
     assert_eq!(detail.used_by[0].ipn, "RES-1");
-    // The team catalog's current values count: a part moved to Device:R.
-    let current = BTreeMap::from([(
-        "RES-1".to_owned(),
-        PartValues {
-            symbol: Some("Device:R".into()),
-            ..PartValues::default()
-        },
-    )]);
-    let team = Arc::new(KnownParts::new(
-        "https://ma.example.com",
-        "MA",
-        current,
-        BTreeMap::new(),
-    ));
+    // The team catalog's current values count: the part moved to Device:R.
+    let team = team("Device:R");
     let items = browser.library_items(&request(PreviewKind::Symbol), &[team.clone()], None);
     let in_catalog: Vec<String> = items
         .rows
