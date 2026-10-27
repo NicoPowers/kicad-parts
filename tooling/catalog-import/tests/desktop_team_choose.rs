@@ -249,7 +249,7 @@ impl Team {
         let data = tempfile::tempdir().unwrap();
         let kicad = kicad(data.path(), copy.path());
         let browser = CatalogBrowser::open(BrowserConfig {
-            catalog_root: copy.path().to_path_buf(),
+            catalog_root: Some(copy.path().to_path_buf()),
             cache_dir: data.path().join("cache"),
             settings_file: data.path().join("settings.json"),
             kicad_locations: SearchLocations::Only(vec![kicad.install.clone()]),

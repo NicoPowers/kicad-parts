@@ -48,7 +48,7 @@ fn ready(outcome: PreviewOutcome) -> PreviewSet {
 
 fn open_browser(catalog_root: &Path, data: &Path) -> CatalogBrowser {
     CatalogBrowser::open(BrowserConfig {
-        catalog_root: catalog_root.to_path_buf(),
+        catalog_root: Some(catalog_root.to_path_buf()),
         cache_dir: data.join("cache"),
         settings_file: data.join("config").join("settings.json"),
         kicad_locations: SearchLocations::Standard,

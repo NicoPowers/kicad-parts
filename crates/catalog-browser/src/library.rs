@@ -161,15 +161,13 @@ pub(crate) fn view_of(check: &LibraryCheck) -> LibraryCheckView {
 
 fn hint(group: Group) -> &'static str {
     match group {
-        Group::ToFix => {
-            "These stop the next import that uses them, and Add part or Edit part with them, until they are fixed in KiCad."
-        }
+        Group::ToFix => "These stop Add part or Edit part with them until they are fixed in KiCad.",
         Group::NotInCatalog => {
             "In our libraries, but no part uses them and the Catalog does not have them. They were probably made in KiCad."
         }
         Group::WorthALook => "Check these; some need fixing before a part uses them.",
         Group::CleanUp => {
-            "Old problems of footprints that have not changed since the last import. They stop nothing; fix them when you can."
+            "Old problems of footprints the Catalog has just like this. They stop nothing; fix them when you can."
         }
     }
 }

@@ -22,7 +22,7 @@ fn sample_library() -> PathBuf {
 /// saying why, when KiCad 10 is not installed.
 fn open(dir: &Path) -> Option<(CatalogBrowser, TeamCatalog)> {
     let browser = CatalogBrowser::open(BrowserConfig {
-        catalog_root: sample_library(),
+        catalog_root: Some(sample_library()),
         cache_dir: dir.join("cache"),
         settings_file: dir.join("config").join("settings.json"),
         kicad_locations: SearchLocations::Standard,

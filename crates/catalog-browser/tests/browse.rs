@@ -21,7 +21,7 @@ const TEAM: &str = "https://ma.example.com";
 
 fn open_browser(dir: &Path, locations: SearchLocations) -> CatalogBrowser {
     CatalogBrowser::open(BrowserConfig {
-        catalog_root: sample_library::root(),
+        catalog_root: Some(sample_library::root()),
         cache_dir: dir.join("cache"),
         settings_file: dir.join("config").join("settings.json"),
         kicad_locations: locations,
@@ -129,10 +129,6 @@ fn search_select_and_preview_a_multi_unit_part() {
     let browser = open_browser(dir.path(), SearchLocations::Standard);
     let status = browser.status();
     assert!(status.kicad.is_ready(), "{:?}", status.kicad);
-    assert_eq!(
-        status.library_folder,
-        Some(sample_library::root().display().to_string())
-    );
 
     let results = browser.search_with("sample-mcu", 50, &sample_team());
     assert_eq!(results.total, 1);

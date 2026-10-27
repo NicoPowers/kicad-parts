@@ -23,7 +23,7 @@ use desktop_contract::{
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{Manager, PhysicalSize, State};
 
@@ -36,7 +36,9 @@ type Repos = Arc<LibraryRepos>;
 /// the app without touching the user's settings or KiCad search.
 #[derive(Debug, Default, PartialEq)]
 struct LaunchOptions {
-    /// `--catalog-root DIR`: holds `database/`, `symbols/`, `footprints/`.
+    /// `--catalog-root DIR`: the local library folder, holding our
+    /// `symbols/`, `footprints/` and `3d-models/`. None by default: making
+    /// the team's linked library repo this folder is kicad-parts-ff3c.
     catalog_root: Option<PathBuf>,
     /// `--data-dir DIR`: settings, preview cache and the KiCad libraries,
     /// instead of the per-user application directories.
@@ -196,31 +198,6 @@ fn size_window_in_screen_pixels(app: &tauri::App, scale: f64) -> tauri::Result<(
         pixels(config.width),
         pixels(config.height),
     ))
-}
-
-fn default_catalog_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("KICAD_PARTS_CATALOG_ROOT") {
-        return PathBuf::from(root);
-    }
-    // Until the canonical catalog exists, development builds browse the
-    // CSV catalog in this repository.
-    normalize(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-}
-
-/// Removes `.` and `..` lexically, so paths shown in the UI stay readable
-/// (`canonicalize` would add a `\\?\` prefix on Windows).
-fn normalize(path: &Path) -> PathBuf {
-    let mut normal = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normal.pop();
-            }
-            other => normal.push(other),
-        }
-    }
-    normal
 }
 
 /// The app's cache folder. On Windows, Tauri's cache folder is the folder
@@ -935,10 +912,7 @@ fn main() {
                 SearchLocations::Only(options.kicad_search_roots.clone())
             };
             let browser = CatalogBrowser::open(BrowserConfig {
-                catalog_root: options
-                    .catalog_root
-                    .clone()
-                    .unwrap_or_else(default_catalog_root),
+                catalog_root: options.catalog_root.clone(),
                 cache_dir,
                 settings_file: config_dir.join("settings.json"),
                 kicad_locations,
@@ -1167,12 +1141,5 @@ mod tests {
         let cache = Path::new("/home/a/.cache/org.kicadparts.desktop");
         let data = Path::new("/home/a/.local/share/org.kicadparts.desktop");
         assert_eq!(cache_dir_apart(cache, data), cache);
-    }
-
-    #[test]
-    fn default_catalog_root_is_the_repository() {
-        let root = normalize(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
-        assert!(root.join("database").is_dir(), "{root:?}");
-        assert!(!root.to_string_lossy().contains(".."));
     }
 }

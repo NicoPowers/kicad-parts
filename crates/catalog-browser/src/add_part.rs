@@ -5,7 +5,7 @@
 //! Then turn the confirmed form into the files a new part sends.
 //!
 //! Everything here works on what the app already has: the team catalog's
-//! categories, remembered matches and current parts, the CSV catalog's
+//! categories, remembered matches and current parts, the local library folder's
 //! IPNs and footprint files, and KiCad's own footprint libraries. No
 //! network, so the guess is the same every time.
 
@@ -44,15 +44,15 @@ pub(crate) struct Context<'a> {
     /// Every part's current details and revision, from the followed
     /// replica.
     pub parts: Vec<(PartDetails, PartRevision)>,
-    /// Every IPN known: the team catalog's and the CSV catalog's.
+    /// Every IPN the team catalog has.
     pub ipns: BTreeSet<String>,
-    /// The CSV catalog's own footprints.
+    /// Our own footprints in the local library folder.
     pub footprints: &'a [LocalFootprint],
     /// KiCad's data folder, when KiCad was found.
     pub kicad_share: Option<PathBuf>,
 }
 
-/// One footprint file of the CSV catalog (`footprints/g-*.pretty`).
+/// One footprint file of our libraries (`footprints/g-*.pretty`).
 #[derive(Clone, Debug)]
 pub(crate) struct LocalFootprint {
     pub reference: String,
@@ -60,7 +60,7 @@ pub(crate) struct LocalFootprint {
     pub pads: Option<BTreeSet<PadKey>>,
 }
 
-/// Every footprint of the CSV catalog under `root`, with its pads, found
+/// Every footprint of our libraries under `root`, with its pads, found
 /// through our layout, the default library source profile.
 pub(crate) fn local_footprints(root: &Path) -> Vec<LocalFootprint> {
     let own = SourceProfile::own();

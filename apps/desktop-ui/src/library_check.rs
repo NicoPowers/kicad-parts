@@ -4,7 +4,7 @@
 //! Catalog yet, Worth a look and Clean-up. A symbol or footprint not in
 //! the Catalog yet can start Add part (kicad-parts-37a7).
 //!
-//! The check compares our folder with one team's Catalog: the team chosen
+//! The check compares the local library folder with one team's Catalog: the team chosen
 //! in the part list, else the one the person chose here last, else the
 //! first they can edit (kicad-parts-8a71). With All teams and two teams or
 //! more, the view has its own Team list box, and the line names the team.
@@ -114,7 +114,7 @@ pub(crate) fn LibraryCheckPanel(
                 <div>
                     <h2 id="library-check-title" tabindex="-1">"Library check"</h2>
                     <p class="part-description">
-                        "The symbols, footprints and 3D models of our CSV catalog folder, compared with the Catalog."
+                        "The symbols, footprints and 3D models of the local library folder, compared with the Catalog."
                     </p>
                     <TeamSelect id="library-check-team" options=teams chosen=team changed=choose_team />
                 </div>

@@ -62,7 +62,8 @@ pub fn seed(admin: &PocketBaseClient, codes: &[&str]) -> Result<Seeded, String> 
 
 /// The files of the sample library `part` uses that no earlier part sent:
 /// its symbol and footprints in g- libraries, and the 3D models those
-/// footprints link in the library.
+/// footprints link in the library. Each is named by its file name, as a
+/// person's chosen files are.
 fn uploads(
     root: &Path,
     part: &SamplePart,
@@ -73,7 +74,7 @@ fn uploads(
         if sent.insert(format!("symbol {}", part.symbol)) {
             let file = format!("symbols/{library}.kicad_sym");
             let bytes = read(root, &file)?;
-            uploads.push(symbol_upload(&bytes, name, &part.symbol, &file)?);
+            uploads.push(symbol_upload(&bytes, name, &part.symbol, file_name(&file))?);
         }
     }
     for footprint in part.footprints() {
@@ -88,11 +89,11 @@ fn uploads(
         for model in read_footprint_file(&bytes)?.models {
             if let Some(key) = model.key {
                 if sent.insert(format!("model {key}")) {
-                    uploads.push(model_upload(&read(root, &key)?, &key, &key)?);
+                    uploads.push(model_upload(&read(root, &key)?, &key, file_name(&key))?);
                 }
             }
         }
-        uploads.push(footprint_upload(&bytes, footprint, &file)?);
+        uploads.push(footprint_upload(&bytes, footprint, file_name(&file))?);
     }
     Ok(uploads)
 }
@@ -103,6 +104,11 @@ fn own_reference(reference: &str) -> Option<(&str, &str)> {
     reference
         .split_once(':')
         .filter(|(library, _)| library.starts_with("g-"))
+}
+
+/// The name of the repository file `path`, such as `g-res.kicad_sym`.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 fn read(root: &Path, file: &str) -> Result<Vec<u8>, String> {

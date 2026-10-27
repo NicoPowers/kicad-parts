@@ -299,7 +299,7 @@ fn the_desktop_edits_and_resolves_a_conflict() {
     wait_until("the saved changes", || checkpoint(&team) == seeded + 6);
     let cache = tempfile::tempdir().unwrap();
     let browser = catalog_browser::CatalogBrowser::open(catalog_browser::BrowserConfig {
-        catalog_root: sample_library::root(),
+        catalog_root: Some(sample_library::root()),
         cache_dir: cache.path().join("cache"),
         settings_file: cache.path().join("settings.json"),
         kicad_locations: kicad_integration::SearchLocations::Only(Vec::new()),

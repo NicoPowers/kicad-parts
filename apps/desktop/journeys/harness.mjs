@@ -134,14 +134,14 @@ export function installedKicadCli() {
 }
 
 /**
- * Launches the desktop app with isolated settings and cache. Its catalog
- * folder is the sample library unless `args` names another with
- * `--catalog-root=`.
- * @param {{ args?: string[], dataDir?: string }} options
+ * Launches the desktop app with isolated settings and cache. Its local
+ * library folder is the sample library unless `args` names another with
+ * `--catalog-root=`, or `libraryFolder` is false for none.
+ * @param {{ args?: string[], dataDir?: string, libraryFolder?: boolean }} options
  */
-export async function launchApp({ args = [], dataDir = tempDir('data') } = {}) {
+export async function launchApp({ args = [], dataDir = tempDir('data'), libraryFolder = true } = {}) {
   assert.ok(fs.existsSync(appBinary), `build the app first: ${appBinary}`);
-  if (!args.some((arg) => arg.startsWith('--catalog-root='))) {
+  if (libraryFolder && !args.some((arg) => arg.startsWith('--catalog-root='))) {
     args = [...args, `--catalog-root=${sampleLibrary}`];
   }
   // The Libraries browser reads KiCad's settings folder for the person's

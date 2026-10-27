@@ -190,8 +190,9 @@ describe('team catalog: edit a part with files', () => {
       );
       return tr ? [...tr.querySelectorAll('td')].map((td) => td.textContent.trim()) : null;
     });
+    // Both files are named the same way: by their file name.
     assert.deepEqual(row, [
-      'footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod (footprint revision 1 of g-Resistor_SMD:R_0603_1608Metric)',
+      'R_0603_1608Metric.kicad_mod (footprint revision 1 of g-Resistor_SMD:R_0603_1608Metric)',
       'R_0603_1608Metric.kicad_mod (footprint revision 2 of g-Resistor_SMD:R_0603_1608Metric)',
     ]);
     assert.match(await provenance(FOOTPRINT), /^team catalog, footprint revision 2/);

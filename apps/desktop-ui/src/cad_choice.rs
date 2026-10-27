@@ -170,7 +170,10 @@ pub(crate) fn use_words(pick: &TeamPick) -> String {
         PickUse::Ours => {
             "From our libraries: added to the Catalog when you save, as committed.".to_owned()
         }
-        PickUse::Kicad => "KiCad's own: the part refers to it, as imported parts do.".to_owned(),
+        PickUse::Kicad => {
+            "KiCad's own: the part refers to it in KiCad's library, which every engineer has."
+                .to_owned()
+        }
         PickUse::Copy => format!(
             "From the installed library {}, which teammates may not have: copied into the library you choose.",
             pick.library.nickname

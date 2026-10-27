@@ -174,7 +174,7 @@ fn the_desktop_uses_files_and_keeps_other_parts_on_their_revision() {
     // Both are drawn with kicad-cli before saving.
     let data = tempfile::tempdir().unwrap();
     let browser = CatalogBrowser::open(BrowserConfig {
-        catalog_root: library.clone(),
+        catalog_root: Some(library.clone()),
         cache_dir: data.path().join("cache"),
         settings_file: data.path().join("settings.json"),
         kicad_locations: SearchLocations::Standard,
@@ -291,10 +291,11 @@ fn the_desktop_uses_files_and_keeps_other_parts_on_their_revision() {
         row.after,
         format!("R_0603_1608Metric.kicad_mod (footprint revision 2 of {FOOTPRINT})")
     );
-    // It replaced the file the sample part was added with.
+    // It replaced the file the sample part was added with, named the same
+    // way.
     assert_eq!(
         row.before,
-        format!("{FOOTPRINT_FILE} (footprint revision 1 of {FOOTPRINT})")
+        format!("R_0603_1608Metric.kicad_mod (footprint revision 1 of {FOOTPRINT})")
     );
     let other = team.part(OTHER).unwrap().unwrap();
     assert!(

@@ -138,7 +138,7 @@ describe('team catalog: choose symbols and footprints from the libraries', () =>
     await waitForText(browser, '#add-download', /^From the libraries: Device:C/, 30_000);
     assert.equal(await valueOf('#add-symbol'), KICAD_SYMBOL);
     assert.equal(await browser.execute(() => document.getElementById('add-symbol').readOnly), true);
-    assert.match(await textOf(browser, '.add-form fieldset:last-of-type'), /KiCad's own: the part refers to it, as imported parts do\./);
+    assert.match(await textOf(browser, '.add-form fieldset:last-of-type'), /KiCad's own: the part refers to it in KiCad's library, which every engineer has\./);
     await waitForText(browser, '#add-guess', /^Best guess: Capacitors/);
     ipn = await valueOf('#add-ipn');
     assert.match(ipn, /^CAP-\d{4}-0001$/);

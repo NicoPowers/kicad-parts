@@ -5,7 +5,7 @@
 //! - the Catalog has it: the part is bound to it as the Catalog has it;
 //! - one of our libraries' items the Catalog lacks: it is added from the
 //!   folder when saving, as committed (kicad-parts-37a7);
-//! - KiCad's own: the part refers to it as KiCad's, as imported parts do;
+//! - KiCad's own: the part refers to it in KiCad's library;
 //! - another installed library's: it is copied into one of our libraries,
 //!   like a download, with the 3D models its footprint links when they can
 //!   be read.
@@ -118,7 +118,11 @@ fn encoded(bytes: &[u8]) -> String {
 impl CatalogBrowser {
     /// Our libraries' nicknames, by role.
     pub fn our_libraries(&self) -> OurLibraries {
-        crate::libraries::sources::our_library_names(&self.config.catalog_root)
+        self.config
+            .catalog_root
+            .as_deref()
+            .map(crate::libraries::sources::our_library_names)
+            .unwrap_or_default()
     }
 
     /// The library `key` of `kind`, as the browser lists it, once read.
@@ -293,7 +297,7 @@ impl CatalogBrowser {
             }
             LibraryGroup::Kicad => {
                 pick.notes.push(
-                    "KiCad's own: the part refers to it, as imported parts do. Every engineer has KiCad."
+                    "KiCad's own: the part refers to it in KiCad's library, which every engineer has."
                         .into(),
                 );
             }
@@ -468,14 +472,17 @@ impl CatalogBrowser {
 
     /// The uploads that add our libraries' items `wanted` names and the
     /// Catalog lacks, read from the folder as committed (kicad-parts-37a7),
-    /// with the files the history lists. An item the folder does not have
-    /// is left for the team server to refuse plainly.
+    /// with the files the history lists. An item the folder does not have,
+    /// or every item while no folder is set, is left for the team server
+    /// to refuse plainly.
     pub(crate) fn ours_uploads(
         &self,
         wanted: &[(CadItemKind, String)],
         team: &TeamCatalog,
     ) -> Result<(Vec<catalog::pocketbase::CadUpload>, Vec<String>), String> {
-        let root = &self.config.catalog_root;
+        let Some(root) = self.config.catalog_root.as_deref() else {
+            return Ok((Vec::new(), Vec::new()));
+        };
         let mut uploads: Vec<catalog::pocketbase::CadUpload> = Vec::new();
         let mut sources: Vec<String> = Vec::new();
         for (kind, reference) in wanted {

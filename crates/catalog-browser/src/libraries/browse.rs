@@ -75,7 +75,7 @@ impl CatalogBrowser {
         view
     }
 
-    /// Where the libraries are: our CSV catalog folder, KiCad's data
+    /// Where the libraries are: the local library folder, KiCad's data
     /// folder (found even when kicad-cli cannot run) and the person's
     /// KiCad settings folder.
     pub(crate) fn library_places(&self) -> Places {

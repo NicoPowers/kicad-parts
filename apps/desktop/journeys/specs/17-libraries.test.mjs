@@ -460,3 +460,39 @@ describe('Libraries browser', () => {
     await browser.waitUntil(async () => browser.execute((s) => !document.querySelector(s), DIALOG), { timeout: 5_000 });
   });
 });
+
+// With no local library folder set, the features that read it say so and
+// what to do, instead of looking empty or broken (kicad-parts-e257).
+describe('Libraries browser without a local library folder', () => {
+  const NO_FOLDER = "There is no local library folder yet. Link the team's library repo in the Teams menu.";
+  let server;
+  let browser;
+
+  before(async () => {
+    server = await startTeamServer();
+    ({ browser } = await launchApp({ args: [`--kicad-config-dir=${kicadSettings()}`], libraryFolder: false }));
+    await signInToTeam(browser, server);
+  });
+
+  after(async () => {
+    await browser?.deleteSession();
+    await server?.stop();
+  });
+
+  it('says there is no local library folder yet, where Ours would be', async () => {
+    await waitForText(browser, '#result-count', '16 matching parts');
+    // Someone who can edit sees why the library check cannot run.
+    await waitForText(browser, '.library-check-line', `Library check could not run: ${NO_FOLDER}`);
+    await openBrowser(browser);
+    await waitUntilRead(browser);
+    const groups = await browser.execute(() =>
+      [...document.querySelectorAll('.library-group')].map((h) => h.textContent),
+    );
+    assert.equal(groups[0], 'Ours (0)');
+    assert.match(groups[1], /^KiCad \(\d{3}\)$/);
+    assert.equal(await textOf(browser, '.library-group-note'), NO_FOLDER);
+    await assertAccessible(browser, '110-libraries-no-library-folder');
+    await screenshot(browser, '110-libraries-no-library-folder');
+    await (await browser.$('#libraries-close')).click();
+  });
+});

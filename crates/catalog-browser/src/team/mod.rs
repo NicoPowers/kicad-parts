@@ -2061,8 +2061,8 @@ fn file_row(
         CadItemKind::Footprint => ("Footprint file", "footprint"),
         CadItemKind::Model3d => ("3D model file", "3D model"),
     };
-    // A file chosen in the app keeps its name; one an import read, its
-    // path in the CSV catalog.
+    // A file is named as it was chosen: its name, or its path in our
+    // libraries.
     let file = |revision: &StoredCadItemRevision| -> Option<String> {
         let source: serde_json::Value = serde_json::from_str(&revision.source).ok()?;
         let name = source

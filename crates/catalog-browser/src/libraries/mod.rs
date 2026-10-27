@@ -44,6 +44,7 @@ struct State {
     libraries: Vec<Library>,
     notes: Vec<String>,
     installed_note: Option<String>,
+    ours_note: Option<String>,
     /// The teams whose library repos are listed, in order.
     teams: Vec<LibraryTeam>,
     /// Whether old cache layouts were removed this run.
@@ -102,6 +103,7 @@ impl LibraryIndex {
             read::clean_cache(&self.shared.cache_dir);
         }
         state.installed_note = found.installed_note;
+        state.ours_note = found.ours_note;
         state.teams = found.teams;
         let old = std::mem::take(&mut state.libraries);
         state.libraries = sources
@@ -221,6 +223,7 @@ impl LibraryIndex {
             total: state.libraries.len(),
             notes: state.notes.clone(),
             installed_note: state.installed_note.clone(),
+            ours_note: state.ours_note.clone(),
             teams: state.teams.clone(),
         }
     }

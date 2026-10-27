@@ -404,7 +404,7 @@ describe('team catalog: history, edits and conflicts', () => {
       timeout: 20_000,
       timeoutMsg: `the Symbol did not become Device:R: ${await textOf(browser, '.edit-form')}`,
     });
-    await waitForText(browser, '.edit-form .file-chosen .file-name', /^KiCad's own: the part refers to it, as imported parts do\./);
+    await waitForText(browser, '.edit-form .file-chosen .file-name', /^KiCad's own: the part refers to it in KiCad's library, which every engineer has\./);
     await browser.waitUntil(async () => (await browser.execute(() => document.activeElement?.id)) === 'edit-cad-0-choose', {
       timeout: 5_000,
       timeoutMsg: 'focus did not come back to Choose…',

@@ -590,7 +590,7 @@ fn one_list_holds_both_teams_and_each_edit_goes_to_its_own_server() {
     });
     let cache = tempfile::tempdir().unwrap();
     let browser = CatalogBrowser::open(BrowserConfig {
-        catalog_root: sample_library::root(),
+        catalog_root: Some(sample_library::root()),
         cache_dir: cache.path().join("cache"),
         settings_file: cache.path().join("settings.json"),
         kicad_locations: kicad_integration::SearchLocations::Only(Vec::new()),
@@ -720,7 +720,7 @@ fn a_team_down_at_start_shows_its_parts_file_until_its_server_is_back() {
     let parts_folder = data.path().join("parts-files");
     let cache = tempfile::tempdir_in(&scratch).unwrap();
     let browser = CatalogBrowser::open(BrowserConfig {
-        catalog_root: sample_library::root(),
+        catalog_root: Some(sample_library::root()),
         cache_dir: cache.path().join("cache"),
         settings_file: cache.path().join("settings.json"),
         kicad_locations: kicad_integration::SearchLocations::Only(Vec::new()),

@@ -1,8 +1,8 @@
 //! Add part from our libraries (kicad-parts-37a7): a symbol and a footprint
-//! already in the CSV catalog's own libraries (drawn by hand in KiCad, or
-//! committed by someone else) instead of a download.
+//! already in our own libraries (drawn by hand in KiCad, or committed by
+//! someone else) instead of a download.
 //!
-//! The chosen items are read from the CSV catalog folder the app reads,
+//! The chosen items are read from the local library folder the app reads,
 //! with the library check's safety (no link is followed; every path stays
 //! inside the folder), and handed to the same reading as a download
 //! ([`crate::add_part::read_files`]), so the category guess, the next free
@@ -10,7 +10,7 @@
 //! link; the model is sent when the link points into our library. The
 //! files are sent exactly as they are in the library, with references
 //! unchanged, and each records the repository file and the commit it was
-//! read from, so a later CSV import naming them finds nothing to change.
+//! read from.
 //! Symbols and footprints the Catalog already has are used, not sent.
 
 use crate::git::commit_holding;
@@ -131,7 +131,7 @@ fn read_footprint(root: &Path, reference: &str) -> Result<File, String> {
     })
 }
 
-/// Reads the chosen symbol and footprint from the CSV catalog under
+/// Reads the chosen symbol and footprint from the local library folder
 /// `root` and works out what saving them needs: whether the Catalog has
 /// each (`has`), the commit holding the files to send, and what stops the
 /// save (`check`'s errors and model problems for these items, files that

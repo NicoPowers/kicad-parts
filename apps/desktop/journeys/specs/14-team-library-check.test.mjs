@@ -129,7 +129,7 @@ describe('team catalog: the library check', () => {
     assert.match(toFix, /g-Resistor_SMD:R_0603_1608Metric/);
     assert.match(toFix, /footprints\/g-Resistor_SMD\.pretty\/R_0603_1608Metric\.kicad_mod/);
     assert.match(toFix, /C:\/Users\/me\/models\/R_0603\.step, which is outside our library/);
-    assert.match(toFix, /The footprint changed since the last import\.$/);
+    assert.match(toFix, /The footprint differs from the Catalog's\.$/);
     const newItems = await browser.execute(() =>
       [...document.querySelectorAll('.library-check-group:nth-of-type(2) .library-check-name')].map((p) =>
         p.textContent.trim(),

@@ -577,6 +577,13 @@ fn poll_progress(view: RwSignal<Option<LibrariesView>>, alive: Arc<AtomicBool>) 
     );
 }
 
+/// What the Ours and Installed groups say when they list nothing.
+#[derive(Clone, Default)]
+struct GroupNotes {
+    ours: Option<String>,
+    installed: Option<String>,
+}
+
 /// One group of the library list: its heading and its libraries.
 struct ListGroup {
     /// The heading's element ID.
@@ -589,14 +596,14 @@ struct ListGroup {
 }
 
 /// The groups of `entries` in the order shown: ours, each team's repo,
-/// KiCad's, then installed ones. Empty groups are left out, except
-/// Installed with `installed_note`, which says why it is empty. Teams'
-/// repos are left out without `with_teams`, such as while choosing an
-/// item for a part.
+/// KiCad's, then installed ones. Empty groups are left out, except Ours
+/// with `ours_note` and Installed with `installed_note`, which say why
+/// they are empty. Teams' repos are left out without `with_teams`, such as
+/// while choosing an item for a part.
 fn list_groups(
     entries: &[LibraryEntry],
     teams: &[LibraryTeam],
-    installed_note: Option<String>,
+    notes: &GroupNotes,
     with_teams: bool,
 ) -> Vec<ListGroup> {
     let mut groups = Vec::new();
@@ -624,10 +631,12 @@ fn list_groups(
     };
     for group in LibraryGroup::ALL {
         let in_group = of(group, "");
-        let note = (group == LibraryGroup::Installed)
-            .then(|| installed_note.clone())
-            .flatten()
-            .filter(|_| in_group.is_empty());
+        let note = match group {
+            LibraryGroup::Ours => notes.ours.clone(),
+            LibraryGroup::Installed => notes.installed.clone(),
+            _ => None,
+        }
+        .filter(|_| in_group.is_empty());
         let count = in_group.len();
         push(
             format!("library-group-{group:?}").to_lowercase(),
@@ -684,8 +693,12 @@ fn LibraryList(
                 .unwrap_or_default()
         })
     };
-    let installed_note =
-        move || view.with(|view| view.as_ref().and_then(|view| view.installed_note.clone()));
+    let group_notes = move || {
+        view.with(|view| GroupNotes {
+            ours: view.as_ref().and_then(|view| view.ours_note.clone()),
+            installed: view.as_ref().and_then(|view| view.installed_note.clone()),
+        })
+    };
     let teams = move || {
         view.with(|view| {
             view.as_ref()
@@ -711,7 +724,7 @@ fn LibraryList(
             </button>
             {move || {
                 let entries = entries.get();
-                list_groups(&entries, &teams(), installed_note(), with_teams)
+                list_groups(&entries, &teams(), &group_notes(), with_teams)
                     .into_iter()
                     .map(|group| {
                         let ListGroup { id, title, mark, entries: in_group, note: group_note } = group;

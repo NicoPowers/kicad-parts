@@ -70,10 +70,6 @@ pub struct AppStatus {
     pub override_rejected: Option<String>,
     /// Why the saved settings could not be read (defaults are in use).
     pub settings_error: Option<String>,
-    /// The local library folder: the KiCad libraries the library check,
-    /// Add part from our libraries, the Libraries browser's "Ours" and the
-    /// 3D view read. `None` while none is set.
-    pub library_folder: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -267,8 +263,8 @@ pub enum PreviewKind {
 pub struct PreviewRequest {
     pub ipn: String,
     pub kind: PreviewKind,
-    /// The Symbol or Footprint field value to preview instead of the CSV
-    /// catalog's, such as the team catalog's current revision.
+    /// The Symbol or Footprint field value to preview, such as the team
+    /// catalog's current revision's.
     #[serde(default)]
     pub field: Option<String>,
     /// Draw what this revision of the part in the team catalog uses, from
@@ -1700,6 +1696,9 @@ pub struct LibrariesView {
     /// settings not being found.
     #[serde(default)]
     pub installed_note: Option<String>,
+    /// Said in the Ours group while there is no local library folder.
+    #[serde(default)]
+    pub ours_note: Option<String>,
     /// The linked teams whose reviewed library layouts are listed, in the
     /// order their groups are shown.
     #[serde(default)]

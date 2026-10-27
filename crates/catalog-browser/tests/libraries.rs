@@ -188,7 +188,7 @@ fn fixture() -> Fixture {
 
 fn open(fixture: &Fixture, config: Option<&Path>) -> CatalogBrowser {
     CatalogBrowser::open(BrowserConfig {
-        catalog_root: fixture.catalog.clone(),
+        catalog_root: Some(fixture.catalog.clone()),
         cache_dir: fixture.root.join("cache"),
         settings_file: fixture.root.join("settings.json"),
         kicad_locations: SearchLocations::Only(vec![fixture.install.clone()]),
@@ -623,7 +623,7 @@ fn indexes_and_draws_kicads_own_libraries() {
     let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/sample-library");
     let open_real = || {
         CatalogBrowser::open(BrowserConfig {
-            catalog_root: sample.clone(),
+            catalog_root: Some(sample.clone()),
             cache_dir: dir.path().join("cache"),
             settings_file: dir.path().join("settings.json"),
             kicad_locations: SearchLocations::Standard,
@@ -786,6 +786,38 @@ fn a_bad_file_is_skipped_and_the_rest_of_its_library_kept() {
         .find(|entry| entry.key.nickname == "Resistor_SMD")
         .unwrap();
     assert!(resistors.note.is_some());
+}
+
+/// With no local library folder, Ours lists nothing and says what to do.
+#[test]
+fn says_plainly_when_there_is_no_local_library_folder() {
+    let fixture = fixture();
+    let browser = CatalogBrowser::open(BrowserConfig {
+        catalog_root: None,
+        cache_dir: fixture.root.join("cache"),
+        settings_file: fixture.root.join("settings.json"),
+        kicad_locations: SearchLocations::Only(vec![fixture.install.clone()]),
+        kicad_config_dir: Some(fixture.config.clone()),
+        kicad_documents_dir: None,
+    });
+    browser.libraries(true);
+    assert!(browser.wait_for_libraries(WAIT));
+    let view = browser.libraries(false);
+    assert_eq!(
+        view.ours_note.as_deref(),
+        Some(
+            "There is no local library folder yet. Link the team's library repo in the Teams menu."
+        )
+    );
+    assert!(
+        view.symbols
+            .iter()
+            .chain(&view.footprints)
+            .all(|entry| entry.key.group != LibraryGroup::Ours)
+    );
+    assert_eq!(browser.our_libraries(), Default::default());
+    // With a folder there is no note.
+    assert_eq!(indexed(&fixture).libraries(false).ours_note, None);
 }
 
 #[test]

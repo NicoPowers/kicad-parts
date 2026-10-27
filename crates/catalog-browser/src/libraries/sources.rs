@@ -1,8 +1,8 @@
 //! Which libraries the browser lists, in these groups:
 //!
-//! - Ours: the CSV catalog's `symbols/g-*.kicad_sym` (or `.kicad_symdir`)
-//!   and `footprints/g-*.pretty`, found without following links, as the
-//!   library check reads them;
+//! - Ours: the local library folder's `symbols/g-*.kicad_sym` (or
+//!   `.kicad_symdir`) and `footprints/g-*.pretty`, found without following
+//!   links, as the library check reads them;
 //! - one group per linked team: the libraries of its library repo, as the
 //!   person reviewed its layout (kicad-parts-e9a3), from files the app
 //!   wrote out of its own copy;
@@ -62,8 +62,8 @@ pub(crate) struct Source {
 /// Where the libraries are.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Places {
-    /// The CSV catalog folder.
-    pub catalog_root: PathBuf,
+    /// The local library folder, if one is set.
+    pub catalog_root: Option<PathBuf>,
     /// KiCad's installed data folder.
     pub share: Option<PathBuf>,
     /// KiCad's settings folder holding the person's tables.
@@ -85,6 +85,8 @@ pub(crate) struct Found {
     /// Said in the Installed group when it lists nothing, such as KiCad's
     /// settings not being found.
     pub installed_note: Option<String>,
+    /// Said in the Ours group while there is no local library folder.
+    pub ours_note: Option<String>,
     /// The teams whose libraries are listed, for their groups' headings.
     pub teams: Vec<LibraryTeam>,
 }
@@ -97,7 +99,13 @@ const KICAD_MAJOR: u32 = kicad_integration::SUPPORTED_MAJOR;
 pub(crate) fn find_sources(places: &Places) -> Found {
     let mut sources = Vec::new();
     let mut notes = Vec::new();
-    ours(&places.catalog_root, &mut sources);
+    let ours_note = match &places.catalog_root {
+        Some(root) => {
+            ours(root, &mut sources);
+            None
+        }
+        None => Some(crate::NO_LIBRARY_FOLDER.to_owned()),
+    };
     let teams = places
         .teams
         .iter()
@@ -152,6 +160,7 @@ pub(crate) fn find_sources(places: &Places) -> Found {
         sources,
         notes,
         installed_note,
+        ours_note,
         teams,
     }
 }
@@ -328,7 +337,7 @@ fn installed(places: &Places, config: &Path, sources: &mut Vec<Source>, notes: &
     let mut listed: Vec<PathBuf> = [TableKind::Symbol, TableKind::Footprint]
         .into_iter()
         .flat_map(|table| own.library_folders(table))
-        .map(|folder| native_path(&places.catalog_root, &folder))
+        .filter_map(|folder| Some(native_path(places.catalog_root.as_deref()?, &folder)))
         .collect();
     if let Some(share) = &places.share {
         listed.push(share.join("symbols"));

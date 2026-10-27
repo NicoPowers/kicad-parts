@@ -176,7 +176,7 @@ fn the_desktop_adds_a_part_from_a_download() {
     wait_until("every sample part", || team.current_values().len() >= 9);
     let data = tempfile::tempdir().unwrap();
     let browser = CatalogBrowser::open(BrowserConfig {
-        catalog_root: sample_library::root(),
+        catalog_root: Some(sample_library::root()),
         cache_dir: data.path().join("cache"),
         settings_file: data.path().join("settings.json"),
         kicad_locations: SearchLocations::Standard,

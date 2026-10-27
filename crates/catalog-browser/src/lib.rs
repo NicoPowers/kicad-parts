@@ -45,11 +45,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 use team::{StoredCad, TeamCad, TeamCadError, TeamCatalog};
 
+/// What the features that read the local library folder say while none is
+/// set. Making the team's linked repo that folder is kicad-parts-ff3c.
+pub(crate) const NO_LIBRARY_FOLDER: &str =
+    "There is no local library folder yet. Link the team's library repo in the Teams menu.";
+
 #[derive(Clone, Debug)]
 pub struct BrowserConfig {
     /// The local library folder, holding our `symbols/`, `footprints/` and
-    /// `3d-models/`.
-    pub catalog_root: PathBuf,
+    /// `3d-models/`, if one is set. The library check, Add part from our
+    /// libraries, the Libraries browser's Ours and the 3D view read it.
+    pub catalog_root: Option<PathBuf>,
     /// The app's cache folder, kept apart from WebView2's data; previews go
     /// under `previews/`, and kicad-cli keeps its own settings under
     /// `kicad-cli-settings/`.
@@ -144,7 +150,6 @@ impl CatalogBrowser {
             kicad_override: kicad.settings.kicad_cli_override.as_deref().map(display),
             override_rejected: kicad.override_rejected.clone(),
             settings_error: kicad.settings_error.clone(),
-            library_folder: Some(display(&self.config.catalog_root)),
         }
     }
 
@@ -386,9 +391,13 @@ impl CatalogBrowser {
             .iter()
             .map(|(details, _)| details.ipn.clone())
             .collect();
-        let footprints = self
-            .footprints
-            .get_or_init(|| add_part::local_footprints(&self.config.catalog_root));
+        let footprints = self.footprints.get_or_init(|| {
+            self.config
+                .catalog_root
+                .as_deref()
+                .map(add_part::local_footprints)
+                .unwrap_or_default()
+        });
         Ok(add_part::Context {
             categories,
             remembered,
@@ -416,13 +425,14 @@ impl CatalogBrowser {
         team: &TeamCatalog,
     ) -> Result<library_part::Plan, String> {
         let share = self.kicad_share();
+        let root = self.library_folder()?;
         let check = self
             .library_check
-            .check(team, &self.config.catalog_root, share.as_deref())?
+            .check(team, root, share.as_deref())?
             .ok_or_else(|| {
                 "Sign in as someone who can edit to add a part from our libraries.".to_owned()
             })?;
-        library_part::plan(&self.config.catalog_root, choice, &check, &|kind, key| {
+        library_part::plan(root, choice, &check, &|kind, key| {
             team.has_cad_item(kind, key)
         })
     }
@@ -432,10 +442,23 @@ impl CatalogBrowser {
     /// while signed out or for someone who can only view. It is worked out
     /// once per change of the team catalog (a new Change, a catch-up or
     /// another person signing in) and kept until then.
+    ///
+    /// With no local library folder, it says so to someone who can edit.
     pub fn library_check(&self, team: &TeamCatalog) -> Result<Option<LibraryCheckView>, String> {
+        if team.editor_position().is_none() {
+            return Ok(None);
+        }
         let kicad_share = self.kicad_share();
         self.library_check
-            .get(team, &self.config.catalog_root, kicad_share.as_deref())
+            .get(team, self.library_folder()?, kicad_share.as_deref())
+    }
+
+    /// The local library folder, or why there is none.
+    pub(crate) fn library_folder(&self) -> Result<&Path, String> {
+        self.config
+            .catalog_root
+            .as_deref()
+            .ok_or_else(|| NO_LIBRARY_FOLDER.to_owned())
     }
 
     /// Whether `ipn` can be a new part's IPN.
@@ -905,10 +928,7 @@ impl CatalogBrowser {
     }
 
     fn resolver(&self, install: &KicadInstall) -> LibraryResolver {
-        LibraryResolver::new(
-            Some(self.config.catalog_root.clone()),
-            install.share_dir.clone(),
-        )
+        LibraryResolver::new(self.config.catalog_root.clone(), install.share_dir.clone())
     }
 }
 

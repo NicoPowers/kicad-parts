@@ -230,7 +230,7 @@ impl Team {
         let team = Self::member(&server, &admin, "Ada Editor", "ada@example.test", true);
         let data = tempfile::tempdir().unwrap();
         let browser = CatalogBrowser::open(BrowserConfig {
-            catalog_root: copy.path().to_path_buf(),
+            catalog_root: Some(copy.path().to_path_buf()),
             cache_dir: data.path().join("cache"),
             settings_file: data.path().join("settings.json"),
             kicad_locations: SearchLocations::Standard,
@@ -1574,4 +1574,28 @@ fn editors_see_the_library_check_of_the_folder_the_app_reads() {
     // Someone who can only view sees no library check.
     let viewer = team.second("Vic Viewer", "vic@example.test", false);
     assert_eq!(team.browser.library_check(&viewer).unwrap(), None);
+
+    // With no local library folder, an editor is told so and what to do.
+    let data = tempfile::tempdir().unwrap();
+    let without = CatalogBrowser::open(BrowserConfig {
+        catalog_root: None,
+        cache_dir: data.path().join("cache"),
+        settings_file: data.path().join("settings.json"),
+        kicad_locations: SearchLocations::Standard,
+        kicad_config_dir: None,
+        kicad_documents_dir: None,
+    });
+    let no_folder =
+        "There is no local library folder yet. Link the team's library repo in the Teams menu.";
+    assert_eq!(without.library_check(&team.team).unwrap_err(), no_folder);
+    assert_eq!(without.library_check(&viewer).unwrap(), None);
+    // Editing a part that uses our libraries still works: the Catalog has
+    // its symbol and footprint.
+    let part = team.team.part("RES-0000-0470").unwrap().unwrap();
+    let mut edit = opened(&part, "Another note");
+    set_field(&mut edit.fields, "Description", "RES 47 OHM 1% 1/10W 0603");
+    assert!(matches!(
+        without.edit(edit, &team.team).unwrap(),
+        PublishResult::Saved { .. }
+    ));
 }

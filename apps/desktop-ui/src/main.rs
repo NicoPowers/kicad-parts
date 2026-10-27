@@ -838,8 +838,8 @@ fn PartPanel(
     let pending_part = StoredValue::new(None::<(PartKey, ManufacturerPart)>);
     // Add part's form, kept while another part is looked at.
     let add_form = add_part::Form::new();
-    // Changes whenever someone saves a Change, a CSV import run finishes
-    // (it may find CSV changes to review), or on sign-in and sign-out.
+    // Changes whenever someone saves a Change, after a catch-up, or on
+    // sign-in and sign-out.
     let team_checkpoint = Memo::new(move |_| {
         team.with(|status| match status {
             Some(TeamStatus {
@@ -921,7 +921,7 @@ fn PartPanel(
     Effect::new(move |_| ui.team.set(team_url.get()));
     // For a part the team catalog has: the revision shown, whose exact CAD
     // item revisions the previews are drawn from, and its Symbol and
-    // Footprint in case those cannot be fetched. Otherwise the CSV catalog's.
+    // Footprint in case those cannot be fetched.
     // It names the part's IPN, because the part chosen before can still be
     // here for a moment after another is selected.
     let preview_source = Memo::new(move |_| {
@@ -1058,11 +1058,10 @@ fn PartPanel(
         footprint.set(Load::Loading);
         let (team_revision, symbol_field, footprint_field) = match source {
             Some((revision, symbol, footprint)) => (Some(revision), Some(symbol), Some(footprint)),
-            // A part of a team: wait for its team revision while the team
-            // can be read, so a part only the team has never shows "not in
-            // the catalog" first. Offline, or if it cannot be read, draw
-            // its list row's symbol and footprint.
-            None if !team.is_empty() => {
+            // Wait for its team revision while the team can be read, so the
+            // part never shows "not in the catalog" first. Offline, or if
+            // it cannot be read, draw its list row's symbol and footprint.
+            None => {
                 if team_checkpoint.get().is_some() && !team_checked.get() {
                     return;
                 }
@@ -1081,7 +1080,6 @@ fn PartPanel(
                     Some(footprint.unwrap_or_default()),
                 )
             }
-            None => (None, None, None),
         };
         for (kind, target, field) in [
             (PreviewKind::Symbol, symbol, symbol_field),

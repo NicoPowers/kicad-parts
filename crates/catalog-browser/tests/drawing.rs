@@ -19,7 +19,7 @@ fn sample_library() -> PathBuf {
 
 fn open_browser(dir: &Path) -> CatalogBrowser {
     CatalogBrowser::open(BrowserConfig {
-        catalog_root: sample_library(),
+        catalog_root: Some(sample_library()),
         cache_dir: dir.join("cache"),
         settings_file: dir.join("config").join("settings.json"),
         kicad_locations: SearchLocations::Standard,

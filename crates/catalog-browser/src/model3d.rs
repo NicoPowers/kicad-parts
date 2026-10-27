@@ -55,8 +55,9 @@ const HEADER_BYTES: u64 = 4096;
 /// Where 3D model files are looked for.
 #[derive(Clone, Debug)]
 pub(crate) struct ModelPlaces {
-    /// The catalog folder, which holds our library's `3d-models/`.
-    pub catalog_root: PathBuf,
+    /// The local library folder, which holds our library's `3d-models/`,
+    /// if one is set.
+    pub catalog_root: Option<PathBuf>,
     /// KiCad's own 3D models folder.
     pub kicad_models: Option<PathBuf>,
     /// The person's KiCad path variables.
@@ -119,6 +120,9 @@ pub(crate) enum NotShown {
     NoFolder,
     /// A path variable the link uses is not set.
     VariableNotSet(String),
+    /// The link points into our library, but no local library folder is
+    /// set.
+    NoLibraryFolder,
     /// The link uses `${KIPRJMOD}`, a KiCad project's folder.
     ProjectFolder,
     /// A network or system path that no path variable of the person's
@@ -169,6 +173,7 @@ impl NotShown {
             Self::VariableNotSet(name) => {
                 format!("The path variable ${{{name}}} is not set in KiCad's path settings.")
             }
+            Self::NoLibraryFolder => crate::NO_LIBRARY_FOLDER.into(),
             Self::ProjectFolder => {
                 "${KIPRJMOD} means a KiCad project's folder, which a library footprint doesn't have."
                     .into()
@@ -271,10 +276,13 @@ pub(crate) fn resolve(
         return not_shown(NotShown::NotModelFile);
     }
     if let Some(key) = our_key(link) {
-        let path = places.catalog_root.join(&key);
-        // Our library allows no link anywhere below the catalog folder, as
-        // the library check reads it.
-        let mut below = places.catalog_root.clone();
+        let Some(root) = &places.catalog_root else {
+            return not_shown(NotShown::NoLibraryFolder);
+        };
+        let path = root.join(&key);
+        // Our library allows no link anywhere below the local library
+        // folder, as the library check reads it.
+        let mut below = root.clone();
         for part in key.split('/') {
             below.push(part);
             if is_link(&below, true) {

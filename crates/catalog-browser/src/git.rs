@@ -1,8 +1,8 @@
-//! Which commit files of the CSV catalog folder were read from, for Add
+//! Which commit files of the local library folder were read from, for Add
 //! part from our libraries (kicad-parts-37a7): the Catalog records the
 //! commit each file came from, so a file must be committed exactly as it
-//! is. The same rule as the CSV import's commit-first rule: the bytes, as
-//! git would store them without filters, against `HEAD`'s.
+//! is: the bytes, as git would store them without filters, against
+//! `HEAD`'s.
 //!
 //! The bytes compared are the ones the app already read and will send:
 //! their git object ID is worked out here, so a file saved again in KiCad
@@ -31,7 +31,7 @@ fn commit_holding_with(
     files: &[(&str, &[u8])],
 ) -> Result<String, String> {
     let not_a_repository = || {
-        "The CSV catalog folder is not the top folder of a git repository, so the Catalog cannot record which commit the files came from. Add the part from a checkout of the CSV catalog.".to_owned()
+        "The local library folder is not the top folder of a git repository, so the Catalog cannot record which commit the files came from. Add the part from a checkout of the CSV catalog.".to_owned()
     };
     let top = match git(program, root, &["rev-parse", "--show-toplevel"])? {
         Ok(top) => top,
@@ -47,7 +47,7 @@ fn commit_holding_with(
         .ok()
         .filter(|commit| commit.len() == 40 || commit.len() == 64)
         .ok_or_else(|| {
-            "The CSV catalog folder has no commit yet. Commit the files first: the Catalog records the commit each file came from.".to_owned()
+            "The local library folder has no commit yet. Commit the files first: the Catalog records the commit each file came from.".to_owned()
         })?;
     if files.is_empty() {
         return Ok(commit);
@@ -100,13 +100,13 @@ fn commit_holding_with(
     Err(problem)
 }
 
-/// "git could not read the CSV catalog folder: <git's reason>".
+/// "git could not read the local library folder: <git's reason>".
 fn could_not_read(reason: &str) -> String {
     let reason = reason
         .trim()
         .trim_start_matches("fatal: ")
         .trim_end_matches('.');
-    format!("git could not read the CSV catalog folder: {reason}.")
+    format!("git could not read the local library folder: {reason}.")
 }
 
 /// Whether git would change `bytes`' line endings when committing `path`:
@@ -206,7 +206,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     out
 }
 
-/// How long one local git step for the CSV catalog folder may take.
+/// How long one local git step for the local library folder may take.
 const LOCAL_STEP: Duration = Duration::from_secs(120);
 
 /// Runs git in `root` without a window or a prompt (see [`Git::run`]): its
@@ -374,12 +374,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            refused.starts_with("git could not read the CSV catalog folder: "),
+            refused.starts_with("git could not read the local library folder: "),
             "{refused}"
         );
         assert_eq!(
             could_not_read("fatal: detected dubious ownership in repository at 'C:/x'"),
-            "git could not read the CSV catalog folder: detected dubious ownership in repository at 'C:/x'."
+            "git could not read the local library folder: detected dubious ownership in repository at 'C:/x'."
         );
     }
 

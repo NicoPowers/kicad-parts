@@ -30,7 +30,7 @@ fn places() -> Places {
         dir.path().join("mine").to_string_lossy().into_owned(),
     );
     let places = ModelPlaces {
-        catalog_root: dir.path().join("catalog"),
+        catalog_root: Some(dir.path().join("catalog")),
         kicad_models: Some(dir.path().join("kicad").join("3dmodels")),
         variables: PathVariables::new(variables),
     };
@@ -85,6 +85,22 @@ fn links_resolve_to_our_library_kicads_own_and_installed_libraries() {
     assert_eq!(
         places.resolve(&absolute.to_string_lossy()),
         Resolved::Found(ModelSource::Installed, part)
+    );
+}
+
+#[test]
+fn our_library_needs_a_local_library_folder() {
+    let mut places = places();
+    places.places.catalog_root = None;
+    let Resolved::NotShown(why) =
+        places.resolve("${GITPLM_PARTS}/3d-models/g-Package_SO.3dshapes/SOIC-8.step")
+    else {
+        panic!("our library's model was found without a folder");
+    };
+    assert_eq!(why, NotShown::NoLibraryFolder);
+    assert_eq!(
+        why.words(),
+        "There is no local library folder yet. Link the team's library repo in the Teams menu."
     );
 }
 
