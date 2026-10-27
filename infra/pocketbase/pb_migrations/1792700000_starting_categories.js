@@ -2,9 +2,9 @@
 
 // A new team server starts with the starting categories (seed
 // kicad-parts-e257), so Add part works on a new team at once. They are
-// listed in pb_hooks/catalog_starting_categories.json, which crates/catalog
-// keeps in step with STARTING_CATEGORIES. All of them are saved in one
-// Change of kind category, the team server's first.
+// listed in pb_hooks/catalog_starting_categories.json, the only copy;
+// crates/catalog reads the same file. All of them are saved in one Change
+// of kind category, the team server's first.
 //
 // A team server that already saved something is left as it is.
 //

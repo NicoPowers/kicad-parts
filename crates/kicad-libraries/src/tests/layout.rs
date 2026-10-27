@@ -310,10 +310,9 @@ fn rows_hold_the_fields_and_link_exact_revisions() {
 }
 
 #[test]
-fn category_fields_follow_the_old_database_library() {
-    let regulators = catalog::CategoryDetails::starting(
-        "reg",
-        [
+fn category_fields_become_database_library_columns() {
+    let regulators = catalog::CategoryDetails {
+        fields: [
             "Description",
             "Voltage",
             "Sim_Library",
@@ -323,7 +322,8 @@ fn category_fields_follow_the_old_database_library() {
         ]
         .map(str::to_owned)
         .to_vec(),
-    );
+        ..catalog::CategoryDetails::starting("reg")
+    };
     let (fields, refused) = crate::plan::extra_fields(&regulators);
     let fields: Vec<(String, String, bool)> = fields
         .into_iter()

@@ -18,7 +18,7 @@ fn a_new_team_server_starts_with_the_starting_categories() {
     let (server, admin, superuser) = services::start(&root, state.path()).unwrap();
     let mut categories = current_categories(&admin).unwrap();
     categories.sort_by(|a, b| a.code.cmp(&b.code));
-    let mut starting = starting_categories();
+    let mut starting = starting_categories().to_vec();
     starting.sort_by(|a, b| a.code.cmp(&b.code));
     assert_eq!(categories, starting);
     assert_eq!(categories.len(), 21);
@@ -38,7 +38,10 @@ fn a_new_team_server_starts_with_the_starting_categories() {
 
 /// A category no team server starts with.
 fn fuses() -> CategoryDetails {
-    CategoryDetails::starting("fus", vec!["Description".into(), "Current".into()])
+    CategoryDetails {
+        fields: vec!["Description".into(), "Current".into()],
+        ..CategoryDetails::starting("fus")
+    }
 }
 
 #[test]
@@ -70,10 +73,7 @@ fn a_superuser_sets_up_a_category_once_and_only_a_superuser_may() {
     let again = submit_category(&admin, &command).unwrap();
     assert!(again.replayed);
     assert_eq!(again.body, reply.body);
-    let mut other = CategoryCommand::new(
-        CategoryDetails::starting("xyz", Vec::new()),
-        "Another category",
-    );
+    let mut other = CategoryCommand::new(CategoryDetails::starting("xyz"), "Another category");
     other.correlation_id = command.correlation_id.clone();
     assert!(matches!(
         submit_category(&admin, &other).unwrap().outcome,
@@ -83,7 +83,10 @@ fn a_superuser_sets_up_a_category_once_and_only_a_superuser_may() {
     // A category the Catalog has is never changed this way, whether a
     // superuser or the setup made it.
     for code in ["fus", "res"] {
-        let again = CategoryDetails::starting(code, vec!["Description".into()]);
+        let again = CategoryDetails {
+            fields: vec!["Description".into()],
+            ..CategoryDetails::starting(code)
+        };
         let twice = submit_category(&admin, &CategoryCommand::new(again, "Again"))
             .unwrap_err()
             .to_string();
@@ -93,16 +96,16 @@ fn a_superuser_sets_up_a_category_once_and_only_a_superuser_may() {
         );
     }
     // A category with a CAD field is refused.
-    let mut wrong = CategoryDetails::starting("abc", vec!["Description".into()]);
-    wrong.fields.push("Symbol".into());
+    let mut wrong = CategoryDetails::starting("abc");
+    wrong.fields = vec!["Description".into(), "Symbol".into()];
     let refused = submit_category(&admin, &CategoryCommand::new(wrong, "Wrong"))
         .unwrap_err()
         .to_string();
     assert!(refused.contains("Symbol or Footprint"), "{refused}");
     // So is one with a field named Category, in any case: that is the
     // part's category in this app.
-    let mut named = CategoryDetails::starting("abc", vec!["Description".into()]);
-    named.fields.push(" category".into());
+    let mut named = CategoryDetails::starting("abc");
+    named.fields = vec!["Description".into(), " category".into()];
     let refused = submit_category(&admin, &CategoryCommand::new(named, "Wrong"))
         .unwrap_err()
         .to_string();
@@ -116,7 +119,7 @@ fn a_superuser_sets_up_a_category_once_and_only_a_superuser_may() {
     let client = PocketBaseClient::new(server.url())
         .authenticate("users", &editor.email, &editor.password)
         .unwrap();
-    let other = CategoryCommand::new(CategoryDetails::starting("abc", Vec::new()), "Another");
+    let other = CategoryCommand::new(CategoryDetails::starting("abc"), "Another");
     assert!(submit_category(&client, &other).is_err());
     assert_eq!(current_categories(&admin).unwrap().len(), starting + 1);
     server.stop();

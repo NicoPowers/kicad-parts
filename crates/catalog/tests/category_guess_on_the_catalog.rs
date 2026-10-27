@@ -6,7 +6,7 @@
 //!
 //! Run with `--nocapture` to see top-1 and top-3 accuracy per category.
 
-use catalog::category::CategoryDetails;
+use catalog::category::{CategoryDetails, starting_categories};
 use catalog::guess::{Clues, ExamplePart, guess_category};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -15,14 +15,7 @@ use std::path::PathBuf;
 /// `fixtures/category-guess/parts.json`.
 #[derive(Deserialize)]
 struct Fixture {
-    categories: Vec<FixtureCategory>,
     parts: Vec<FixturePart>,
-}
-
-#[derive(Deserialize)]
-struct FixtureCategory {
-    code: String,
-    fields: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -45,12 +38,8 @@ fn fixture() -> Fixture {
 #[test]
 fn the_guess_finds_most_categories_in_its_top_three_leave_one_out() {
     let fixture = fixture();
-    let categories: Vec<CategoryDetails> = fixture
-        .categories
-        .into_iter()
-        .map(|category| CategoryDetails::starting(&category.code, category.fields))
-        .collect();
-    assert_eq!(categories.len(), 21);
+    // The parts' categories are the starting categories.
+    let categories = starting_categories();
     let parts: Vec<ExamplePart> = fixture
         .parts
         .into_iter()
@@ -66,7 +55,7 @@ fn the_guess_finds_most_categories_in_its_top_three_leave_one_out() {
         .collect();
     assert_eq!(parts.len(), 178);
 
-    let (tally, misses) = measure(&categories, &parts, true);
+    let (tally, misses) = measure(categories, &parts, true);
     let percent = |part: u32, all: u32| 100.0 * f64::from(part) / f64::from(all.max(1));
     println!("category  parts  top-1  top-3");
     let (mut all, mut first, mut three) = (0, 0, 0);
@@ -89,7 +78,7 @@ fn the_guess_finds_most_categories_in_its_top_three_leave_one_out() {
         println!("not in the top three: {miss}");
     }
     // Downloads often carry no description; for information only.
-    let (without, _) = measure(&categories, &parts, false);
+    let (without, _) = measure(categories, &parts, false);
     let (count, top1, top3) = without.values().fold((0, 0, 0), |sum, entry| {
         (sum.0 + entry.0, sum.1 + entry.1, sum.2 + entry.2)
     });

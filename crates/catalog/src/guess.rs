@@ -574,7 +574,7 @@ mod tests {
     fn categories() -> Vec<CategoryDetails> {
         ["res", "cap", "reg", "ics"]
             .into_iter()
-            .map(|code| CategoryDetails::starting(code, Vec::new()))
+            .map(CategoryDetails::starting)
             .collect()
     }
 

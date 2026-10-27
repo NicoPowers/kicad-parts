@@ -1,27 +1,4 @@
 {
-  "categories": [
-    {"code": "ana", "fields": ["Description", "Datasheet", "Sim_Library", "Sim_Name", "Sim_Device", "Sim_Pins"]},
-    {"code": "art", "fields": ["Description", "Comments"]},
-    {"code": "cap", "fields": ["Description", "Value", "Voltage", "Material", "Tolerance", "Datasheet"]},
-    {"code": "con", "fields": ["Value", "Description", "Pins", "Datasheet"]},
-    {"code": "cpd", "fields": ["Description", "Datasheet"]},
-    {"code": "dio", "fields": ["Value", "Description", "Current", "Voltage", "Datasheet"]},
-    {"code": "ics", "fields": ["Description", "Datasheet"]},
-    {"code": "ind", "fields": ["Description", "Value", "Current", "Datasheet"]},
-    {"code": "mcu", "fields": ["Description", "Datasheet"]},
-    {"code": "mec", "fields": ["Description", "Type", "Datasheet"]},
-    {"code": "mpu", "fields": ["Description", "Datasheet"]},
-    {"code": "opt", "fields": ["Description", "Color", "I-forward-max", "V-forward", "Wavelength", "Datasheet"]},
-    {"code": "osc", "fields": ["Description", "Frequency", "Stability", "Load", "Datasheet"]},
-    {"code": "pcb", "fields": ["Description", "Project link"]},
-    {"code": "pwr", "fields": ["Description", "Datasheet"]},
-    {"code": "reg", "fields": ["Description", "Voltage", "Current", "Datasheet"]},
-    {"code": "res", "fields": ["Description", "Value", "Tolerance", "Datasheet"]},
-    {"code": "rfm", "fields": ["Value", "Description", "Datasheet"]},
-    {"code": "rvr", "fields": ["Description", "Resistance", "Tolerance", "Turns", "Datasheet"]},
-    {"code": "swi", "fields": ["Description", "Form", "Datasheet"]},
-    {"code": "trs", "fields": ["Value", "Type", "max(Vce)", "max(Ic)", "Description", "Datasheet"]}
-  ],
   "parts": [
     {"category": "ana", "description": "Single Op-amp, 1.8V to 5.5V rail-to-rail", "footprints": ["Package_TO_SOT_SMD:SOT-353_SC-70-5"], "ipn": "ANA-0001-0001", "manufacturer": "TI", "mpn": "TLV9001IDCKR", "reference": ""},
     {"category": "ana", "description": "Single Op-amp, 2.7V to 40V rail-to-rail, shutdown", "footprints": ["Package_TO_SOT_SMD:SOT-23-6"], "ipn": "ANA-0002-0001", "manufacturer": "TI", "mpn": "OPA990SIDBVR", "reference": "U"},

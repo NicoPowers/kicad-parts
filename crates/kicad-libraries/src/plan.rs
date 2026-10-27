@@ -831,7 +831,7 @@ fn plan_tables(records: &Records<'_>, links: &Links, plan: &mut Plan<'_>) {
             ));
             categories.insert(
                 details.category.clone(),
-                CategoryDetails::starting(&details.category, Vec::new()),
+                CategoryDetails::starting(&details.category),
             );
         }
         let category = &categories[&details.category];
@@ -1133,7 +1133,7 @@ mod tests {
         };
         let value = |code: &str, fields: &[(&str, &str)], mpn: &str| {
             value_of(
-                &CategoryDetails::starting(code, Vec::new()),
+                &CategoryDetails::starting(code),
                 &details(code, fields, mpn),
             )
         };

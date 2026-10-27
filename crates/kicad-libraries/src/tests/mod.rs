@@ -111,8 +111,10 @@ impl Fixture {
     }
 
     pub fn category(&mut self, code: &str, fields: Vec<&str>) {
-        let details =
-            CategoryDetails::starting(code, fields.into_iter().map(str::to_owned).collect());
+        let details = CategoryDetails {
+            fields: fields.into_iter().map(str::to_owned).collect(),
+            ..CategoryDetails::starting(code)
+        };
         let number = self
             .catalog
             .category_revisions
