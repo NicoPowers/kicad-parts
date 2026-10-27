@@ -69,7 +69,7 @@ describe('a team linked to its library repo', () => {
   }
 
   it('links the team from the person\'s clone and says it can read and write', async () => {
-    await waitForText(browser, '#result-count', 'No parts match.');
+    await waitForText(browser, '#result-count', 'Sign in to a team to see its parts.');
     await setMenuOpen(true);
     await (await browser.$('#team-password')).setValue(acme.accounts[0].password);
     await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();

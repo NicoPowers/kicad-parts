@@ -1571,13 +1571,6 @@ a {
 .team-colour-olive { --chip-bg: var(--team-olive-bg); --chip-ink: var(--team-olive-ink); }
 .team-colour-slate { --chip-bg: var(--team-slate-bg); --chip-ink: var(--team-slate-ink); }
 
-/* A part only the CSV files have: no team, so no team colour. */
-.team-chip-csv {
-  --chip-bg: var(--panel);
-  --chip-ink: var(--muted);
-  border-style: dashed;
-}
-
 /* The team's name in the Teams menu, in its colour. */
 .kicad-settings-body .team-name .team-chip {
   margin-right: 0;
@@ -1920,73 +1913,9 @@ a {
   border-top: 1px solid var(--line);
 }
 
-/* CSV changes an import did not apply because the part was edited here. */
-.csv-notice {
-  margin-bottom: 0.9rem;
-  padding: 0.6rem 0.9rem;
-  background: var(--warn-soft);
-  border: 1px solid var(--warn-line);
-  border-left-width: 6px;
-  border-radius: var(--radius);
-}
-
-.csv-notice h3 {
-  margin: 0 0 0.25rem;
-}
-
-.csv-notice p {
-  margin: 0 0 0.5rem;
-}
-
-.csv-notice ul {
-  margin: 0 0 0.5rem;
-  padding-left: 1.2rem;
-}
-
-/* An MPN, IPN or file name stays on one line. */
-.nowrap {
-  white-space: nowrap;
-}
-
-.csv-review-form > p {
-  margin: 0 0 0.6rem;
-}
-
 /* Headings that take focus after a form closes show no focus ring. */
-.csv-review-form h3:focus,
 #fields-heading:focus {
   outline: none;
-}
-
-.csv-review-form textarea {
-  width: 100%;
-  font: inherit;
-  padding: 0.4rem 0.6rem;
-  border: 1px solid #9aa7b6;
-  border-radius: 6px;
-}
-
-.part-fields .changes .pick {
-  width: 4.6rem;
-  text-align: center;
-  white-space: nowrap;
-}
-
-.part-fields .changes td.pick input {
-  width: 1.1rem;
-  height: 1.1rem;
-}
-
-/* Field names in the review table read as easily as the values. */
-.part-fields .csv-review-form .changes tbody th {
-  color: var(--ink);
-}
-
-/* A CSV value the CSV already had: accepting it undoes an edit. */
-.csv-review-form .csv-same {
-  display: block;
-  color: var(--muted);
-  font-size: 0.85em;
 }
 
 /* "Use a file…" under the Symbol and Footprint fields of Edit part. The
@@ -2116,12 +2045,6 @@ a {
 
 .cad-buttons .file-remove {
   margin-left: 0;
-}
-
-/* A CSV value that can only be kept, in place of the Accept box. */
-.keep-only {
-  color: var(--muted);
-  font-size: 0.85rem;
 }
 
 /* Add part: the checks before saving, the category guesses, and what the

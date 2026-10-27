@@ -102,7 +102,7 @@ describe('team catalog: the library check', () => {
   }
 
   it('shows nothing until someone who can edit signs in', async () => {
-    await waitForText(browser, '#result-count', 'No parts match.');
+    await waitForText(browser, '#result-count', 'Sign in to a team to see its parts.');
     assert.equal((await browser.$$(LINE)).length, 0);
     assert.equal(await browser.execute(() => document.querySelector('.search-pane').dataset.libraryCheck), 'off');
   });

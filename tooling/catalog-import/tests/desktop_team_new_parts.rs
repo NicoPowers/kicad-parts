@@ -320,10 +320,9 @@ fn the_desktop_adds_a_part_from_a_download() {
         .unwrap()];
     let found = browser.search_with(MPN, 10, &parts);
     assert_eq!(found.total, 1, "{found:?}");
-    // A part only the team catalog has is in its category's section.
+    // The new part is in its category's section.
     assert_eq!(found.sections[0].name, "Capacitors");
     assert_eq!(found.sections[0].hits[0].ipn, ipn);
-    assert_eq!(found.sections[0].hits[0].csv_file, "Team catalog");
     let detail = browser
         .part_in_list(
             &parts,

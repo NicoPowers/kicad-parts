@@ -398,17 +398,6 @@ pub(crate) fn TeamChip(mark: TeamMark) -> impl IntoView {
     }
 }
 
-/// The mark of a part only the CSV files have, beside team marks.
-#[component]
-pub(crate) fn CsvChip() -> impl IntoView {
-    view! {
-        <span class="team-chip team-chip-csv">
-            <span class="visually-hidden">"From the "</span>
-            "CSV"
-        </span>
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,7 +424,7 @@ mod tests {
             can_edit: true,
             live,
             checkpoint: 1,
-            imports: 1,
+            catch_ups: 1,
         }
     }
 
@@ -711,8 +700,6 @@ mod tests {
             // The chip stands out on the dark header too.
             assert!(contrast(&bg, &navy) >= 3.0, "{colour} chip on the header");
         }
-        // The CSV mark's muted text reads on white.
-        assert!(contrast(&token("muted"), &white) >= 4.5);
     }
 
     #[test]

@@ -129,7 +129,7 @@ describe('several teams at once', () => {
   }
 
   it('adds a second team without signing out of the first', async () => {
-    await waitForText(browser, '#result-count', 'No parts match.');
+    await waitForText(browser, '#result-count', 'Sign in to a team to see its parts.');
     await setMenuOpen(true);
     await signInWithForm(acme, editor);
     await waitForText(browser, BADGE, `Team catalog · ${editor.name}`);
@@ -313,7 +313,7 @@ describe('several teams at once', () => {
     ({ browser } = await launchApp({
       args: ['--sign-ins=until-closed', `--team-server=${acme.url}`, `--team-email=${editor.email}`],
     }));
-    await waitForText(browser, '#result-count', 'No parts match.');
+    await waitForText(browser, '#result-count', 'Sign in to a team to see its parts.');
     await setMenuOpen(true);
     await waitForText(
       browser,
@@ -343,7 +343,7 @@ describe('several teams at once', () => {
       dataDir,
       args: [`--team-server=${acme.url}`, `--team-email=${editor.email}`],
     }));
-    await waitForText(browser, '#result-count', 'No parts match.');
+    await waitForText(browser, '#result-count', 'Sign in to a team to see its parts.');
     await setMenuOpen(true);
     await signInWithForm(acme, editor);
     // The badge says a team needs a look, with the problem look.

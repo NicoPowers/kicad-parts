@@ -30,7 +30,7 @@ fn open_browser(dir: &Path) -> CatalogBrowser {
 
 /// The drawing, the kicad-cli SVG and the footprint file of `reference`.
 fn drawn(browser: &CatalogBrowser, reference: &str) -> (FootprintDrawing, String, Vec<u8>) {
-    let set = match browser.preview_field("ANY", PreviewKind::Footprint, Some(reference)) {
+    let set = match browser.preview_field("ANY", PreviewKind::Footprint, reference) {
         PreviewOutcome::Ready(set) => set,
         PreviewOutcome::Problem(problem) => panic!("{reference}: {problem:?}"),
     };

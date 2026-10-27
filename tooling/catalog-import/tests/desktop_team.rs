@@ -328,7 +328,8 @@ fn the_desktop_edits_and_resolves_a_conflict() {
         ),
         (IPN, "Thick film resistor 47 ohm", "47R", "RC0603FR-0747RL")
     );
-    assert_eq!(browser.search("47R thick", 10).total, 0);
+    // Signed out of every team, nothing is listed.
+    assert_eq!(browser.search_with("47R thick", 10, &[]).total, 0);
     // Words only the old description had no longer find it.
     assert!(
         browser

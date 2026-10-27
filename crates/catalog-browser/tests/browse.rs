@@ -101,7 +101,7 @@ fn preview(browser: &CatalogBrowser, ipn: &str, kind: PreviewKind) -> PreviewOut
         PreviewKind::Symbol => detail.symbol,
         PreviewKind::Footprint => detail.footprint,
     };
-    browser.preview_field(ipn, kind, Some(field.as_deref().unwrap_or_default()))
+    browser.preview_field(ipn, kind, field.as_deref().unwrap_or_default())
 }
 
 fn ready(outcome: PreviewOutcome) -> desktop_contract::PreviewSet {
@@ -129,9 +129,10 @@ fn search_select_and_preview_a_multi_unit_part() {
     let browser = open_browser(dir.path(), SearchLocations::Standard);
     let status = browser.status();
     assert!(status.kicad.is_ready(), "{:?}", status.kicad);
-    // The sample library has no CSV files, and that is no problem.
-    assert_eq!((status.catalog.csv_files, status.catalog.parts), (0, 0));
-    assert_eq!(status.catalog.error, None);
+    assert_eq!(
+        status.library_folder,
+        Some(sample_library::root().display().to_string())
+    );
 
     let results = browser.search_with("sample-mcu", 50, &sample_team());
     assert_eq!(results.total, 1);
@@ -383,12 +384,7 @@ fn search_groups_the_parts_by_category() {
     assert_eq!(resistors.name, "Resistors");
     assert_eq!(resistors.total, resistors.hits.len());
     assert_eq!(resistors.total, sample.parts_in(&["res"]).count());
-    assert!(
-        resistors
-            .hits
-            .iter()
-            .all(|hit| hit.csv_file == "Team catalog")
-    );
+    assert!(resistors.hits.iter().all(|hit| hit.team == TEAM));
 
     // A search keeps only the sections with matches, each with its count.
     let found = browser.search_with("0603", 500, &team);
@@ -576,9 +572,8 @@ fn the_part_panel_shows_a_part_as_its_row_in_the_list() {
         .unwrap();
     assert_eq!(detail.summary.value, "47R");
     assert_eq!(detail.summary.team, "");
-    assert_eq!(detail.summary.csv_file, "Team catalog");
-    // A part of no team is in no list without a CSV catalog; another team's
-    // part is not this one.
+    // A part of no team is in no list; another team's part is not this
+    // one.
     assert!(browser.part_in_list(&teams, &key("")).is_none());
     assert!(
         browser

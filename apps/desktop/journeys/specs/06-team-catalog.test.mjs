@@ -167,8 +167,8 @@ describe('team catalog: history, edits and conflicts', () => {
   }
 
   it('starts signed out and explains how to sign in', async () => {
-    // Without a team, the sample library has no parts to list.
-    await waitForText(browser, '#result-count', 'No parts match.');
+    // Without a team there are no parts, and the list says how to get some.
+    await waitForText(browser, '#result-count', 'Sign in to a team to see its parts.');
     await waitForText(browser, BADGE, 'Team catalog: not signed in');
     await openTeamMenu();
     assert.equal(await (await browser.$('aria/Team server address')).getValue(), server.url);

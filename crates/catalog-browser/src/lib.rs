@@ -5,7 +5,6 @@
 //! else, so everything here is testable without a window.
 
 mod add_part;
-pub mod csv_ipns;
 pub mod drawing;
 mod file_safe;
 mod git;
@@ -17,6 +16,7 @@ mod library_part;
 pub mod library_repos;
 mod model3d;
 mod part_list;
+mod part_row;
 mod pick;
 pub mod team;
 pub mod teams;
@@ -25,12 +25,11 @@ pub use model3d::MAX_GLB_BYTES;
 pub use part_list::MAX_SEARCH_LIMIT;
 
 use base64::Engine;
-use csv_catalog::{CatalogPart, CsvCatalog};
 use desktop_contract::{
-    AppStatus, CatalogStatus, Field, FileKind, FilePreviewRequest, KicadStatus, LibraryCheckView,
-    PartDetail, PartSummary, PreviewImage, PreviewKind, PreviewOutcome, PreviewProblem,
-    PreviewProblemReason, PreviewRequest, PreviewSet, PublishResult, SearchRequest, SearchResponse,
-    TeamDownload, TeamDownloadRequest, TeamIpnCheck, TeamNewPartRequest,
+    AppStatus, Field, FileKind, FilePreviewRequest, KicadStatus, LibraryCheckView, PartDetail,
+    PartSummary, PreviewImage, PreviewKind, PreviewOutcome, PreviewProblem, PreviewProblemReason,
+    PreviewRequest, PreviewSet, PublishResult, SearchRequest, SearchResponse, TeamDownload,
+    TeamDownloadRequest, TeamIpnCheck, TeamNewPartRequest,
 };
 use kicad_integration::library_file::{SymbolLibrary, SymbolLookup};
 use kicad_integration::{
@@ -38,6 +37,7 @@ use kicad_integration::{
     LibRef, LibraryOrigin, LibraryResolver, Preview, PreviewCache, PreviewError, ResolveError,
     SUPPORTED_MAJOR, SearchLocations, StoredItem, discover, footprint_choices, sha256_hex,
 };
+use part_row::PartRow;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -47,7 +47,8 @@ use team::{StoredCad, TeamCad, TeamCadError, TeamCatalog};
 
 #[derive(Clone, Debug)]
 pub struct BrowserConfig {
-    /// Directory holding `database/`, `symbols/` and `footprints/`.
+    /// The local library folder, holding our `symbols/`, `footprints/` and
+    /// `3d-models/`.
     pub catalog_root: PathBuf,
     /// The app's cache folder, kept apart from WebView2's data; previews go
     /// under `previews/`, and kicad-cli keeps its own settings under
@@ -81,21 +82,14 @@ struct KicadState {
 
 pub struct CatalogBrowser {
     config: BrowserConfig,
-    catalog: Result<CsvCatalog, String>,
     previews: PreviewCache,
     kicad: RwLock<KicadState>,
-    /// The CSV catalog's footprints with their pads, read the first time
-    /// Add part needs them.
+    /// The local library folder's footprints with their pads, read the
+    /// first time Add part needs them.
     footprints: OnceLock<Vec<add_part::LocalFootprint>>,
-    /// Where each IPN's first row is in `catalog`, worked out the first
-    /// time the part list needs it, from the same reading.
-    csv_rows_by_ipn: OnceLock<std::collections::HashMap<String, usize>>,
     /// Each team's parts made into part list rows, kept until that team's
     /// parts change.
     listed_teams: part_list::ListedTeams,
-    /// The IPNs the CSV catalog folder holds now, for giving a new part its
-    /// IPN: read again when the files change (kicad-parts-3b72).
-    csv_ipns: csv_ipns::CsvIpns,
     /// The last library check and what it was worked out for.
     library_check: library::Cached,
     /// The Libraries browser's index, read in the background.
@@ -113,10 +107,9 @@ pub(crate) struct TeamState {
 }
 
 impl CatalogBrowser {
-    /// Loads the catalog and settings and looks for KiCad. Problems become
-    /// part of [`AppStatus`] rather than errors, so the UI can explain them.
+    /// Loads the settings and looks for KiCad. Problems become part of
+    /// [`AppStatus`] rather than errors, so the UI can explain them.
     pub fn open(config: BrowserConfig) -> Self {
-        let catalog = CsvCatalog::load(&config.catalog_root).map_err(|e| e.to_string());
         let (settings, settings_error) = match load_settings(&config.settings_file) {
             Ok(settings) => (settings, None),
             Err(error) => (Settings::default(), Some(error)),
@@ -129,14 +122,11 @@ impl CatalogBrowser {
         }
         Self {
             footprints: OnceLock::new(),
-            csv_rows_by_ipn: OnceLock::new(),
             listed_teams: part_list::ListedTeams::default(),
-            csv_ipns: csv_ipns::CsvIpns::new(&config.catalog_root),
             library_check: library::Cached::default(),
             libraries: libraries::LibraryIndex::new(config.cache_dir.clone()),
             team_libraries: Default::default(),
             previews,
-            catalog,
             kicad: RwLock::new(KicadState {
                 settings,
                 settings_error,
@@ -149,26 +139,12 @@ impl CatalogBrowser {
 
     pub fn status(&self) -> AppStatus {
         let kicad = self.kicad.read().unwrap_or_else(|e| e.into_inner());
-        let catalog = match &self.catalog {
-            Ok(catalog) => CatalogStatus {
-                root: display(&self.config.catalog_root),
-                parts: catalog.parts().len(),
-                csv_files: catalog.categories().len(),
-                error: None,
-            },
-            Err(error) => CatalogStatus {
-                root: display(&self.config.catalog_root),
-                parts: 0,
-                csv_files: 0,
-                error: Some(error.clone()),
-            },
-        };
         AppStatus {
             kicad: kicad_status(&kicad.discovery),
             kicad_override: kicad.settings.kicad_cli_override.as_deref().map(display),
             override_rejected: kicad.override_rejected.clone(),
             settings_error: kicad.settings_error.clone(),
-            catalog,
+            library_folder: Some(display(&self.config.catalog_root)),
         }
     }
 
@@ -214,15 +190,8 @@ impl CatalogBrowser {
         Ok(self.status())
     }
 
-    /// The CSV catalog's parts matching `query`, with no team: at most
-    /// `limit` per section.
-    pub fn search(&self, query: &str, limit: usize) -> SearchResponse {
-        self.search_with(query, limit, &[])
-    }
-
-    /// The parts of `teams` (in team order) and the CSV catalog matching
-    /// `query`, at most `limit` per category section, as the part list
-    /// shows them.
+    /// The parts of `teams` (in team order) matching `query`, at most
+    /// `limit` per category section, as the part list shows them.
     pub fn search_with(
         &self,
         query: &str,
@@ -246,7 +215,7 @@ impl CatalogBrowser {
     /// for each category, and the checks before saving.
     ///
     /// With [`TeamDownloadRequest::library`], the symbol and footprint are
-    /// read from our libraries in the CSV catalog folder instead
+    /// read from our libraries in the local library folder instead
     /// (kicad-parts-37a7), with the library check's findings for them.
     pub fn read_download(
         &self,
@@ -408,15 +377,15 @@ impl CatalogBrowser {
     }
 
     /// What Add part reads besides the files: the team catalog's
-    /// categories, remembered matches and parts, every IPN, the CSV
-    /// catalog's footprints and KiCad's data folder.
+    /// categories, remembered matches and parts, every IPN, the local
+    /// library folder's footprints and KiCad's data folder.
     fn add_part_context(&self, team: &TeamCatalog) -> Result<add_part::Context<'_>, String> {
         let (categories, remembered) = team.categories_and_matches()?;
         let parts = team.current_parts();
-        // The CSV catalog as it is now, so a row added since the app opened
-        // is never offered again.
-        let mut ipns: BTreeSet<String> = self.csv_ipns.now()?.ipns().map(str::to_owned).collect();
-        ipns.extend(parts.iter().map(|(details, _)| details.ipn.clone()));
+        let ipns: BTreeSet<String> = parts
+            .iter()
+            .map(|(details, _)| details.ipn.clone())
+            .collect();
         let footprints = self
             .footprints
             .get_or_init(|| add_part::local_footprints(&self.config.catalog_root));
@@ -440,7 +409,7 @@ impl CatalogBrowser {
     }
 
     /// The symbol and footprint `choice` names in our libraries, read from
-    /// the CSV catalog folder, with what saving them needs.
+    /// the local library folder, with what saving them needs.
     fn library_plan(
         &self,
         choice: &desktop_contract::TeamLibraryChoice,
@@ -458,10 +427,10 @@ impl CatalogBrowser {
         })
     }
 
-    /// The library check (kicad-parts-da65) of this app's CSV catalog folder
-    /// against the team catalog, for someone who can edit; `None` while
-    /// signed out or for someone who can only view. It is worked out once
-    /// per change of the team catalog (a new Change, a finished import or
+    /// The library check (kicad-parts-da65) of this app's local library
+    /// folder against the team catalog, for someone who can edit; `None`
+    /// while signed out or for someone who can only view. It is worked out
+    /// once per change of the team catalog (a new Change, a catch-up or
     /// another person signing in) and kept until then.
     pub fn library_check(&self, team: &TeamCatalog) -> Result<Option<LibraryCheckView>, String> {
         let kicad_share = self.kicad_share();
@@ -469,47 +438,14 @@ impl CatalogBrowser {
             .get(team, &self.config.catalog_root, kicad_share.as_deref())
     }
 
-    /// The team catalog's part `ipn`, as [`TeamCatalog::part`] reads it,
-    /// with the next free IPN for each CSV row that may be another part:
-    /// only this app sees the CSV catalog folder, and the person needs a
-    /// number that clashes with nothing (kicad-parts-3b72). If the folder
-    /// cannot be read, the part still opens, without a suggestion.
-    pub fn team_part(
-        &self,
-        ipn: &str,
-        team: &TeamCatalog,
-    ) -> Result<Option<desktop_contract::TeamPart>, String> {
-        let Some(mut part) = team.part(ipn)? else {
-            return Ok(None);
-        };
-        if !part.csv_rows_for_other_parts.is_empty() {
-            if let Ok(csv) = self.csv_ipns.now() {
-                let next_free = team.next_free_after(&part.ipn, &csv);
-                for row in &mut part.csv_rows_for_other_parts {
-                    row.next_free_ipn.clone_from(&next_free);
-                }
-            }
-        }
-        Ok(Some(part))
-    }
-
     /// Whether `ipn` can be a new part's IPN.
     pub fn check_ipn(&self, ipn: &str, prefix: &str, team: &TeamCatalog) -> TeamIpnCheck {
-        match self.csv_ipns.now() {
-            Ok(csv) => team.check_ipn(ipn, prefix, &csv),
-            Err(problem) => TeamIpnCheck {
-                problem: Some(problem),
-            },
-        }
+        team.check_ipn(ipn, prefix)
     }
 
-    /// Saves a new part from Add part. A part from our libraries
-    /// ([`TeamNewPartRequest::library`]) is read again from the CSV catalog
-    /// folder, so what is saved is what the folder and its commit hold now;
-    /// only the chosen items the Symbol and Footprint still name are used.
     /// Saves an edit from Edit part. Our libraries' items the edit newly
     /// names and the Catalog lacks (chosen in the Libraries browser,
-    /// kicad-parts-bc6f) are added from the CSV catalog folder as
+    /// kicad-parts-bc6f) are added from the local library folder as
     /// committed, as Add part does (kicad-parts-37a7).
     pub fn edit(
         &self,
@@ -521,6 +457,11 @@ impl CatalogBrowser {
         })
     }
 
+    /// Saves a new part from Add part. A part from our libraries
+    /// ([`TeamNewPartRequest::library`]) is read again from the local
+    /// library folder, so what is saved is what the folder and its commit
+    /// hold now; only the chosen items the Symbol and Footprint still name
+    /// are used.
     pub fn add_part(
         &self,
         request: TeamNewPartRequest,
@@ -559,40 +500,19 @@ impl CatalogBrowser {
             files.extend(sources);
             Ok((uploads, files))
         };
-        // Read the CSV catalog again just before the IPN is used: a row
-        // saved or pulled since Add part offered it must stop the save.
-        let csv = match self.csv_ipns.read_fresh() {
-            Ok(csv) => csv,
-            Err(message) => return Ok(PublishResult::Refused { message }),
-        };
-        team.add_part_with(request.clone(), &csv, files)
+        team.add_part_with(request.clone(), files)
     }
 
-    pub fn part(&self, ipn: &str) -> Option<PartDetail> {
-        let part = self.catalog.as_ref().ok()?.find(ipn)?;
-        Some(detail(part))
-    }
-
-    /// The exact kicad-cli preview of a part's symbol (every unit) or
-    /// footprint. Exports on the first view; later views use the cache.
-    pub fn preview(&self, ipn: &str, kind: PreviewKind) -> PreviewOutcome {
-        self.preview_field(ipn, kind, None)
-    }
-
-    /// Like [`Self::preview`], but previews `field` (a Symbol or Footprint
-    /// field value, such as the team catalog's) instead of the CSV
-    /// catalog's when it is given.
-    pub fn preview_field(
-        &self,
-        ipn: &str,
-        kind: PreviewKind,
-        field: Option<&str>,
-    ) -> PreviewOutcome {
+    /// The exact kicad-cli preview of `field` (a part's Symbol or
+    /// Footprint field value, such as the team catalog's): every unit of a
+    /// symbol, or a footprint. Exports on the first view; later views use
+    /// the cache.
+    pub fn preview_field(&self, ipn: &str, kind: PreviewKind, field: &str) -> PreviewOutcome {
         self.preview_request(
             &PreviewRequest {
                 ipn: ipn.to_owned(),
                 kind,
-                field: field.map(str::to_owned),
+                field: Some(field.to_owned()),
                 team_revision: None,
                 selection: None,
             },
@@ -900,8 +820,8 @@ impl CatalogBrowser {
         )
     }
 
-    /// Draws the part's symbol or footprint from the library on this
-    /// computer: `request.field` when given, otherwise the CSV catalog's.
+    /// Draws `request.field`, the part's symbol or footprint, from the
+    /// library on this computer.
     fn local_preview(
         &self,
         request: &PreviewRequest,
@@ -909,27 +829,15 @@ impl CatalogBrowser {
         note: Option<String>,
     ) -> PreviewOutcome {
         let (ipn, kind) = (request.ipn.as_str(), request.kind);
-        let csv_field = self
-            .catalog
-            .as_ref()
-            .ok()
-            .and_then(|catalog| catalog.find(ipn))
-            .map(|part| match kind {
-                PreviewKind::Symbol => part.symbol.clone(),
-                PreviewKind::Footprint => part.footprint.clone(),
-            });
-        let field = match (&request.field, csv_field) {
-            (Some(field), _) => Some(field.trim().to_owned()).filter(|field| !field.is_empty()),
-            (None, Some(field)) => field,
-            (None, None) => {
-                return problem(
-                    kind,
-                    PreviewProblemReason::UnknownPart,
-                    None,
-                    format!("Part {ipn} is not in the catalog."),
-                );
-            }
+        let Some(field) = &request.field else {
+            return problem(
+                kind,
+                PreviewProblemReason::UnknownPart,
+                None,
+                format!("Part {ipn} is not in the catalog."),
+            );
         };
+        let field = Some(field.trim().to_owned()).filter(|field| !field.is_empty());
         // Footprint fields may list `;`-separated alternatives; symbol
         // fields hold exactly one reference.
         let choices = match (kind, field.as_deref()) {
@@ -1006,7 +914,7 @@ impl CatalogBrowser {
 
 /// Whether `part` uses `reference` exactly: as its Symbol, or as one of
 /// its Footprint choices.
-fn part_uses(part: &CatalogPart, reference: &str) -> bool {
+fn part_uses(part: &PartRow, reference: &str) -> bool {
     part.symbol.as_deref().map(str::trim) == Some(reference)
         || part
             .footprint
@@ -1184,7 +1092,7 @@ fn kicad_status(discovery: &Discovery) -> KicadStatus {
     }
 }
 
-fn detail(part: &CatalogPart) -> PartDetail {
+fn detail(part: &PartRow) -> PartDetail {
     PartDetail {
         summary: summary(part),
         symbol: part.symbol.clone(),
@@ -1203,16 +1111,10 @@ fn detail(part: &CatalogPart) -> PartDetail {
 
 /// How the part list shows `part`, with no team; the part list names the
 /// team of each row.
-fn summary(part: &CatalogPart) -> PartSummary {
+fn summary(part: &PartRow) -> PartSummary {
     PartSummary {
         team: String::new(),
         ipn: part.ipn.clone(),
-        // A part only the team catalog has comes from no CSV file.
-        csv_file: if part.category.is_empty() {
-            "Team catalog".to_owned()
-        } else {
-            format!("{}.csv", part.category)
-        },
         mpn: part.mpn.clone(),
         manufacturer: part.manufacturer.clone(),
         description: part.description.clone(),
@@ -1310,8 +1212,8 @@ fn display(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// A part's current values from somewhere other than the CSV catalog, such
-/// as the team catalog. `None` keeps the CSV catalog's value.
+/// A team part's current values, as the part list needs them. `None` for
+/// a value the part does not have.
 ///
 /// Each team's last-known parts are kept on disk in this shape (see
 /// `teams::parts_file`). Renaming or changing a field there needs a new
@@ -1332,9 +1234,8 @@ pub struct PartValues {
 }
 
 impl PartValues {
-    /// The part `ipn` as these values describe it, for a part the CSV
-    /// catalog does not have.
-    fn part(&self, ipn: &str) -> CatalogPart {
+    /// The part `ipn` as these values describe it.
+    fn part(&self, ipn: &str) -> PartRow {
         let text = |value: &Option<String>| value.clone().unwrap_or_default();
         let reference =
             |value: &Option<String>| value.clone().filter(|value| !value.trim().is_empty());
@@ -1345,9 +1246,8 @@ impl PartValues {
             .into_iter()
             .filter(|(_, value)| !value.trim().is_empty())
             .collect();
-        CatalogPart {
+        PartRow {
             ipn: ipn.to_owned(),
-            category: String::new(),
             mpn: text(&self.mpn),
             manufacturer: text(&self.manufacturer),
             description: text(&self.description),
@@ -1360,24 +1260,6 @@ impl PartValues {
                 .map(|(_, value)| value.clone())
                 .unwrap_or_default(),
             fields,
-        }
-    }
-
-    pub(crate) fn apply(&self, part: &CatalogPart) -> CatalogPart {
-        let pick = |new: &Option<String>, old: &String| new.clone().unwrap_or_else(|| old.clone());
-        let pick_reference = |new: &Option<String>, old: &Option<String>| match new {
-            Some(reference) if reference.trim().is_empty() => None,
-            Some(reference) => Some(reference.clone()),
-            None => old.clone(),
-        };
-        CatalogPart {
-            mpn: pick(&self.mpn, &part.mpn),
-            manufacturer: pick(&self.manufacturer, &part.manufacturer),
-            description: pick(&self.description, &part.description),
-            value: pick(&self.value, &part.value),
-            symbol: pick_reference(&self.symbol, &part.symbol),
-            footprint: pick_reference(&self.footprint, &part.footprint),
-            ..part.clone()
         }
     }
 }

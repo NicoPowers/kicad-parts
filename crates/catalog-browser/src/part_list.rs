@@ -1,30 +1,19 @@
 //! The part list's search (kicad-parts-8a71): one list and one search over
-//! every signed-in team's parts, and the CSV catalog's parts no team has.
+//! every signed-in team's parts.
 //!
 //! A part is named by its team and its IPN ([`PartKey`]). Two teams may
-//! both have RES-0000-0470, and each shows as its own row. The CSV row
-//! itself shows only while no team has its IPN.
+//! both have RES-0000-0470, and each shows as its own row.
 //!
-//! Which team the CSV folder belongs to is not known yet: team parts keep
-//! no record of the CSV file they came from, and the link between a team
-//! and its library repository is still to come (kicad-parts-e9a3). So the
-//! CSV row's values (its file, fields, symbol and footprint) fill in a team
-//! part only while exactly one team shows parts, as before several teams.
-//! With two or more, each team's part shows only its own values, so a
-//! client team never shows our CSV data.
-//!
-//! Rows rank as the CSV catalog's search ranks parts ([`SearchText::rank`]).
-//! Within a rank they keep catalog order: the CSV catalog's order, then the
-//! parts only teams have, by IPN. The same IPN in two teams goes by team
-//! order, as in the Teams menu.
+//! Rows rank by [`SearchText::rank`]. Within a rank they are in IPN order;
+//! the same IPN in two teams goes by team order, as in the Teams menu.
 //!
 //! Searching makes no request. Each team's parts come from its
 //! [`KnownParts`], and are made into rows once per change of that team, so
 //! a search over 10 teams of a few thousand parts each only compares text.
 
+use crate::part_row::{PartRow, Query, SearchText};
 use crate::team::KnownParts;
-use crate::{CatalogBrowser, PartValues, detail, part_uses, summary};
-use csv_catalog::{CatalogPart, CsvCatalog, Query, SearchText};
+use crate::{CatalogBrowser, detail, part_uses, summary};
 use desktop_contract::{
     GroupBy, PartDetail, PartKey, PartSummary, SearchRequest, SearchResponse, SearchSection,
     team_section,
@@ -36,18 +25,12 @@ use std::time::Instant;
 /// Largest page of search results the UI may request.
 pub const MAX_SEARCH_LIMIT: usize = 500;
 
-/// What a section of only the CSV catalog's parts is called, when grouping
-/// by team.
-pub(crate) const CSV_SECTION: &str = "CSV files";
-
 /// One team's parts made into rows: each part as the list shows it, and
 /// what a search matches it on.
 pub(crate) struct ListedTeam {
     /// What they were made from, so they are made again only when it
     /// changes.
     source: Arc<KnownParts>,
-    /// Whether the CSV rows' values fill in its parts (see the module).
-    with_csv: bool,
     /// In IPN order.
     parts: Vec<ListedPart>,
     /// Where each IPN is in `parts`.
@@ -55,22 +38,24 @@ pub(crate) struct ListedTeam {
 }
 
 struct ListedPart {
-    part: CatalogPart,
+    part: PartRow,
     /// The part's category code; blank for none.
     category: String,
     text: SearchText,
-    /// The CSV catalog has this IPN too.
-    in_csv: bool,
 }
 
 impl ListedTeam {
-    fn new(source: Arc<KnownParts>, csv: &CsvRows<'_>, with_csv: bool) -> Self {
+    fn new(source: Arc<KnownParts>) -> Self {
         let parts: Vec<ListedPart> = source
             .values
             .iter()
             .map(|(ipn, values)| {
-                let row = csv.find(ipn);
-                listed_part(ipn, values, row.filter(|_| with_csv), row.is_some())
+                let part = values.part(ipn);
+                ListedPart {
+                    text: SearchText::new(&part),
+                    part,
+                    category: values.category.clone().unwrap_or_default(),
+                }
             })
             .collect();
         let at = parts
@@ -78,67 +63,8 @@ impl ListedTeam {
             .enumerate()
             .map(|(at, listed)| (listed.part.ipn.clone(), at))
             .collect();
-        Self {
-            source,
-            with_csv,
-            parts,
-            at,
-        }
+        Self { source, parts, at }
     }
-}
-
-/// The team part `ipn` with `values`, filled in from the CSV catalog's
-/// `row` when it is given, as the part header shows it. `in_csv` says the
-/// CSV catalog has the IPN, which places the row in CSV order.
-fn listed_part(
-    ipn: &str,
-    values: &PartValues,
-    row: Option<&CatalogPart>,
-    in_csv: bool,
-) -> ListedPart {
-    let part = match row {
-        Some(row) => values.apply(row),
-        None => values.part(ipn),
-    };
-    let category = values
-        .category
-        .clone()
-        .or_else(|| row.map(|row| catalog::category::category_code(&row.category).to_owned()))
-        .unwrap_or_default();
-    ListedPart {
-        text: SearchText::new(&part),
-        part,
-        category,
-        in_csv,
-    }
-}
-
-/// The CSV catalog this app loaded, and where each IPN's first row is.
-pub(crate) struct CsvRows<'a> {
-    catalog: Option<&'a CsvCatalog>,
-    at: &'a HashMap<String, usize>,
-}
-
-impl CsvRows<'_> {
-    fn find(&self, ipn: &str) -> Option<&CatalogPart> {
-        let catalog = self.catalog?;
-        self.at.get(ipn).map(|&at| &catalog.parts()[at])
-    }
-}
-
-/// Where each IPN's first row is in `catalog`. The CSV catalog can repeat
-/// an IPN; the team import keeps the first row.
-pub(crate) fn csv_rows_by_ipn(catalog: Option<&CsvCatalog>) -> HashMap<String, usize> {
-    let mut at = HashMap::new();
-    for (position, part) in catalog
-        .map(CsvCatalog::parts)
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
-    {
-        at.entry(part.ipn.clone()).or_insert(position);
-    }
-    at
 }
 
 /// Every team's rows, kept until that team's parts change.
@@ -149,20 +75,15 @@ impl ListedTeams {
     /// The rows of each team in `teams`, in order. A team's rows are made
     /// again only when its parts changed: [`KnownParts`] are kept and
     /// given out again until then. Teams no longer given are forgotten.
-    fn rows_of(&self, teams: &[Arc<KnownParts>], csv: &CsvRows<'_>) -> Vec<Arc<ListedTeam>> {
+    fn rows_of(&self, teams: &[Arc<KnownParts>]) -> Vec<Arc<ListedTeam>> {
         let mut known = self.0.lock().unwrap_or_else(|e| e.into_inner());
         known.retain(|team, _| teams.iter().any(|given| given.team == *team));
-        let with_csv = teams.len() == 1;
         teams
             .iter()
             .map(|source| match known.get(&source.team) {
-                Some(listed)
-                    if Arc::ptr_eq(&listed.source, source) && listed.with_csv == with_csv =>
-                {
-                    listed.clone()
-                }
+                Some(listed) if Arc::ptr_eq(&listed.source, source) => listed.clone(),
                 _ => {
-                    let listed = Arc::new(ListedTeam::new(source.clone(), csv, with_csv));
+                    let listed = Arc::new(ListedTeam::new(source.clone()));
                     known.insert(source.team.clone(), listed.clone());
                     listed
                 }
@@ -171,97 +92,55 @@ impl ListedTeams {
     }
 }
 
-/// One row of the part list.
+/// One row of the part list: the part at `part` of the team at `team` (in
+/// team order).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Row {
-    /// The CSV catalog's part at this position, which no team has.
-    Csv(usize),
-    /// The part at `part` of the team at `team` (in team order).
-    Team { team: usize, part: usize },
+struct Row {
+    team: usize,
+    part: usize,
 }
 
-/// The teams a list draws from, in team order, and the CSV catalog.
-struct Sources<'a> {
-    csv: Option<&'a CsvCatalog>,
+/// The teams a list draws from, in team order.
+struct Sources {
     teams: Vec<Arc<ListedTeam>>,
 }
 
-impl Sources<'_> {
-    /// Every row of the list, in catalog order: the CSV catalog's order,
-    /// with each team having the IPN in team order (or the CSV row when no
-    /// team has it), then the parts only teams have, by IPN and then team
-    /// order. With `only`, just that team's rows.
+impl Sources {
+    /// Every row of the list, by IPN and then team order. With `only`,
+    /// just that team's rows.
     fn rows(&self, only: Option<&str>) -> Vec<Row> {
-        let shown = |team: usize| only.is_none_or(|only| self.teams[team].source.team == only);
-        let mut rows = Vec::new();
-        if let Some(csv) = self.csv {
-            for (position, part) in csv.parts().iter().enumerate() {
-                let mut held = false;
-                for (team, listed) in self.teams.iter().enumerate() {
-                    if let Some(&at) = listed.at.get(&part.ipn) {
-                        held = true;
-                        if shown(team) {
-                            rows.push(Row::Team { team, part: at });
-                        }
-                    }
-                }
-                if !held && only.is_none() {
-                    rows.push(Row::Csv(position));
-                }
+        let mut rows: Vec<(&str, Row)> = Vec::new();
+        for (team, listed) in self.teams.iter().enumerate() {
+            if only.is_some_and(|only| listed.source.team != only) {
+                continue;
             }
-        }
-        let mut team_only: Vec<(&str, usize, usize)> = Vec::new();
-        for (team, listed) in self
-            .teams
-            .iter()
-            .enumerate()
-            .filter(|(team, _)| shown(*team))
-        {
             for (at, part) in listed.parts.iter().enumerate() {
-                if !part.in_csv {
-                    team_only.push((&part.part.ipn, team, at));
-                }
+                rows.push((&part.part.ipn, Row { team, part: at }));
             }
         }
         // Each team's parts are in IPN order already, so this only merges.
-        team_only.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-        rows.extend(
-            team_only
-                .into_iter()
-                .map(|(_, team, part)| Row::Team { team, part }),
-        );
-        rows
+        rows.sort_by(|a, b| (a.0, a.1.team).cmp(&(b.0, b.1.team)));
+        rows.into_iter().map(|(_, row)| row).collect()
     }
 
-    fn part(&self, row: Row) -> &CatalogPart {
-        match row {
-            Row::Csv(position) => &self.csv_catalog().parts()[position],
-            Row::Team { team, part } => &self.teams[team].parts[part].part,
-        }
+    fn listed(&self, row: Row) -> &ListedPart {
+        &self.teams[row.team].parts[row.part]
+    }
+
+    fn part(&self, row: Row) -> &PartRow {
+        &self.listed(row).part
     }
 
     fn text(&self, row: Row) -> &SearchText {
-        match row {
-            Row::Csv(position) => self.csv_catalog().search_text(position),
-            Row::Team { team, part } => &self.teams[team].parts[part].text,
-        }
+        &self.listed(row).text
     }
 
     fn team(&self, row: Row) -> &str {
-        match row {
-            Row::Csv(_) => "",
-            Row::Team { team, .. } => &self.teams[team].source.team,
-        }
+        &self.teams[row.team].source.team
     }
 
     fn category(&self, row: Row) -> String {
-        match row {
-            Row::Csv(position) => {
-                let part = &self.csv_catalog().parts()[position];
-                catalog::category::category_code(&part.category).to_owned()
-            }
-            Row::Team { team, part } => self.teams[team].parts[part].category.clone(),
-        }
+        self.listed(row).category.clone()
     }
 
     fn key(&self, row: Row) -> PartKey {
@@ -286,10 +165,6 @@ impl Sources<'_> {
         }
     }
 
-    fn csv_catalog(&self) -> &CsvCatalog {
-        self.csv.expect("a CSV row comes from the CSV catalog")
-    }
-
     /// Every category's plain name, by code: from the first team, in team
     /// order, that names it.
     fn category_names(&self) -> BTreeMap<String, String> {
@@ -300,8 +175,7 @@ impl Sources<'_> {
         names
     }
 
-    /// Each team's section, in team order, with its name; the CSV
-    /// catalog's section last.
+    /// Each team's section, in team order, with its name.
     fn team_sections(&self) -> Vec<(String, String)> {
         self.teams
             .iter()
@@ -311,14 +185,13 @@ impl Sources<'_> {
                     listed.source.label.clone(),
                 )
             })
-            .chain(std::iter::once((team_section(""), CSV_SECTION.to_owned())))
             .collect()
     }
 }
 
 impl CatalogBrowser {
     /// The search behind the part list, over every team in `teams` (in
-    /// team order) and the CSV catalog. The matches are put into sections,
+    /// team order). The matches are put into sections,
     /// by category or by team, each with at most `request.limit` parts plus
     /// the selected part (0 for counts only).
     ///
@@ -338,13 +211,9 @@ impl CatalogBrowser {
     }
 
     /// The part `key` as the part list shows it: the team's row, from its
-    /// last-known parts in `teams`, or for a part of no team the CSV
-    /// catalog's row. So the part panel and the list always agree, also
-    /// while the team's server cannot be reached.
+    /// last-known parts in `teams`. So the part panel and the list always
+    /// agree, also while the team's server cannot be reached.
     pub fn part_in_list(&self, teams: &[Arc<KnownParts>], key: &PartKey) -> Option<PartDetail> {
-        if key.team.is_empty() {
-            return self.part(&key.ipn);
-        }
         let sources = self.sources(teams);
         let team = sources
             .teams
@@ -360,7 +229,7 @@ impl CatalogBrowser {
         &self,
         teams: &[Arc<KnownParts>],
         only: Option<&str>,
-    ) -> Vec<(String, CatalogPart)> {
+    ) -> Vec<(String, PartRow)> {
         let sources = self.sources(teams);
         sources
             .rows(only)
@@ -369,21 +238,16 @@ impl CatalogBrowser {
             .collect()
     }
 
-    fn sources(&self, teams: &[Arc<KnownParts>]) -> Sources<'_> {
-        let catalog = self.catalog.as_ref().ok();
-        let at = self
-            .csv_rows_by_ipn
-            .get_or_init(|| csv_rows_by_ipn(catalog));
+    fn sources(&self, teams: &[Arc<KnownParts>]) -> Sources {
         Sources {
-            csv: catalog,
-            teams: self.listed_teams.rows_of(teams, &CsvRows { catalog, at }),
+            teams: self.listed_teams.rows_of(teams),
         }
     }
 }
 
 /// The part list's answer to `request` from `sources`; see
 /// [`CatalogBrowser::search_request`].
-fn answer(sources: &Sources<'_>, request: &SearchRequest) -> SearchResponse {
+fn answer(sources: &Sources, request: &SearchRequest) -> SearchResponse {
     let query = Query::new(&request.query);
     // Only the parts using the reference, compared exactly.
     let uses = request
@@ -397,23 +261,15 @@ fn answer(sources: &Sources<'_>, request: &SearchRequest) -> SearchResponse {
         .filter_map(|row| Some((sources.text(row).rank(&query)?, row)))
         .filter(|(_, row)| uses.is_none_or(|reference| part_uses(sources.part(*row), reference)))
         .collect();
-    // Rows are in catalog order already, so a stable sort keeps it within
+    // Rows are in IPN order already, so a stable sort keeps it within
     // each rank.
     ranked.sort_by_key(|(rank, _)| *rank);
     let total = ranked.len();
-    // A part only the CSV catalog had moves to the first team that has
-    // its IPN now, so it stays selected after signing in.
     let selected_row = request.selected.as_ref().and_then(|selected| {
-        let rows = || ranked.iter().map(|(_, row)| *row);
-        rows()
+        ranked
+            .iter()
+            .map(|(_, row)| *row)
             .find(|row| sources.key(*row) == *selected)
-            .or_else(|| {
-                rows().find(|row| {
-                    selected.team.is_empty()
-                        && sources.part(*row).ipn == selected.ipn
-                        && !matches!(row, Row::Csv(_))
-                })
-            })
     });
     let names = sources.category_names();
     let team_sections = sources.team_sections();
@@ -516,9 +372,8 @@ struct Group {
 ///
 /// Category groups are in name order; while searching, the group with the
 /// best match comes first, ties by name. "Other parts" (no category) is
-/// always last. A category without matches makes no section, so an empty
-/// CSV file (g-mec.csv) has none: 21 CSV files, 20 sections. Team groups
-/// are in team order, the CSV catalog's last.
+/// always last. A category without matches makes no section. Team groups
+/// are in team order.
 fn group_rows(ranked: impl IntoIterator<Item = Ranked>, how: &Grouping<'_>) -> Vec<Group> {
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
     for Ranked { section, row, rank } in ranked {

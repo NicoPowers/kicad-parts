@@ -157,7 +157,7 @@ describe('team catalog: edge cases', () => {
 
   it('saves unusual and very long values exactly', async () => {
     // Without a team, the sample library has no parts to list.
-    await waitForText(browser, '#result-count', 'No parts match.');
+    await waitForText(browser, '#result-count', 'Sign in to a team to see its parts.');
     await signIn(editor);
     await searchFor(browser, MPN, '1 matching part');
     await selectResult(browser, MPN);

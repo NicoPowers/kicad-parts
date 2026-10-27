@@ -102,12 +102,12 @@ fn App() -> impl IntoView {
             for team in &mut status.teams {
                 if let TeamSession::SignedIn {
                     checkpoint,
-                    imports,
+                    catch_ups,
                     ..
                 } = &mut team.session
                 {
                     *checkpoint = 0;
-                    *imports = 0;
+                    *catch_ups = 0;
                 }
             }
             status
@@ -224,9 +224,9 @@ fn App() -> impl IntoView {
                     can_edit: true,
                     email,
                     checkpoint,
-                    imports,
+                    catch_ups,
                     ..
-                } => Some((format!("{team}\n{email}"), *checkpoint, *imports)),
+                } => Some((format!("{team}\n{email}"), *checkpoint, *catch_ups)),
                 _ => None,
             }
         })
@@ -312,17 +312,6 @@ fn App() -> impl IntoView {
                     let response = backend::search(request.clone()).await;
                     // Ignore answers to queries the user has already replaced.
                     if search_seq.get_value() == seq {
-                        // A part only the CSV files had, selected before
-                        // signing in, follows its IPN to the team's part.
-                        let moved = response.as_ref().ok().and_then(|response| {
-                            let now = response.selected_part.clone()?;
-                            let asked = request.selected.as_ref()?;
-                            (asked.team.is_empty() && *asked != now).then_some(now)
-                        });
-                        if let Some(part) = moved {
-                            selected.set(Some(part));
-                            return;
-                        }
                         results.set(into_load(response).map(|response| Searched {
                             response,
                             request,
@@ -339,7 +328,7 @@ fn App() -> impl IntoView {
         <div class="app">
             <header class="topbar">
                 <h1 class="brand">"KiCad Parts"</h1>
-                <CatalogBadge status=status />
+                <CatalogBadge />
                 <button
                     type="button"
                     id="libraries-open"
@@ -546,54 +535,29 @@ fn into_load<T>(result: Result<T, String>) -> Load<T> {
     }
 }
 
-/// The header's words about where the list's parts come from. With two
-/// teams or more showing parts, the CSV count alone would not match the
-/// list, so it says the teams instead of a number. A catalog folder with no
-/// CSV files gets no words, unless two teams or more show parts.
-fn catalog_words(csv_parts: usize, csv_files: usize, teams: usize) -> String {
-    if csv_files == 0 {
-        return if teams >= 2 {
-            format!("Parts from {teams} teams")
-        } else {
-            String::new()
-        };
-    }
-    let files = counted(csv_files, "CSV file", "CSV files");
+/// The header's words about where the list's parts come from: the teams,
+/// while two or more show parts; nothing otherwise.
+fn catalog_words(teams: usize) -> String {
     if teams >= 2 {
-        format!("Parts from {teams} teams and {files}")
+        format!("Parts from {teams} teams")
     } else {
-        format!("{} from {files}", counted(csv_parts, "part", "parts"))
+        String::new()
     }
 }
 
 #[component]
-fn CatalogBadge(status: RwSignal<Load<AppStatus>>) -> impl IntoView {
+fn CatalogBadge() -> impl IntoView {
     let marks = use_context::<ListTeams>().map(|list| list.marks);
-    let teams = move || {
-        marks
+    let words = move || {
+        let teams = marks
             .map(|marks| marks.with(|marks| if marks.shown { marks.by_team.len() } else { 0 }))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        catalog_words(teams)
     };
-    move || match status.get() {
-        Load::Ready(status) => match status.catalog.error {
-            None => {
-                let words =
-                    move || catalog_words(status.catalog.parts, status.catalog.csv_files, teams());
-                view! {
-                    <Show when=move || !words().is_empty()>
-                        <p class="catalog-summary">{words}</p>
-                    </Show>
-                }
-                .into_any()
-            }
-            Some(error) => view! {
-                <p class="catalog-summary catalog-error" role="alert">
-                    {format!("Catalog not loaded: {error}")}
-                </p>
-            }
-            .into_any(),
-        },
-        _ => ().into_any(),
+    view! {
+        <Show when=move || !words().is_empty()>
+            <p class="catalog-summary">{words}</p>
+        </Show>
     }
 }
 
@@ -853,8 +817,6 @@ fn PartPanel(
     library_add: RwSignal<Option<desktop_contract::TeamLibraryChoice>>,
 ) -> impl IntoView {
     let list_teams = expect_context::<ListTeams>();
-    // Whether any team shows parts.
-    let any_team = Memo::new(move |_| list_teams.marks.with(|marks| !marks.by_team.is_empty()));
     let detail = RwSignal::new(None::<Load<Option<PartDetail>>>);
     let symbol = RwSignal::new(Load::<PreviewOutcome>::Loading);
     let footprint = RwSignal::new(Load::<PreviewOutcome>::Loading);
@@ -885,11 +847,11 @@ fn PartPanel(
                 session:
                     TeamSession::SignedIn {
                         checkpoint,
-                        imports,
+                        catch_ups,
                         ..
                     },
                 ..
-            }) => Some((server_url.clone(), *checkpoint, *imports)),
+            }) => Some((server_url.clone(), *checkpoint, *catch_ups)),
             _ => None,
         })
     });
@@ -1280,9 +1242,6 @@ fn PartPanel(
                         footprint=footprint
                         team_part=team_part
                         team_checked=team_checked
-                        in_no_team=Signal::derive(move || {
-                            any_team.get() && team_url.with(String::is_empty)
-                        })
                         offline_note=offline_note
                         source_team=source_team
                         can_edit=can_edit
@@ -1303,8 +1262,6 @@ fn PartView(
     footprint: RwSignal<Load<PreviewOutcome>>,
     team_part: RwSignal<Option<TeamPart>>,
     team_checked: RwSignal<bool>,
-    /// The part is only in the CSV files while a team shows parts.
-    in_no_team: Signal<bool>,
     /// Why the part can't be edited now, while its team is offline.
     offline_note: Memo<Option<Said>>,
     /// The part's team code, while several teams show parts.
@@ -1314,8 +1271,8 @@ fn PartView(
 ) -> impl IntoView {
     let in_team = Memo::new(move |_| team_part.with(Option::is_some));
     let summary = part.summary.clone();
-    // The header: from the team catalog's current details and revision when
-    // it has the part, otherwise from the CSV catalog.
+    // The header: from the team catalog's current details and revision once
+    // they are read, otherwise from the part's row in the list.
     let header = move || {
         let team = team_part.get();
         let field = |name: &str| {
@@ -1349,8 +1306,7 @@ fn PartView(
         };
         let source = match &team {
             Some(part) => format!("{catalog}, revision {} of this part", part.revision.number),
-            None if summary.csv_file == "Team catalog" => catalog,
-            None => summary.csv_file.clone(),
+            None => catalog,
         };
         let facts: Vec<(&str, String)> = [
             ("IPN", summary.ipn.clone()),
@@ -1422,7 +1378,7 @@ fn PartView(
                         // which the offline note says, not "not in the
                         // team catalog".
                         let is_offline = offline_note.with(Option::is_some);
-                        let not_in_team = in_no_team.get() || (team_checked.get() && !is_offline);
+                        let not_in_team = team_checked.get() && !is_offline;
                         view! {
                             {offline}
                             <h3 id="fields-heading">{format!("Catalog fields ({field_count})")}</h3>
@@ -1777,21 +1733,8 @@ fn PreviewProblemView(problem: PreviewProblem) -> impl IntoView {
 mod tests {
     #[test]
     fn the_header_says_where_the_lists_parts_come_from() {
-        assert_eq!(
-            super::catalog_words(178, 21, 0),
-            "178 parts from 21 CSV files"
-        );
-        assert_eq!(
-            super::catalog_words(178, 21, 1),
-            "178 parts from 21 CSV files"
-        );
-        assert_eq!(
-            super::catalog_words(178, 21, 2),
-            "Parts from 2 teams and 21 CSV files"
-        );
-        // A folder with no CSV catalog, such as the sample library.
-        assert_eq!(super::catalog_words(0, 0, 0), "");
-        assert_eq!(super::catalog_words(0, 0, 1), "");
-        assert_eq!(super::catalog_words(0, 0, 2), "Parts from 2 teams");
+        assert_eq!(super::catalog_words(0), "");
+        assert_eq!(super::catalog_words(1), "");
+        assert_eq!(super::catalog_words(2), "Parts from 2 teams");
     }
 }

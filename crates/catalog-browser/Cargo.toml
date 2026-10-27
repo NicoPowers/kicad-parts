@@ -10,7 +10,6 @@ description = "Browse the catalog with kicad-cli previews; the use cases behind 
 base64 = "0.22"
 catalog = { path = "../catalog" }
 collaboration = { path = "../collaboration" }
-csv-catalog = { path = "../csv-catalog" }
 desktop-contract = { path = "../desktop-contract" }
 kicad-integration = { path = "../kicad-integration" }
 kicad-libraries = { path = "../kicad-libraries" }

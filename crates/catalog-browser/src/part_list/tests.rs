@@ -1,32 +1,8 @@
 use super::*;
+use crate::PartValues;
 
 const MA: &str = "https://ma.example.com";
 const AC: &str = "https://ac.example.com";
-
-/// A CSV catalog row: (IPN, MPN, CSV table such as `g-res`).
-fn csv_part(ipn: &str, mpn: &str, table: &str) -> CatalogPart {
-    CatalogPart {
-        ipn: ipn.into(),
-        category: table.into(),
-        mpn: mpn.into(),
-        manufacturer: String::new(),
-        description: format!("{mpn} from the CSV files"),
-        value: String::new(),
-        symbol: None,
-        footprint: None,
-        datasheet: String::new(),
-        fields: Vec::new(),
-    }
-}
-
-fn csv(rows: &[(&str, &str, &str)]) -> CsvCatalog {
-    CsvCatalog::from_parts(
-        rows.iter()
-            .map(|(ipn, mpn, table)| csv_part(ipn, mpn, table))
-            .collect(),
-        Vec::new(),
-    )
-}
 
 /// A team's parts: (IPN, MPN, category code).
 fn team(server: &str, label: &str, parts: &[(&str, &str, &str)]) -> Arc<KnownParts> {
@@ -49,34 +25,9 @@ fn team(server: &str, label: &str, parts: &[(&str, &str, &str)]) -> Arc<KnownPar
 
 /// The answer to `request` over `teams`, as the app gives it.
 fn search(teams: &[Arc<KnownParts>], request: &SearchRequest) -> SearchResponse {
-    let at = csv_rows_by_ipn(None);
     let listed = ListedTeams::default();
-    let csv = CsvRows {
-        catalog: None,
-        at: &at,
-    };
     let sources = Sources {
-        csv: None,
-        teams: listed.rows_of(teams, &csv),
-    };
-    answer(&sources, request)
-}
-
-/// The answer to `request` over `catalog` and `teams`, as the app gives it.
-fn search_with_csv(
-    catalog: &CsvCatalog,
-    teams: &[Arc<KnownParts>],
-    request: &SearchRequest,
-) -> SearchResponse {
-    let at = csv_rows_by_ipn(Some(catalog));
-    let listed = ListedTeams::default();
-    let csv = CsvRows {
-        catalog: Some(catalog),
-        at: &at,
-    };
-    let sources = Sources {
-        csv: Some(catalog),
-        teams: listed.rows_of(teams, &csv),
+        teams: listed.rows_of(teams),
     };
     answer(&sources, request)
 }
@@ -93,8 +44,7 @@ fn request(query: &str) -> SearchRequest {
     }
 }
 
-/// Every row shown, section by section, as `team code:IPN` (`CSV:IPN` for
-/// a part only the CSV catalog has).
+/// Every row shown, section by section, as `team code:IPN`.
 fn rows(response: &SearchResponse) -> Vec<String> {
     response
         .hits()
@@ -102,7 +52,6 @@ fn rows(response: &SearchResponse) -> Vec<String> {
             let team = match hit.team.as_str() {
                 MA => "MA",
                 AC => "AC",
-                "" => "CSV",
                 other => other,
             };
             format!("{team}:{}", hit.ipn)
@@ -129,41 +78,6 @@ fn every_teams_parts_are_in_one_list_with_the_same_ipn_once_per_team() {
     // Each team's row shows that team's own values.
     let mpns: Vec<&str> = found.hits().take(2).map(|hit| hit.mpn.as_str()).collect();
     assert_eq!(mpns, ["R1", "R1-AC"]);
-}
-
-#[test]
-fn with_one_team_the_list_is_as_before() {
-    // Before several teams, the CSV catalog's rows showed in their order,
-    // the team's values over them, then the team's own parts.
-    let catalog = csv(&[("RES-2", "R2", "g-res"), ("RES-1", "R1", "g-res")]);
-    let ma = team(
-        MA,
-        "MA",
-        &[("RES-1", "R1-new", "res"), ("RES-0", "R0", "res")],
-    );
-    let found = search_with_csv(&catalog, &[ma], &request(""));
-    assert_eq!(rows(&found), ["CSV:RES-2", "MA:RES-1", "MA:RES-0"]);
-    assert_eq!(found.sections[0].hits[1].mpn, "R1-new");
-    // A team's part over a CSV row keeps the CSV file it came from.
-    assert_eq!(found.sections[0].hits[1].csv_file, "g-res.csv");
-    assert_eq!(found.sections[0].hits[2].csv_file, "Team catalog");
-}
-
-#[test]
-fn with_two_teams_a_team_part_never_takes_the_csv_rows_values() {
-    // Whose CSV folder this is is not known yet (kicad-parts-e9a3), so a
-    // client team's RES-1 must not show our CSV file's data.
-    let catalog = csv(&[("RES-1", "R1", "g-res")]);
-    let mut ac_values = (*team(AC, "AC", &[("RES-1", "R1-AC", "res")])).clone();
-    ac_values.values.get_mut("RES-1").unwrap().symbol = Some("AC-Lib:R".into());
-    let ma = team(MA, "MA", &[("RES-1", "R1", "res")]);
-    let found = search_with_csv(&catalog, &[ma, Arc::new(ac_values.clone())], &request(""));
-    let ac_row = found.hits().find(|hit| hit.team == AC).unwrap();
-    assert_eq!(ac_row.csv_file, "Team catalog");
-    assert_eq!(ac_row.description, "R1-AC in AC");
-    // With one team, the CSV row fills it in, as before several teams.
-    let found = search_with_csv(&catalog, &[Arc::new(ac_values)], &request(""));
-    assert_eq!(found.hits().next().unwrap().csv_file, "g-res.csv");
 }
 
 #[test]
@@ -289,50 +203,17 @@ fn the_selected_part_is_found_in_its_own_team() {
 }
 
 #[test]
-fn a_part_selected_while_signed_out_becomes_the_first_teams_part() {
-    let catalog = csv(&[("RES-1", "R1", "g-res"), ("RES-2", "R2", "g-res")]);
-    let ac = team(AC, "AC", &[("RES-1", "R1", "res")]);
-    let ma = team(MA, "MA", &[("RES-1", "R1", "res")]);
-    let asked = |ipn: &str| SearchRequest {
-        selected: Some(PartKey {
-            team: String::new(),
-            ipn: ipn.into(),
-        }),
-        ..request("")
-    };
-    let found = search_with_csv(&catalog, &[ac.clone(), ma], &asked("RES-1"));
-    assert_eq!(
-        found.selected_part,
-        Some(PartKey {
-            team: AC.into(),
-            ipn: "RES-1".into()
-        })
-    );
-    // A part still only in the CSV files stays as it is.
-    let found = search_with_csv(&catalog, &[ac], &asked("RES-2"));
-    assert_eq!(
-        found.selected_part.map(|part| part.team),
-        Some(String::new())
-    );
-}
-
-#[test]
 fn a_team_with_new_parts_makes_its_rows_again_and_others_keep_theirs() {
-    let at = csv_rows_by_ipn(None);
-    let csv = CsvRows {
-        catalog: None,
-        at: &at,
-    };
     let listed = ListedTeams::default();
     let ma = team(MA, "MA", &[("RES-1", "R1", "res")]);
     let ac = team(AC, "AC", &[("RES-1", "R1", "res")]);
-    let first = listed.rows_of(&[ma.clone(), ac.clone()], &csv);
+    let first = listed.rows_of(&[ma.clone(), ac.clone()]);
     // The same parts give the same rows: nothing is made again.
-    let again = listed.rows_of(&[ma.clone(), ac.clone()], &csv);
+    let again = listed.rows_of(&[ma.clone(), ac.clone()]);
     assert!(Arc::ptr_eq(&first[0], &again[0]) && Arc::ptr_eq(&first[1], &again[1]));
     // A teammate saved on AC: only AC's rows are made again.
     let ac_saved = team(AC, "AC", &[("RES-1", "R1-new", "res")]);
-    let after = listed.rows_of(&[ma, ac_saved], &csv);
+    let after = listed.rows_of(&[ma, ac_saved]);
     assert!(Arc::ptr_eq(&first[0], &after[0]));
     assert!(!Arc::ptr_eq(&first[1], &after[1]));
     assert_eq!(after[1].parts[0].part.mpn, "R1-new");
@@ -356,15 +237,9 @@ fn ten_teams_of_three_thousand_parts_search_quickly() {
             )
         })
         .collect();
-    let at = csv_rows_by_ipn(None);
-    let csv = CsvRows {
-        catalog: None,
-        at: &at,
-    };
     let listed = ListedTeams::default();
     let sources = Sources {
-        csv: None,
-        teams: listed.rows_of(&teams, &csv),
+        teams: listed.rows_of(&teams),
     };
     // Rows are made once; each keystroke only compares text.
     let started = Instant::now();
@@ -386,7 +261,7 @@ fn ranked(items: &[(&str, usize, u8)]) -> Vec<Ranked> {
         .iter()
         .map(|(code, position, rank)| Ranked {
             section: (*code).to_owned(),
-            row: Row::Team {
+            row: Row {
                 team: 0,
                 part: *position,
             },
@@ -407,14 +282,7 @@ fn grouping(limit: usize, searching: bool) -> Grouping<'static> {
 }
 
 fn positions(group: &Group) -> Vec<usize> {
-    group
-        .rows
-        .iter()
-        .map(|row| match row {
-            Row::Csv(position) => *position,
-            Row::Team { part, .. } => *part,
-        })
-        .collect()
+    group.rows.iter().map(|row| row.part).collect()
 }
 
 fn summary_of(groups: &[Group]) -> Vec<(&str, &str, usize, Vec<usize>)> {
@@ -481,7 +349,7 @@ fn each_section_shows_at_most_the_limit_but_counts_every_match() {
     let many: Vec<Ranked> = (0..5)
         .map(|n| Ranked {
             section: "res".to_owned(),
-            row: Row::Team { team: 0, part: n },
+            row: Row { team: 0, part: n },
             rank: 2,
         })
         .collect();
@@ -494,7 +362,7 @@ fn each_section_shows_at_most_the_limit_but_counts_every_match() {
     let groups = group_rows(
         many,
         &Grouping {
-            selected: Some(Row::Team { team: 0, part: 4 }),
+            selected: Some(Row { team: 0, part: 4 }),
             ..grouping(2, false)
         },
     );

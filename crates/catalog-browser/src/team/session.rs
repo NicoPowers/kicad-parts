@@ -21,9 +21,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The realtime topic of new Changes.
 const CHANGES_TOPIC: &str = "catalog_changes";
-/// The realtime topic of new audit entries, which tell when a CSV import run
-/// finishes even if it published no Change.
-const AUDIT_TOPIC: &str = "catalog_audit_entries";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the follower waits for an event before checking whether it
 /// should stop.
@@ -79,14 +76,14 @@ impl Session {
 }
 
 /// The category names last read, and the position of the team catalog
-/// (checkpoint and imports) they were read at.
+/// (checkpoint and catch-ups) they were read at.
 pub(super) type NamesRead = ((u64, u64), CategoryNames);
 
 pub(super) struct Live {
     pub(super) updates: LiveUpdates,
     pub(super) replica: CatalogReplica,
-    /// Counts finished CSV import runs and catch-ups.
-    pub(super) imports: u64,
+    /// Counts finished catch-ups.
+    pub(super) catch_ups: u64,
     /// When the replica last matched the server, in milliseconds since
     /// 1970: when a catch-up finished, or when live updates broke after
     /// one. While live, the replica matches the server now.
@@ -105,7 +102,7 @@ impl Follower {
         let live = Arc::new(Mutex::new(Live {
             updates: LiveUpdates::Connecting,
             replica: CatalogReplica::new(),
-            imports: 0,
+            catch_ups: 0,
             in_step_at_ms: 0,
         }));
         let stop = Arc::new(AtomicBool::new(false));
@@ -125,7 +122,7 @@ impl Follower {
         (
             live.updates.clone(),
             live.replica.checkpoint(),
-            live.imports,
+            live.catch_ups,
         )
     }
 
@@ -201,8 +198,8 @@ fn follow_changes(shared: &Mutex<PocketBaseClient>, live: &Mutex<Live>, stop: &A
     let set = |updates: LiveUpdates| {
         live.lock().unwrap_or_else(|e| e.into_inner()).updates = updates;
     };
-    let imported = || {
-        live.lock().unwrap_or_else(|e| e.into_inner()).imports += 1;
+    let caught_up = || {
+        live.lock().unwrap_or_else(|e| e.into_inner()).catch_ups += 1;
     };
     let in_step_now = || {
         live.lock().unwrap_or_else(|e| e.into_inner()).in_step_at_ms = now_ms();
@@ -225,7 +222,7 @@ fn follow_changes(shared: &Mutex<PocketBaseClient>, live: &Mutex<Live>, stop: &A
         let client = &shared.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let result = (|| -> Result<(), CollabError> {
             let mut connection = RealtimeConnection::connect(client, CONNECT_TIMEOUT)?;
-            connection.subscribe(client, &[CHANGES_TOPIC, AUDIT_TOPIC])?;
+            connection.subscribe(client, &[CHANGES_TOPIC])?;
             update_replica(&|replica| {
                 // A replica that has applied nothing yet starts from the
                 // current state, which is much quicker than replaying
@@ -237,8 +234,7 @@ fn follow_changes(shared: &Mutex<PocketBaseClient>, live: &Mutex<Live>, stop: &A
                 }
                 Ok(())
             })?;
-            // An import run may have finished while disconnected.
-            imported();
+            caught_up();
             in_step_now();
             set(LiveUpdates::Live);
             went_live.set(true);
@@ -246,16 +242,7 @@ fn follow_changes(shared: &Mutex<PocketBaseClient>, live: &Mutex<Live>, stop: &A
                 let Some(event) = connection.next_event(POLL)? else {
                     continue;
                 };
-                if event.data["action"] != "create" {
-                    continue;
-                }
-                if event.topic == AUDIT_TOPIC {
-                    if event.data["record"]["csv_import_number"].as_u64() > Some(0) {
-                        imported();
-                    }
-                    continue;
-                }
-                if event.topic != CHANGES_TOPIC {
+                if event.data["action"] != "create" || event.topic != CHANGES_TOPIC {
                     continue;
                 }
                 let change: StoredChange = serde_json::from_value(event.data["record"].clone())

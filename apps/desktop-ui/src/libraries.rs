@@ -12,7 +12,7 @@
 //! one role, the current item selected, and a callback for the choice.
 
 use crate::focus::focus_later;
-use crate::team_marks::{CsvChip, ListTeams, TeamChip, TeamMark};
+use crate::team_marks::{ListTeams, TeamChip, TeamMark};
 use crate::{Load, PreviewSection, backend, cad_reference, counted, grouped, into_load};
 use desktop_contract::{
     LibrariesView, LibraryCheckView, LibraryEntry, LibraryFilters, LibraryGroup, LibraryItemDetail,
@@ -1361,11 +1361,9 @@ fn UsedBy(
                             team: part.team.clone(),
                             ipn: part.ipn.clone(),
                         };
-                        let chip = match marks.mark(&part.team) {
-                            Some(mark) => Some(view! { <TeamChip mark=mark.clone() /> }.into_any()),
-                            None if marks.shown => Some(view! { <CsvChip /> }.into_any()),
-                            None => None,
-                        };
+                        let chip = marks
+                            .mark(&part.team)
+                            .map(|mark| view! { <TeamChip mark=mark.clone() /> });
                         view! {
                             <li>
                                 {chip}

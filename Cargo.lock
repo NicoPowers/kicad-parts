@@ -536,7 +536,6 @@ dependencies = [
  "base64 0.22.1",
  "catalog",
  "collaboration",
- "csv-catalog",
  "desktop-contract",
  "kicad-integration",
  "kicad-libraries",
@@ -911,14 +910,6 @@ dependencies = [
  "itoa",
  "ryu",
  "serde_core",
-]
-
-[[package]]
-name = "csv-catalog"
-version = "0.1.0"
-dependencies = [
- "csv",
- "tempfile",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 //! The team catalog use cases behind the desktop: sign in to the team's
 //! PocketBase server, read one part's details and history, publish edits,
-//! archive and unarchive revisions, review CSV changes that were not
-//! applied, and follow changes others make.
+//! add parts, archive and unarchive revisions, and follow changes others
+//! make.
 //!
 //! A [`TeamCatalog`] is one team: one team server and, while signed in, one
 //! session with it. The person's list of teams is in [`crate::teams`].
@@ -10,9 +10,7 @@
 //! in step with the server (see [`session`]).
 //!
 //! The UI polls [`TeamCatalog::status`], whose `checkpoint` grows whenever
-//! anyone publishes a Change and whose `imports` grows when a CSV import
-//! run finishes (a run may find CSV changes without publishing a Change) or
-//! after catching up.
+//! anyone publishes a Change and whose `catch_ups` grows after catching up.
 
 mod known_parts;
 mod session;
@@ -20,20 +18,15 @@ mod session;
 pub use known_parts::{KnownParts, PartsFile};
 
 use crate::PartValues;
-use crate::csv_ipns::IpnsInCsv;
 use catalog::library_check::{chosen_footprint_problems, judge_model_link};
 use catalog::pocketbase::UploadRole;
 use catalog::pocketbase::{
-    ArchiveCommand, ArchiveOutcome, CSV_CAD_DIFFERS, CSV_CAD_ITEM_KEPT, CSV_DETAILS_DIFFER,
-    CadUpload, ConflictingRecord, CreateCommand, CreateOutcome, CsvReviewCommand, CsvReviewOutcome,
-    EDIT_BODY_LIMIT, EditCommand, IPN_GIVEN_TO_ANOTHER_PART, MANUFACTURER_PARTS_FIELD,
-    PublishOutcome, PublishReply, StoredArchiveEntry, StoredBlob, StoredCadItemRevision,
-    StoredChange, StoredCsvReview, StoredImportProblem, StoredPart, StoredPartRevision,
-    archive_entries_of, archived_numbers, cad_item_revisions_by_id, cad_item_revisions_in_changes,
-    changes_by_id, csv_reviews_of, current_categories, fields_for_category, has_cad_item,
-    latest_import_run, part_by_ipn, part_details_of, part_revisions, problems_of,
-    recorded_csv_document, remembered_matches, submit_archive, submit_create, submit_csv_review,
-    submit_edit,
+    ArchiveCommand, ArchiveOutcome, CadUpload, ConflictingRecord, CreateCommand, CreateOutcome,
+    EDIT_BODY_LIMIT, EditCommand, PublishOutcome, PublishReply, StoredArchiveEntry, StoredBlob,
+    StoredCadItemRevision, StoredChange, StoredPart, StoredPartRevision, archive_entries_of,
+    archived_numbers, cad_item_revisions_by_id, cad_item_revisions_in_changes, changes_by_id,
+    current_categories, fields_for_category, has_cad_item, part_by_ipn, part_details_of,
+    part_revisions, remembered_matches, submit_archive, submit_create, submit_edit,
 };
 use catalog::{
     CATEGORY_LABEL, CadItemDetails, CadItemId, CadItemKind, CadItemRevisionId, CadReference,
@@ -42,12 +35,11 @@ use catalog::{
 };
 use collaboration::{CollabError, CorrelationId, PocketBaseClient};
 use desktop_contract::{
-    ArchiveNote, CadItemUse, ConflictRow, CsvChangeRow, CsvChanges, CsvRowForAnotherPart,
-    CurrentDetails, CurrentRevision, DetailChange, Field, FileKind, HistoryEntry, ManufacturerPart,
-    OlderUse, PreviewKind, PublishResult, RevisionStatus, SignInRequest, StoredFootprint,
-    TeamArchiveRequest, TeamCategory, TeamConflict, TeamCsvReviewRequest, TeamEditRequest,
-    TeamFile, TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamNewPartRequest, TeamPart,
-    TeamSession, TeamStatus,
+    ArchiveNote, CadItemUse, ConflictRow, CurrentDetails, CurrentRevision, DetailChange, Field,
+    FileKind, HistoryEntry, ManufacturerPart, OlderUse, PreviewKind, PublishResult, RevisionStatus,
+    SignInRequest, StoredFootprint, TeamArchiveRequest, TeamCategory, TeamConflict,
+    TeamEditRequest, TeamFile, TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamNewPartRequest,
+    TeamPart, TeamSession, TeamStatus,
 };
 use kicad_integration::library_file::{
     footprint_says_excluded_from_bom, symbol_entries_say_not_in_bom,
@@ -145,8 +137,8 @@ pub enum TeamCad {
     /// The revision assigns none.
     Unassigned,
     /// A library the team catalog does not store, such as KiCad's own, or
-    /// a reference that did not resolve when it was imported. Draw it from
-    /// the library on this computer.
+    /// a reference that did not resolve when it was saved. Draw it from the
+    /// library on this computer.
     Library {
         reference: String,
         alternates: Vec<String>,
@@ -277,7 +269,7 @@ impl TeamCatalog {
                 },
             };
         };
-        let (live, checkpoint, imports) = session.follower.snapshot();
+        let (live, checkpoint, catch_ups) = session.follower.snapshot();
         let in_step_at = session.follower.in_step_at();
         TeamStatus {
             server_url: session.client().base_url().to_owned(),
@@ -287,14 +279,14 @@ impl TeamCatalog {
             note: None,
             libraries_made_from: None,
             library_repo: None,
-            parts_as_of: self.parts_as_of(Some((&live, imports, in_step_at))),
+            parts_as_of: self.parts_as_of(Some((&live, catch_ups, in_step_at))),
             session: TeamSession::SignedIn {
                 name: session.name.clone(),
                 email: session.email.clone(),
                 can_edit: session.can_edit,
                 live,
                 checkpoint,
-                imports,
+                catch_ups,
             },
         }
     }
@@ -460,7 +452,7 @@ impl TeamCatalog {
 
     /// Every category's plain name, by code, for grouping the part list;
     /// empty while signed out. Read again only when the team catalog has
-    /// moved on (a new Change or import), so searching makes no request.
+    /// moved on (a new Change or a catch-up), so searching makes no request.
     /// If reading fails, the names read before are kept until it moves on.
     pub fn category_names(&self) -> BTreeMap<String, String> {
         let (client, cache, position) = {
@@ -468,11 +460,11 @@ impl TeamCatalog {
             let Some(session) = &state.session else {
                 return BTreeMap::new();
             };
-            let (_, checkpoint, imports) = session.follower.snapshot();
+            let (_, checkpoint, catch_ups) = session.follower.snapshot();
             (
                 session.client(),
                 session.category_names.clone(),
-                (checkpoint, imports),
+                (checkpoint, catch_ups),
             )
         };
         let earlier = cache.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -738,62 +730,6 @@ impl TeamCatalog {
         }
     }
 
-    /// Reviews CSV changes that were not applied to an edited part: takes
-    /// the CSV's values for the fields named, keeps the part's for the rest.
-    pub fn csv_review(&self, request: TeamCsvReviewRequest) -> Result<PublishResult, String> {
-        let client = self.client()?;
-        let mut command = CsvReviewCommand::new(
-            &request.ipn,
-            &request.problem,
-            request.accept.clone(),
-            request.expected,
-            &request.reason,
-        );
-        command.correlation_id = attempt_id(request.correlation_id.as_deref())?;
-        match submit_csv_review(&client, &command) {
-            Ok(reply) => match reply.outcome {
-                CsvReviewOutcome::Applied {
-                    accepted,
-                    details,
-                    revision,
-                    ..
-                } => saved_then(reload(&client, &request.ipn), |part| {
-                    PublishResult::CsvReviewed {
-                        accepted,
-                        details_saved: details.is_some(),
-                        revision: revision.map(|revision| revision.number),
-                        part,
-                    }
-                }),
-                CsvReviewOutcome::Noop { .. } => Ok(PublishResult::NothingToSave {
-                    message: "Someone already reviewed these CSV values, so nothing was saved."
-                        .into(),
-                }),
-                CsvReviewOutcome::Conflict { .. } => Ok(PublishResult::Refused {
-                    message: format!(
-                        "Someone else changed {} after you opened these CSV values. Nothing was saved. Look at the part again, then review the CSV values again.",
-                        request.ipn
-                    ),
-                }),
-                CsvReviewOutcome::OutOfDate { .. } => Ok(PublishResult::Refused {
-                    message: "A newer import has run since you opened these CSV values. Nothing was saved. Open the part again to see what differs now.".into(),
-                }),
-                CsvReviewOutcome::CorrelationReused { message, .. } => {
-                    Ok(PublishResult::Refused { message })
-                }
-            },
-            Err(CollabError::Http {
-                status: 400 | 404,
-                message,
-            }) => Ok(PublishResult::Refused { message }),
-            Err(CollabError::Forbidden(message)) => Ok(PublishResult::Refused { message }),
-            Err(CollabError::Unauthorized(_)) => Ok(PublishResult::Refused {
-                message: "Your sign-in has ended. Sign in again, then save.".into(),
-            }),
-            Err(error) => save_failed(error),
-        }
-    }
-
     /// Every part's current details and current revision, from what the app
     /// follows; no request. Empty while signed out.
     pub(crate) fn current_parts(&self) -> Vec<(PartDetails, PartRevision)> {
@@ -814,7 +750,7 @@ impl TeamCatalog {
     }
 
     /// Who is signed in, to which server, and how far the app has followed
-    /// the team catalog (its checkpoint and finished imports), when they
+    /// the team catalog (its checkpoint and catch-ups), when they
     /// can edit: the library check is worked out again only when this
     /// changes. Two teams may share a checkpoint, so the server is part of
     /// it. No request; `None` while signed out or for someone who can only
@@ -822,14 +758,14 @@ impl TeamCatalog {
     pub(crate) fn editor_position(&self) -> Option<(String, u64, u64)> {
         let state = self.lock();
         let session = state.session.as_ref().filter(|session| session.can_edit)?;
-        let (_, checkpoint, imports) = session.follower.snapshot();
+        let (_, checkpoint, catch_ups) = session.follower.snapshot();
         let who = format!(
             "{}
 {}",
             session.client().base_url(),
             session.email
         );
-        Some((who, checkpoint, imports))
+        Some((who, checkpoint, catch_ups))
     }
 
     /// What an importer reads from the team catalog: each CAD item's
@@ -881,8 +817,8 @@ impl TeamCatalog {
     }
 
     /// Whether `ipn` can be a new part's IPN: written as an IPN, and not
-    /// one the team catalog or the CSV catalog (`csv`) has.
-    pub fn check_ipn(&self, ipn: &str, prefix: &str, csv: &IpnsInCsv) -> TeamIpnCheck {
+    /// one the team catalog has.
+    pub fn check_ipn(&self, ipn: &str, prefix: &str) -> TeamIpnCheck {
         let problem = if catalog::Ipn::parse(ipn).is_err() {
             Some("Write the IPN as three capital letters, four digits and four letters or digits, such as RES-0001-0001.".to_owned())
         } else if !prefix.is_empty() && !ipn.starts_with(&format!("{prefix}-")) {
@@ -898,38 +834,28 @@ impl TeamCatalog {
                 "{ipn} is already in the Catalog. An IPN is never reused."
             ))
         } else {
-            // A CSV row the team catalog has not imported yet.
-            csv.file_of(ipn)
-                .map(|file| format!("{ipn} is already in {file}. An IPN is never reused."))
+            None
         };
         TeamIpnCheck { problem }
     }
 
     /// Saves a new part: part details 1 in the confirmed category, revision
-    /// 1 with its symbol and footprint, and the files they use. `csv` are
-    /// the CSV catalog's IPNs, read just before saving: the team catalog
-    /// may not have them yet, so an IPN there is refused, and none of them
-    /// is offered as the next free IPN.
-    pub fn add_part(
-        &self,
-        request: TeamNewPartRequest,
-        csv: &IpnsInCsv,
-    ) -> Result<PublishResult, String> {
+    /// 1 with its symbol and footprint, and the files they use.
+    pub fn add_part(&self, request: TeamNewPartRequest) -> Result<PublishResult, String> {
         let files = || {
             let uploads = crate::add_part::uploads(&request)?;
             Ok((uploads, request.downloads.clone()))
         };
-        self.add_part_with(request.clone(), csv, files)
+        self.add_part_with(request.clone(), files)
     }
 
     /// The next free IPN after `ipn` was found taken: for its prefix, after
-    /// every IPN the team catalog and the CSV catalog (`csv`) have, and
-    /// `ipn` itself.
-    pub(crate) fn next_free_after(&self, ipn: &str, csv: &IpnsInCsv) -> String {
+    /// every IPN the team catalog has, and `ipn` itself.
+    fn next_free_after(&self, ipn: &str) -> String {
         let parts = self.current_parts();
-        let taken = csv
-            .ipns()
-            .chain(parts.iter().map(|(details, _)| details.ipn.as_str()))
+        let taken = parts
+            .iter()
+            .map(|(details, _)| details.ipn.as_str())
             .chain(std::iter::once(ipn));
         catalog::download::next_free_ipn(&ipn[..3], taken).unwrap_or_default()
     }
@@ -939,7 +865,6 @@ impl TeamCatalog {
     pub(crate) fn add_part_with(
         &self,
         request: TeamNewPartRequest,
-        csv: &IpnsInCsv,
         files: impl FnOnce() -> Result<(Vec<CadUpload>, Vec<String>), String>,
     ) -> Result<PublishResult, String> {
         let client = self.client()?;
@@ -960,28 +885,9 @@ impl TeamCatalog {
         // A taken IPN is the server's to say: someone may take it any time.
         let ipn = request.ipn.trim().to_owned();
         if catalog::Ipn::parse(&ipn).is_err() {
-            if let Some(problem) = self.check_ipn(&ipn, "", csv).problem {
+            if let Some(problem) = self.check_ipn(&ipn, "").problem {
                 return refused(problem);
             }
-        }
-        // Only this app sees the CSV catalog folder, so it checks it here: a
-        // row saved or pulled since Add part offered the IPN has it now. A
-        // part the team catalog has is the server's to answer, because it
-        // knows whether you added it yourself.
-        let in_team_catalog = self
-            .current_parts()
-            .iter()
-            .any(|(details, _)| details.ipn == ipn);
-        if let Some(file) = csv.file_of(&ipn).filter(|_| !in_team_catalog) {
-            let next_free = self.next_free_after(&ipn, csv);
-            return Ok(PublishResult::IpnTaken {
-                message: format!(
-                    "Someone gave the IPN {ipn} to a row of {file}, so nothing was saved. The next free IPN is {next_free}."
-                ),
-                next_free,
-                ipn,
-                yours: false,
-            });
         }
         let (uploads, sources) = match files() {
             Ok(files) => files,
@@ -1029,24 +935,14 @@ impl TeamCatalog {
                     self.wait_for_change(seq);
                     saved_then(reload(&client, &ipn), |part| PublishResult::Added { part })
                 }
-                CreateOutcome::IpnTaken {
-                    added_by_you,
-                    csv_file,
-                    ..
-                } => {
-                    let next_free = self.next_free_after(&ipn, csv);
+                CreateOutcome::IpnTaken { added_by_you, .. } => {
+                    let next_free = self.next_free_after(&ipn);
                     // A part you added yourself (a save whose answer was
                     // lost) is offered to open; another part with this IPN
                     // is someone else's.
                     let message = if added_by_you {
                         format!(
                             "You already added {ipn}, so nothing more was saved. Open it to check it, or, for another part, use the next free IPN, {next_free}."
-                        )
-                    } else if !csv_file.is_empty() {
-                        // The team server knows a row the import could not
-                        // make a part from.
-                        format!(
-                            "A row of {csv_file} has the IPN {ipn}, but the import could not make a part from it, so nothing was saved. The next free IPN is {next_free}."
                         )
                     } else {
                         format!(
@@ -1740,7 +1636,7 @@ pub(crate) fn newly_named(
 
 /// The uploads for the files of an edit: a symbol or footprint file is for
 /// the reference its field names (a footprint's first choice), and is read
-/// the way the import reads the CSV catalog's files.
+/// the way Add part reads library files.
 fn uploads_of(files: &[TeamFile], cad_fields: &[Field]) -> Result<Vec<CadUpload>, String> {
     let field = |name: &str| {
         cad_fields
@@ -1962,7 +1858,6 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
     let saved_details = part_details_of(client, &part.id).map_err(fail)?;
     let revisions = part_revisions(client, &part.id).map_err(fail)?;
     let archive_entries = archive_entries_of(client, &part.id).map_err(fail)?;
-    let reviews = csv_reviews_of(client, &part.id).map_err(fail)?;
     let categories = current_categories(client).map_err(fail)?;
     let names = category_names(&categories);
     let change_ids: Vec<&str> = saved_details
@@ -1970,7 +1865,6 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
         .map(|d| d.change.as_str())
         .chain(revisions.iter().map(|r| r.change.as_str()))
         .chain(archive_entries.iter().map(|a| a.change.as_str()))
-        .chain(reviews.iter().map(|r| r.change.as_str()))
         .collect();
     let change_records: BTreeMap<String, StoredChange> = changes_by_id(client, &change_ids)
         .map_err(fail)?
@@ -2086,69 +1980,6 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
             history_entry(&mut entries, change).changes.insert(0, row);
         }
     }
-    for review in &reviews {
-        if let Some(change) = change_records.get(&review.change) {
-            let took = serde_json::from_str::<Vec<String>>(&review.accepted)
-                .is_ok_and(|accepted| !accepted.is_empty());
-            history_entry(&mut entries, change).action = match (took, review.code.as_str()) {
-                (true, _) => ACCEPTED,
-                (false, CSV_CAD_DIFFERS) => "Kept current symbol and footprint",
-                (false, _) => "Kept current part details",
-            }
-            .to_owned();
-        }
-    }
-    // What the CSV said the last time an import applied to the part, for
-    // each kind: the newest details and the newest revision a CSV import
-    // saved, with the seq of the Change that saved them.
-    let imported = |change: &str| {
-        change_records
-            .get(change)
-            .filter(|change| change.kind == "csv-import")
-            .map(|change| change.seq)
-    };
-    let last_imported = LastImported {
-        details: saved_details
-            .iter()
-            .filter_map(|saved| Some((imported(&saved.change)?, saved.snapshot.as_str())))
-            .max_by_key(|(seq, _)| *seq),
-        revision: revisions
-            .iter()
-            .filter_map(|revision| Some((imported(&revision.change)?, revision.snapshot.as_str())))
-            .max_by_key(|(seq, _)| *seq),
-    };
-    // Every import problem the part view shows, read in one request.
-    let problems = problems_of(
-        client,
-        &part.ipn,
-        &[
-            CSV_DETAILS_DIFFER,
-            CSV_CAD_DIFFERS,
-            CSV_CAD_ITEM_KEPT,
-            IPN_GIVEN_TO_ANOTHER_PART,
-        ],
-    )
-    .map_err(|error| error.to_string())?;
-    let mut runs = LatestRuns::new(client);
-    let csv_rows_for_other_parts = rows_for_other_parts(&problems, &mut runs)?;
-    // A CSV file whose row with this IPN may be another part says nothing
-    // sure about this part, so its values are never offered for review.
-    let other_part_files: BTreeSet<&str> = csv_rows_for_other_parts
-        .iter()
-        .map(|row| row.csv_file.as_str())
-        .collect();
-    let csv_changes = open_csv_changes(
-        &problems,
-        part,
-        current_details,
-        current_revision,
-        &reviews,
-        &last_imported,
-        &names,
-        describe,
-        &mut runs,
-        &other_part_files,
-    )?;
     let archived = archived_numbers(&archive_entries.iter().collect::<Vec<_>>());
     let view = TeamPart {
         ipn: part.ipn.clone(),
@@ -2166,8 +1997,6 @@ fn load(client: &PocketBaseClient, part: &StoredPart) -> Result<LoadedPart, Read
             })
             .collect(),
         history: entries.into_values().rev().collect(),
-        csv_changes,
-        csv_rows_for_other_parts,
         categories: categories
             .iter()
             .map(|category| TeamCategory {
@@ -2217,9 +2046,6 @@ fn downloaded_from(change: &StoredChange) -> Option<DetailChange> {
     })
 }
 
-/// The history action of a review that accepted CSV values.
-const ACCEPTED: &str = "Accepted CSV values";
-
 /// The history row of a CAD item revision made from a file, such as
 /// `Footprint file`, from the file of the revision it `replaced` (blank for
 /// a new CAD item) to `R_0603.kicad_mod (footprint revision 2 of ...)`;
@@ -2256,415 +2082,6 @@ fn file_row(
     })
 }
 
-/// The snapshots of a part's newest details and newest revision that a CSV
-/// import saved, with the seq of the Change that saved each: what the CSV
-/// said the last time an import applied to it.
-struct LastImported<'a> {
-    details: Option<(u64, &'a str)>,
-    revision: Option<(u64, &'a str)>,
-}
-
-/// What the CSV said the last time the app applied or reviewed it, for one
-/// kind: the SHA-256 of that CSV document, and the document if it can be
-/// read.
-struct LastSeen {
-    sha256: String,
-    document: Option<String>,
-}
-
-/// Which import problems the latest import run of their CSV file found, so
-/// what the CSV says now. Problems that only older runs found stay recorded
-/// for the zero-loss report, but the CSV has moved on since. Each CSV
-/// file's latest run is read once.
-struct LatestRuns<'c> {
-    client: &'c PocketBaseClient,
-    /// The problem IDs each CSV file's latest run found, such as `g-res`.
-    found: BTreeMap<String, Vec<String>>,
-}
-
-impl<'c> LatestRuns<'c> {
-    fn new(client: &'c PocketBaseClient) -> Self {
-        Self {
-            client,
-            found: BTreeMap::new(),
-        }
-    }
-
-    /// Whether the latest run of the CSV file `problem` is about found it.
-    fn found_now(&mut self, problem: &StoredImportProblem) -> Result<bool, String> {
-        let Some(csv_file) = csv_file_of(&problem.path) else {
-            return Ok(false);
-        };
-        if !self.found.contains_key(csv_file) {
-            let found = latest_import_run(self.client, csv_file)
-                .map_err(|error| error.to_string())?
-                .and_then(|entry| entry.import_run())
-                .map(|run| run.problems)
-                .unwrap_or_default();
-            self.found.insert(csv_file.to_owned(), found);
-        }
-        Ok(self.found[csv_file].contains(&problem.id))
-    }
-}
-
-/// The CSV file a repository path names, such as `g-res` for
-/// `database/g-res.csv`.
-fn csv_file_of(path: &str) -> Option<&str> {
-    path.strip_prefix("database/")?.strip_suffix(".csv")
-}
-
-/// The CSV rows with the part's IPN that may be a different part
-/// ([`IPN_GIVEN_TO_ANOTHER_PART`] among the part's `problems`), as the
-/// latest import of their CSV file found them, in file order. The next free
-/// IPN is left blank: only the desktop sees the CSV catalog folder, so
-/// `CatalogBrowser::team_part` fills it in. A problem whose detail cannot be
-/// read is skipped, so the part still opens.
-fn rows_for_other_parts(
-    problems: &[StoredImportProblem],
-    runs: &mut LatestRuns,
-) -> Result<Vec<CsvRowForAnotherPart>, String> {
-    let mut rows = Vec::new();
-    for problem in problems {
-        if problem.code != IPN_GIVEN_TO_ANOTHER_PART || csv_file_of(&problem.path).is_none() {
-            continue;
-        }
-        if !runs.found_now(problem)? {
-            continue;
-        }
-        let Ok(detail) = serde_json::from_str::<serde_json::Value>(&problem.detail) else {
-            continue;
-        };
-        let mpns = detail["csv_manufacturer_parts"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|made| made["mpn"].as_str())
-            .map(str::trim)
-            .filter(|mpn| !mpn.is_empty())
-            .map(str::to_owned)
-            .collect();
-        rows.push(CsvRowForAnotherPart {
-            csv_file: problem.path.clone(),
-            mpns,
-            next_free_ipn: String::new(),
-        });
-    }
-    rows.sort_by(|a, b| a.csv_file.cmp(&b.csv_file));
-    Ok(rows)
-}
-
-/// The new CSV values nobody has reviewed yet: each [`CSV_DETAILS_DIFFER`]
-/// or [`CSV_CAD_DIFFERS`] import problem of the part that the latest import
-/// run of its CSV file found, unless a review already covers what the CSV
-/// says (as the server's no-op does), and only if a field still differs.
-///
-/// The app asks only when the CSV changed since it was last applied or
-/// reviewed: for each kind, a problem whose recorded CSV document is the
-/// newer (by seq) of what the last import saved and what the last review
-/// covered is left out, because only the part was edited in this app. The
-/// problem itself stays recorded for the zero-loss report. Each row says
-/// whether the CSV changed that field since then.
-///
-/// Nothing is offered from a CSV file in `other_part_files` (such as
-/// `database/g-res.csv`): its row with this IPN may be another part.
-///
-/// A recorded document that cannot be read is skipped, so the part still
-/// opens.
-#[allow(clippy::too_many_arguments)]
-fn open_csv_changes(
-    problems: &[StoredImportProblem],
-    part: &StoredPart,
-    details: &PartDetails,
-    revision: &PartRevision,
-    reviews: &[StoredCsvReview],
-    last_imported: &LastImported,
-    names: &CategoryNames,
-    describe: impl Fn(&CadReference) -> String,
-    runs: &mut LatestRuns,
-    other_part_files: &BTreeSet<&str>,
-) -> Result<Vec<CsvChanges>, String> {
-    let last_seen = |cad: bool| -> Option<LastSeen> {
-        let code = if cad {
-            CSV_CAD_DIFFERS
-        } else {
-            CSV_DETAILS_DIFFER
-        };
-        let imported = if cad {
-            last_imported.revision
-        } else {
-            last_imported.details
-        };
-        let reviewed = reviews
-            .iter()
-            .filter(|review| review.code == code)
-            .max_by_key(|review| review.seq);
-        match (imported, reviewed) {
-            (Some((seq, _)), Some(review)) if review.seq > seq => Some(LastSeen {
-                sha256: review.csv_sha256.clone(),
-                document: problems
-                    .iter()
-                    .find(|problem| problem.id == review.problem)
-                    .and_then(recorded_csv_document),
-            }),
-            (None, Some(review)) => Some(LastSeen {
-                sha256: review.csv_sha256.clone(),
-                document: problems
-                    .iter()
-                    .find(|problem| problem.id == review.problem)
-                    .and_then(recorded_csv_document),
-            }),
-            (Some((_, snapshot)), _) => Some(LastSeen {
-                sha256: catalog::sha256_hex(snapshot),
-                document: Some(snapshot.to_owned()),
-            }),
-            (None, None) => None,
-        }
-    };
-    let seen = [last_seen(false), last_seen(true)];
-    let mut open: Vec<(String, CsvChanges)> = Vec::new();
-    for problem in problems {
-        // Only the problems a person can review have a CSV document.
-        let Some(document) = recorded_csv_document(problem) else {
-            continue;
-        };
-        // A CSV file for a CAD item made in the app: the import applied
-        // nothing of it, so there is no "last seen" to compare with; only a
-        // review covers it.
-        let kept_cad_item = problem.code == CSV_CAD_ITEM_KEPT;
-        let cad = problem.code == CSV_CAD_DIFFERS || kept_cad_item;
-        let csv_sha256 = catalog::sha256_hex(&document);
-        let last = seen[usize::from(cad)].as_ref().filter(|_| !kept_cad_item);
-        if last.is_some_and(|last| last.sha256 == csv_sha256) {
-            continue;
-        }
-        let last_document = last.and_then(|last| last.document.as_deref());
-        if reviews
-            .iter()
-            .any(|review| review.code == problem.code && review.csv_sha256 == csv_sha256)
-        {
-            continue;
-        }
-        let Some(csv_file) = csv_file_of(&problem.path) else {
-            continue;
-        };
-        if other_part_files.contains(problem.path.as_str()) {
-            continue;
-        }
-        if !runs.found_now(problem)? {
-            continue;
-        }
-        let mut rows = if kept_cad_item {
-            let Some(row) = kept_cad_item_row(problem, revision, &describe) else {
-                continue;
-            };
-            vec![row]
-        } else if cad {
-            let Ok(csv) = serde_json::from_str::<PartRevision>(&document) else {
-                continue;
-            };
-            let before = last_document.and_then(|text| serde_json::from_str(text).ok());
-            cad_rows(revision, &csv, before.as_ref(), &describe)
-        } else {
-            let Ok(csv) = serde_json::from_str::<PartDetails>(&document) else {
-                continue;
-            };
-            let before = last_document.and_then(|text| serde_json::from_str(text).ok());
-            details_rows(details, &csv, before.as_ref(), names)
-        };
-        // Values the CSV changed first; the rest keep their order.
-        rows.sort_by_key(|row| !row.changed_in_csv);
-        if rows.is_empty() {
-            continue;
-        }
-        open.push((
-            problem.code.clone(),
-            CsvChanges {
-                problem: problem.id.clone(),
-                csv_file: format!("{csv_file}.csv"),
-                cad,
-                expected: if cad {
-                    part.current_revision_number
-                } else {
-                    part.current_details_number
-                },
-                rows,
-            },
-        ));
-    }
-    Ok(in_order(open))
-}
-
-/// Open CSV changes, details first, each with its import problem's code.
-/// One import run finds at most one problem of each of the first two kinds,
-/// so a second one of those is left out; a CAD item made in the app gives
-/// one problem per symbol or footprint choice, so each of those shows.
-fn in_order(mut open: Vec<(String, CsvChanges)>) -> Vec<CsvChanges> {
-    open.sort_by(|(a_code, a), (b_code, b)| {
-        (a.cad, a_code, &a.rows[0].field, &a.rows[0].now).cmp(&(
-            b.cad,
-            b_code,
-            &b.rows[0].field,
-            &b.rows[0].now,
-        ))
-    });
-    open.dedup_by(|(a_code, a), (b_code, b)| {
-        a_code == b_code && (a_code != CSV_CAD_ITEM_KEPT || a.problem == b.problem)
-    });
-    open.into_iter().map(|(_, changes)| changes).collect()
-}
-
-/// The row of a [`CSV_CAD_ITEM_KEPT`] problem: the Symbol or Footprint, the
-/// exact revision the part uses now, and that the CSV has a changed file for
-/// it, which can only be kept.
-fn kept_cad_item_row(
-    problem: &catalog::pocketbase::StoredImportProblem,
-    revision: &PartRevision,
-    describe: &impl Fn(&CadReference) -> String,
-) -> Option<CsvChangeRow> {
-    let detail: serde_json::Value = serde_json::from_str(&problem.detail).ok()?;
-    let reference = detail.get("reference")?.as_str()?;
-    let (field, role, what) = match detail.get("role")?.as_str()? {
-        "symbol" => ("Symbol", CadReferenceRole::Symbol, "symbol"),
-        _ => ("Footprint", CadReferenceRole::Footprint, "footprint"),
-    };
-    let now = revision
-        .cad_references
-        .iter()
-        .find(|item| item.role == role && item.reference == reference)
-        .map_or_else(|| reference.to_owned(), describe);
-    Some(CsvChangeRow {
-        field: field.to_owned(),
-        now,
-        csv: format!(
-            "A changed file for {reference}. It cannot be accepted here, because this {what} was changed in this app."
-        ),
-        changed_in_csv: true,
-        keep_only: true,
-    })
-}
-
-/// The details fields both have whose values differ, in the part's order,
-/// then the manufacturer parts if they differ. A row is changed in the CSV
-/// unless `before` (what the CSV said when last applied or reviewed) has the
-/// same value; with no `before`, every row counts as changed.
-fn details_rows(
-    now: &PartDetails,
-    csv: &PartDetails,
-    before: Option<&PartDetails>,
-    names: &CategoryNames,
-) -> Vec<CsvChangeRow> {
-    let mut rows = Vec::new();
-    // The CSV file the row is in makes its category, so a row moved to
-    // another file has another category.
-    if now.category != csv.category {
-        rows.push(CsvChangeRow {
-            field: CATEGORY_LABEL.to_owned(),
-            now: category_name(names, &now.category),
-            csv: category_name(names, &csv.category),
-            changed_in_csv: before.is_none_or(|before| before.category != csv.category),
-            keep_only: false,
-        });
-    }
-    rows.extend(now.fields.iter().filter_map(|field| {
-        let theirs = csv.field(&field.name)?;
-        (theirs != field.value).then(|| CsvChangeRow {
-            field: field.name.clone(),
-            now: field.value.clone(),
-            csv: theirs.to_owned(),
-            changed_in_csv: before.is_none_or(|before| before.field(&field.name) != Some(theirs)),
-            keep_only: false,
-        })
-    }));
-    if now.manufacturer_parts != csv.manufacturer_parts {
-        rows.push(CsvChangeRow {
-            field: MANUFACTURER_PARTS_FIELD.to_owned(),
-            now: stored_lines(now),
-            csv: stored_lines(csv),
-            changed_in_csv: before
-                .is_none_or(|before| before.manufacturer_parts != csv.manufacturer_parts),
-            keep_only: false,
-        });
-    }
-    rows
-}
-
-/// Symbol and Footprint, where the field or the exact CAD it uses differs.
-/// When only the exact CAD differs, each side lists its references.
-fn cad_rows(
-    now: &PartRevision,
-    csv: &PartRevision,
-    before: Option<&PartRevision>,
-    describe: &impl Fn(&CadReference) -> String,
-) -> Vec<CsvChangeRow> {
-    let mut rows = Vec::new();
-    for (name, role) in [
-        ("Symbol", CadReferenceRole::Symbol),
-        ("Footprint", CadReferenceRole::Footprint),
-    ] {
-        let (Some(ours), Some(theirs)) = (now.field(name), csv.field(name)) else {
-            continue;
-        };
-        let references = |revision: &PartRevision| -> Vec<CadReference> {
-            revision
-                .cad_references
-                .iter()
-                .filter(|reference| reference.role == role)
-                .cloned()
-                .collect()
-        };
-        let (our_references, their_references) = (references(now), references(csv));
-        if ours == theirs && our_references == their_references {
-            continue;
-        }
-        let lines = |references: &[CadReference]| {
-            references
-                .iter()
-                .map(describe)
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let (now_text, csv_text) = if ours == theirs {
-            (lines(&our_references), lines(&their_references))
-        } else {
-            (ours.to_owned(), theirs.to_owned())
-        };
-        let changed_in_csv = before.is_none_or(|before| {
-            before.field(name) != Some(theirs) || references(before) != their_references
-        });
-        // A reference the CSV catalog cannot find, which the Catalog has
-        // (such as a symbol added in this app): accepting it would lose it,
-        // so it can only be kept.
-        let lost = their_references.iter().find(|theirs| {
-            matches!(theirs.target, CadReferenceTarget::Unresolved { .. })
-                && our_references.iter().any(|ours| {
-                    ours.reference == theirs.reference
-                        && matches!(ours.target, CadReferenceTarget::CadItemRevision { .. })
-                })
-        });
-        if let Some(lost) = lost {
-            rows.push(CsvChangeRow {
-                field: name.to_owned(),
-                now: now_text,
-                csv: format!(
-                    "The CSV catalog does not have {}. It cannot be accepted here, because the Catalog has it.",
-                    lost.reference
-                ),
-                changed_in_csv,
-                keep_only: true,
-            });
-            continue;
-        }
-        rows.push(CsvChangeRow {
-            field: name.to_owned(),
-            now: now_text,
-            csv: csv_text,
-            changed_in_csv,
-            keep_only: false,
-        });
-    }
-    rows
-}
-
 /// The history entry of `change`, made when first needed.
 fn history_entry<'a>(
     entries: &'a mut BTreeMap<u64, HistoryEntry>,
@@ -2692,7 +2109,7 @@ fn archive_note(entry: &StoredArchiveEntry) -> ArchiveNote {
 }
 
 /// Says plainly why the server refused a category change because the new
-/// category's fields changed while the person was editing (an import
+/// category's fields changed while the person was editing (a superuser
 /// changed them), instead of the server's "field 7 must be X".
 fn plain_refusal(message: String, moved: bool) -> String {
     let fields_differ = message.contains("an edit cannot add, remove, rename or reorder fields")
@@ -2713,8 +2130,8 @@ fn to_changes(
     names: &CategoryNames,
 ) -> Vec<DetailChange> {
     // A field a category change added blank needs no row of its own: the
-    // category row says why it is there. Without a category change (a CSV
-    // header change, say) every row is shown.
+    // category row says why it is there. Without a category change every
+    // row is shown.
     let moved = differences
         .iter()
         .any(|difference| difference.what == DifferenceKind::Category);
@@ -2930,8 +2347,8 @@ fn excluded_from_bom_words(excluded: bool, marks: &[(CadReferenceRole, BomMark)]
 }
 
 /// Who made a Change, in words a team member understands. Administrator
-/// accounts (such as the one that runs imports) are not team members, so
-/// their email is not shown.
+/// accounts (such as the one that sets up categories) are not team
+/// members, so their email is not shown.
 fn actor_name(change: &StoredChange) -> String {
     plain_actor(&change.actor, &change.actor_name)
 }
@@ -2949,11 +2366,9 @@ fn plain_actor(actor: &str, name: &str) -> String {
 /// The plain word for a Change kind.
 fn action(kind: &str) -> &'static str {
     match kind {
-        "csv-import" => "Imported",
         "edit" => "Edited",
         "archive" => "Archived",
         "unarchive" => "Unarchived",
-        "csv-review" => ACCEPTED,
         "create" => "Added",
         _ => "Saved",
     }
@@ -3298,7 +2713,7 @@ mod tests {
         let labels = |rows: Vec<DetailChange>| -> Vec<String> {
             rows.into_iter().map(|row| row.label).collect()
         };
-        // A blank column a CSV header change added is shown.
+        // A blank field a category's new revision added is shown.
         let header = vec![difference(DifferenceKind::Field, "Notes", "", "")];
         assert_eq!(labels(to_changes(header, &names)), ["Notes"]);
         // With a category change, the category row explains it.
@@ -3307,80 +2722,6 @@ mod tests {
             difference(DifferenceKind::Field, "Tolerance", "", ""),
         ];
         assert_eq!(labels(to_changes(moved, &names)), ["Category"]);
-    }
-
-    #[test]
-    fn a_row_moved_to_another_csv_file_shows_its_new_category_by_name() {
-        let details = |category: &str| PartDetails {
-            schema: catalog::PART_DETAILS_SCHEMA.into(),
-            ipn: "RES-0000-0470".into(),
-            category: category.into(),
-            fields: vec![DetailField {
-                name: "Value".into(),
-                value: "47".into(),
-            }],
-            manufacturer_parts: Vec::new(),
-        };
-        let names: CategoryNames = [("res", "Resistors"), ("cap", "Capacitors")]
-            .into_iter()
-            .map(|(code, name)| (code.to_owned(), name.to_owned()))
-            .collect();
-        let rows = details_rows(&details("res"), &details("cap"), None, &names);
-        assert_eq!(
-            rows,
-            [CsvChangeRow {
-                field: "Category".into(),
-                now: "Resistors".into(),
-                csv: "Capacitors".into(),
-                changed_in_csv: true,
-                keep_only: false,
-            }]
-        );
-        // Already moved when last applied: not a CSV change, accepting it
-        // undoes the edit. An unknown code shows as it is.
-        let rows = details_rows(
-            &details("res"),
-            &details("xyz"),
-            Some(&details("xyz")),
-            &names,
-        );
-        assert_eq!(
-            (rows[0].csv.as_str(), rows[0].changed_in_csv),
-            ("xyz", false)
-        );
-        assert!(details_rows(&details("res"), &details("res"), None, &names).is_empty());
-    }
-
-    #[test]
-    fn each_kept_cad_item_choice_shows_its_own_csv_change() {
-        let changes = |problem: &str, now: &str| CsvChanges {
-            problem: problem.into(),
-            csv_file: "g-res.csv".into(),
-            cad: true,
-            expected: 2,
-            rows: vec![CsvChangeRow {
-                field: "Footprint".into(),
-                now: now.into(),
-                csv: "A changed file".into(),
-                changed_in_csv: true,
-                keep_only: true,
-            }],
-        };
-        let open = in_order(vec![
-            (
-                CSV_CAD_ITEM_KEPT.to_owned(),
-                changes("b", "g-a:Second, footprint revision 1"),
-            ),
-            (
-                CSV_CAD_ITEM_KEPT.to_owned(),
-                changes("a", "g-a:First, footprint revision 2"),
-            ),
-        ]);
-        let problems: Vec<&str> = open
-            .iter()
-            .map(|changes| changes.problem.as_str())
-            .collect();
-        assert_eq!(problems, ["a", "b"]);
     }
 
     #[test]

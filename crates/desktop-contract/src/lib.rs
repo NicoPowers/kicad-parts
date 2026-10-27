@@ -30,7 +30,6 @@ pub mod command {
     pub const TEAM_PART: &str = "team_part";
     pub const TEAM_EDIT: &str = "team_edit";
     pub const TEAM_ARCHIVE: &str = "team_archive";
-    pub const TEAM_CSV_REVIEW: &str = "team_csv_review";
     pub const TEAM_READ_FILE: &str = "team_read_file";
     pub const TEAM_PREVIEW_FILE: &str = "team_preview_file";
     pub const TEAM_READ_DOWNLOAD: &str = "team_read_download";
@@ -71,7 +70,10 @@ pub struct AppStatus {
     pub override_rejected: Option<String>,
     /// Why the saved settings could not be read (defaults are in use).
     pub settings_error: Option<String>,
-    pub catalog: CatalogStatus,
+    /// The local library folder: the KiCad libraries the library check,
+    /// Add part from our libraries, the Libraries browser's "Ours" and the
+    /// 3D view read. `None` while none is set.
+    pub library_folder: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -113,23 +115,12 @@ impl KicadStatus {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CatalogStatus {
-    pub root: String,
-    pub parts: usize,
-    /// How many CSV files the catalog was read from.
-    pub csv_files: usize,
-    /// Why the catalog could not be loaded, if it could not.
-    pub error: Option<String>,
-}
-
 /// One part in the part list: its team and its IPN. Two teams may both
 /// have RES-0000-0470, so an IPN alone does not name a part. Selection,
 /// previews, edits and every request about a part use this.
 #[derive(Clone, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct PartKey {
-    /// The server address of the part's team; blank for a part only the
-    /// CSV catalog has, which belongs to no team.
+    /// The server address of the part's team.
     pub team: String,
     pub ipn: String,
 }
@@ -163,7 +154,7 @@ pub struct SearchRequest {
     #[serde(default)]
     pub uses: Option<String>,
     /// Only the parts of this team, by server address. `None` lists every
-    /// signed-in team's parts, and the CSV catalog's parts no team has.
+    /// signed-in team's parts.
     #[serde(default)]
     pub team: Option<String>,
     #[serde(default)]
@@ -171,9 +162,8 @@ pub struct SearchRequest {
 }
 
 /// The key of the part list's section of the team at `server_url`, when
-/// grouping by team: blank `server_url` for the parts only the CSV
-/// catalog has. Kept apart from category codes, so a section the person
-/// opened in one grouping never opens one in the other.
+/// grouping by team. Kept apart from category codes, so a section the
+/// person opened in one grouping never opens one in the other.
 pub fn team_section(server_url: &str) -> String {
     format!("team:{server_url}")
 }
@@ -194,9 +184,8 @@ pub struct SearchResponse {
     /// matches it.
     #[serde(default)]
     pub selected: Option<String>,
-    /// The part taken as the selected one: the part asked for, or, for a
-    /// part only the CSV catalog had, the first team's part with its IPN
-    /// once a team has it (such as after signing in).
+    /// The part taken as the selected one: the part asked for, when the
+    /// search matches it.
     #[serde(default)]
     pub selected_part: Option<PartKey>,
     pub elapsed_micros: u64,
@@ -231,13 +220,10 @@ pub struct SearchSection {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PartSummary {
-    /// The server address of the part's team; blank for a part only the
-    /// CSV catalog has.
+    /// The server address of the part's team.
     #[serde(default)]
     pub team: String,
     pub ipn: String,
-    /// The CSV file the part was read from, such as `g-res.csv`.
-    pub csv_file: String,
     pub mpn: String,
     pub manufacturer: String,
     pub description: String,
@@ -820,11 +806,9 @@ pub enum TeamSession {
         /// The `seq` of the last Change this app has seen. It grows when
         /// anyone publishes a Change, which tells the UI to reload.
         checkpoint: u64,
-        /// Grows when a CSV import run finishes (which may find CSV changes
-        /// without publishing a Change) and after catching up, which also
-        /// tells the UI to reload.
+        /// Grows after catching up, which also tells the UI to reload.
         #[serde(default)]
-        imports: u64,
+        catch_ups: u64,
     },
 }
 
@@ -895,17 +879,6 @@ pub struct TeamPart {
     pub revisions: Vec<RevisionStatus>,
     /// One entry per Change that saved this part, newest first.
     pub history: Vec<HistoryEntry>,
-    /// New CSV values that were not applied because the part was edited in
-    /// this app, and nobody has reviewed yet: the CSV changed after the
-    /// edit. At most one for the details and one for the symbol and
-    /// footprint.
-    #[serde(default)]
-    pub csv_changes: Vec<CsvChanges>,
-    /// CSV catalog rows with this part's IPN that may be a different part,
-    /// as the latest import of their CSV file found them. The import left
-    /// the part as it is.
-    #[serde(default)]
-    pub csv_rows_for_other_parts: Vec<CsvRowForAnotherPart>,
     /// Every category, by name, for the Category choice in Edit part.
     #[serde(default)]
     pub categories: Vec<TeamCategory>,
@@ -920,81 +893,6 @@ pub struct TeamCategory {
     pub name: String,
     /// The fields a part in it has, in order.
     pub fields: Vec<String>,
-}
-
-/// A CSV catalog row with a part's IPN that may be a different part: the
-/// part was added in this app, and the row names none of its MPNs and is no
-/// exact copy of it (kicad-parts-3b72). Nothing shows they are one part, so
-/// the import left the part as it is. The row is named by its IPN and MPN,
-/// because row numbers differ by one between the file and a spreadsheet.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CsvRowForAnotherPart {
-    /// The CSV file, such as `database/g-res.csv`.
-    pub csv_file: String,
-    /// The row's MPNs as written, such as `ERJ-3EKF1001V`; empty when it
-    /// has none.
-    pub mpns: Vec<String>,
-    /// The next free IPN to give the row if it is a different part, such as
-    /// `RES-0003-0001`, worked out by the desktop from the team catalog and
-    /// the CSV catalog folder when the part loads; empty when not known.
-    #[serde(default)]
-    pub next_free_ipn: String,
-}
-
-/// New CSV values the latest import found for a part that was edited in
-/// this app, so the import left the part as it is.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CsvChanges {
-    /// The import problem that recorded them.
-    pub problem: String,
-    /// The CSV file, such as `g-res.csv`.
-    pub csv_file: String,
-    /// True for the symbol and footprint (taking them adds a revision),
-    /// false for the part details.
-    pub cad: bool,
-    /// The current details number (`cad` false) or revision number (`cad`
-    /// true) the rows compare with.
-    pub expected: u32,
-    /// Each field whose CSV value differs from the part's.
-    pub rows: Vec<CsvChangeRow>,
-}
-
-/// One field whose value in the CSV differs from the part's.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CsvChangeRow {
-    /// A details field name, `Category`, `Manufacturer parts`, `Symbol` or
-    /// `Footprint`.
-    pub field: String,
-    pub now: String,
-    pub csv: String,
-    /// The CSV changed this value since it was last applied or reviewed.
-    /// False for a value the CSV already had (the part was edited away from
-    /// it): accepting it undoes that edit.
-    #[serde(default)]
-    pub changed_in_csv: bool,
-    /// The CSV's value cannot be accepted here, only kept: the CSV's file
-    /// for a symbol or footprint changed, but that symbol or footprint was
-    /// changed in this app, so the Catalog does not have the CSV's file.
-    /// Choose the file in Edit part to use it.
-    #[serde(default)]
-    pub keep_only: bool,
-}
-
-/// Accept the CSV's values for the fields in `accept` and keep the part's
-/// for the rest; an empty `accept` keeps all of them. The server takes the
-/// values from what the import recorded, not from this request.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TeamCsvReviewRequest {
-    /// As in [`TeamEditRequest`].
-    #[serde(default)]
-    pub correlation_id: Option<String>,
-    pub ipn: String,
-    /// [`CsvChanges::problem`].
-    pub problem: String,
-    pub accept: Vec<String>,
-    /// [`CsvChanges::expected`].
-    pub expected: u32,
-    pub reason: String,
 }
 
 /// One revision of a part and whether it is archived. An archived revision
@@ -1086,9 +984,7 @@ pub struct HistoryEntry {
     /// The revision this Change archived or unarchived, if it did.
     #[serde(default)]
     pub archive: Option<ArchiveNote>,
-    /// `Imported`, `Edited`, `Archived`, `Unarchived`, `Accepted CSV
-    /// values`, `Kept current part details` or `Kept current symbol and
-    /// footprint`.
+    /// `Added`, `Edited`, `Archived` or `Unarchived`.
     pub action: String,
     pub actor_name: String,
     /// When it was saved, as `2026-10-09 18:02 UTC`.
@@ -1250,8 +1146,8 @@ pub struct TeamFileReading {
     /// otherwise the first.
     pub chosen: String,
     /// The library suggested for the reference: the current reference's
-    /// when it is one of the Catalog's (`g-`) libraries, otherwise one from
-    /// the part's CSV file (symbols) or the footprint's package. Blank when
+    /// when it is one of the Catalog's (`g-`) libraries, otherwise the
+    /// part's category's (symbols) or the footprint's package. Blank when
     /// nothing says, so the person types it.
     pub library: String,
     /// For a footprint, the 3D models it names in the Catalog's 3D model
@@ -1327,7 +1223,8 @@ pub enum PickUse {
     /// One of our libraries' items the Catalog does not have yet: added
     /// from the folder when saving, as it is committed.
     Ours,
-    /// KiCad's own: referred to as KiCad's, as imported parts are.
+    /// KiCad's own: the part refers to it in KiCad's library, and the
+    /// Catalog keeps no copy.
     Kicad,
     /// Another installed library's: copied into one of our libraries, like
     /// a download.
@@ -1364,8 +1261,8 @@ pub struct TeamPick {
     pub notes: Vec<String>,
 }
 
-/// Our libraries (the CSV catalog's `g-` libraries), by role, for the
-/// library a copied or downloaded file goes into.
+/// Our libraries (the `g-` libraries of the local library folder), by
+/// role, for the library a copied or downloaded file goes into.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OurLibraries {
     /// Such as `g-res`.
@@ -1374,9 +1271,9 @@ pub struct OurLibraries {
     pub footprints: Vec<String>,
 }
 
-/// A symbol and a footprint chosen from our libraries (the CSV catalog's
-/// `symbols/g-*.kicad_sym` and `footprints/g-*.pretty`) for Add part,
-/// such as `g-ics:IC_TP4333`; either may be left out.
+/// A symbol and a footprint chosen from our libraries (the local library
+/// folder's `symbols/g-*.kicad_sym` and `footprints/g-*.pretty`) for Add
+/// part, such as `g-ics:IC_TP4333`; either may be left out.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamLibraryChoice {
     #[serde(default)]
@@ -1508,15 +1405,16 @@ pub struct TeamKnownFootprint {
     pub why: String,
 }
 
-/// What the library check found (kicad-parts-da65): the CSV catalog's own
-/// libraries compared with the team catalog. Shown to people who can edit.
+/// What the library check found (kicad-parts-da65): the local library
+/// folder's own libraries compared with the team catalog. Shown to people
+/// who can edit.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LibraryCheckView {
     /// The server address of the team checked, so an answer for another
     /// team is never shown, and Add part from it adds to this team.
     #[serde(default)]
     pub team: String,
-    /// Errors: they stop an import, and Add part or Edit part with them.
+    /// Errors: they stop Add part or Edit part with them.
     pub to_fix: usize,
     /// Symbols, footprints and 3D models no part uses and the Catalog does
     /// not have yet.
@@ -1616,7 +1514,7 @@ pub struct OlderUse {
     pub other_parts: u32,
 }
 
-/// What publishing an edit, archive, unarchive or CSV review did.
+/// What publishing an edit, archive or unarchive did.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum PublishResult {
@@ -1635,17 +1533,6 @@ pub enum PublishResult {
         archived: bool,
         /// The part's current revision afterwards.
         current: u32,
-        part: TeamPart,
-    },
-    /// CSV values were reviewed: some accepted (new details, a new
-    /// revision, or both) or none (the part's values kept).
-    CsvReviewed {
-        /// The fields whose CSV values were accepted; empty if none.
-        accepted: Vec<String>,
-        /// The part details were saved again.
-        details_saved: bool,
-        /// The revision added, if a symbol or footprint was taken.
-        revision: Option<u32>,
         part: TeamPart,
     },
     /// Nothing would change, so nothing was saved.
@@ -1718,7 +1605,7 @@ pub fn unit_label(unit: u32) -> String {
 
 // ---- The Libraries browser -------------------------------------------------
 //
-// Ours (the CSV catalog's g- libraries), each linked team's library repo
+// Ours (the local library folder's g- libraries), each linked team's library repo
 // as its library layout was reviewed, KiCad's own installed libraries, and
 // the other libraries the person added to KiCad (their library tables,
 // read only). Symbols and footprints are listed by an index the app builds
@@ -1728,7 +1615,7 @@ pub fn unit_label(unit: u32) -> String {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LibraryGroup {
-    /// The CSV catalog's own `g-` libraries.
+    /// The `g-` libraries of the local library folder.
     Ours,
     /// A linked team's library repo, as its library layout was reviewed
     /// (kicad-parts-e9a3). One group per team, named by [`LibraryKey::team`].
@@ -1937,8 +1824,7 @@ pub struct LibraryItemRequest {
 /// A part that uses an item.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PartUse {
-    /// The server address of the part's team; blank for a part only the
-    /// CSV catalog has.
+    /// The server address of the part's team.
     #[serde(default)]
     pub team: String,
     pub ipn: String,

@@ -110,7 +110,7 @@ describe('team catalog previews: drawn from the exact CAD item revision', () => 
 
   it('signed in, draws the stored revision, not the changed local file', async () => {
     // Without a team, the sample library has no parts to list.
-    await waitForText(browser, '#result-count', 'No parts match.');
+    await waitForText(browser, '#result-count', 'Sign in to a team to see its parts.');
     await waitForText(browser, BADGE, 'Team catalog: not signed in');
     await browser.execute(() => document.querySelector('.team-settings').open = true);
     await (await browser.$('aria/Password')).setValue(account.password);

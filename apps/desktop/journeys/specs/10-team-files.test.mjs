@@ -142,7 +142,7 @@ describe('team catalog: edit a part with files', () => {
   }
 
   it('signs in and opens the resistor', async () => {
-    await waitForText(browser, '#result-count', 'No parts match.');
+    await waitForText(browser, '#result-count', 'Sign in to a team to see its parts.');
     await browser.execute(() => document.querySelector('.team-settings').open = true);
     await (await browser.$('aria/Password')).setValue(editor.password);
     await (await browser.$('form[aria-label="Sign in to the team catalog"] button[type="submit"]')).click();

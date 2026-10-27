@@ -17,10 +17,9 @@ use desktop_contract::{
     LibraryItemRequest, LibraryItems, LibraryItemsRequest, LibraryLayoutReview, LibraryRepoLinking,
     LibraryRepoRequest, OurLibraries, PartDetail, PartKey, PreviewOutcome, PreviewRequest,
     PublishResult, SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamChoices,
-    TeamCodeCheck, TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest,
-    TeamFileReading, TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest,
-    TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus,
-    UseNewServerRequest,
+    TeamCodeCheck, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
+    TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
+    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus, UseNewServerRequest,
 };
 use kicad_integration::{SearchLocations, remove_old_cache};
 use std::ffi::OsString;
@@ -269,8 +268,8 @@ async fn set_kicad_override(
     blocking(move || browser.set_kicad_override(path)).await?
 }
 
-/// The part list: one search over every signed-in team's parts and the
-/// CSV catalog, or one team's parts when the request names it.
+/// The part list: one search over every signed-in team's parts, or one
+/// team's parts when the request names it.
 #[tauri::command]
 async fn search_parts(
     browser: State<'_, Browser>,
@@ -283,9 +282,9 @@ async fn search_parts(
     blocking(move || browser.search_request(&request, &teams.known_parts())).await
 }
 
-/// The team at `server_url`, or none for a blank address: a part only the
-/// CSV catalog has belongs to no team. Every request about a team's parts
-/// names its team by server address, never "the shown team".
+/// The team at `server_url`, or none for a blank address: a drawing from a
+/// library on this computer belongs to no team. Every request about a
+/// team's parts names its team by server address, never "the shown team".
 fn maybe_team_at(teams: &Teams, server_url: &str) -> Result<Option<Arc<TeamCatalog>>, String> {
     if server_url.is_empty() {
         return Ok(None);
@@ -294,8 +293,7 @@ fn maybe_team_at(teams: &Teams, server_url: &str) -> Result<Option<Arc<TeamCatal
 }
 
 /// The part panel's view of a part, as its row in the part list shows it:
-/// the team's last-known values, even while its server cannot be reached,
-/// or for a part of no team the CSV catalog's row.
+/// the team's last-known values, even while its server cannot be reached.
 #[tauri::command]
 async fn part_detail(
     browser: State<'_, Browser>,
@@ -470,13 +468,12 @@ async fn team_choose(
 
 #[tauri::command]
 async fn team_part(
-    browser: State<'_, Browser>,
     teams: State<'_, Team>,
     team: String,
     ipn: String,
 ) -> Result<Option<TeamPart>, String> {
-    let (browser, team) = (browser.inner().clone(), teams.team(&team)?);
-    blocking(move || browser.team_part(&ipn, &team)).await?
+    let team = teams.team(&team)?;
+    blocking(move || team.part(&ipn)).await?
 }
 
 #[tauri::command]
@@ -531,16 +528,6 @@ async fn team_archive(
 ) -> Result<PublishResult, String> {
     let team = teams.team(&team)?;
     blocking(move || team.archive(request)).await?
-}
-
-#[tauri::command]
-async fn team_csv_review(
-    teams: State<'_, Team>,
-    team: String,
-    request: TeamCsvReviewRequest,
-) -> Result<PublishResult, String> {
-    let team = teams.team(&team)?;
-    blocking(move || team.csv_review(request)).await?
 }
 
 #[tauri::command]
@@ -1002,7 +989,6 @@ fn main() {
             our_libraries,
             team_item_preview,
             team_archive,
-            team_csv_review,
             team_read_file,
             team_preview_file,
             team_read_download,
@@ -1137,7 +1123,6 @@ mod tests {
             command::TEAM_PART,
             command::TEAM_EDIT,
             command::TEAM_ARCHIVE,
-            command::TEAM_CSV_REVIEW,
             command::TEAM_READ_FILE,
             command::TEAM_PREVIEW_FILE,
             command::TEAM_READ_DOWNLOAD,

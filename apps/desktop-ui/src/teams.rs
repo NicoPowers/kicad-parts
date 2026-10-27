@@ -848,7 +848,7 @@ mod tests {
             can_edit: true,
             live,
             checkpoint: 1,
-            imports: 1,
+            catch_ups: 1,
         }
     }
 

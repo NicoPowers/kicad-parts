@@ -40,7 +40,7 @@ fn open(dir: &Path) -> Option<(CatalogBrowser, TeamCatalog)> {
 
 /// The drawing key of the footprint `reference`, as a close-up has it.
 fn drawing_key(browser: &CatalogBrowser, reference: &str) -> String {
-    match browser.preview_field("ANY", PreviewKind::Footprint, Some(reference)) {
+    match browser.preview_field("ANY", PreviewKind::Footprint, reference) {
         PreviewOutcome::Ready(set) => set.images[0].drawing_key.clone().expect("a drawing key"),
         PreviewOutcome::Problem(problem) => panic!("{reference}: {problem:?}"),
     }

@@ -152,7 +152,7 @@ impl TeamCatalog {
     /// since 1970, while they may be out of date: they come from the parts
     /// file, or the server dropped. `None` while they are current, or while
     /// none are shown. `session` is the session's state, if one runs: its
-    /// live updates, its count of catch-ups and imports, and when it was
+    /// live updates, its count of catch-ups, and when it was
     /// last in step.
     pub(super) fn parts_as_of(&self, session: Option<(&LiveUpdates, u64, u64)>) -> Option<u64> {
         let file_at = || {
@@ -177,8 +177,12 @@ impl TeamCatalog {
     pub(crate) fn version_in_step(&self) -> Option<(u64, u64, u64)> {
         let state = self.lock();
         let session = state.session.as_ref()?;
-        let (live, checkpoint, imports) = session.follower.snapshot();
-        (live == LiveUpdates::Live && imports > 0).then_some((state.number, checkpoint, imports))
+        let (live, checkpoint, catch_ups) = session.follower.snapshot();
+        (live == LiveUpdates::Live && catch_ups > 0).then_some((
+            state.number,
+            checkpoint,
+            catch_ups,
+        ))
     }
 
     /// Where the team's last-known parts come from now. Changes nothing.
@@ -192,14 +196,14 @@ impl TeamCatalog {
         let Some(session) = state.session.as_ref() else {
             return file.unwrap_or(Source::Nothing);
         };
-        let (live, checkpoint, imports) = session.follower.snapshot();
+        let (live, checkpoint, catch_ups) = session.follower.snapshot();
         if matches!(live, LiveUpdates::SignInAgain { .. }) {
             return Source::Nothing;
         }
         match file {
             // Not caught up yet: the parts file shows until then.
-            Some(file) if imports == 0 => file,
-            _ => Source::Session((state.number, checkpoint, imports)),
+            Some(file) if catch_ups == 0 => file,
+            _ => Source::Session((state.number, checkpoint, catch_ups)),
         }
     }
 

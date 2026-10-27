@@ -96,7 +96,7 @@ describe('a team server down when the app starts', () => {
   };
 
   it('keeps each team\'s parts on disk while its server answers', async () => {
-    await waitForText(browser, '#result-count', 'No parts match.');
+    await waitForText(browser, '#result-count', 'Sign in to a team to see its parts.');
     await setMenuOpen(true);
     await signInWithForm(acme, acme.accounts[0]);
     await waitForText(browser, BADGE, `Team catalog · ${acme.accounts[0].name}`);

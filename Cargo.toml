@@ -5,7 +5,6 @@ members = [
     "crates/catalog",
     "crates/catalog-browser",
     "crates/collaboration",
-    "crates/csv-catalog",
     "crates/desktop-contract",
     "crates/kicad-integration",
     "crates/kicad-libraries",

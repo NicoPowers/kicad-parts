@@ -114,7 +114,7 @@ describe('one part list over several teams', () => {
 
   /** Signs in to acme, then adds beta, and waits until both are live. */
   async function signInToBoth() {
-    await waitForText(browser, '#result-count', 'No parts match.');
+    await waitForText(browser, '#result-count', 'Sign in to a team to see its parts.');
     await setMenuOpen(true);
     await signInWithForm(acme);
     await waitForText(browser, BADGE, `Team catalog · ${acme.accounts[0].name}`);

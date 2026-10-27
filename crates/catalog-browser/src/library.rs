@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
-/// Who was signed in, the team catalog's checkpoint and finished imports,
+/// Who was signed in, the team catalog's checkpoint and catch-ups,
 /// and the folder's fingerprint, when a library check was worked out.
 type Position = (String, u64, u64, Fingerprint);
 
@@ -55,10 +55,10 @@ impl Cached {
         root: &Path,
         kicad_share: Option<&Path>,
     ) -> Result<Option<Arc<LibraryCheck>>, String> {
-        let Some((email, checkpoint, imports)) = team.editor_position() else {
+        let Some((email, checkpoint, catch_ups)) = team.editor_position() else {
             return Ok(None);
         };
-        let position = (email, checkpoint, imports, fingerprint(root));
+        let position = (email, checkpoint, catch_ups, fingerprint(root));
         if let Some((at, check)) = self.lock().as_ref() {
             if *at == position {
                 return Ok(Some(check.clone()));

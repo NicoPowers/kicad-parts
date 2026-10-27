@@ -4,10 +4,10 @@ use desktop_contract::{
     AppStatus, FilePreviewRequest, Footprint3dRequest, Footprint3dView, KicadLibrariesStatus,
     LibrariesView, LibraryCheckView, LibraryItemDetail, LibraryItemRequest, LibraryItems,
     LibraryItemsRequest, OurLibraries, PartDetail, PreviewOutcome, PreviewRequest, PublishResult,
-    SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamChoices,
-    TeamCsvReviewRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFileReading,
-    TeamFileRequest, TeamIpnCheck, TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart,
-    TeamPick, TeamPickRequest, TeamSameMpn, TeamsStatus, command,
+    SearchRequest, SearchResponse, SignInRequest, TeamArchiveRequest, TeamChoices, TeamDownload,
+    TeamDownloadRequest, TeamEditRequest, TeamFileReading, TeamFileRequest, TeamIpnCheck,
+    TeamIpnRequest, TeamMpnRequest, TeamNewPartRequest, TeamPart, TeamPick, TeamPickRequest,
+    TeamSameMpn, TeamsStatus, command,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -89,8 +89,7 @@ pub async fn search(request: SearchRequest) -> Result<SearchResponse, String> {
     call(command::SEARCH_PARTS, &SearchArgs { request }).await
 }
 
-/// A part of the team at `team`, or of the CSV catalog alone for a blank
-/// `team`.
+/// A part of the team at `team`, as its row in the part list shows it.
 pub async fn part_detail(team: &str, ipn: &str) -> Result<Option<PartDetail>, String> {
     call(command::PART_DETAIL, &for_team(team, DetailArgs { ipn })).await
 }
@@ -117,11 +116,6 @@ struct EditArgs {
 #[derive(Serialize)]
 struct ArchiveArgs {
     request: TeamArchiveRequest,
-}
-
-#[derive(Serialize)]
-struct CsvReviewArgs {
-    request: TeamCsvReviewRequest,
 }
 
 pub async fn team_status() -> Result<TeamsStatus, String> {
@@ -293,17 +287,6 @@ pub async fn team_archive(
     call(
         command::TEAM_ARCHIVE,
         &for_team(team, ArchiveArgs { request }),
-    )
-    .await
-}
-
-pub async fn team_csv_review(
-    team: &str,
-    request: TeamCsvReviewRequest,
-) -> Result<PublishResult, String> {
-    call(
-        command::TEAM_CSV_REVIEW,
-        &for_team(team, CsvReviewArgs { request }),
     )
     .await
 }

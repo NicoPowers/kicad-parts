@@ -16,7 +16,7 @@
 
 use crate::focus::{Scrolling, focus_found_later};
 use crate::list_focus::{DrawnSection, Focused, ListFocus};
-use crate::team_marks::{CsvChip, ListTeams, TeamChip};
+use crate::team_marks::{ListTeams, TeamChip};
 use crate::{Load, backend, grouped};
 use desktop_contract::{PartKey, PartSummary, SearchRequest, SearchResponse};
 use leptos::prelude::*;
@@ -222,10 +222,9 @@ enum SectionEnd {
 /// While `reloading`, the loaded parts are from before a team catalog
 /// change and may not match the new count, so nothing ends them.
 ///
-/// Each part shows once, as the first row with its team and IPN. The CSV
-/// catalog can repeat an IPN (the team import flags it as duplicate-ipn
-/// and keeps the first row). Rows are keyed by team and IPN, and two rows
-/// with one key would break the list.
+/// Each part shows once, as the first row with its team and IPN: the
+/// loaded parts and the search's first matches overlap. Rows are keyed by
+/// team and IPN, and two rows with one key would break the list.
 fn section_rows(
     searching: bool,
     loaded: Option<&Load<Vec<PartSummary>>>,
@@ -258,9 +257,11 @@ fn section_rows(
     (rows, end)
 }
 
-/// The count line above the list.
-fn count_text(response: &SearchResponse) -> String {
+/// The count line above the list. With no team showing parts, it says how
+/// to get some.
+fn count_text(response: &SearchResponse, any_team: bool) -> String {
     match response.total {
+        0 if !any_team => "Sign in to a team to see its parts.".to_owned(),
         0 => "No parts match.".to_owned(),
         1 => "1 matching part".to_owned(),
         total => format!("{} matching parts", grouped(total)),
@@ -283,10 +284,10 @@ fn row_keys(rows: &[PartSummary]) -> Vec<PartKey> {
 }
 
 /// A row's title and the text beside it. Parts without an MPN are titled
-/// by IPN, with the CSV file beside it instead of the IPN again.
+/// by IPN, with nothing beside it instead of the IPN again.
 fn row_labels(part: &PartSummary) -> (String, String) {
     if part.mpn.is_empty() {
-        (part.ipn.clone(), part.csv_file.clone())
+        (part.ipn.clone(), String::new())
     } else {
         (part.mpn.clone(), part.ipn.clone())
     }
@@ -382,6 +383,12 @@ pub(crate) fn ResultList(
     let open = RwSignal::new(OpenSections::default());
     let loaded = RwSignal::new(Loaded::default());
     let focus = ListFocus::new();
+    // Whether any team shows parts: signed out of every team, the list is
+    // empty for that reason.
+    let list_teams = use_context::<ListTeams>();
+    let any_team = Memo::new(move |_| {
+        list_teams.is_none_or(|list| list.marks.with(|marks| !marks.by_team.is_empty()))
+    });
     let reveals = StoredValue::new(Reveals::default());
     // The search (trimmed) the shown results are for.
     let shown_query = StoredValue::new(None::<String>);
@@ -571,7 +578,7 @@ pub(crate) fn ResultList(
             {move || results.with(|results| match results {
                 Load::Loading => "Searching…".to_owned(),
                 Load::Failed(error) => format!("Search failed: {error}"),
-                Load::Ready(searched) => count_text(&searched.response),
+                Load::Ready(searched) => count_text(&searched.response, any_team.get()),
             })}
         </p>
         {move || hidden_note.get().map(|note| view! {
@@ -877,7 +884,7 @@ fn PartRow(
     let labels =
         Memo::new(move |_| part.with(|part| part.as_ref().map(row_labels).unwrap_or_default()));
     // The part's team, as text in the team's colour, while two teams or
-    // more show parts; "CSV" for a part only the CSV files have.
+    // more show parts.
     let marks = use_context::<ListTeams>().map(|list| list.marks);
     // Inside a team's own section the section names the team, so its rows
     // need no mark.
@@ -888,16 +895,7 @@ fn PartRow(
             if in_team_section {
                 return None;
             }
-            let marks = marks?;
-            marks.with(|marks| {
-                if !marks.shown {
-                    None
-                } else if team.is_empty() {
-                    Some(None)
-                } else {
-                    marks.mark(&team).cloned().map(Some)
-                }
-            })
+            marks?.with(|marks| marks.mark(&team).cloned())
         })
     };
     let description = move || part.with(|part| part.as_ref().map(|part| part.description.clone()));
@@ -918,10 +916,7 @@ fn PartRow(
             >
                 <span class="result-title">{move || labels.with(|(title, _)| title.clone())}</span>
                 <span class="result-ipn">
-                    {move || mark.get().map(|mark| match mark {
-                        Some(mark) => view! { <TeamChip mark=mark /> }.into_any(),
-                        None => view! { <CsvChip /> }.into_any(),
-                    })}
+                    {move || mark.get().map(|mark| view! { <TeamChip mark=mark /> })}
                     {move || labels.with(|(_, aside)| aside.clone())}
                 </span>
                 <span class="result-description">{description}</span>
@@ -1119,7 +1114,6 @@ mod tests {
         PartSummary {
             team: "https://ma.example.com".into(),
             ipn: ipn.into(),
-            csv_file: "g-res.csv".into(),
             mpn: String::new(),
             manufacturer: String::new(),
             description: String::new(),
@@ -1332,9 +1326,14 @@ mod tests {
             selected_part: None,
             elapsed_micros: 0,
         };
-        assert_eq!(count_text(&response(0)), "No parts match.");
-        assert_eq!(count_text(&response(1)), "1 matching part");
-        assert_eq!(count_text(&response(2500)), "2,500 matching parts");
+        assert_eq!(count_text(&response(0), true), "No parts match.");
+        assert_eq!(count_text(&response(1), true), "1 matching part");
+        assert_eq!(count_text(&response(2500), true), "2,500 matching parts");
+        // Signed out of every team, the list is empty for a reason.
+        assert_eq!(
+            count_text(&response(0), false),
+            "Sign in to a team to see its parts."
+        );
     }
 
     #[test]
@@ -1344,7 +1343,7 @@ mod tests {
     }
 
     #[test]
-    fn a_row_is_titled_by_mpn_or_else_by_ipn_with_its_csv_file() {
+    fn a_row_is_titled_by_mpn_or_else_by_ipn() {
         let with_mpn = PartSummary {
             mpn: "RC0603FR-072KL".to_owned(),
             ..hit("RES-0000-2001")
@@ -1355,12 +1354,11 @@ mod tests {
         );
         let without_mpn = PartSummary {
             mpn: String::new(),
-            csv_file: "g-res.csv".to_owned(),
             ..hit("RES-0000-2001")
         };
         assert_eq!(
             row_labels(&without_mpn),
-            ("RES-0000-2001".to_owned(), "g-res.csv".to_owned())
+            ("RES-0000-2001".to_owned(), String::new())
         );
     }
 }
