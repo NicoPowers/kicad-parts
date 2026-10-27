@@ -461,10 +461,10 @@ describe('Libraries browser', () => {
   });
 });
 
-// With no local library folder set, the features that read it say so and
-// what to do, instead of looking empty or broken (kicad-parts-e257).
+// With no local library folder set, the features that read it say so in a
+// calm note, instead of looking empty or broken (kicad-parts-e257).
 describe('Libraries browser without a local library folder', () => {
-  const NO_FOLDER = "There is no local library folder yet. Link the team's library repo in the Teams menu.";
+  const NO_FOLDER = "No local library folder is set, so our own libraries can't be shown. A later version will use the team's linked library repo.";
   let server;
   let browser;
 
@@ -479,10 +479,12 @@ describe('Libraries browser without a local library folder', () => {
     await server?.stop();
   });
 
-  it('says there is no local library folder yet, where Ours would be', async () => {
+  it('says there is no local library folder, where Ours would be', async () => {
     await waitForText(browser, '#result-count', '16 matching parts');
-    // Someone who can edit sees why the library check cannot run.
-    await waitForText(browser, '.library-check-line', `Library check could not run: ${NO_FOLDER}`);
+    // Someone who can edit sees a calm note in place of the library check,
+    // not a failure.
+    await waitForText(browser, '.library-check-note', NO_FOLDER);
+    assert.equal(await browser.execute(() => document.querySelector('.library-check-problem')), null);
     await openBrowser(browser);
     await waitUntilRead(browser);
     const groups = await browser.execute(() =>

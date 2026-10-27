@@ -46,9 +46,9 @@ use std::sync::{Arc, OnceLock, RwLock};
 use team::{StoredCad, TeamCad, TeamCadError, TeamCatalog};
 
 /// What the features that read the local library folder say while none is
-/// set. Making the team's linked repo that folder is kicad-parts-ff3c.
-pub(crate) const NO_LIBRARY_FOLDER: &str =
-    "There is no local library folder yet. Link the team's library repo in the Teams menu.";
+/// set: a calm note, not a failure. Making the team's linked repo that
+/// folder is kicad-parts-ff3c; until then the note promises no action.
+pub(crate) const NO_LIBRARY_FOLDER: &str = "No local library folder is set, so our own libraries can't be shown. A later version will use the team's linked library repo.";
 
 #[derive(Clone, Debug)]
 pub struct BrowserConfig {
@@ -443,14 +443,20 @@ impl CatalogBrowser {
     /// once per change of the team catalog (a new Change, a catch-up or
     /// another person signing in) and kept until then.
     ///
-    /// With no local library folder, it says so to someone who can edit.
+    /// With no local library folder, someone who can edit gets a view
+    /// with only a note saying so.
     pub fn library_check(&self, team: &TeamCatalog) -> Result<Option<LibraryCheckView>, String> {
         if team.editor_position().is_none() {
             return Ok(None);
         }
+        let Ok(folder) = self.library_folder() else {
+            return Ok(Some(LibraryCheckView {
+                note: Some(NO_LIBRARY_FOLDER.to_owned()),
+                ..LibraryCheckView::default()
+            }));
+        };
         let kicad_share = self.kicad_share();
-        self.library_check
-            .get(team, self.library_folder()?, kicad_share.as_deref())
+        self.library_check.get(team, folder, kicad_share.as_deref())
     }
 
     /// The local library folder, or why there is none.

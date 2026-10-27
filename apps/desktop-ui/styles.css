@@ -128,10 +128,6 @@ button:disabled {
   color: #c9d4e2;
 }
 
-.catalog-error {
-  color: #ffd2d2;
-}
-
 .kicad-badge {
   margin: 0 0 0 auto;
   padding: 0.2rem 0.75rem;
@@ -2268,6 +2264,10 @@ a {
 
 .library-check-problem {
   color: var(--danger);
+}
+
+.library-check-note {
+  color: var(--muted);
 }
 
 /* The Libraries browser: a large dialog over the whole window, with the

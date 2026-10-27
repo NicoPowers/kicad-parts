@@ -1424,6 +1424,10 @@ pub struct LibraryCheckView {
     /// The groups that have items, in order: To fix, Not in the Catalog
     /// yet, Worth a look, Clean-up.
     pub groups: Vec<LibraryCheckGroup>,
+    /// Said in place of the line while the check cannot run, such as with
+    /// no local library folder; then nothing else is filled in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl LibraryCheckView {

@@ -156,6 +156,7 @@ pub(crate) fn view_of(check: &LibraryCheck) -> LibraryCheckView {
         clean_up: check.count(Group::CleanUp),
         kicad_footprints_checked: check.kicad_footprints_checked,
         groups,
+        note: None,
     }
 }
 

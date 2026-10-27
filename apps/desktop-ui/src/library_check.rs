@@ -71,6 +71,12 @@ pub(crate) fn LibraryCheckLine(
             );
         }
         let view = check.get()?;
+        if let Some(note) = view.note {
+            return Some(
+                view! { <p class="library-check-line library-check-note" role="status">{note}</p> }
+                    .into_any(),
+            );
+        }
         let text = line_text(&view, team.get().as_deref())?;
         let urgent = view.to_fix > 0;
         Some(
@@ -261,6 +267,7 @@ mod tests {
             clean_up,
             kicad_footprints_checked: true,
             groups: Vec::new(),
+            note: None,
         }
     }
 

@@ -784,7 +784,7 @@ fn a_bad_file_is_skipped_and_the_rest_of_its_library_kept() {
     assert!(resistors.note.is_some());
 }
 
-/// With no local library folder, Ours lists nothing and says what to do.
+/// With no local library folder, Ours lists nothing and says why.
 #[test]
 fn says_plainly_when_there_is_no_local_library_folder() {
     let fixture = fixture();
@@ -802,7 +802,7 @@ fn says_plainly_when_there_is_no_local_library_folder() {
     assert_eq!(
         view.ours_note.as_deref(),
         Some(
-            "There is no local library folder yet. Link the team's library repo in the Teams menu."
+            "No local library folder is set, so our own libraries can't be shown. A later version will use the team's linked library repo."
         )
     );
     assert!(

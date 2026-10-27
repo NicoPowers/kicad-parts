@@ -12,9 +12,9 @@ use catalog_browser::{BrowserConfig, CatalogBrowser};
 use catalog_import::services;
 use collaboration::PocketBaseClient;
 use desktop_contract::{
-    DownloadedFile, Field, FileKind, LiveUpdates, ManufacturerPart, PublishResult, SignInRequest,
-    TeamArchiveRequest, TeamDownload, TeamDownloadRequest, TeamEditRequest, TeamFile,
-    TeamNewPartRequest, TeamPart, TeamSession,
+    DownloadedFile, Field, FileKind, LibraryCheckView, LiveUpdates, ManufacturerPart,
+    PublishResult, SignInRequest, TeamArchiveRequest, TeamDownload, TeamDownloadRequest,
+    TeamEditRequest, TeamFile, TeamNewPartRequest, TeamPart, TeamSession,
 };
 use kicad_integration::SearchLocations;
 use native_services::PocketBaseServer;
@@ -1575,7 +1575,7 @@ fn editors_see_the_library_check_of_the_folder_the_app_reads() {
     let viewer = team.second("Vic Viewer", "vic@example.test", false);
     assert_eq!(team.browser.library_check(&viewer).unwrap(), None);
 
-    // With no local library folder, an editor is told so and what to do.
+    // With no local library folder, an editor gets only a note saying so.
     let data = tempfile::tempdir().unwrap();
     let without = CatalogBrowser::open(BrowserConfig {
         catalog_root: None,
@@ -1585,9 +1585,14 @@ fn editors_see_the_library_check_of_the_folder_the_app_reads() {
         kicad_config_dir: None,
         kicad_documents_dir: None,
     });
-    let no_folder =
-        "There is no local library folder yet. Link the team's library repo in the Teams menu.";
-    assert_eq!(without.library_check(&team.team).unwrap_err(), no_folder);
+    let no_folder = "No local library folder is set, so our own libraries can't be shown. A later version will use the team's linked library repo.";
+    assert_eq!(
+        without.library_check(&team.team).unwrap(),
+        Some(LibraryCheckView {
+            note: Some(no_folder.to_owned()),
+            ..LibraryCheckView::default()
+        })
+    );
     assert_eq!(without.library_check(&viewer).unwrap(), None);
     // Editing a part that uses our libraries still works: the Catalog has
     // its symbol and footprint.

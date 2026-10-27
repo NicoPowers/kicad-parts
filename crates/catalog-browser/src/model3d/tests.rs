@@ -100,7 +100,7 @@ fn our_library_needs_a_local_library_folder() {
     assert_eq!(why, NotShown::NoLibraryFolder);
     assert_eq!(
         why.words(),
-        "There is no local library folder yet. Link the team's library repo in the Teams menu."
+        "No local library folder is set, so our own libraries can't be shown. A later version will use the team's linked library repo."
     );
 }
 
