@@ -555,7 +555,6 @@ dependencies = [
  "catalog",
  "catalog-browser",
  "collaboration",
- "csv-catalog-fixture",
  "desktop-contract",
  "kicad-integration",
  "kicad-libraries",
@@ -919,18 +918,6 @@ name = "csv-catalog"
 version = "0.1.0"
 dependencies = [
  "csv",
- "tempfile",
-]
-
-[[package]]
-name = "csv-catalog-fixture"
-version = "0.1.0"
-dependencies = [
- "csv",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
  "tempfile",
 ]
 

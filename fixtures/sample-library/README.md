@@ -34,7 +34,7 @@ browser and a seeded team server.
   every part. The categories are there already: every new team server
   starts with the starting categories.
 - **By hand.** `cargo run --locked -p catalog-import -- local-team-server
-  --sample --desktop` starts a team server with every sample part.
+  --desktop` starts a team server with every sample part.
 
 ## Where each file came from
 

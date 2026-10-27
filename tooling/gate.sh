@@ -12,9 +12,8 @@
 #      use target/, so running them together would only make them wait.
 #   2. Build everything the tests run: the journey app, the Rust tests and
 #      the catalog tools. Again one cargo build at a time.
-#   3. Run the Rust tests, JavaScript tests, CSV checks, pilots and
-#      ml doctor side by side. Nothing builds here, so nothing waits for
-#      the cargo lock.
+#   3. Run the Rust tests, doc tests, JavaScript tests and ml doctor side
+#      by side. Nothing builds here, so nothing waits for the cargo lock.
 #   4. The journeys, with nothing else running: some of them check how
 #      fast the app answers. They need WebView2, so on macOS and Linux the
 #      gate skips them and says so.
@@ -86,8 +85,6 @@ detail() {
     rust-tests) line=$(grep -E '^ *Summary \[|^test result:' "$log" | tail -1) ;;
     doc-tests) line=$(grep -E '^test result:' "$log" | awk '{p += $4; f += $6} END {print p " passed, " f " failed"}') ;;
     js-tests) line=$(grep -E '^ℹ (pass|fail) ' "$log" | tr '\n' ' ') ;;
-    pilots) line=$(tail -1 "$log") ;;
-    full-pilot) line=$(grep -m1 -E '^(PASSED|FAILED)' "$log" | cut -c1-60) ;;
     journeys) line=$(grep -E '^journeys:' "$log" | sed 's/^journeys: //') ;;
     ml-doctor) line=$(tail -1 "$log") ;;
   esac
@@ -169,33 +166,15 @@ report fmt clippy clippy-wasm
 # 2. Build. catalog-import is part of the journey app build.
 check build-journey-app node apps/desktop/journeys/run-journeys.mjs --build-only
 check build-rust-tests build_rust_tests
-check build-csv-fixture cargo build --locked -p csv-catalog-fixture
-report build-journey-app build-rust-tests build-csv-fixture
+report build-journey-app build-rust-tests
 
-# 3. Tests that need no app, side by side. The pilots run one after the
-# other: each starts its own team server, and together they are short.
-pilots() {
-  local file name failures=0 count=0
-  for file in database/g-*.csv; do
-    name=$(basename "$file" .csv)
-    count=$((count + 1))
-    if ! "target/debug/catalog-import$exe" pilot . "$name" >"$out/pilot-$name.txt" 2>&1; then
-      echo "pilot $name FAILED: see $out/pilot-$name.txt"
-      failures=$((failures + 1))
-    fi
-  done
-  echo "$failures of $count pilots failed"
-  [ "$failures" -eq 0 ]
-}
+# 3. Tests that need no app, side by side.
 check rust-tests run_rust_tests &
 check doc-tests cargo test --doc --workspace --locked &
 check js-tests npm run -s js-tests --prefix apps/desktop/journeys &
-check csv-fixture "target/debug/csv-catalog-fixture$exe" check . &
-check pilots pilots &
-check full-pilot "target/debug/catalog-import$exe" full-pilot &
 check ml-doctor ml doctor &
 wait
-report rust-tests doc-tests js-tests csv-fixture pilots full-pilot ml-doctor
+report rust-tests doc-tests js-tests ml-doctor
 
 # 4. Journeys, alone. They run the app in WebView2, which only Windows has.
 if [ -n "$exe" ]; then

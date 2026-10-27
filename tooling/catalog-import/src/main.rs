@@ -1,72 +1,21 @@
-//! `catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]`
-//!
-//! Imports one CSV catalog file (default `g-res`) into a disposable,
-//! loopback-only PocketBase, imports it again to show nothing new is
-//! created, reads every Catalog record back, and prints the zero-loss
-//! report against the oracle. Each import does what an import into the
-//! team catalog does: it refuses files with changes that are not committed
-//! unless `--allow-uncommitted-changes` is given, reads the team catalog,
-//! refuses an older checkout, runs the library check (printed to standard
-//! error; an error in a file the import uses stops it before anything is
-//! sent) and expects each part's current revision. The PocketBase and its
-//! data are deleted when the command ends; the repository is only read.
-//! Exits 1 if anything was lost.
-//!
-//! `catalog-import full-pilot [--allow-uncommitted-changes] [--every-difference] [REPOSITORY_ROOT]`
-//!
-//! The full-catalog proof (`full_proof`): imports every CSV file into one
-//! throwaway team server as a team would, twice; checks nothing is lost,
-//! file by file and across files; writes the KiCad libraries, again from
-//! the same server and from a second one, and shows they are
-//! byte-identical; compares them with `database/parts.sqlite`; and shows
-//! the CSV catalog did not change. Prints a report for people;
-//! `--every-difference` lists each difference from `parts.sqlite` on its
-//! own line. Everything it writes is in `target/full-catalog-proof/` and is
-//! deleted when it ends. Exits 1 if anything was lost or differs without a
-//! reason.
-//!
-//! `catalog-import local-team-server [--desktop | --json] [--sample | --csv FILES] [--team-code CODE]`
+//! `catalog-import local-team-server [--desktop | --json] [--team-code CODE]`
 //!
 //! Starts a disposable team server on 127.0.0.1 for trying the desktop app
-//! by hand: a PocketBase with every CSV file of the CSV catalog imported
-//! (`database/g-*.csv`, one category each) and three team members (two who
-//! can edit, one who can only read), each with a new random password. It
-//! prints the server address and the accounts, then:
+//! by hand: a PocketBase with the starting categories, the parts of the
+//! sample library (`fixtures/sample-library`) added as Add part adds them,
+//! and three team members (two who can edit, one who can only read), each
+//! with a new random password. It prints the server address and the
+//! accounts, then:
 //!
-//! - with `--sample`, starts from the sample library
-//!   (`fixtures/sample-library`) instead of the CSV catalog: its
-//!   categories are set up and its parts added as Add part adds them, with
-//!   no CSV import. `--desktop` then opens the app on the sample library.
-//!   The tests and journeys start so (kicad-parts-fbc2);
 //! - with `--team-code MA`, gives the team that code, which names its KiCad
 //!   libraries (MA-Parts); without it, someone who can edit chooses it in
 //!   the desktop app;
-//! - with `--csv g-res,g-cap` (a comma list; may be given more than once),
-//!   imports only those CSV files, which starts faster and leaves the rest
-//!   of the CSV catalog's parts out of the team catalog;
-//!
-//! - with `--desktop`, opens the built desktop app pointed at the server
-//!   and stops the server when the app closes;
+//! - with `--desktop`, opens the built desktop app pointed at the server,
+//!   with the sample library as its local library folder, and stops the
+//!   server when the app closes;
 //! - with `--json`, prints one JSON line instead of text and stops when
-//!   standard input closes (the desktop journeys use this). Each line
-//!   `reimport` it reads imports the resistors again (not with `--sample`),
-//!   as an importer would
-//!   after reading the team catalog, and prints one JSON line with the
-//!   outcome (`{"reimported":"nothing_changed"}`); `reimport <folder>`
-//!   imports them from a copy of the CSV catalog in that folder instead.
-//!   Each reimport runs the library check like a real import, so a copy
-//!   with a new footprint whose 3D model link is outside the library is
-//!   refused (`{"reimported":"refused: The library check found ..."}`);
+//!   standard input closes (the desktop journeys use this);
 //! - otherwise, stops when you press Enter.
-//!
-//! The team server is thrown away when it stops, so its imports are allowed
-//! from files with uncommitted changes (each such run records that), and
-//! trying out a change does not need a commit.
-//!
-//! Without `--json`, typing `reimport` (or `reimport <folder>`, a copy of
-//! the CSV catalog) and pressing Enter imports the resistors again, to see
-//! what an import does to parts edited in the app, and prints the outcome in
-//! words. Other text gets a short reminder; Enter alone stops the server.
 //!
 //! The server runs without a window in a kill-on-close job, so it also
 //! stops if this command is killed. Its data lives in
@@ -74,7 +23,7 @@
 //! including on Ctrl+C; a run killed outright is deleted by the next run.
 //! Nothing else is written.
 //!
-//! `catalog-import kicad-libraries --team-code CODE [--csv FILES] FOLDER`
+//! `catalog-import kicad-libraries --team-code CODE FOLDER`
 //! `catalog-import kicad-libraries --server URL --email EMAIL FOLDER`
 //!
 //! Writes the KiCad libraries the desktop app makes (kicad-parts-f397) into
@@ -83,21 +32,17 @@
 //! uses. With `--server`, it reads that team server, signed in as `EMAIL`
 //! with the password in the `KICAD_PARTS_PASSWORD` environment variable,
 //! and refuses if the team has no code yet. Otherwise it starts a
-//! disposable team server with every CSV file imported (or only the
-//! `--csv` ones) and the code `--team-code` gives, as `local-team-server`
-//! does, and deletes it after reading. Prints one JSON summary: entry
-//! counts, files written, problems, and how long reading and writing took.
-//! Libraries from disposable team servers count as one team's, so running
-//! it again updates the same folder.
+//! disposable team server with the sample library's parts and the code
+//! `--team-code` gives, as `local-team-server` does, and deletes it after
+//! reading. Prints one JSON summary: entry counts, files written, problems,
+//! and how long reading and writing took. Libraries from disposable team
+//! servers count as one team's, so running it again updates the same
+//! folder.
 
-use catalog::library_check::Group;
-use catalog::pocketbase::{
-    ImportCommand, ImportOutcome, read_back, read_import_state, read_team, submit_import,
-    submit_team_code,
-};
+use catalog::pocketbase::{read_back, read_team, submit_team_code};
+use catalog_import::libraries;
 use catalog_import::run_folder::RunFolder;
-use catalog_import::services::{self, Allow, Member};
-use catalog_import::{full_proof, imports, libraries};
+use catalog_import::services::{self, Member};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::Command;
@@ -111,113 +56,15 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage: catalog-import pilot [--allow-uncommitted-changes] [REPOSITORY_ROOT] [CSV_FILE]\n       catalog-import full-pilot [--allow-uncommitted-changes] [--every-difference] [REPOSITORY_ROOT]\n       catalog-import local-team-server [--desktop | --json] [--sample | --csv g-res,g-cap ...] [--team-code MA]\n       catalog-import kicad-libraries --team-code MA [--csv g-res,g-cap ...] FOLDER\n       catalog-import kicad-libraries --server URL --email EMAIL FOLDER";
+const USAGE: &str = "usage: catalog-import local-team-server [--desktop | --json] [--team-code MA]\n       catalog-import kicad-libraries --team-code MA FOLDER\n       catalog-import kicad-libraries --server URL --email EMAIL FOLDER";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("pilot") => pilot(&args[1..]),
-        Some("full-pilot") => full_pilot(&args[1..]),
         Some("local-team-server") => local_team_server(&args[1..]),
         Some("kicad-libraries") => kicad_libraries(&args[1..]),
         _ => Err(USAGE.into()),
     }
-}
-
-fn pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    const ALLOW_UNCOMMITTED: &str = "--allow-uncommitted-changes";
-    let allow = Allow {
-        uncommitted_changes: args.iter().any(|arg| arg == ALLOW_UNCOMMITTED),
-        ..Allow::default()
-    };
-    let positional: Vec<&String> = args
-        .iter()
-        .filter(|arg| *arg != ALLOW_UNCOMMITTED)
-        .collect();
-    if positional.len() > 2 || positional.iter().any(|arg| arg.starts_with("--")) {
-        return Err(USAGE.into());
-    }
-    let root = positional
-        .first()
-        .map(|arg| PathBuf::from(arg.as_str()))
-        .unwrap_or_else(services::repository_root);
-    let csv_file = positional.get(1).map(|arg| arg.as_str()).unwrap_or("g-res");
-    let oracle = csv_catalog_fixture::load_manifest(
-        &root.join("fixtures/import/csv-catalog/manifest.json"),
-    )?;
-
-    let import = services::plan(&root, csv_file)?;
-    // Refuse uncommitted changes before starting PocketBase; each import
-    // checks again.
-    services::check_committed(&root, &import, allow)?;
-
-    let state = tempfile::tempdir()?;
-    let (server, admin, _superuser) = services::start(&services::repository_root(), state.path())?;
-    let imported = imports::import_twice(&admin, &root, std::slice::from_ref(&import), allow);
-    server.stop();
-    let imported = imported?;
-    let (first, second) = (&imported.first[0], &imported.second[0]);
-    // Standard output is the JSON summary; the check is for the person.
-    eprintln!("{}", first.check.report());
-
-    let report = catalog_import::report(&oracle, csv_file, &imported.readback, &root);
-    let mut summary = report.summary();
-    let check = &first.check;
-    summary["library_check"] = serde_json::json!({
-        "to_fix": check.count(Group::ToFix),
-        "not_in_catalog": check.count(Group::NotInCatalog),
-        "worth_a_look": check.count(Group::WorthALook),
-        "clean_up": check.count(Group::CleanUp),
-    });
-    summary["import"] = serde_json::json!({
-        "first": first.reply_json(),
-        "second": second.reply_json(),
-        "second_created_nothing": imported.second_created_nothing,
-    });
-    println!("{}", serde_json::to_string_pretty(&summary)?);
-    if !report.is_lossless() {
-        return Err(format!("{} problem(s)", report.problems.len()).into());
-    }
-    Ok(())
-}
-
-fn full_pilot(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    const ALLOW_UNCOMMITTED: &str = "--allow-uncommitted-changes";
-    const EVERY_DIFFERENCE: &str = "--every-difference";
-    let allow = Allow {
-        uncommitted_changes: args.iter().any(|arg| arg == ALLOW_UNCOMMITTED),
-        ..Allow::default()
-    };
-    let every_difference = args.iter().any(|arg| arg == EVERY_DIFFERENCE);
-    let positional: Vec<&String> = args
-        .iter()
-        .filter(|arg| *arg != ALLOW_UNCOMMITTED && *arg != EVERY_DIFFERENCE)
-        .collect();
-    if positional.len() > 1 || positional.iter().any(|arg| arg.starts_with("--")) {
-        return Err(USAGE.into());
-    }
-    let root = positional
-        .first()
-        .map(|arg| PathBuf::from(arg.as_str()))
-        .unwrap_or_else(services::repository_root);
-    let oracle = csv_catalog_fixture::load_manifest(
-        &root.join("fixtures/import/csv-catalog/manifest.json"),
-    )?;
-    // Under target/, never the system temp folder; a run that is killed
-    // outright is deleted by the next one.
-    let work = RunFolder::create(&full_proof::work_base(&services::repository_root()))?;
-    let proof = full_proof::run(&root, &oracle, work.path(), allow);
-    work.remove()?;
-    let proof = proof?;
-    print!("{}", full_proof::report::text(&proof, every_difference));
-    if !proof.passed() {
-        return Err(format!(
-            "{} thing(s) lost or different without a reason",
-            proof.failures().len()
-        )
-        .into());
-    }
-    Ok(())
 }
 
 #[derive(Debug, PartialEq)]
@@ -229,7 +76,7 @@ enum Then {
 
 fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let (team_code, args) = team_code_option(args).ok_or(USAGE)?;
-    let (then, from) = server_options(&args).ok_or(USAGE)?;
+    let then = server_options(&args).ok_or(USAGE)?;
     let desktop = desktop_binary();
     if then == Then::OpenDesktop && !desktop.is_file() {
         return Err(format!(
@@ -239,66 +86,14 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         .into());
     }
 
-    let root = services::repository_root();
-    // With CSV files: what is imported, and the resistors `reimport`
-    // imports again.
-    let csv = match &from {
-        ServerFrom::Sample => None,
-        ServerFrom::Csv(chosen) => {
-            let every = services::csv_files(&root)?;
-            let csv_files = if chosen.is_empty() {
-                every
-            } else {
-                if let Some(unknown) = chosen.iter().find(|name| !every.contains(name)) {
-                    return Err(format!(
-                        "database/{unknown}.csv is not a CSV file of the CSV catalog"
-                    )
-                    .into());
-                }
-                chosen.clone()
-            };
-            let planned = services::plan_all(&root, &csv_files)?;
-            let import = match planned.iter().find(|import| import.csv_file == "g-res") {
-                Some(import) => import.clone(),
-                None => services::plan(&root, "g-res")?,
-            };
-            Some((csv_files, planned, import))
-        }
-    };
     // A known folder under target/, not the system temp folder, so a run
     // that is killed outright is cleaned up by the next one.
+    let root = services::repository_root();
     let folder = RunFolder::create(&root.join("target").join("local-team-server"))?;
     let (stop_sender, stop) = mpsc::channel::<Stop>();
     stop_on_ctrl_c(stop_sender.clone());
     let (server, admin, _superuser) = services::start(&root, folder.path())?;
-    let started_with = match &csv {
-        // Every CSV file (unless --csv names some), so every category
-        // exists. Files share CAD items (one footprint serves several
-        // categories), so each import reads the team catalog first, as an
-        // importer does.
-        Some((csv_files, planned, _)) => {
-            import_all(&admin, planned)?;
-            if from == ServerFrom::Csv(Vec::new()) {
-                format!(
-                    "All {} CSV files in database/ are imported, one category each.",
-                    csv_files.len()
-                )
-            } else {
-                format!(
-                    "These CSV files are imported, one category each: {}.",
-                    csv_files.join(", ")
-                )
-            }
-        }
-        None => {
-            let seeded = sample_library::seed(&admin, &[])?;
-            format!(
-                "The sample library's {} parts are added (fixtures/sample-library).",
-                seeded.parts.len()
-            )
-        }
-    };
-    let import = csv.map(|(_, _, import)| import);
+    let seeded = sample_library::seed(&admin, &[])?;
     if let Some(code) = &team_code {
         submit_team_code(&admin, code)?;
     }
@@ -333,26 +128,24 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             )?;
             out.flush()?;
             drop(out);
-            // Import again on each `reimport` line; stop when whoever
-            // started us closes our input.
+            // Stop when whoever started us closes our input.
             let sender = stop_sender.clone();
-            let admin = admin.clone();
             std::thread::spawn(move || {
                 for line in std::io::stdin().lock().lines() {
-                    let Ok(line) = line else { break };
-                    let Some(from) = reimport_command(&line) else {
-                        continue;
-                    };
-                    let outcome = reimport_if_csv(&admin, import.as_ref(), from)
-                        .unwrap_or_else(|error| format!("failed: {error}"));
-                    println!("{}", serde_json::json!({ "reimported": outcome }));
+                    if line.is_err() {
+                        break;
+                    }
                 }
                 let _ = sender.send(Stop::Finished);
             });
         }
         Then::WaitForEnter | Then::OpenDesktop => {
             writeln!(out, "Team server: {}", server.url())?;
-            writeln!(out, "{started_with}")?;
+            writeln!(
+                out,
+                "It has the starting categories and the sample library's {} parts (fixtures/sample-library).",
+                seeded.parts.len()
+            )?;
             writeln!(
                 out,
                 "Sign in to the desktop app with one of these accounts:"
@@ -367,43 +160,16 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             out.flush()?;
             drop(out);
             let sender = stop_sender.clone();
-            if import.is_some() {
-                println!(
-                    "Type reimport and press Enter to import the resistors again. Type reimport <folder> to import them from a copy of the CSV catalog in that folder."
-                );
+            if then == Then::WaitForEnter {
+                // Enter stops the server (with --desktop, closing the app
+                // does).
+                let typed = sender.clone();
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let _ = std::io::stdin().lock().read_line(&mut line);
+                    let _ = typed.send(Stop::Finished);
+                });
             }
-            let admin = admin.clone();
-            let typed = (then == Then::WaitForEnter).then(|| sender.clone());
-            std::thread::spawn(move || {
-                for line in std::io::stdin().lock().lines() {
-                    let Ok(line) = line else { break };
-                    if let Some(from) = reimport_command(&line) {
-                        match reimport_if_csv(&admin, import.as_ref(), from) {
-                            Ok(outcome) => match outcome.strip_prefix("refused: ") {
-                                Some(why) => println!("The import was refused. {why}"),
-                                None => println!("Imported again: {}.", outcome.replace('_', " ")),
-                            },
-                            Err(error) => println!("The import failed: {error}"),
-                        }
-                    } else if line.trim().is_empty() {
-                        // Enter alone stops the server (not with --desktop,
-                        // where closing the app does).
-                        if let Some(sender) = &typed {
-                            let _ = sender.send(Stop::Finished);
-                            return;
-                        }
-                    } else if typed.is_some() {
-                        println!(
-                            "Unknown command. Type reimport or reimport <folder>, or press Enter to stop the team server."
-                        );
-                    } else {
-                        println!("Unknown command. Type reimport or reimport <folder>.");
-                    }
-                }
-                if let Some(sender) = &typed {
-                    let _ = sender.send(Stop::Finished);
-                }
-            });
             if then == Then::OpenDesktop {
                 println!("Opening the desktop app. Close it to stop the team server.");
                 let mut command = Command::new(&desktop);
@@ -413,13 +179,11 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                     .arg(format!(
                         "--data-dir={}",
                         folder.path().join("desktop").display()
-                    ));
-                if from == ServerFrom::Sample {
-                    command.arg(format!(
+                    ))
+                    .arg(format!(
                         "--catalog-root={}",
                         sample_library::root().display()
                     ));
-                }
                 let mut child = command.spawn()?;
                 std::thread::spawn(move || {
                     let status = child.wait();
@@ -443,50 +207,11 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// Imports the resistors again for a team server that started from CSV
-/// files; one that started from the sample library has none to import.
-fn reimport_if_csv(
-    admin: &collaboration::PocketBaseClient,
-    import: Option<&catalog::CsvImport>,
-    folder: Option<PathBuf>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    match import {
-        Some(import) => reimport_from(admin, import, folder),
-        None => Ok(
-            "refused: this team server started from the sample library, which has no CSV files to import"
-                .to_owned(),
-        ),
-    }
-}
-
-/// Imports `planned` one CSV file after another, each reading the team
-/// catalog first, as an importer does.
-fn import_all(
-    admin: &collaboration::PocketBaseClient,
-    planned: &[catalog::CsvImport],
-) -> Result<(), Box<dyn std::error::Error>> {
-    for each in planned {
-        let csv_file = &each.csv_file;
-        let state = read_import_state(admin)?;
-        let command = ImportCommand::new(
-            each,
-            &format!("Import the parts from database/{csv_file}.csv"),
-        )
-        .expecting(&state)
-        .allowing_uncommitted_changes(services::has_uncommitted_changes(each));
-        let reply = submit_import(admin, &command)?;
-        if !matches!(reply.outcome, ImportOutcome::Applied { .. }) {
-            return Err(format!("the import of {csv_file} did not apply: {}", reply.body).into());
-        }
-    }
-    Ok(())
-}
-
 /// Where `kicad-libraries` reads the team catalog.
 #[derive(Debug, PartialEq)]
 enum LibrariesFrom {
-    /// A disposable team server with these CSV files (empty for all).
-    Local(Vec<String>),
+    /// A disposable team server with the sample library's parts.
+    Local,
     /// A running team server, signed in as this email.
     Server { url: String, email: String },
 }
@@ -494,22 +219,10 @@ enum LibrariesFrom {
 /// Where `kicad-libraries` reads from and the folder it writes; `None`
 /// for arguments that are not understood.
 fn libraries_options(args: &[String]) -> Option<(LibrariesFrom, PathBuf)> {
-    let mut chosen = Vec::new();
     let (mut url, mut email, mut folder) = (None, None, None);
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
-            "--csv" => {
-                for name in rest.next()?.split(',').map(str::trim) {
-                    if name.is_empty() {
-                        return None;
-                    }
-                    let name = name.trim_end_matches(".csv").to_owned();
-                    if !chosen.contains(&name) {
-                        chosen.push(name);
-                    }
-                }
-            }
             "--server" if url.is_none() => url = Some(rest.next()?.clone()),
             "--email" if email.is_none() => email = Some(rest.next()?.clone()),
             other if !other.starts_with("--") && folder.is_none() => {
@@ -519,8 +232,8 @@ fn libraries_options(args: &[String]) -> Option<(LibrariesFrom, PathBuf)> {
         }
     }
     let from = match (url, email) {
-        (None, None) => LibrariesFrom::Local(chosen),
-        (Some(url), Some(email)) if chosen.is_empty() => LibrariesFrom::Server { url, email },
+        (None, None) => LibrariesFrom::Local,
+        (Some(url), Some(email)) => LibrariesFrom::Server { url, email },
         _ => return None,
     };
     Some((from, folder?))
@@ -564,20 +277,14 @@ fn kicad_libraries(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 .authenticate("users", &email, &password)?;
             (client, url)
         }
-        LibrariesFrom::Local(chosen) => {
+        LibrariesFrom::Local => {
             let Some(code) = &team_code else {
                 return Err("Give the disposable team server a team code, such as --team-code MA: it names the KiCad libraries.".into());
             };
             let root = services::repository_root();
-            let csv_files = if chosen.is_empty() {
-                services::csv_files(&root)?
-            } else {
-                chosen
-            };
-            let planned = services::plan_all(&root, &csv_files)?;
             let run = RunFolder::create(&root.join("target").join("local-team-server"))?;
             let (server, admin, _superuser) = services::start(&root, run.path())?;
-            import_all(&admin, &planned)?;
+            sample_library::seed(&admin, &[])?;
             submit_team_code(&admin, code)?;
             let url = server.url().to_owned();
             local = Some((server, run));
@@ -599,7 +306,7 @@ fn kicad_libraries(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             naming,
         }
     };
-    let imported = started.elapsed();
+    let started_up = started.elapsed();
     let reading = Instant::now();
     let readback = read_back(&client)?;
     let read = reading.elapsed();
@@ -629,7 +336,7 @@ fn kicad_libraries(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "libraries": libraries,
         "problems": outcome.problems,
         "seconds": {
-            "start_and_import": imported.as_secs_f64(),
+            "start_and_seed": started_up.as_secs_f64(),
             "read_team_catalog": read.as_secs_f64(),
             "write_libraries": written.as_secs_f64(),
         },
@@ -638,23 +345,11 @@ fn kicad_libraries(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// What a local team server starts with.
-#[derive(Clone, Debug, PartialEq)]
-enum ServerFrom {
-    /// The CSV files `--csv` names, or every file when empty.
-    Csv(Vec<String>),
-    /// The sample library (`--sample`).
-    Sample,
-}
-
-/// What to do after starting, and what to start with; `None` for
-/// arguments that are not understood, or `--sample` with `--csv`.
-fn server_options(args: &[String]) -> Option<(Then, ServerFrom)> {
+/// What to do after starting; `None` for arguments that are not
+/// understood.
+fn server_options(args: &[String]) -> Option<Then> {
     let mut then = None;
-    let mut chosen: Vec<String> = Vec::new();
-    let mut sample = false;
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
+    for arg in args {
         match arg.as_str() {
             "--desktop" | "--json" if then.is_none() => {
                 then = Some(if arg == "--desktop" {
@@ -663,76 +358,10 @@ fn server_options(args: &[String]) -> Option<(Then, ServerFrom)> {
                     Then::PrintJson
                 });
             }
-            "--sample" => sample = true,
-            "--csv" => {
-                let list = rest.next()?;
-                for name in list.split(',').map(str::trim) {
-                    if name.is_empty() {
-                        return None;
-                    }
-                    let name = name.trim_end_matches(".csv").to_owned();
-                    if !chosen.contains(&name) {
-                        chosen.push(name);
-                    }
-                }
-            }
             _ => return None,
         }
     }
-    let from = match (sample, chosen.is_empty()) {
-        (true, false) => return None,
-        (true, true) => ServerFrom::Sample,
-        (false, _) => ServerFrom::Csv(chosen),
-    };
-    Some((then.unwrap_or(Then::WaitForEnter), from))
-}
-
-/// For a `reimport` or `reimport <folder>` line, the folder to import from
-/// (`None` for the repository); `None` for any other line.
-fn reimport_command(line: &str) -> Option<Option<PathBuf>> {
-    match line.trim().strip_prefix("reimport")? {
-        "" => Some(None),
-        folder if folder.starts_with(' ') => Some(Some(PathBuf::from(folder.trim()))),
-        _ => None,
-    }
-}
-
-/// Imports the resistors again, from `folder` (a copy of the CSV catalog)
-/// or else as planned from the repository.
-fn reimport_from(
-    admin: &collaboration::PocketBaseClient,
-    import: &catalog::CsvImport,
-    folder: Option<PathBuf>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    match folder {
-        None => reimport(admin, import, &services::repository_root()),
-        Some(folder) => reimport(admin, &services::plan(&folder, "g-res")?, &folder),
-    }
-}
-
-/// Imports the resistors again as an importer would after reading the team
-/// catalog, and names the outcome. Uncommitted changes are allowed, because
-/// this team server is thrown away when it stops; the library check runs as
-/// for any import, so an error in a file it uses refuses it.
-fn reimport(
-    admin: &collaboration::PocketBaseClient,
-    import: &catalog::CsvImport,
-    folder: &std::path::Path,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let state = read_import_state(admin)?;
-    if let Err(refusal) = services::check_libraries(folder, import, &state) {
-        return Ok(format!("refused: {refusal}"));
-    }
-    let command = ImportCommand::new(import, "Import the resistors from database/g-res.csv")
-        .expecting(&state)
-        .allowing_uncommitted_changes(services::has_uncommitted_changes(import));
-    let reply = submit_import(admin, &command)?;
-    Ok(match reply.outcome {
-        ImportOutcome::Applied { .. } => "applied".to_owned(),
-        ImportOutcome::NothingChanged { .. } => "nothing_changed".to_owned(),
-        ImportOutcome::Noop { .. } => "noop".to_owned(),
-        _ => format!("refused: {}", reply.body),
-    })
+    Some(then.unwrap_or(Then::WaitForEnter))
 }
 
 #[derive(Debug, PartialEq)]
@@ -812,34 +441,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_team_server_takes_a_mode_and_the_sample_or_csv_files() {
+    fn the_team_server_takes_one_mode() {
         let args =
             |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_owned).collect() };
         let options = |text: &str| server_options(&args(text));
-        assert_eq!(
-            options(""),
-            Some((Then::WaitForEnter, ServerFrom::Csv(Vec::new())))
-        );
-        let (then, from) = options("--json --csv g-res,g-cap --csv g-reg.csv,g-res").unwrap();
-        assert!(then == Then::PrintJson);
-        assert_eq!(
-            from,
-            ServerFrom::Csv(vec!["g-res".into(), "g-cap".into(), "g-reg".into()])
-        );
-        assert!(
-            options("--csv g-res --desktop").is_some_and(|(then, _)| then == Then::OpenDesktop)
-        );
-        assert_eq!(
-            options("--sample --json"),
-            Some((Then::PrintJson, ServerFrom::Sample))
-        );
+        assert_eq!(options(""), Some(Then::WaitForEnter));
+        assert_eq!(options("--json"), Some(Then::PrintJson));
+        assert_eq!(options("--desktop"), Some(Then::OpenDesktop));
         for refused in [
-            "--csv",
-            "--csv g-res,,g-cap",
             "--json --desktop",
             "--other",
             "g-res",
-            "--sample --csv g-res",
+            "--sample",
+            "--csv g-res",
         ] {
             assert!(options(refused).is_none(), "{refused}");
         }
@@ -850,8 +464,8 @@ mod tests {
         let args =
             |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_owned).collect() };
         assert_eq!(
-            team_code_option(&args("--json --team-code MA --csv g-res")),
-            Some((Some("MA".to_owned()), args("--json --csv g-res")))
+            team_code_option(&args("--json --team-code MA --desktop")),
+            Some((Some("MA".to_owned()), args("--json --desktop")))
         );
         assert_eq!(team_code_option(&args("out")), Some((None, args("out"))));
         for refused in [
@@ -870,14 +484,7 @@ mod tests {
         let options = |text: &str| libraries_options(&args(text));
         assert_eq!(
             options("out"),
-            Some((LibrariesFrom::Local(Vec::new()), PathBuf::from("out")))
-        );
-        assert_eq!(
-            options("--csv g-res,g-cap.csv out"),
-            Some((
-                LibrariesFrom::Local(vec!["g-res".into(), "g-cap".into()]),
-                PathBuf::from("out")
-            ))
+            Some((LibrariesFrom::Local, PathBuf::from("out")))
         );
         assert_eq!(
             options("--server http://127.0.0.1:8090 --email a@example.test out"),
@@ -891,26 +498,12 @@ mod tests {
         );
         for refused in [
             "",
-            "--csv g-res",
+            "--csv g-res out",
             "a b",
             "--server http://x out",
-            "--server http://x --email e --csv g-res out",
             "--json out",
         ] {
             assert_eq!(options(refused), None, "{refused}");
-        }
-    }
-
-    #[test]
-    fn only_reimport_lines_are_commands() {
-        assert_eq!(reimport_command("reimport"), Some(None));
-        assert_eq!(reimport_command("  reimport  "), Some(None));
-        assert_eq!(
-            reimport_command("reimport C:/copy of catalog"),
-            Some(Some(PathBuf::from("C:/copy of catalog")))
-        );
-        for other in ["", "reimprot", "reimports", "stop"] {
-            assert_eq!(reimport_command(other), None, "{other:?}");
         }
     }
 }

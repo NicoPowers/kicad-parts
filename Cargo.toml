@@ -11,7 +11,6 @@ members = [
     "crates/kicad-libraries",
     "tooling/afk",
     "tooling/catalog-import",
-    "tooling/csv-catalog-fixture",
     "tooling/fake-kicad-cli",
     "tooling/journey-desktop",
     "tooling/native-services",

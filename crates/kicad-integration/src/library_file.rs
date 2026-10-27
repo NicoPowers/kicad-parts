@@ -329,9 +329,8 @@ fn file_version(children: &[Child]) -> Option<String> {
 /// The file types KiCad reads as 3D models, in lower case.
 pub const MODEL_EXTENSIONS: [&str; 5] = ["step", "stp", "stpz", "wrl", "wrz"];
 
-/// Every 3D model path in a footprint, in file order, extracted exactly as
-/// the CSV catalog fixture (`tooling/csv-catalog-fixture`) does, so the two
-/// always agree on what a footprint references.
+/// Every 3D model path in a footprint, in file order: the text after each
+/// `(model`, quoted or not.
 pub fn model_references(content: &str) -> Vec<String> {
     let mut paths = Vec::new();
     for suffix in content.split("(model").skip(1) {

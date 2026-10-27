@@ -799,15 +799,13 @@ async function waitForDrawnImages(browser, section, timeout) {
 
 /**
  * Starts `catalog-import local-team-server --json`: a disposable PocketBase
- * on 127.0.0.1 with three accounts and the sample library's parts
- * (`--sample`). With `csv`, such as `['g-res']`, it imports those CSV
- * files of the CSV catalog instead: only the CSV journeys do, until
- * kicad-parts-e257 removes them. With `teamCode`, the team has that code
- * from the start. It runs windowless in a kill-on-close job and stops when
- * its input closes, so it cannot outlive this process.
+ * on 127.0.0.1 with three accounts, the starting categories and the sample
+ * library's parts. With `teamCode`, the team has that code from the start.
+ * It runs windowless in a kill-on-close job and stops when its input
+ * closes, so it cannot outlive this process.
  * @returns {Promise<{ url: string, accounts: { name: string, email: string, password: string, canEditCatalog: boolean }[], stop: () => Promise<void> }>}
  */
-export async function startTeamServer({ csv = [], teamCode } = {}) {
+export async function startTeamServer({ teamCode } = {}) {
   const exe = path.join(
     repoRoot,
     'target',
@@ -815,12 +813,7 @@ export async function startTeamServer({ csv = [], teamCode } = {}) {
     process.platform === 'win32' ? 'catalog-import.exe' : 'catalog-import',
   );
   assert.ok(fs.existsSync(exe), `build it first: ${exe}`);
-  const args = [
-    'local-team-server',
-    '--json',
-    ...(csv.length > 0 ? ['--csv', csv.join(',')] : ['--sample']),
-    ...(teamCode ? ['--team-code', teamCode] : []),
-  ];
+  const args = ['local-team-server', '--json', ...(teamCode ? ['--team-code', teamCode] : [])];
   const child = spawn(exe, args, {
     cwd: repoRoot,
     stdio: ['pipe', 'pipe', 'inherit'],
@@ -844,32 +837,9 @@ export async function startTeamServer({ csv = [], teamCode } = {}) {
     });
   });
   const info = JSON.parse(line);
-  record({ event: 'team-server', url: info.url, csv, accounts: info.accounts.map((a) => a.email) });
-  // Later lines answer `reimport` requests, one each, in order.
-  let rest = '';
-  const waiting = [];
-  child.stdout.on('data', (chunk) => {
-    rest += chunk.toString('utf8');
-    for (let end = rest.indexOf('\n'); end >= 0; end = rest.indexOf('\n')) {
-      const answer = rest.slice(0, end);
-      rest = rest.slice(end + 1);
-      if (answer.includes('"reimported"')) waiting.shift()?.(JSON.parse(answer).reimported);
-    }
-  });
+  record({ event: 'team-server', url: info.url, accounts: info.accounts.map((a) => a.email) });
   return {
     ...info,
-    /**
-     * Imports the resistors again, as an importer would after reading the
-     * team catalog, and returns the outcome, such as `nothing_changed`.
-     * With `folder`, imports them from the copy of the CSV catalog there.
-     */
-    async reimport(folder) {
-      const answered = new Promise((resolve) => waiting.push(resolve));
-      child.stdin.write(folder ? `reimport ${folder}\n` : 'reimport\n');
-      const outcome = await answered;
-      record({ event: 'reimport', outcome });
-      return outcome;
-    },
     async stop() {
       child.stdin.end();
       const timeout = new Promise((resolve) => setTimeout(() => resolve('timeout'), 15_000));
