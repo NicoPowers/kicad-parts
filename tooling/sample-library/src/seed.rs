@@ -2,10 +2,7 @@
 
 use crate::{Sample, SamplePart};
 use catalog::cad_file::{footprint_upload, model_upload, read_footprint_file, symbol_upload};
-use catalog::pocketbase::{
-    CadUpload, CategoryCommand, CategoryOutcome, CreateCommand, CreateOutcome, submit_category,
-    submit_create,
-};
+use catalog::pocketbase::{CadUpload, CreateCommand, CreateOutcome, submit_create};
 use collaboration::PocketBaseClient;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -13,20 +10,19 @@ use std::path::Path;
 /// What [`seed`] saved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Seeded {
-    /// The category codes, in order.
-    pub categories: Vec<String>,
     /// The IPNs, in order.
     pub parts: Vec<String>,
-    /// The seq of the last Change saved: one per category and one per part.
+    /// The seq of the last Change saved: one per part, after the one that
+    /// set up the starting categories.
     pub last_seq: u64,
 }
 
-/// Sets up the sample categories `codes` (every category when empty) and
-/// their parts on the team server `admin` signs in to, as a superuser:
-/// each category with `POST /api/catalog/categories`, then each part with
-/// `POST /api/catalog/parts`, as Add part saves one. A symbol, footprint or
-/// 3D model of the sample library goes with the first part that uses it.
-/// Never uses the CSV import.
+/// Adds the sample parts in the categories `codes` (every part when empty)
+/// to the team server `admin` signs in to, as a superuser: each part with
+/// `POST /api/catalog/parts`, as Add part saves one. The server has their
+/// categories already, as every new team server does. A symbol, footprint
+/// or 3D model of the sample library goes with the first part that uses
+/// it.
 pub fn seed(admin: &PocketBaseClient, codes: &[&str]) -> Result<Seeded, String> {
     let sample = Sample::load();
     let root = crate::root();
@@ -34,31 +30,14 @@ pub fn seed(admin: &PocketBaseClient, codes: &[&str]) -> Result<Seeded, String> 
         .iter()
         .find(|code| !sample.categories.iter().any(|c| c.code == **code))
     {
-        return Err(format!("parts.toml has no category {unknown}"));
+        return Err(format!(
+            "no part of parts.toml is in the category {unknown}"
+        ));
     }
     let mut seeded = Seeded {
-        categories: Vec::new(),
         parts: Vec::new(),
         last_seq: 0,
     };
-    for category in &sample.categories {
-        if !codes.is_empty() && !codes.contains(&category.code.as_str()) {
-            continue;
-        }
-        let command = CategoryCommand::new(
-            category.details(),
-            &format!("Set up the sample category {}", category.code),
-        );
-        let reply = submit_category(admin, &command).map_err(|error| error.to_string())?;
-        let CategoryOutcome::Applied { seq, .. } = reply.outcome else {
-            return Err(format!(
-                "the category {} was not set up: {}",
-                category.code, reply.body
-            ));
-        };
-        seeded.categories.push(category.code.clone());
-        seeded.last_seq = seq;
-    }
     let mut sent = BTreeSet::new();
     for part in sample.parts_in(codes) {
         let category = sample.category(&part.category);

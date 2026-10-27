@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 const IPN: &str = "RES-0000-0470";
 
 /// Every catalog migration, newest first.
-const CATALOG_MIGRATIONS: [&str; 12] = [
+const CATALOG_MIGRATIONS: [&str; 13] = [
+    "1792700000_starting_categories.js",
     "1792600000_category_changes.js",
     "1792500000_team_settings.js",
     "1792400000_new_parts.js",
@@ -157,6 +158,8 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_data() {
             "{said}"
         );
     };
+    refuses("8", "saved more than its starting categories");
+    set_aside_migration(&options, "1792700000_starting_categories.js");
     refuses("7", "categories set up without a CSV file");
     set_aside_migration(&options, "1792600000_category_changes.js");
     refuses("6", "team has a code");
@@ -261,12 +264,12 @@ fn team_server_data_from_before_numbered_cad_revisions_is_refused_not_changed() 
     let revision = read_back(&admin).unwrap().cad_item_revisions[0].clone();
     server.stop();
 
-    // Undoing is refused while there is data: the newest undo refuses the
-    // categories set up without a CSV file, and the undo stops there as a
-    // whole, so the numbering is never undone either.
-    let said = migrate(&root, &options, &["down", "7"]);
+    // Undoing is refused while there is data: the newest undo refuses to
+    // take out the starting categories once parts were added, and the undo
+    // stops there as a whole, so the numbering is never undone either.
+    let said = migrate(&root, &options, &["down", "8"]);
     assert!(
-        said.contains("which the older version cannot read"),
+        said.contains("saved more than its starting categories"),
         "{said}"
     );
     assert!(!said.contains("Reverted"), "{said}");
@@ -357,7 +360,7 @@ fn a_cad_item_revision_has_at_most_one_successor() {
     // Undoing the index loses nothing and lets the fork in; starting again
     // then refuses with a plain message and changes nothing. (The newer
     // steps refuse this data, so they are set aside.)
-    for newer in &CATALOG_MIGRATIONS[..4] {
+    for newer in &CATALOG_MIGRATIONS[..5] {
         set_aside_migration(&options, newer);
     }
     let said = migrate(&root, &options, &["down", "1"]);

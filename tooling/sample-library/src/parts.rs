@@ -1,25 +1,27 @@
-//! The parts and categories in `parts.toml`.
+//! The parts in `parts.toml`, and the starting categories they are in.
 
+use catalog::category::starting_categories;
 use catalog::{CategoryDetails, DetailField, ManufacturerPart};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Everything `parts.toml` lists, in its order.
-#[derive(Clone, Debug, Deserialize)]
+/// Everything `parts.toml` lists, in its order, and the categories its
+/// parts are in.
+#[derive(Clone, Debug)]
 pub struct Sample {
-    #[serde(rename = "category")]
-    pub categories: Vec<SampleCategory>,
-    #[serde(rename = "part")]
+    /// The starting categories the parts are in, in the order the parts
+    /// first name them, as every new team server has them.
+    pub categories: Vec<CategoryDetails>,
     pub parts: Vec<SamplePart>,
 }
 
-/// One category: its code and its fields, in order.
-#[derive(Clone, Debug, Deserialize)]
+/// `parts.toml` as written.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SampleCategory {
-    pub code: String,
-    pub fields: Vec<String>,
+struct PartsFile {
+    #[serde(rename = "part")]
+    parts: Vec<SamplePart>,
 }
 
 /// One part, with the values of some of its category's fields.
@@ -52,14 +54,18 @@ impl Sample {
         let path = root.join("parts.toml");
         let text = std::fs::read_to_string(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        let sample: Self =
+        let file: PartsFile =
             toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-        for part in &sample.parts {
-            let category = sample
-                .categories
+        let starting = starting_categories();
+        let mut categories: Vec<CategoryDetails> = Vec::new();
+        for part in &file.parts {
+            let category = starting
                 .iter()
                 .find(|category| category.code == part.category)
-                .ok_or_else(|| format!("{} names no category of parts.toml", part.ipn))?;
+                .ok_or_else(|| format!("{} names no starting category", part.ipn))?;
+            if !categories.iter().any(|known| known.code == category.code) {
+                categories.push(category.clone());
+            }
             if let Some(name) = part
                 .fields
                 .keys()
@@ -71,7 +77,10 @@ impl Sample {
                 ));
             }
         }
-        Ok(sample)
+        Ok(Self {
+            categories,
+            parts: file.parts,
+        })
     }
 
     /// The part `ipn`; panics if there is none, as a test should.
@@ -82,12 +91,12 @@ impl Sample {
             .unwrap_or_else(|| panic!("parts.toml has no part {ipn}"))
     }
 
-    /// The category `code`; panics if there is none.
-    pub fn category(&self, code: &str) -> &SampleCategory {
+    /// The category `code`; panics if no part is in it.
+    pub fn category(&self, code: &str) -> &CategoryDetails {
         self.categories
             .iter()
             .find(|category| category.code == code)
-            .unwrap_or_else(|| panic!("parts.toml has no category {code}"))
+            .unwrap_or_else(|| panic!("no part of parts.toml is in the category {code}"))
     }
 
     /// The parts in the categories `codes`, in order; every part when
@@ -96,14 +105,6 @@ impl Sample {
         self.parts
             .iter()
             .filter(move |part| codes.is_empty() || codes.contains(&part.category.as_str()))
-    }
-}
-
-impl SampleCategory {
-    /// The category as a team server keeps it: its fields, and the name, IPN
-    /// prefix and rules of the app's starting categories.
-    pub fn details(&self) -> CategoryDetails {
-        CategoryDetails::starting(&self.code, self.fields.clone())
     }
 }
 
@@ -121,7 +122,7 @@ impl SamplePart {
     }
 
     /// Every field of `category`, in its order, with this part's values.
-    pub fn detail_fields(&self, category: &SampleCategory) -> Vec<DetailField> {
+    pub fn detail_fields(&self, category: &CategoryDetails) -> Vec<DetailField> {
         category
             .fields
             .iter()
@@ -182,7 +183,7 @@ mod tests {
             assert!(catalog::Ipn::parse(&part.ipn).is_ok(), "{}", part.ipn);
             let category = sample.category(&part.category);
             assert!(
-                part.ipn.starts_with(&category.details().ipn_prefix),
+                part.ipn.starts_with(&category.ipn_prefix),
                 "{} is not in {}'s numbering",
                 part.ipn,
                 category.code

@@ -8,14 +8,15 @@
 //! - [`Sample`] reads `parts.toml`.
 //! - [`SampleRepo`] makes a throwaway git repo of the library under
 //!   `target/`, for features that read a library folder or a linked repo.
-//! - [`seed`] sets up a team server's categories and parts through the same
-//!   routes the app uses, never the CSV import.
+//! - [`seed`] adds the parts to a team server through the same route Add
+//!   part uses. The server already has their categories: every new team
+//!   server starts with the starting categories.
 
 mod parts;
 mod repo;
 mod seed;
 
-pub use parts::{Sample, SampleCategory, SamplePart};
+pub use parts::{Sample, SamplePart};
 pub use repo::{SampleRepo, git_isolated};
 pub use seed::{Seeded, seed};
 

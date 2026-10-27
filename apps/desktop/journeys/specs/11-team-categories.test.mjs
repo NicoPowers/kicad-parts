@@ -120,14 +120,29 @@ describe('team catalog: categories', () => {
     const options = await browser.execute(() =>
       [...document.querySelectorAll('#edit-category option')].map((o) => o.textContent.trim()),
     );
-    // One choice per category of the team, by name.
+    // One choice per category of the team, by name: the 21 starting
+    // categories every new team server has.
     assert.deepEqual(options, [
+      'Analog ICs',
       'Bare boards',
       'Board features',
       'Capacitors',
+      'Circuit protection',
+      'Connectors',
+      'Crystals and oscillators',
+      'Diodes',
+      'Inductors',
       'Integrated circuits',
+      'LEDs and optoelectronics',
+      'Mechanical parts',
       'Microcontrollers',
+      'Potentiometers and trimmers',
+      'Power ICs and relays',
+      'Processors and modules',
       'Resistors',
+      'RF modules and shields',
+      'Switches',
+      'Transistors',
       'Voltage regulators',
     ]);
     assert.deepEqual(await editLabels(), ['Category', 'Description', 'Value', 'Tolerance', 'Datasheet']);

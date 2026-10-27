@@ -50,17 +50,26 @@ fn the_desktop_shows_and_changes_a_parts_category() {
     });
 
     // The part shows its category by name, and Edit part can offer every
-    // category, by name, with its fields.
+    // category, by name, with its fields: the starting categories every
+    // new team server has, in name order.
     let part = team.part(IPN).unwrap().unwrap();
     assert_eq!(part.details.category, "res");
     assert_eq!(part.details.category_name, "Resistors");
-    let offered: Vec<(&str, &str)> = part
+    let offered: Vec<&str> = part
         .categories
         .iter()
-        .map(|category| (category.code.as_str(), category.name.as_str()))
+        .map(|category| category.name.as_str())
         .collect();
-    assert_eq!(offered, [("cap", "Capacitors"), ("res", "Resistors")]);
-    let capacitors = &part.categories[0];
+    let mut by_name = offered.clone();
+    by_name.sort_by_key(|name| name.to_lowercase());
+    assert_eq!(offered, by_name);
+    assert_eq!(offered.len(), 21);
+    let capacitors = part
+        .categories
+        .iter()
+        .find(|category| category.code == "cap")
+        .unwrap();
+    assert_eq!(capacitors.name, "Capacitors");
     assert_eq!(
         capacitors.fields,
         [

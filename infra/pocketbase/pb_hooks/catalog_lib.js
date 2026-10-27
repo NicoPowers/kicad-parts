@@ -3402,14 +3402,115 @@ function publishArchive(e) {
 
 // ---- Setting up a category (kicad-parts-fbc2) ----------------------------------
 //
-// A superuser sets up a team's categories without a CSV file: one new
-// category per request, saved as its revision 1 in one Change of kind
-// category. Test team servers and local-team-server --sample start this
-// way, so they need no CSV import. A category that exists is refused, so
-// this never changes one.
+// A team server sets up its starting categories the first time it starts,
+// all in one Change of kind category. After that, a superuser sets up a
+// new category: one per request, saved as its revision 1 in one Change of
+// kind category. A category that exists is refused, so this never changes
+// one.
 
 // The `source` of a category revision a superuser set up.
 const CATEGORY_SETUP_SOURCE = "setup";
+
+// The `source` of a starting category's first revision.
+const STARTING_CATEGORY_SOURCE = "starting";
+
+// Who saved the starting categories, as their Change names it.
+const SETUP_ACTOR = { id: "server:setup", name: "the team server's setup" };
+
+// The correlation ID of the Change that saves the starting categories.
+const SETUP_CORRELATION_ID = "setup-starting-categories";
+
+// Saves `document`, a category checked by categoryDocument, as revision 1
+// of a new category in the Change `changeId`. Returns the category's ID,
+// its revision's ID and the snapshot's SHA-256.
+function saveNewCategory(txApp, document, changeId, source) {
+  const record = (name, id) => {
+    const made = new Record(txApp.findCollectionByNameOrId(name));
+    made.set("id", id);
+    return made;
+  };
+  const snapshot = JSON.stringify(document);
+  const sha = $security.sha256(snapshot);
+  const categoryId = deriveId("category", document.code);
+  const category = record("catalog_categories", categoryId);
+  category.set("code", document.code);
+  category.set("first_change", changeId);
+  txApp.save(category);
+  const revisionId = deriveId("category-revision", categoryId + "\n" + 1);
+  const revision = record("catalog_category_revisions", revisionId);
+  revision.set("category", categoryId);
+  revision.set("number", 1);
+  revision.set("predecessor", "");
+  revision.set("change", changeId);
+  revision.set("snapshot", snapshot);
+  revision.set("snapshot_sha256", sha);
+  revision.set("source", JSON.stringify({ schema: SOURCE_SCHEMA, source: source }));
+  txApp.save(revision);
+  return { categoryId: categoryId, revisionId: revisionId, sha: sha };
+}
+
+// Saves a Change of kind category and its audit entry, numbered after the
+// newest Change. `summary` is the JSON counts both record.
+function saveCategoryChange(txApp, actor, correlationId, reason, codes, summary) {
+  const last = txApp.findRecordsByFilter("catalog_changes", "seq > 0", "-seq", 1, 0);
+  const seq = last.length > 0 ? last[0].getInt("seq") + 1 : 1;
+  const changeId = deriveId("change", correlationId);
+  const change = new Record(txApp.findCollectionByNameOrId("catalog_changes"));
+  change.set("id", changeId);
+  change.set("seq", seq);
+  change.set("kind", CHANGE_KINDS.category);
+  change.set("reason", reason);
+  change.set("correlation_id", correlationId);
+  change.set("actor", actor.id);
+  change.set("actor_name", actor.name);
+  change.set("sources", JSON.stringify({ categories: codes }));
+  change.set("summary", summary);
+  txApp.save(change);
+  const auditEntryId = deriveId("audit-entry", correlationId);
+  const audit = new Record(txApp.findCollectionByNameOrId("catalog_audit_entries"));
+  audit.set("id", auditEntryId);
+  audit.set("action", "catalog." + CHANGE_KINDS.category);
+  audit.set("actor", actor.id);
+  audit.set("actor_name", actor.name);
+  audit.set("change", changeId);
+  audit.set("reason", reason);
+  audit.set("correlation_id", correlationId);
+  audit.set("summary", summary);
+  txApp.save(audit);
+  return { changeId: changeId, seq: seq, auditEntryId: auditEntryId };
+}
+
+// Sets up the starting categories (catalog_starting_categories.json, kept
+// in step with crates/catalog STARTING_CATEGORIES) on a team server that
+// has saved nothing yet, so Add part works on a new team. A server that
+// has any Change is left as it is. Migration 1792700000 calls it.
+function setUpStartingCategories(app) {
+  if (app.findRecordsByFilter("catalog_changes", "seq > 0", "", 1, 0).length > 0) {
+    return;
+  }
+  const starting = JSON.parse(toString($os.readFile(`${__hooks}/catalog_starting_categories.json`)));
+  const documents = starting.map((parsed) => {
+    const document = categoryDocument(parsed);
+    if (typeof document === "string") {
+      throw new Error(`the starting category ${parsed && parsed.code} cannot be saved: ${document}`);
+    }
+    return document;
+  });
+  const codes = documents.map((document) => document.code);
+  app.runInTransaction((txApp) => {
+    const saved = saveCategoryChange(
+      txApp,
+      SETUP_ACTOR,
+      SETUP_CORRELATION_ID,
+      "Set up the categories a new team starts with",
+      codes,
+      JSON.stringify({ categories: codes.length }),
+    );
+    for (const document of documents) {
+      saveNewCategory(txApp, document, saved.changeId, STARTING_CATEGORY_SOURCE);
+    }
+  });
+}
 
 function publishCategory(e) {
   const kind = CHANGE_KINDS.category;
@@ -3427,9 +3528,7 @@ function publishCategory(e) {
   if (typeof document === "string") {
     fail(`the category cannot be saved: ${document}`);
   }
-  const snapshot = JSON.stringify(document);
-  const sha = $security.sha256(snapshot);
-  const requestHash = $security.sha256(JSON.stringify([kind, reason, snapshot]));
+  const requestHash = $security.sha256(JSON.stringify([kind, reason, JSON.stringify(document)]));
 
   let reply = null;
   $app.runInTransaction((txApp) => {
@@ -3453,55 +3552,19 @@ function publishCategory(e) {
       reply = { status: prior.getInt("status"), body: JSON.parse(prior.getString("result")), replayed: true };
       return;
     }
-    const categoryId = deriveId("category", document.code);
-    if (recordById(txApp, "catalog_categories", categoryId)) {
+    if (recordById(txApp, "catalog_categories", deriveId("category", document.code))) {
       throw new BadRequestError(`the Catalog already has the category ${document.code}`);
     }
-    const record = (name, id) => {
-      const made = new Record(txApp.findCollectionByNameOrId(name));
-      made.set("id", id);
-      return made;
-    };
-    const last = first("catalog_changes", "seq > 0", {}, "-seq");
-    const seq = last ? last.getInt("seq") + 1 : 1;
-    const changeId = deriveId("change", correlationId);
     const summary = JSON.stringify({ category: document.code, revision: 1 });
-    const change = record("catalog_changes", changeId);
-    change.set("seq", seq);
-    change.set("kind", kind);
-    change.set("reason", reason);
-    change.set("correlation_id", correlationId);
-    change.set("actor", actor.id);
-    change.set("actor_name", actor.name);
-    change.set("sources", JSON.stringify({ categories: [document.code] }));
-    change.set("summary", summary);
-    txApp.save(change);
-
-    const category = record("catalog_categories", categoryId);
-    category.set("code", document.code);
-    category.set("first_change", changeId);
-    txApp.save(category);
-    const revisionId = deriveId("category-revision", categoryId + "\n" + 1);
-    const revision = record("catalog_category_revisions", revisionId);
-    revision.set("category", categoryId);
-    revision.set("number", 1);
-    revision.set("predecessor", "");
-    revision.set("change", changeId);
-    revision.set("snapshot", snapshot);
-    revision.set("snapshot_sha256", sha);
-    revision.set("source", JSON.stringify({ schema: SOURCE_SCHEMA, source: CATEGORY_SETUP_SOURCE }));
-    txApp.save(revision);
-
-    const auditEntryId = deriveId("audit-entry", correlationId);
-    const audit = record("catalog_audit_entries", auditEntryId);
-    audit.set("action", "catalog." + kind);
-    audit.set("actor", actor.id);
-    audit.set("actor_name", actor.name);
-    audit.set("change", changeId);
-    audit.set("reason", reason);
-    audit.set("correlation_id", correlationId);
-    audit.set("summary", summary);
-    txApp.save(audit);
+    const { changeId, seq, auditEntryId } = saveCategoryChange(
+      txApp,
+      actor,
+      correlationId,
+      reason,
+      [document.code],
+      summary,
+    );
+    const { categoryId, revisionId, sha } = saveNewCategory(txApp, document, changeId, CATEGORY_SETUP_SOURCE);
 
     const result = {
       outcome: "applied",
@@ -4122,6 +4185,8 @@ module.exports = {
   modelLinkProblem: modelLinkProblem,
   publishArchive: publishArchive,
   publishCategory: publishCategory,
+  setUpStartingCategories: setUpStartingCategories,
+  SETUP_CORRELATION_ID: SETUP_CORRELATION_ID,
   publishCsvReview: publishCsvReview,
   excludedFromBom: excludedFromBom,
   storedBomMarks: storedBomMarks,

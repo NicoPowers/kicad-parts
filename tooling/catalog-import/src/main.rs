@@ -293,9 +293,8 @@ fn local_team_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         None => {
             let seeded = sample_library::seed(&admin, &[])?;
             format!(
-                "The sample library's {} parts in {} categories are added (fixtures/sample-library).",
-                seeded.parts.len(),
-                seeded.categories.len()
+                "The sample library's {} parts are added (fixtures/sample-library).",
+                seeded.parts.len()
             )
         }
     };

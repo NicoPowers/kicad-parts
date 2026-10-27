@@ -1,15 +1,14 @@
 //! Categories: the only grouping of parts that people see.
 //!
-//! Each category is a Catalog record with revisions, like a CAD item. The
-//! CSV import makes one per CSV file (`database/g-res.csv` makes `res`),
-//! with its plain name, the IPN prefix new parts get by default, the
-//! fields a part in it has (the CSV file's part details columns, in
-//! order), and the rules that help guess a new part's category
-//! ([`crate::guess`]). A part's category is part of its
-//! [`crate::PartDetails`]; changing it never changes the part's IPN.
+//! Each category is a Catalog record with revisions, like a CAD item. It
+//! has a code (such as `res`), its plain name, the IPN prefix new parts get
+//! by default, the fields a part in it has, in order, and the rules that
+//! help guess a new part's category ([`crate::guess`]). A part's category
+//! is part of its [`crate::PartDetails`]; changing it never changes the
+//! part's IPN.
 //!
-//! The rules every category starts with are the table
-//! [`STARTING_CATEGORIES`], shipped as each category's first revision.
+//! A new team server starts with the table [`STARTING_CATEGORIES`], each
+//! saved as its first revision.
 
 use crate::hash::sha256_hex;
 use crate::ids::derive_id;
@@ -59,10 +58,9 @@ pub struct CategoryRules {
 }
 
 impl CategoryDetails {
-    /// The first revision of the category made from `database/g-<code>.csv`
-    /// whose part details columns are `fields`: its name and rules from
-    /// [`STARTING_CATEGORIES`], or the code as its name and no rules for a
-    /// CSV file the table does not know.
+    /// A first revision of the category `code` with `fields`: its name and
+    /// rules from [`STARTING_CATEGORIES`], or the code as its name and no
+    /// rules for a code the table does not know.
     pub fn starting(code: &str, fields: Vec<String>) -> Self {
         let start = starting_category(code);
         let list = |items: &[&str]| items.iter().map(|item| (*item).to_owned()).collect();
@@ -114,23 +112,32 @@ pub fn category_revision_id(category: &str, number: u32) -> String {
     derive_id("category-revision", &format!("{category}\n{number}"))
 }
 
-/// The name, rules and keywords one category starts with.
+/// What one starting category is: its code, name, fields and the rules
+/// that guess it.
 #[derive(Clone, Copy, Debug)]
 pub struct StartingCategory {
     pub code: &'static str,
     pub name: &'static str,
+    /// The fields a part in it has, in order.
+    pub fields: &'static [&'static str],
     pub reference_letters: &'static [&'static str],
     pub footprint_patterns: &'static [&'static str],
     pub keywords: &'static [&'static str],
 }
 
-/// The 21 categories of the CSV catalog, with the rules each starts with.
-/// `U` is in no list: it says only that a part is a chip. The existing
-/// parts are the examples the guess learns from, so they need no rules.
+/// The 21 categories a new team server starts with, with their fields and
+/// the rules each starts with. They were the CSV catalog's categories. `U`
+/// is in no list: it says only that a part is a chip. A team's own parts
+/// are the examples the guess learns from, so they need no rules.
+///
+/// The team server sets them up the first time it starts, from
+/// `infra/pocketbase/pb_hooks/catalog_starting_categories.json`; a test
+/// keeps that file and this table in step.
 pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "res",
         name: "Resistors",
+        fields: &["Description", "Value", "Tolerance", "Datasheet"],
         reference_letters: &["R"],
         footprint_patterns: &["R_*", "RESC*", "RESM*", "Resistor*"],
         keywords: &["resistor", "res", "ohm"],
@@ -138,6 +145,14 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "cap",
         name: "Capacitors",
+        fields: &[
+            "Description",
+            "Value",
+            "Voltage",
+            "Material",
+            "Tolerance",
+            "Datasheet",
+        ],
         reference_letters: &["C"],
         footprint_patterns: &["C_*", "CP_*", "CAPC*", "CAPM*", "CAPAE*"],
         keywords: &["capacitor", "cap", "ceramic", "electrolytic"],
@@ -145,6 +160,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "ind",
         name: "Inductors",
+        fields: &["Description", "Value", "Current", "Datasheet"],
         reference_letters: &["L"],
         footprint_patterns: &["L_*", "INDC*", "INDM*", "IND_*"],
         keywords: &["inductor", "ind", "choke", "ferrite"],
@@ -152,6 +168,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "dio",
         name: "Diodes",
+        fields: &["Value", "Description", "Current", "Voltage", "Datasheet"],
         reference_letters: &["D"],
         footprint_patterns: &["D_*", "SOD*", "DIOM*", "DIOC*"],
         keywords: &["diode", "rectifier", "schottky", "zener", "varactor"],
@@ -159,6 +176,14 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "opt",
         name: "LEDs and optoelectronics",
+        fields: &[
+            "Description",
+            "Color",
+            "I-forward-max",
+            "V-forward",
+            "Wavelength",
+            "Datasheet",
+        ],
         reference_letters: &["LED"],
         footprint_patterns: &["LED_*", "LEDC*", "LEDM*"],
         keywords: &["led", "optocoupler", "optoisolator", "photodiode"],
@@ -166,6 +191,14 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "trs",
         name: "Transistors",
+        fields: &[
+            "Value",
+            "Type",
+            "max(Vce)",
+            "max(Ic)",
+            "Description",
+            "Datasheet",
+        ],
         reference_letters: &["Q"],
         footprint_patterns: &[],
         keywords: &["transistor", "mosfet", "bjt", "npn", "pnp"],
@@ -173,6 +206,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "reg",
         name: "Voltage regulators",
+        fields: &["Description", "Voltage", "Current", "Datasheet"],
         reference_letters: &[],
         footprint_patterns: &[],
         keywords: &[
@@ -188,6 +222,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "pwr",
         name: "Power ICs and relays",
+        fields: &["Description", "Datasheet"],
         reference_letters: &["K"],
         footprint_patterns: &["Relay*"],
         keywords: &[
@@ -201,6 +236,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "ics",
         name: "Integrated circuits",
+        fields: &["Description", "Datasheet"],
         reference_letters: &[],
         footprint_patterns: &[],
         keywords: &[
@@ -219,6 +255,14 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "ana",
         name: "Analog ICs",
+        fields: &[
+            "Description",
+            "Datasheet",
+            "Sim_Library",
+            "Sim_Name",
+            "Sim_Device",
+            "Sim_Pins",
+        ],
         reference_letters: &[],
         footprint_patterns: &[],
         keywords: &["op amp", "opamp", "amplifier", "comparator"],
@@ -226,6 +270,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "mcu",
         name: "Microcontrollers",
+        fields: &["Description", "Datasheet"],
         reference_letters: &[],
         footprint_patterns: &[],
         keywords: &["microcontroller", "mcu", "cortex"],
@@ -233,6 +278,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "mpu",
         name: "Processors and modules",
+        fields: &["Description", "Datasheet"],
         reference_letters: &[],
         footprint_patterns: &[],
         keywords: &["processor", "sodimm", "module", "som"],
@@ -240,6 +286,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "osc",
         name: "Crystals and oscillators",
+        fields: &["Description", "Frequency", "Stability", "Load", "Datasheet"],
         reference_letters: &["Y"],
         footprint_patterns: &["Crystal*", "XTAL*", "OSC*", "Oscillator*", "Resonator*"],
         keywords: &["crystal", "oscillator", "xo", "resonator"],
@@ -247,6 +294,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "con",
         name: "Connectors",
+        fields: &["Value", "Description", "Pins", "Datasheet"],
         reference_letters: &["J", "P"],
         footprint_patterns: &[
             "Conn*",
@@ -264,6 +312,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "swi",
         name: "Switches",
+        fields: &["Description", "Form", "Datasheet"],
         reference_letters: &["SW"],
         footprint_patterns: &["SW_*", "Button*", "Switch*"],
         keywords: &["switch", "tactile", "button", "pushbutton"],
@@ -271,6 +320,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "cpd",
         name: "Circuit protection",
+        fields: &["Description", "Datasheet"],
         reference_letters: &["F", "TVS"],
         footprint_patterns: &["Fuse*", "PTC*", "Varistor*"],
         keywords: &[
@@ -288,6 +338,13 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "rvr",
         name: "Potentiometers and trimmers",
+        fields: &[
+            "Description",
+            "Resistance",
+            "Tolerance",
+            "Turns",
+            "Datasheet",
+        ],
         reference_letters: &["RV"],
         footprint_patterns: &["Potentiometer*", "Trimmer*"],
         keywords: &["potentiometer", "trimmer", "pot"],
@@ -295,6 +352,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "rfm",
         name: "RF modules and shields",
+        fields: &["Value", "Description", "Datasheet"],
         reference_letters: &[],
         footprint_patterns: &["RF_Shield*", "Shield*"],
         keywords: &["shield", "rf module", "antenna"],
@@ -302,6 +360,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "mec",
         name: "Mechanical parts",
+        fields: &["Description", "Type", "Datasheet"],
         reference_letters: &[],
         footprint_patterns: &["Standoff*", "Spacer*"],
         keywords: &[
@@ -316,6 +375,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "art",
         name: "Board features",
+        fields: &["Description", "Comments"],
         reference_letters: &["TP", "FD", "FID", "H", "MH"],
         footprint_patterns: &["TestPoint*", "Fiducial*", "MountingHole*", "Tag-Connect*"],
         keywords: &[
@@ -329,6 +389,7 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
     StartingCategory {
         code: "pcb",
         name: "Bare boards",
+        fields: &["Description", "Project link"],
         reference_letters: &[],
         footprint_patterns: &[],
         keywords: &["pcb", "bare board"],
@@ -338,6 +399,17 @@ pub const STARTING_CATEGORIES: [StartingCategory; 21] = [
 /// The starting entry for `code`, if the table has one.
 pub fn starting_category(code: &str) -> Option<&'static StartingCategory> {
     STARTING_CATEGORIES.iter().find(|start| start.code == code)
+}
+
+/// The first revision of every starting category, in table order.
+pub fn starting_categories() -> Vec<CategoryDetails> {
+    STARTING_CATEGORIES
+        .iter()
+        .map(|start| {
+            let fields = start.fields.iter().map(|field| (*field).to_owned());
+            CategoryDetails::starting(start.code, fields.collect())
+        })
+        .collect()
 }
 
 /// Reference letters that mean the same as another: `IC` is `U`, `S` is
@@ -423,6 +495,34 @@ mod tests {
         assert_eq!(
             category_revision_id(&category_id("res"), 2),
             derive_id("category-revision", &format!("{}\n2", category_id("res")))
+        );
+    }
+
+    #[test]
+    fn the_team_server_sets_up_the_starting_categories() {
+        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../infra/pocketbase/pb_hooks/catalog_starting_categories.json");
+        let text = std::fs::read_to_string(file).unwrap();
+        let on_server: Vec<CategoryDetails> = serde_json::from_str(&text).unwrap();
+        assert_eq!(on_server, starting_categories());
+        // One category per line, each as canonical JSON, as the server
+        // saves it.
+        let lines: Vec<String> = starting_categories()
+            .iter()
+            .map(CategoryDetails::canonical_json)
+            .collect();
+        assert_eq!(
+            text,
+            format!(
+                "[
+{}
+]
+",
+                lines.join(
+                    ",
+"
+                )
+            )
         );
     }
 

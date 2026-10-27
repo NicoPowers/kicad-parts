@@ -65,7 +65,7 @@ fn sample_names() -> BTreeMap<String, String> {
     Sample::load()
         .categories
         .iter()
-        .map(|category| (category.code.clone(), category.details().name))
+        .map(|category| (category.code.clone(), category.name.clone()))
         .collect()
 }
 

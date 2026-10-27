@@ -176,7 +176,7 @@ fn signing_in_while_others_save_ends_like_the_server() {
             .unwrap();
             assert_eq!(archived.status, 200, "{}", archived.body);
             let more = sample_library::seed(&hook_admin, &OTHERS).unwrap();
-            *marked.lock().unwrap() = 2 + more.categories.len() + more.parts.len();
+            *marked.lock().unwrap() = 2 + more.parts.len();
         }),
     );
 

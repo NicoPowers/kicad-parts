@@ -1,10 +1,14 @@
 /// <reference path="../pb_data/types.d.ts" />
 
-// Setting up a category without a CSV file (seed kicad-parts-fbc2). The
-// route runs catalog_lib.js publishCategory in one transaction; see there
-// for the steps. Only superusers may call it: no screen sets up categories
-// yet. Test team servers and local-team-server --sample use it, so they
-// start without the CSV import.
+// A team's categories (seeds kicad-parts-fbc2 and kicad-parts-e257).
+//
+// A new team server starts with the starting categories, set up by
+// migration 1792700000_starting_categories.js. So Add part works on a new
+// team at once.
+//
+// After that, only a superuser sets up another category, through the route
+// below; no screen does yet. The route runs catalog_lib.js publishCategory
+// in one transaction.
 //
 // POST /api/catalog/categories
 //

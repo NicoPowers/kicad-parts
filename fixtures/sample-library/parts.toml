@@ -1,41 +1,12 @@
 # The parts a test team server starts with, made from the sample library.
 # The README says what each part is for and which tests use it.
 #
-# Each category lists its fields in order. Its name, IPN prefix and the
-# rules that guess a category come from the app's starting categories
+# Each part is in one of the starting categories every new team server has
 # (crates/catalog/src/category.rs). A part gives a value for some of its
 # category's fields; the rest stay blank.
 #
 # A symbol or footprint in a g- library is a file of this library, sent to
 # the team server with the part. Any other library is KiCad's own.
-
-[[category]]
-code = "res"
-fields = ["Description", "Value", "Tolerance", "Datasheet"]
-
-[[category]]
-code = "cap"
-fields = ["Description", "Value", "Voltage", "Material", "Tolerance", "Datasheet"]
-
-[[category]]
-code = "ics"
-fields = ["Description", "Datasheet"]
-
-[[category]]
-code = "mcu"
-fields = ["Description", "Datasheet"]
-
-[[category]]
-code = "reg"
-fields = ["Description", "Voltage", "Current", "Datasheet"]
-
-[[category]]
-code = "art"
-fields = ["Description", "Comments"]
-
-[[category]]
-code = "pcb"
-fields = ["Description", "Project link"]
 
 [[part]]
 ipn = "RES-0000-0470"

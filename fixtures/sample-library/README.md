@@ -30,8 +30,9 @@ browser and a seeded team server.
   settings of yours. Tests that change files, need committed files or link a
   repo use it. The folder goes when the test ends.
 - **A seeded team server.** `sample_library::seed(&admin, &["res", "cap"])`
-  sets up those categories and adds their parts, as Add part does. An empty
-  list seeds everything. It never uses the CSV import.
+  adds the parts in those categories, as Add part does. An empty list adds
+  every part. The categories are there already: every new team server
+  starts with the starting categories.
 - **By hand.** `cargo run --locked -p catalog-import -- local-team-server
   --sample --desktop` starts a team server with every sample part.
 
@@ -53,6 +54,8 @@ your KiCad installation.
 
 ## The categories
 
+The parts are in 7 of the starting categories every new team server has:
+
 | Code | Name | Fields |
 | --- | --- | --- |
 | `res` | Resistors | Description, Value, Tolerance, Datasheet |
@@ -63,9 +66,10 @@ your KiCad installation.
 | `art` | Board features | Description, Comments |
 | `pcb` | Bare boards | Description, Project link |
 
-Names, IPN prefixes and the rules that guess a category come from the app's
-starting categories in `crates/catalog/src/category.rs`. Resistors and
-capacitors have different fields on purpose.
+Names, fields, IPN prefixes and the rules that guess a category come from
+the starting categories in `crates/catalog/src/category.rs`. Resistors and
+capacitors have different fields, which tests of changing a part's category
+use.
 
 ## The parts
 
