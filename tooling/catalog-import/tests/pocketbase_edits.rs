@@ -564,12 +564,12 @@ fn catalog_records_never_change_even_for_superusers() {
         (
             "catalog_part_revisions",
             &revision.id,
-            json!({ "source": "not a CSV catalog row" }),
+            json!({ "source": "not what the route saved" }),
         ),
         (
             "catalog_part_details",
             &details.id,
-            json!({ "snapshot": "{}", "source": "not a CSV catalog row" }),
+            json!({ "snapshot": "{}", "source": "not what the route saved" }),
         ),
         (
             "catalog_changes",
@@ -957,7 +957,7 @@ fn catalog_collections_cannot_lose_data_through_the_collection_api() {
         change_collection(
             admin,
             "catalog_changes",
-            set_option("kind", "values", json!(["csv-import"]))
+            set_option("kind", "values", json!(["edit"]))
         ),
         403
     );
@@ -1145,7 +1145,7 @@ fn simultaneous_edits_apply_once_and_the_rest_conflict() {
 
 #[test]
 fn references_are_trimmed_the_way_rust_trims_them() {
-    // Rust's str::trim (used by the CSV import) removes U+0085 but not
+    // Rust's str::trim (used by the desktop) removes U+0085 but not
     // U+FEFF; JavaScript's trim() does the opposite. The route follows Rust.
     let team = Team::start();
     let editor = team.member("Ada Editor", true);

@@ -1,16 +1,10 @@
 //! What kind of action made a Change.
 
 /// The closed set of `catalog_changes.kind` values. The migration
-/// declares them as a select field and the import route's
-/// `CHANGE_KINDS` names them; the test below keeps all three in step.
-///
-/// The import route saves a changed row's part details only when the
-/// part's current details came from a CSV import, and its changed CAD only
-/// when its current revision did, so an edit is never overwritten by one.
+/// declares them as a select field and the team server's `CHANGE_KINDS`
+/// names them; the test below keeps all three in step.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ChangeKind {
-    /// Published by `POST /api/catalog/csv-imports`.
-    CsvImport,
     /// A change to one part's details, symbol or footprint, published by
     /// `POST /api/catalog/edits`.
     Edit,
@@ -18,36 +12,27 @@ pub enum ChangeKind {
     Archive,
     /// One part revision unarchived, published by `POST /api/catalog/archives`.
     Unarchive,
-    /// A person reviewed CSV changes that were not applied to an edited
-    /// part, taking some of the CSV's values or keeping theirs, published by
-    /// `POST /api/catalog/csv-reviews`.
-    CsvReview,
-    /// A new part added in the app from downloaded CAD files, published by
-    /// `POST /api/catalog/parts`.
+    /// A new part added in the app, published by `POST /api/catalog/parts`.
     Create,
-    /// A new category a superuser set up without a CSV file, published by
-    /// `POST /api/catalog/categories`.
+    /// New categories: the starting categories a new team server sets up,
+    /// or one a superuser set up with `POST /api/catalog/categories`.
     Category,
 }
 
 impl ChangeKind {
-    pub const ALL: [Self; 7] = [
-        Self::CsvImport,
+    pub const ALL: [Self; 5] = [
         Self::Edit,
         Self::Archive,
         Self::Unarchive,
-        Self::CsvReview,
         Self::Create,
         Self::Category,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::CsvImport => "csv-import",
             Self::Edit => "edit",
             Self::Archive => "archive",
             Self::Unarchive => "unarchive",
-            Self::CsvReview => "csv-review",
             Self::Create => "create",
             Self::Category => "category",
         }
@@ -61,7 +46,6 @@ impl ChangeKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::csv_import::CSV_CATALOG_SOURCE;
     use std::path::PathBuf;
 
     fn infra(path: &str) -> String {
@@ -87,11 +71,9 @@ mod tests {
         );
         let library = infra("pb_hooks/catalog_lib.js");
         for (name, kind) in [
-            ("csvImport", ChangeKind::CsvImport),
             ("edit", ChangeKind::Edit),
             ("archive", ChangeKind::Archive),
             ("unarchive", ChangeKind::Unarchive),
-            ("csvReview", ChangeKind::CsvReview),
             ("create", ChangeKind::Create),
             ("category", ChangeKind::Category),
         ] {
@@ -100,9 +82,6 @@ mod tests {
                 "catalog_lib.js lacks {name}"
             );
         }
-        assert!(library.contains(&format!(
-            "const CSV_CATALOG_SOURCE = \"{CSV_CATALOG_SOURCE}\";"
-        )));
         // The edit route writes part details, revisions and sources with
         // these tags.
         assert!(library.contains(&format!(
@@ -117,13 +96,17 @@ mod tests {
             "const CATEGORY_SCHEMA = \"{}\";",
             crate::CATEGORY_SCHEMA
         )));
+        assert!(library.contains(&format!(
+            "const CAD_ITEM_DETAILS_SCHEMA = \"{}\";",
+            crate::cad_item::CAD_ITEM_DETAILS_SCHEMA
+        )));
         // A remembered match is made only by an edit or a new part
         // (catalog_write_guards).
         assert!(library.contains("\"catalog_category_matches\""));
         assert!(!library.contains("restore"));
         assert!(library.contains(&format!(
             "const SOURCE_SCHEMA = \"{}\";",
-            crate::csv_import::SOURCE_SCHEMA
+            crate::SOURCE_SCHEMA
         )));
         assert_eq!(ChangeKind::parse("edit"), Some(ChangeKind::Edit));
         assert_eq!(ChangeKind::parse("Edit"), None);

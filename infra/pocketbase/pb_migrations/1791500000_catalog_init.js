@@ -5,9 +5,9 @@
 // Terms follow docs/contexts/catalog/CONTEXT.md. Every record is immutable
 // once written except a part's current revision pointer. Signed-in members
 // may read everything; nobody writes directly. Writes go through the
-// protected routes in pb_hooks (today: POST /api/catalog/csv-imports), which
-// run in one transaction, derive record IDs from content (see catalog_lib.js
-// and crates/catalog/src/ids.rs), and keep catalog_changes.seq gap-free.
+// protected routes in pb_hooks, which run in one transaction, derive record
+// IDs from content (see catalog_lib.js and crates/catalog/src/ids.rs), and
+// keep catalog_changes.seq gap-free.
 //
 // Canonical documents (revision snapshots and sources) are stored in text
 // fields, not json fields, so the exact bytes their SHA-256 covers survive a
@@ -40,16 +40,16 @@ migrate((app) => {
       { name: "seq", type: "number", required: true, min: 1, onlyInt: true },
       // A closed set shared with catalog_lib.js (CHANGE_KINDS) and
       // crates/catalog (ChangeKind). These were the first values;
-      // 1791800000_shared_part_details.js sets the current ones.
-      { name: "kind", type: "select", required: true, maxSelect: 1, values: ["csv-import", "edit", "restore"] },
+      // 1792600000_category_changes.js sets the current ones.
+      { name: "kind", type: "select", required: true, maxSelect: 1, values: ["edit", "restore"] },
       { name: "reason", type: "text", required: true, max: 2000 },
       { name: "correlation_id", type: "text", required: true, max: 100 },
       // "<auth collection>:<record id>", because a superuser is not a users
       // record.
       { name: "actor", type: "text", required: true, max: 200 },
       { name: "source_commit", type: "text", max: 100 },
-      // JSON list of every source file read: role, path, byte_sha256,
-      // size and, for CSV files, the exact header line.
+      // JSON of where what it saved came from, such as the files a new
+      // part was made from.
       { name: "sources", type: "text", required: true, max: DOCUMENT },
       // JSON counts of what this Change created.
       { name: "summary", type: "text", required: true, max: 10000 },
@@ -169,14 +169,7 @@ migrate((app) => {
   parts.fields.add(new RelationField({ name: "current_revision", collectionId: partRevisions.id, maxSelect: 1 }));
   app.save(parts);
 
-  // One per run that wrote anything: who ran it, when and why, and the
-  // Change it made, if any (a run that adds no revision makes no Change).
-  //
-  // A CSV import run also records exactly what the CSV said, whether or not
-  // it made a Change, so the zero-loss report can rebuild the CSV from the
-  // latest run alone: the files it read with their byte hashes, each CSV
-  // file's header line and rows, and the current revision it left each part
-  // at.
+  // One per save: who saved it, when and why, and the Change it made.
   const auditEntries = new Collection(Object.assign({}, readOnly, {
     type: "base",
     name: "catalog_audit_entries",
@@ -186,52 +179,12 @@ migrate((app) => {
       { name: "change", type: "relation", collectionId: changes.id, maxSelect: 1 },
       { name: "reason", type: "text", required: true, max: 2000 },
       { name: "correlation_id", type: "text", required: true, max: 100 },
-      // JSON counts of what the run created.
+      // JSON counts of what the save created.
       { name: "summary", type: "text", required: true, max: 10000 },
-      // CSV import runs only (empty or 0 for edits):
-      // the CSV file imported, such as g-res;
-      { name: "csv_file", type: "text", max: 100 },
-      // the run's number among all CSV import runs, from 1, without gaps;
-      { name: "csv_import_number", type: "number", min: 0, onlyInt: true },
-      // the commit the files were read at, possibly ending in +dirty;
-      { name: "source_commit", type: "text", max: 100 },
-      // JSON { csv_file, files: [{ role, path, byte_sha256, size,
-      // header_raw, rows }], parts: [{ ipn, revision }], removed_parts:
-      // [ipn], problems: [id] }, where removed_parts lists parts earlier
-      // runs made that no row makes now, and problems every import problem
-      // the run found, new or already stored;
-      { name: "sources", type: "text", max: DOCUMENT },
-      // JSON [[path, byte_sha256], ...] of the files read, sorted by path,
-      // so importers can compare runs without downloading the rows;
-      { name: "file_hashes", type: "text", max: 100000 },
-      // and whether the importer was told to import from a checkout older
-      // than the team catalog's latest imports.
-      { name: "allowed_older_checkout", type: "bool" },
       { name: "created", type: "autodate", onCreate: true, onUpdate: false },
-    ],
-    indexes: [
-      "CREATE UNIQUE INDEX idx_catalog_audit_entries_csv_import ON catalog_audit_entries (csv_import_number) WHERE csv_import_number > 0",
-      "CREATE INDEX idx_catalog_audit_entries_csv_file ON catalog_audit_entries (csv_file, csv_import_number)",
     ],
   }));
   app.save(auditEntries);
-
-  const problems = new Collection(Object.assign({}, readOnly, {
-    type: "base",
-    name: "catalog_import_problems",
-    fields: [
-      { name: "code", type: "text", required: true, max: 100 },
-      { name: "subject", type: "text", required: true, max: 500 },
-      { name: "path", type: "text", required: true, max: 500 },
-      { name: "location", type: "text", required: true, max: 2000 },
-      { name: "message", type: "text", required: true, max: 10000 },
-      { name: "detail", type: "text", required: true, max: DOCUMENT },
-      // The import run that first found it.
-      { name: "audit_entry", type: "relation", collectionId: auditEntries.id, maxSelect: 1, required: true },
-      { name: "created", type: "autodate", onCreate: true, onUpdate: false },
-    ],
-  }));
-  app.save(problems);
 
   // Correlation-ID ledger: a repeated command replays its stored answer.
   const commands = new Collection({
@@ -263,7 +216,6 @@ migrate((app) => {
   };
   const drop = (name) => app.delete(app.findCollectionByNameOrId(name));
   drop("catalog_commands");
-  drop("catalog_import_problems");
   drop("catalog_audit_entries");
   removeField("catalog_parts", "current_revision");
   removeField("catalog_part_revisions", "predecessor");

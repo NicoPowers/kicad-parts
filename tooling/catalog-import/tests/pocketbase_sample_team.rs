@@ -139,7 +139,7 @@ fn the_sample_parts_are_added_with_their_files_and_kicads_own_items_stay_externa
             .iter()
             .all(|change| change.kind == ChangeKind::Category.as_str()
                 || change.kind == ChangeKind::Create.as_str()),
-        "never a CSV import"
+        "only the starting categories and new parts"
     );
 
     let readback = read_back(&admin).unwrap();

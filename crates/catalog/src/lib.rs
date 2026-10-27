@@ -27,23 +27,20 @@
 //!   revision adds a revision, even if an older revision had exactly that
 //!   content. A part's details name each CAD item revision by number and
 //!   snapshot hash, and a binding keeps its number while its content is the
-//!   same: the same content under a newer number is not a change. The revision's [`csv_import::CadItemSource`] is stored
-//!   with it but is not hashed, so reading identical content from a moved
-//!   or edited library file adds no revision.
+//!   same: the same content under a newer number is not a change. Where
+//!   the revision came from (its source: a file chosen in the app, our
+//!   libraries or another installed library) is stored with it but is not
+//!   hashed, so reading identical content from a moved or edited library
+//!   file adds no revision.
 //! - A [`Blob`] is exact bytes, addressed by their SHA-256, so revisions
 //!   with the same bytes share one stored blob. A symbol's blob
 //!   is the exact bytes of that one symbol in its library file, so editing
 //!   a neighbouring symbol does not revise it.
-//! - A **Change** groups what one import, edit, archive or unarchive saved,
-//!   with its reason: at least one part revision, CAD item revision, saved
-//!   part details or archive entry.
-//! - **Supplier data** (supplier part numbers and prices) is kept in a
-//!   revision's [`Source`], never in its part details, so it never creates
-//!   a revision.
+//! - A **Change** groups what one edit, new part, archive, unarchive or
+//!   category setup saved, with its reason.
 //!
-//! [`csv_import`] turns the read-only CSV catalog into a [`CsvImport`]
-//! without touching any store; [`pocketbase`] submits imports and edits to
-//! the protected routes and reads the stored records back;
+//! [`pocketbase`] submits edits and new parts to the protected routes and
+//! reads the stored records back;
 //! [`replica`] keeps a local copy of every part's current revision in step
 //! with the server; [`compare_details`] and [`compare_revisions`] list what
 //! differs between two saved part details or two revisions.
@@ -53,7 +50,6 @@ mod cad_item;
 pub mod category;
 mod change;
 mod compare;
-pub mod csv_import;
 pub mod download;
 pub mod guess;
 mod hash;
@@ -73,15 +69,10 @@ pub use compare::{
     CATEGORY_LABEL, DetailDifference, DifferenceKind, compare_details, compare_revisions,
     describe_binding,
 };
-pub use csv_import::{
-    Binding, CSV_CAD_DIFFERS_FROM_EDITED_CAD_ITEM, CadItemRevisionDraft, CategoryDraft, CsvCatalog,
-    CsvImport, CurrentCad, CurrentCadItemRevision, EditedInApp, ImportProblem, LastImported,
-    PartDraft, Source, SourceFile,
-};
 pub use hash::sha256_hex;
 pub use ids::{
-    AuditEntryId, BlobId, CadItemId, CadItemRevisionId, ChangeId, ID_LENGTH, ImportProblemId,
-    PartDetailsId, PartId, PartRevisionId, derive_id,
+    BlobId, CadItemId, CadItemRevisionId, ChangeId, ID_LENGTH, PartDetailsId, PartId,
+    PartRevisionId, derive_id,
 };
 pub use ipn::{Ipn, IpnError};
 pub use part::{
@@ -91,3 +82,7 @@ pub use part::{
 
 /// The schema tag every canonical JSON document in this crate carries.
 pub const SCHEMA_PREFIX: &str = "kicad-parts/";
+
+/// The schema tag of the `source` the team server stores with each saved
+/// record: where it came from.
+pub const SOURCE_SCHEMA: &str = "kicad-parts/source/1";

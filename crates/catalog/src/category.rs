@@ -26,17 +26,16 @@ pub const CATEGORY_SCHEMA: &str = "kicad-parts/category/1";
 #[serde(deny_unknown_fields)]
 pub struct CategoryDetails {
     pub schema: String,
-    /// The CSV file name without `g-` and `.csv`, such as `res`. It never
-    /// changes and gives the category its ID.
+    /// Its code, such as `res`. It never changes and gives the category
+    /// its ID.
     pub code: String,
     /// The name people see, such as `Resistors`.
     pub name: String,
     /// The IPN prefix a new part in this category gets by default, such as
     /// `RES`, or blank when the code is not three letters.
     pub ipn_prefix: String,
-    /// The fields a part in this category has, in order: the part details
-    /// columns of its CSV file (never IPN, MPN, Manufacturer, Symbol,
-    /// Footprint or supplier data).
+    /// The fields a part in this category has, in order (never IPN, MPN,
+    /// Manufacturer, Symbol, Footprint or supplier data).
     pub fields: Vec<String>,
     pub rules: CategoryRules,
 }
@@ -85,11 +84,6 @@ impl CategoryDetails {
     pub fn sha256(&self) -> String {
         sha256_hex(self.canonical_json())
     }
-}
-
-/// The code of the category a CSV file makes: `g-res` makes `res`.
-pub fn category_code(csv_file: &str) -> &str {
-    csv_file.strip_prefix("g-").unwrap_or(csv_file)
 }
 
 /// The code in capitals when it is three letters, such as `RES`; otherwise
@@ -473,7 +467,7 @@ mod tests {
             category.canonical_json(),
             r#"{"schema":"kicad-parts/category/1","code":"res","name":"Resistors","ipn_prefix":"RES","fields":["Description","Value"],"rules":{"reference_letters":["R"],"footprint_patterns":["R_*","RESC*","RESM*","Resistor*"],"keywords":["resistor","res","ohm"]}}"#
         );
-        // A CSV file the table does not know gets its code as its name.
+        // A code the table does not know gets its code as its name.
         let unknown = CategoryDetails::starting("misc-2", Vec::new());
         assert_eq!(unknown.name, "misc-2");
         assert_eq!(unknown.ipn_prefix, "");
@@ -489,7 +483,6 @@ mod tests {
                 .iter()
                 .all(|start| !start.reference_letters.contains(&"U"))
         );
-        assert_eq!(category_code("g-res"), "res");
         // Pinned: the server derives the same IDs (catalog_lib.js).
         assert_eq!(category_id("res"), derive_id("category", "res"));
         assert_eq!(

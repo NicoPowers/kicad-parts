@@ -13,7 +13,7 @@
 // is refused. The undo refuses any archive entry, which the older version
 // cannot read.
 migrate((app) => {
-  const KINDS = ["csv-import", "edit", "archive", "unarchive"];
+  const KINDS = ["edit", "archive", "unarchive"];
   const parts = app.findCollectionByNameOrId("catalog_parts");
   const revisions = app.findCollectionByNameOrId("catalog_part_revisions");
   const changes = app.findCollectionByNameOrId("catalog_changes");
@@ -60,6 +60,6 @@ migrate((app) => {
   }
   app.delete(app.findCollectionByNameOrId("catalog_archive_entries"));
   const changes = app.findCollectionByNameOrId("catalog_changes");
-  changes.fields.getByName("kind").values = ["csv-import", "edit"];
+  changes.fields.getByName("kind").values = ["edit"];
   app.save(changes);
 });

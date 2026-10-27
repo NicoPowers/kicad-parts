@@ -1,6 +1,5 @@
-use super::read::{check_folder, check_folder_with, read_csv_references, read_libraries};
+use super::read::{check_folder, read_libraries};
 use super::*;
-use crate::csv_import::CsvCatalog;
 use crate::hash::sha256_hex;
 use std::fs;
 use std::path::Path;
@@ -40,41 +39,22 @@ fn footprint(name: &str, models: &[&str]) -> String {
     text
 }
 
-const CSV_HEADER: &str = "IPN,MPN,Manufacturer,Description,Symbol,Footprint\n";
-
-/// What the Catalog has after importing `root`'s CSV files as they are now.
-fn imported(root: &Path) -> KnownCad {
-    let catalog = CsvCatalog::new(root);
-    let mut items: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut imported_csv_files = BTreeSet::new();
-    for entry in fs::read_dir(root.join("database")).unwrap().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(csv_file) = name.strip_suffix(".csv").filter(|n| n.starts_with("g-")) else {
-            continue;
-        };
-        let import = catalog.import(csv_file, None).unwrap();
-        imported_csv_files.insert(format!("database/{name}"));
-        for revision in &import.cad_item_revisions {
-            items
-                .entry(revision.cad_item.id.as_str().to_owned())
-                .or_default()
-                .insert(revision.snapshot.blob_sha256.clone());
-        }
-    }
+/// What the Catalog has: each CAD item of `items` (kind, reference and the
+/// repository file it was saved from), with that file's bytes under `root`
+/// as they are now.
+fn known(root: &Path, items: &[(CadItemKind, &str, &str)]) -> KnownCad {
     KnownCad {
-        items,
-        imported_csv_files,
+        items: items
+            .iter()
+            .map(|(kind, reference, file)| {
+                let bytes = fs::read(root.join(file)).unwrap();
+                (
+                    CadItemId::new(*kind, reference).as_str().to_owned(),
+                    sha256_hex(bytes),
+                )
+            })
+            .collect(),
     }
-}
-
-/// [`imported`], leaving out `csv_file` (such as one that cannot be read).
-fn imported_without(root: &Path, csv_file: &str) -> KnownCad {
-    let moved = tempfile::tempdir().unwrap();
-    let file = format!("database/{csv_file}.csv");
-    fs::rename(root.join(&file), moved.path().join("held.csv")).unwrap();
-    let known = imported(root);
-    fs::rename(moved.path().join("held.csv"), root.join(&file)).unwrap();
-    known
 }
 
 fn kinds(check: &LibraryCheck) -> Vec<(Group, &'static str, &str)> {
@@ -92,89 +72,85 @@ fn kinds(check: &LibraryCheck) -> Vec<(Group, &'static str, &str)> {
 }
 
 const OWN: &str = "${GITPLM_PARTS}/3d-models/g-Package_SO.3dshapes/SOIC-8.step";
+const SOIC: &str = "footprints/g-Package_SO.pretty/SOIC-8.kicad_mod";
+const SOIC_MODEL: &str = "3d-models/g-Package_SO.3dshapes/SOIC-8.step";
 
-/// A CSV catalog with one part using `g-ics:TP4333` (missing; the library
-/// has IC_TP4333) and the footprint SOIC-8, whose 3D model is in place.
-fn small_catalog(extra: &[(&str, &str)]) -> tempfile::TempDir {
+/// Our libraries with three symbols and the footprint SOIC-8, whose 3D
+/// model is in place.
+fn small_library(extra: &[(&str, &str)]) -> tempfile::TempDir {
     let symbols = library(&[
         symbol("IC_TP4333", "g-Package_SO:SOIC-8"),
         symbol("LM358", "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"),
         symbol("ODD", "g-Package_SO:NOPE"),
     ]);
     let soic = footprint("SOIC-8", &[OWN]);
-    let csv = format!(
-        "{CSV_HEADER}ICS-0001-0001,TP4333,Top,Charger,g-ics:TP4333,g-Package_SO:SOIC-8\nICS-0002-0001,LM358,TI,Op-amp,g-ics:LM358,g-Package_SO:SOIC-8\n"
-    );
     let mut files: Vec<(&str, &str)> = vec![
-        ("database/g-ics.csv", &csv),
-        (
-            "database/substitutes.csv",
-            "IPN,MPN,Manufacturer,Datasheet,Supplier,SupplierPN\n",
-        ),
         ("symbols/g-ics.kicad_sym", &symbols),
-        ("footprints/g-Package_SO.pretty/SOIC-8.kicad_mod", &soic),
-        (
-            "3d-models/g-Package_SO.3dshapes/SOIC-8.step",
-            "ISO-10303-21;\n",
-        ),
+        (SOIC, &soic),
+        (SOIC_MODEL, "ISO-10303-21;\n"),
     ];
     files.extend_from_slice(extra);
     folder(&files)
 }
 
+/// The Catalog of [`small_library`]: one part using g-ics:LM358 and
+/// g-Package_SO:SOIC-8 with its 3D model.
+fn small_catalog(root: &Path) -> KnownCad {
+    known(
+        root,
+        &[
+            (
+                CadItemKind::Symbol,
+                "g-ics:LM358",
+                "symbols/g-ics.kicad_sym",
+            ),
+            (CadItemKind::Footprint, "g-Package_SO:SOIC-8", SOIC),
+            (CadItemKind::Model3d, SOIC_MODEL, SOIC_MODEL),
+        ],
+    )
+}
+
 #[test]
 fn a_library_in_order_finds_only_what_the_catalog_lacks() {
-    let root = small_catalog(&[]);
-    let known = imported(root.path());
+    let root = small_library(&[]);
+    let known = small_catalog(root.path());
     let kicad: BTreeSet<String> = ["Package_SO:SOIC-8_3.9x4.9mm_P1.27mm".to_owned()].into();
     let libraries = read_libraries(root.path());
-    let csv = read_csv_references(root.path(), &mut Vec::new());
     let found = check(CheckInputs {
         libraries: &libraries,
         known: &known,
-        csv: &csv,
         kicad_footprints: Some(&kicad),
-        today: today(),
     });
     assert_eq!(
         kinds(&found),
         [
             (Group::NotInCatalog, "not-in-catalog", "g-ics:IC_TP4333"),
             (Group::NotInCatalog, "not-in-catalog", "g-ics:ODD"),
-            (Group::WorthALook, "similar-name", "g-ics:TP4333"),
             (Group::WorthALook, "symbol-footprint", "g-ics:ODD"),
         ]
     );
-    let similar = &found.findings[2];
-    assert_eq!(similar.file, "database/g-ics.csv");
-    assert_eq!(
-        similar.message,
-        "database/g-ics.csv names the symbol g-ics:TP4333, which symbols/g-ics.kicad_sym does not have. Did you mean g-ics:IC_TP4333?"
-    );
     assert_eq!(
         found.findings[0].message,
-        "No part uses it, and the Catalog does not have it yet."
+        "No part uses it yet: the Catalog does not have it."
     );
     assert_eq!(
         (found.findings[0].library(), found.findings[0].name()),
         ("g-ics", "IC_TP4333")
     );
     assert!(
-        found.findings[3].message.starts_with(
+        found.findings[2].message.starts_with(
             "The symbol's own Footprint, g-Package_SO:NOPE, is not in our libraries or KiCad's."
         ),
         "{}",
-        found.findings[3].message
+        found.findings[2].message
     );
     // Without KiCad's libraries, a KiCad footprint is not checked; with
     // KiCad's libraries lacking it, it is named.
     let empty = BTreeSet::new();
     let without_lm358 = check(CheckInputs {
         kicad_footprints: Some(&empty),
-        today: today(),
         libraries: &libraries,
         known: &known,
-        csv: &csv,
     });
     assert!(
         without_lm358
@@ -184,13 +160,11 @@ fn a_library_in_order_finds_only_what_the_catalog_lacks() {
     );
     // The same inputs give the same findings in the same order.
     assert_eq!(
-        check_folder(root.path(), &known, None).unwrap(),
+        check_folder(root.path(), &known, None),
         check(CheckInputs {
             kicad_footprints: None,
-            today: today(),
             libraries: &libraries,
             known: &known,
-            csv: &csv,
         })
     );
 }
@@ -226,112 +200,115 @@ fn every_kind_of_3d_model_link_is_judged() {
         ("Escape", "${GITPLM_PARTS}/3d-models/../symbols/x.step"),
     ];
     let mut files: Vec<(String, String)> = Vec::new();
-    let mut csv = CSV_HEADER.to_owned();
-    for (index, (name, link)) in links.iter().enumerate() {
+    for (name, link) in &links {
         files.push((
             format!("footprints/g-Package_SO.pretty/{name}.kicad_mod"),
             footprint(name, &[link]),
         ));
-        csv.push_str(&format!(
-            "ICS-{:04}-0001,M{index},Maker,Part,,g-Package_SO:{name}\n",
-            index + 10
-        ));
     }
-    files.push(("database/g-ics.csv".into(), csv));
     files.push((
         "3d-models/g-Package_SO.3dshapes/Own.step".into(),
-        "ISO-10303-21;
-"
-        .into(),
+        "ISO-10303-21;\n".into(),
     ));
     let borrowed: Vec<(&str, &str)> = files
         .iter()
         .map(|(path, text)| (path.as_str(), text.as_str()))
         .collect();
-    let root = small_catalog(&borrowed);
-    // Nothing imported yet, but these footprints are not today's CSV
-    // catalog's: a first import does not take new footprints as they are.
-    let first = check_folder(root.path(), &KnownCad::default(), None).unwrap();
-    assert_eq!(first.count(Group::ToFix), 7, "{}", first.report());
-    assert_eq!(first.count(Group::CleanUp), 0, "{}", first.report());
-    // As today's CSV catalog had them, the first import takes them as they
-    // are: their old problems are clean-up.
-    let libraries = read_libraries(root.path());
-    let today = Today {
-        footprints: libraries
-            .footprints
+    let root = small_library(&borrowed);
+    // By footprint name: the groups put them in another order.
+    let judged = |check: &LibraryCheck| -> Vec<(Severity, &'static str, String)> {
+        let mut judged: Vec<_> = check
+            .findings
             .iter()
-            .map(|f| (f.file.clone(), f.sha256.clone()))
-            .collect(),
-        csv_files: ["database/g-ics.csv".to_owned()].into(),
+            .filter(|f| f.file.starts_with("footprints/") && f.kind != FindingKind::NotInCatalog)
+            .map(|f| (f.severity, f.kind.as_str(), f.name().to_owned()))
+            .collect();
+        judged.sort_by(|a, b| a.2.cmp(&b.2));
+        judged
     };
-    let as_today = check_folder_with(root.path(), &KnownCad::default(), None, &today).unwrap();
-    assert_eq!(as_today.count(Group::ToFix), 0, "{}", as_today.report());
-    assert_eq!(as_today.count(Group::CleanUp), 7, "{}", as_today.report());
-    assert!(
-        as_today.in_group(Group::CleanUp).all(|f| f
-            .message
-            .ends_with("It was like this before the first import.")),
-        "{}",
-        as_today.report()
-    );
-    // g-ics.csv was imported before, and none of these footprints is in
-    // the Catalog: each is new, so a problem is an error.
-    let after_an_import = KnownCad {
-        items: BTreeMap::new(),
-        imported_csv_files: ["database/g-ics.csv".to_owned()].into(),
-    };
-    let found = check_folder(root.path(), &after_an_import, None).unwrap();
-    let models: Vec<(Severity, &str, &str)> = found
-        .findings
-        .iter()
-        .filter(|f| f.file.starts_with("footprints/") && f.kind != FindingKind::NotInCatalog)
-        .map(|f| (f.severity, f.kind.as_str(), f.name()))
-        .collect();
-    assert_eq!(
-        models,
+    let expected = |severity: Severity| {
         [
-            (Severity::Error, "model-outside", "Drive"),
-            (Severity::Error, "model-outside", "Escape"),
-            (Severity::Error, "model-outside", "Home"),
-            (Severity::Error, "missing-model", "Missing"),
-            (Severity::Error, "model-outside", "Project"),
-            (Severity::Error, "model-outside", "Relative"),
-            (Severity::Error, "model-outside", "Variable"),
+            (severity, "model-outside", "Drive"),
+            (severity, "model-outside", "Escape"),
+            (severity, "model-outside", "Home"),
+            (severity, "missing-model", "Missing"),
+            (severity, "model-outside", "Project"),
+            (severity, "model-outside", "Relative"),
             (Severity::SoftWarning, "shared-model", "Shared"),
+            (severity, "model-outside", "Variable"),
         ]
-    );
-    let home = found.findings.iter().find(|f| f.name() == "Home").unwrap();
+        .map(|(severity, kind, name)| (severity, kind, name.to_owned()))
+    };
+
+    // The Catalog has none of them: no part uses them yet, so each
+    // problem is a warning.
+    let unused = check_folder(root.path(), &KnownCad::default(), None);
+    assert_eq!(judged(&unused), expected(Severity::Warning));
+    let home_of = |check: &LibraryCheck| {
+        check
+            .findings
+            .iter()
+            .find(|f| f.name() == "Home" && f.kind == FindingKind::ModelOutside)
+            .cloned()
+            .unwrap()
+    };
+    let home = home_of(&unused);
     assert_eq!(
         home.message,
-        "The footprint links the 3D model /home/jeffs/Workspace/Cliff/3d-models/DFN-12_FTD.step, which is outside our library, so it only works on one computer. Put the file in 3d-models/g-Package_SO.3dshapes/ and link it as ${GITPLM_PARTS}/3d-models/g-Package_SO.3dshapes/Home.step. A CSV row uses the footprint, so the next import would add it."
+        "The footprint links the 3D model /home/jeffs/Workspace/Cliff/3d-models/DFN-12_FTD.step, which is outside our library, so it only works on one computer. Put the file in 3d-models/g-Package_SO.3dshapes/ and link it as ${GITPLM_PARTS}/3d-models/g-Package_SO.3dshapes/Home.step. Fix it before a part uses this footprint."
     );
     assert_eq!(home.file, "footprints/g-Package_SO.pretty/Home.kicad_mod");
-    // An error in a file an import reads stops it; one elsewhere does not.
-    let files: BTreeSet<&str> = ["footprints/g-Package_SO.pretty/Home.kicad_mod"].into();
-    assert_eq!(found.errors_in(&files), [home]);
-    assert!(found.errors_in(&BTreeSet::new()).is_empty());
+
+    // The Catalog has them as they are: their problems are clean-up.
+    let items: Vec<(String, String)> = links
+        .iter()
+        .map(|(name, _)| {
+            (
+                format!("g-Package_SO:{name}"),
+                format!("footprints/g-Package_SO.pretty/{name}.kicad_mod"),
+            )
+        })
+        .collect();
+    let catalog: Vec<(CadItemKind, &str, &str)> = items
+        .iter()
+        .map(|(reference, file)| (CadItemKind::Footprint, reference.as_str(), file.as_str()))
+        .collect();
+    let unchanged = check_folder(root.path(), &known(root.path(), &catalog), None);
+    assert_eq!(judged(&unchanged), expected(Severity::CleanUp));
+
+    // The Catalog has them with other bytes: adding one to a part would
+    // bring its problem in, so each is an error.
+    let mut changed = known(root.path(), &catalog);
+    for bytes in changed.items.values_mut() {
+        *bytes = sha256_hex("an older revision");
+    }
+    let found = check_folder(root.path(), &changed, None);
+    assert_eq!(judged(&found), expected(Severity::Error));
+    let home = home_of(&found);
+    assert!(
+        home.message
+            .ends_with("The footprint differs from the Catalog's."),
+        "{}",
+        home.message
+    );
 }
 
 #[test]
-fn only_new_or_changed_footprints_have_errors() {
+fn only_changed_footprints_have_errors() {
     let home = "/home/jeffs/model.step";
-    let root = small_catalog(&[
-        (
-            "footprints/g-Package_SO.pretty/Old.kicad_mod",
-            &footprint("Old", &[home]),
-        ),
+    let old = "footprints/g-Package_SO.pretty/Old.kicad_mod";
+    let root = small_library(&[
+        (old, &footprint("Old", &[home])),
         (
             "footprints/g-Package_SO.pretty/Unused.kicad_mod",
             &footprint("Unused", &[home]),
         ),
-        (
-            "database/g-old.csv",
-            &format!("{CSV_HEADER}OLD-0001-0001,X,Y,Old part,,g-Package_SO:Old\n"),
-        ),
     ]);
-    let known = imported(root.path());
-    let unchanged = check_folder(root.path(), &known, None).unwrap();
+    let catalog = known(
+        root.path(),
+        &[(CadItemKind::Footprint, "g-Package_SO:Old", old)],
+    );
+    let unchanged = check_folder(root.path(), &catalog, None);
     let severity_of = |check: &LibraryCheck, name: &str| {
         check
             .findings
@@ -345,8 +322,8 @@ fn only_new_or_changed_footprints_have_errors() {
             && f.message
                 .ends_with("The Catalog already has the footprint like this.")
     }));
-    // A footprint no part uses and the Catalog lacks: listed, with its
-    // problem as a warning until something brings it in.
+    // A footprint the Catalog lacks: listed, with its problem as a warning
+    // until a part uses it.
     assert_eq!(severity_of(&unchanged, "Unused"), Some(Severity::Warning));
     assert!(
         unchanged
@@ -356,79 +333,24 @@ fn only_new_or_changed_footprints_have_errors() {
     );
     assert_eq!(unchanged.count(Group::ToFix), 0);
 
-    // Changed in KiCad since the import: an error.
+    // Changed in KiCad since the Catalog got it: an error.
     fs::write(
-        root.path()
-            .join("footprints/g-Package_SO.pretty/Old.kicad_mod"),
+        root.path().join(old),
         footprint("Old", &[home, "C:/x.step"]),
     )
     .unwrap();
-    let changed = check_folder(root.path(), &known, None).unwrap();
+    let changed = check_folder(root.path(), &catalog, None);
     assert_eq!(severity_of(&changed, "Old"), Some(Severity::Error));
-    assert_eq!(changed.count(Group::ToFix), 2, "{}", changed.report());
-
-    // A new (or renamed) CSV file, never imported, uses the footprint drawn
-    // since today's CSV catalog: its link is judged like any new one, an
-    // error, so no CSV file brings a bad 3D model link in as clean-up.
-    fs::write(
-        root.path().join("database/g-new.csv"),
-        format!("{CSV_HEADER}NEW-0001-0001,X,Y,New part,,g-Package_SO:Unused\n"),
-    )
-    .unwrap();
-    let first_import = check_folder(root.path(), &known, None).unwrap();
-    assert_eq!(severity_of(&first_import, "Unused"), Some(Severity::Error));
-    // Today's footprint, byte for byte, but used by a CSV file that is not
-    // one of today's (new or renamed): still an error, since no CSV file of
-    // today's catalog brought it in.
-    let unused = root
-        .path()
-        .join("footprints/g-Package_SO.pretty/Unused.kicad_mod");
-    let mut today = Today {
-        footprints: [(
-            "footprints/g-Package_SO.pretty/Unused.kicad_mod".to_owned(),
-            sha256_hex(fs::read(&unused).unwrap()),
-        )]
-        .into(),
-        csv_files: [
-            "database/g-ics.csv".to_owned(),
-            "database/g-old.csv".to_owned(),
-        ]
-        .into(),
-    };
-    let new_file = check_folder_with(root.path(), &known, None, &today).unwrap();
-    assert_eq!(severity_of(&new_file, "Unused"), Some(Severity::Error));
-    // Only a footprint still as today's CSV catalog had it, used only by
-    // today's CSV files, keeps its old problem as clean-up at its CSV
-    // file's first import.
-    today.csv_files.insert("database/g-new.csv".to_owned());
-    let as_today = check_folder_with(root.path(), &known, None, &today).unwrap();
-    assert_eq!(severity_of(&as_today, "Unused"), Some(Severity::CleanUp));
-    fs::remove_file(root.path().join("database/g-new.csv")).unwrap();
-
-    // A row of a CSV file imported before now uses it: the next import
-    // would bring it in, so its problem is an error.
-    fs::write(
-        root.path().join("database/g-old.csv"),
-        format!("{CSV_HEADER}OLD-0001-0001,X,Y,Old part,,g-Package_SO:Old;g-Package_SO:Unused\n"),
-    )
-    .unwrap();
-    let used = check_folder(root.path(), &known, None).unwrap();
-    assert_eq!(severity_of(&used, "Unused"), Some(Severity::Error));
-    assert!(
-        !used
-            .findings
-            .iter()
-            .any(|f| f.kind == FindingKind::NotInCatalog && f.item == "g-Package_SO:Unused")
-    );
+    assert_eq!(changed.count(Group::ToFix), 2, "{:?}", changed.findings);
 }
 
 #[test]
 fn a_model_no_footprint_links_is_not_in_the_catalog_yet() {
-    let root = small_catalog(&[(
+    let root = small_library(&[(
         "3d-models/g-Package_SO.3dshapes/Lonely.step",
         "ISO-10303-21;\n",
     )]);
-    let found = check_folder(root.path(), &imported(root.path()), None).unwrap();
+    let found = check_folder(root.path(), &small_catalog(root.path()), None);
     let lonely = found
         .findings
         .iter()
@@ -441,36 +363,8 @@ fn a_model_no_footprint_links_is_not_in_the_catalog_yet() {
     );
     assert_eq!(
         lonely.message,
-        "No footprint uses it, and the Catalog does not have it yet."
+        "No footprint uses it yet: the Catalog does not have it."
     );
-}
-
-#[test]
-fn similar_names_contain_each_other_or_are_a_few_edits_apart() {
-    let names = ["IC_TP4333", "TP4056", "LM358", "R", "Crystal_SMD"];
-    let similar = |name: &str| similar_name(name, names.iter().copied());
-    assert_eq!(similar("TP4333"), Some("IC_TP4333"));
-    assert_eq!(similar("lm358"), Some("LM358"));
-    assert_eq!(similar("Crystal_SDM"), Some("Crystal_SMD"));
-    assert_eq!(similar("XYZ123"), None);
-    // A changed or added digit names another part or package, not a typo.
-    assert_eq!(similar("LM385"), None);
-    assert_eq!(similar("TP4057"), None);
-    for (name, other) in [
-        ("R_0402", "R_0603"),
-        ("C_0805", "C_0603"),
-        ("SOT-23", "SOT-223"),
-        ("SOT-223", "SOT-23"),
-    ] {
-        assert_eq!(similar_name(name, [other].into_iter()), None, "{name}");
-    }
-    // One name containing the other still counts.
-    assert_eq!(
-        similar_name("R_0402", ["R_0402_1005Metric"].into_iter()),
-        Some("R_0402_1005Metric")
-    );
-    // A short name alone is no clue.
-    assert_eq!(similar_name("RX", ["R_US_LONG"].into_iter()), None);
 }
 
 #[test]
@@ -504,114 +398,6 @@ fn a_chosen_footprint_with_a_link_that_would_stop_it_is_refused_plainly() {
 }
 
 #[test]
-fn the_report_lists_errors_then_warnings_then_new_items_then_counts_clean_up() {
-    let finding = |severity, kind, item: &str| Finding {
-        severity,
-        kind,
-        item: item.to_owned(),
-        file: format!("file of {item}"),
-        message: format!("about {item}"),
-    };
-    let check = LibraryCheck {
-        findings: vec![
-            finding(Severity::Error, FindingKind::ModelOutside, "g-a:Bad"),
-            finding(Severity::Warning, FindingKind::NotInCatalog, "g-a:New"),
-            finding(
-                Severity::SoftWarning,
-                FindingKind::SharedModel,
-                "g-a:Shared",
-            ),
-            finding(Severity::CleanUp, FindingKind::MissingModel, "g-a:Old"),
-        ],
-        ..LibraryCheck::default()
-    };
-    assert_eq!(
-        check.report(),
-        "Library check: 1 to fix, 1 not in the Catalog yet, 1 worth a look, 1 to clean up.\nTo fix:\n  file of g-a:Bad: about g-a:Bad\nWorth a look:\n  file of g-a:Shared: about g-a:Shared\nNot in the Catalog yet:\n  g-a:New (file of g-a:New)\nClean-up: 1 old problem that was there before this import; the desktop app lists them."
-    );
-    assert_eq!(
-        LibraryCheck::default().summary(),
-        "Library check: nothing found."
-    );
-}
-
-/// The repository's CSV catalog, read only.
-fn repository() -> &'static Path {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-}
-
-/// Today's CSV catalog has no errors, imported or not, so imports keep
-/// working: its old problems are clean-up. (Run with `--nocapture` to see
-/// the counts.)
-#[test]
-fn todays_csv_catalog_has_nothing_to_fix() {
-    let root = repository();
-    let all_imported = imported(root);
-    for (what, known) in [
-        ("before the first import", KnownCad::default()),
-        ("after importing every CSV file", all_imported.clone()),
-    ] {
-        let found = check_folder(root, &known, None).unwrap();
-        println!("{what}:\n{}\n", found.report());
-        let mut counts: BTreeMap<(Group, &str), usize> = BTreeMap::new();
-        for finding in &found.findings {
-            *counts
-                .entry((finding.group(), finding.kind.as_str()))
-                .or_default() += 1;
-        }
-        println!("{what}: {counts:?}");
-        assert_eq!(found.count(Group::ToFix), 0, "{what}: {}", found.report());
-    }
-    // With KiCad's own libraries, when installed, symbols naming one of
-    // KiCad's footprints are checked too.
-    let share = kicad_integration::installed_share_dir(&Default::default());
-    if let Some(share) = share {
-        let found = check_folder(root, &all_imported, Some(&share)).unwrap();
-        let named: Vec<String> = found
-            .findings
-            .iter()
-            .filter(|f| f.kind == FindingKind::SymbolFootprint)
-            .map(|f| format!("{}: {}", f.item, f.message))
-            .collect();
-        println!("with KiCad's libraries at {}: {named:#?}", share.display());
-        assert_eq!(found.count(Group::ToFix), 0, "{}", found.report());
-    }
-    let found = check_folder(root, &all_imported, None).unwrap();
-    // g-ics.csv names g-ics:TP4333, while the library has IC_TP4333.
-    assert!(
-        found
-            .findings
-            .iter()
-            .any(|f| f.kind == FindingKind::SimilarName
-                && f.item == "g-ics:TP4333"
-                && f.message.ends_with("Did you mean g-ics:IC_TP4333?"))
-    );
-    // The three footprints linking a model in someone's home folder are
-    // used by no part, so they wait in Worth a look.
-    let home: Vec<&str> = found
-        .findings
-        .iter()
-        .filter(|f| f.message.contains("/home/jeffs/"))
-        .map(|f| f.name())
-        .collect();
-    assert_eq!(home, ["DFN-12_FTD-L", "DFN-12_FTD-M", "DFN-12_FTD"]);
-    // Footprints are hashed whole, like the import's blobs.
-    let libraries = read_libraries(root);
-    let r0603 = libraries
-        .footprints
-        .iter()
-        .find(|f| f.name == "R_0603_1608Metric")
-        .unwrap();
-    assert_eq!(
-        r0603.sha256,
-        sha256_hex(
-            fs::read(root.join("footprints/g-Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod"))
-                .unwrap()
-        )
-    );
-}
-
-#[test]
 fn a_kicad_model_link_climbing_out_of_kicads_folder_is_outside() {
     for link in [
         "${KICAD9_3DMODEL_DIR}/../../me/x.step",
@@ -638,11 +424,11 @@ fn a_kicad_model_link_climbing_out_of_kicads_folder_is_outside() {
 fn power_symbols_are_never_listed_as_not_in_the_catalog() {
     let power =
         "\t(symbol \"GND\"\n\t\t(power)\n\t\t(property \"Reference\" \"#PWR\" (at 0 0 0))\n\t)\n";
-    let root = small_catalog(&[(
+    let root = small_library(&[(
         "symbols/g-pwr.kicad_sym",
         &library(&[power.to_owned(), symbol("NOT_POWER", "")]),
     )]);
-    let found = check_folder(root.path(), &imported(root.path()), None).unwrap();
+    let found = check_folder(root.path(), &small_catalog(root.path()), None);
     let listed: Vec<&str> = found
         .in_group(Group::NotInCatalog)
         .map(|f| f.item.as_str())
@@ -651,19 +437,18 @@ fn power_symbols_are_never_listed_as_not_in_the_catalog() {
     assert!(!listed.contains(&"g-pwr:GND"), "{listed:?}");
 }
 
-/// A CSV file that cannot be read does not stop the check: it is listed,
-/// and everything else is checked.
+/// A library file that cannot be read does not stop the check: it is
+/// listed, and everything else is checked.
 #[test]
-fn an_unreadable_csv_file_is_listed_and_the_rest_is_checked() {
-    let root = small_catalog(&[]);
-    fs::write(root.path().join("database/g-bad.csv"), [0xff, 0xfe, b'\n']).unwrap();
-    let found = check_folder(root.path(), &imported_without(root.path(), "g-bad"), None).unwrap();
+fn an_unreadable_library_is_listed_and_the_rest_is_checked() {
+    let root = small_library(&[("symbols/g-bad.kicad_sym", "(not a library")]);
+    let found = check_folder(root.path(), &small_catalog(root.path()), None);
     let unreadable = found
         .findings
         .iter()
         .find(|f| f.kind == FindingKind::Unreadable)
         .unwrap();
-    assert_eq!(unreadable.file, "database/g-bad.csv");
+    assert_eq!(unreadable.file, "symbols/g-bad.kicad_sym");
     assert!(
         unreadable.message.starts_with("Could not be read: "),
         "{}",
@@ -673,7 +458,7 @@ fn an_unreadable_csv_file_is_listed_and_the_rest_is_checked() {
         found
             .findings
             .iter()
-            .any(|f| f.kind == FindingKind::SimilarName)
+            .any(|f| f.kind == FindingKind::NotInCatalog && f.item == "g-ics:IC_TP4333")
     );
 }
 
@@ -699,12 +484,12 @@ fn link_folder(target: &Path, link: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
 }
 
-/// Like the import, the check never follows a link, whether it is one of
-/// the library folders themselves or something inside them; each is listed.
+/// The check never follows a link, whether it is one of the library
+/// folders themselves or something inside them; each is listed.
 #[test]
 fn links_are_not_followed_and_are_listed() {
-    let root = small_catalog(&[]);
-    let known = imported(root.path());
+    let root = small_library(&[]);
+    let known = small_catalog(root.path());
     let elsewhere = tempfile::tempdir().unwrap();
     fs::create_dir_all(elsewhere.path().join("g-Outside.3dshapes")).unwrap();
     fs::write(elsewhere.path().join("g-Outside.3dshapes/X.step"), "x").unwrap();
@@ -719,7 +504,7 @@ fn links_are_not_followed_and_are_listed() {
     );
     fs::remove_dir_all(root.path().join("3d-models")).unwrap();
     link_folder(elsewhere.path(), &root.path().join("3d-models"));
-    let found = check_folder(root.path(), &known, None).unwrap();
+    let found = check_folder(root.path(), &known, None);
     let unreadable: Vec<&str> = found
         .findings
         .iter()
@@ -729,8 +514,8 @@ fn links_are_not_followed_and_are_listed() {
     assert_eq!(
         unreadable,
         ["3d-models", "footprints/g-Linked.pretty"],
-        "{}",
-        found.report()
+        "{:?}",
+        found.findings
     );
     assert!(
         found
@@ -738,8 +523,8 @@ fn links_are_not_followed_and_are_listed() {
             .iter()
             .filter(|f| f.kind != FindingKind::Unreadable)
             .all(|f| !f.item.contains("Linked") && !f.item.contains("Outside")),
-        "{}",
-        found.report()
+        "{:?}",
+        found.findings
     );
     // The footprint's own model in the linked folder is not seen either.
     assert!(
@@ -755,20 +540,8 @@ fn links_are_not_followed_and_are_listed() {
 #[test]
 fn an_unquoted_kicad_5_model_path_is_judged_too() {
     let old = "(module Old5 (layer F.Cu)\n  (descr \"see (model x) note\")\n  (model ${KIPRJMOD}/3D/Old5.wrl\n    (at (xyz 0 0 0))\n  )\n)\n";
-    let root = small_catalog(&[
-        ("footprints/g-Package_SO.pretty/Old5.kicad_mod", old),
-        (
-            "database/g-old.csv",
-            &format!("{CSV_HEADER}OLD-0001-0001,X,Y,Old part,,g-Package_SO:SOIC-8\n"),
-        ),
-    ]);
-    let known = imported(root.path());
-    fs::write(
-        root.path().join("database/g-old.csv"),
-        format!("{CSV_HEADER}OLD-0001-0001,X,Y,Old part,,g-Package_SO:SOIC-8;g-Package_SO:Old5\n"),
-    )
-    .unwrap();
-    let found = check_folder(root.path(), &known, None).unwrap();
+    let root = small_library(&[("footprints/g-Package_SO.pretty/Old5.kicad_mod", old)]);
+    let found = check_folder(root.path(), &small_catalog(root.path()), None);
     let old5: Vec<(Severity, &str)> = found
         .findings
         .iter()
@@ -777,16 +550,16 @@ fn an_unquoted_kicad_5_model_path_is_judged_too() {
         .collect();
     assert_eq!(
         old5,
-        [(Severity::Error, "model-outside")],
-        "{}",
-        found.report()
+        [(Severity::Warning, "model-outside")],
+        "{:?}",
+        found.findings
     );
     assert!(
         found
             .findings
             .iter()
             .any(|f| f.message.contains("${KIPRJMOD}/3D/Old5.wrl")),
-        "{}",
-        found.report()
+        "{:?}",
+        found.findings
     );
 }

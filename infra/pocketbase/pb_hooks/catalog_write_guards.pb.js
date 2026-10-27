@@ -8,16 +8,15 @@
 // - Nobody creates, updates or deletes a Catalog record through the record
 //   API (`/api/collections/catalog_*/records`, the batch API or the
 //   dashboard). The protected routes are the only way in:
-//   POST /api/catalog/csv-imports, /api/catalog/edits, /api/catalog/parts,
-//   /api/catalog/archives, /api/catalog/csv-reviews and
+//   POST /api/catalog/edits, /api/catalog/parts, /api/catalog/archives and
 //   /api/catalog/categories.
-// - Revisions, saved part details, archive entries, CSV reviews, CAD items, blobs,
+// - Revisions, saved part details, archive entries, CAD items, blobs,
 //   categories and their revisions, remembered matches, Changes, audit
-//   entries, import problems and the command ledger refuse every update and
-//   delete, whoever saves them.
+//   entries and the command ledger refuse every update and delete, whoever
+//   saves them.
 // - A remembered match is made only with an edit that changes that part's
 //   category to the match's category, or with a new part in that category,
-//   by the person who made it; never by an import.
+//   by the person who made it.
 // - A part refuses every delete. Its current details may only move to its
 //   next details. Its current revision may only move to its newest revision
 //   that is not archived (a new revision, or the one an archive or
@@ -67,12 +66,10 @@ onRecordCreateRequest(
   "catalog_part_details",
   "catalog_part_revisions",
   "catalog_archive_entries",
-  "catalog_csv_reviews",
   "catalog_categories",
   "catalog_category_revisions",
   "catalog_category_matches",
   "catalog_audit_entries",
-  "catalog_import_problems",
   "catalog_commands",
 );
 
@@ -90,12 +87,10 @@ onRecordUpdateRequest(
   "catalog_part_details",
   "catalog_part_revisions",
   "catalog_archive_entries",
-  "catalog_csv_reviews",
   "catalog_categories",
   "catalog_category_revisions",
   "catalog_category_matches",
   "catalog_audit_entries",
-  "catalog_import_problems",
   "catalog_commands",
 );
 
@@ -111,12 +106,10 @@ onRecordDeleteRequest(
   "catalog_part_details",
   "catalog_part_revisions",
   "catalog_archive_entries",
-  "catalog_csv_reviews",
   "catalog_categories",
   "catalog_category_revisions",
   "catalog_category_matches",
   "catalog_audit_entries",
-  "catalog_import_problems",
   "catalog_commands",
 );
 
@@ -133,12 +126,10 @@ onRecordDelete(
   "catalog_part_details",
   "catalog_part_revisions",
   "catalog_archive_entries",
-  "catalog_csv_reviews",
   "catalog_categories",
   "catalog_category_revisions",
   "catalog_category_matches",
   "catalog_audit_entries",
-  "catalog_import_problems",
   "catalog_commands",
 );
 
@@ -154,12 +145,10 @@ onRecordUpdate(
   "catalog_part_details",
   "catalog_part_revisions",
   "catalog_archive_entries",
-  "catalog_csv_reviews",
   "catalog_categories",
   "catalog_category_revisions",
   "catalog_category_matches",
   "catalog_audit_entries",
-  "catalog_import_problems",
   "catalog_commands",
 );
 
@@ -339,55 +328,6 @@ onRecordCreate((e) => {
   return saved;
 }, "catalog_archive_entries");
 
-// A CSV review must be exactly what the review route saves: for one of the
-// part's own csv-details-differ-from-edited-details,
-// csv-cad-differs-from-edited-revision or csv-cad-differs-from-edited-cad-item
-// import problems, copying its code and
-// the SHA-256 of the CSV document it recorded, in a Change of kind
-// csv-review whose seq it copies, under the ID derived from that Change's
-// correlation ID, with a list of field names.
-onRecordCreate((e) => {
-  const lib = require(`${__hooks}/catalog_lib.js`);
-  const review = e.record;
-  const find = (collection, id) => lib.recordById(e.app, collection, id);
-  const part = find("catalog_parts", review.getString("part"));
-  const problem = find("catalog_import_problems", review.getString("problem"));
-  const kind = problem ? lib.CSV_REVIEW_KINDS[problem.getString("code")] : undefined;
-  if (!part || !problem || !kind || problem.getString("subject") !== part.getString("ipn")) {
-    lib.refuseProgrammingError(e.app, "a CSV review must name a CSV difference of its own part");
-  }
-  if (review.getString("code") !== problem.getString("code")) {
-    lib.refuseProgrammingError(e.app, "a CSV review must copy its problem's code");
-  }
-  let recorded = null;
-  try {
-    const detail = JSON.parse(problem.getString("detail"));
-    recorded = lib.recordedCsvDocument(problem.getString("code"), detail);
-  } catch (_) {
-    recorded = null;
-  }
-  if (typeof recorded !== "string" || review.getString("csv_sha256") !== $security.sha256(recorded)) {
-    lib.refuseProgrammingError(e.app, "a CSV review must name the SHA-256 of the CSV document its problem recorded");
-  }
-  const change = find("catalog_changes", review.getString("change"));
-  if (!change || change.getString("kind") !== "csv-review" || change.getInt("seq") !== review.getInt("seq")) {
-    lib.refuseProgrammingError(e.app, "a CSV review must belong to a Change of kind csv-review and copy its seq");
-  }
-  if (review.id !== lib.deriveId("csv-review", change.getString("correlation_id"))) {
-    lib.refuseProgrammingError(e.app, "a CSV review must have the ID derived from its Change's correlation ID");
-  }
-  let accepted = null;
-  try {
-    accepted = JSON.parse(review.getString("accepted"));
-  } catch (_) {
-    accepted = null;
-  }
-  if (!Array.isArray(accepted) || !accepted.every((name) => typeof name === "string" && name.length > 0)) {
-    lib.refuseProgrammingError(e.app, "a CSV review must list the field names it took, as JSON");
-  }
-  return e.next();
-}, "catalog_csv_reviews");
-
 // A category revision must hold a category with that category's code. A
 // category's ID is derived from its code.
 onRecordCreate((e) => {
@@ -421,7 +361,7 @@ onRecordCreate((e) => {
 // derived from the Change and its clue, and that Change must save the
 // part's details in the match's category: changed from another category
 // (an edit), or the new part's first details (a create, kicad-parts-9693).
-// So an import, or a supplier category on its own, never makes one.
+// So a supplier category on its own never makes one.
 onRecordCreate((e) => {
   const lib = require(`${__hooks}/catalog_lib.js`);
   const match = e.record;

@@ -3,8 +3,7 @@
 //! library's resistors: a chosen file is read and a reference suggested, it
 //! is drawn with kicad-cli before saving, saving makes a new CAD item
 //! revision that the history shows with the file's name, and the message
-//! says how many other parts keep the older revision. (Later CSV imports
-//! are in `desktop_team_files_csv.rs`.)
+//! says how many other parts keep the older revision.
 
 use base64::Engine;
 use catalog_browser::team::TeamCatalog;

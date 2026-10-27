@@ -563,10 +563,9 @@ pub fn remove_model_links(footprint: &str, remove: impl Fn(&str) -> bool) -> Str
 /// Every 3D model path of a footprint (the text of a `.kicad_mod`), as
 /// written, without quotes: each quoted `(model "...")` path and each KiCad
 /// 5 path written without quotes, outside quoted strings. The library
-/// check's rule for 3D model links reads these; the CAD snapshot and the
-/// zero-loss report keep reading
-/// [`kicad_integration::library_file::model_references`], which leaves the
-/// unquoted ones out, so their hashes never change.
+/// check's rule for 3D model links reads these; the CAD snapshot keeps
+/// reading [`kicad_integration::library_file::model_references`], which
+/// leaves the unquoted ones out, so its hashes never change.
 pub fn model_links(footprint: &str) -> Vec<String> {
     model_path_spans(footprint)
         .into_iter()

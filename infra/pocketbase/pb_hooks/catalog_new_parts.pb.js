@@ -32,11 +32,9 @@
 //         revision: { id, number, snapshotSha256 }, cadItemRevisions,
 //         newCadItemRevisions: [{ kind, key, number, id, otherParts }],
 //         rememberedMatches: [{ clue, value }] }
-//   409 { outcome: "ipn_taken", correlationId, ipn, message, addedByYou,
-//         csvFile? }
-//         the Catalog already has a part with that IPN, or a row of the
-//         latest import run of a CSV file has it (csvFile names that file,
-//         such as database/g-res.csv); nothing is written.
+//   409 { outcome: "ipn_taken", correlationId, ipn, message, addedByYou }
+//         the Catalog already has a part with that IPN; nothing is
+//         written.
 //         addedByYou is true when the caller added that part in the app
 //         (a save whose answer was lost, then changed and sent again)
 //   409 { outcome: "correlation_reused", correlationId, message }

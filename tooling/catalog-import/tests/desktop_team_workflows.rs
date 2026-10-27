@@ -4,8 +4,7 @@
 //! against a disposable PocketBase with the sample library's resistors and
 //! capacitors. Our libraries are a throwaway git repo of the sample library.
 //! Downloads are small ZIP files built here from the sample library's CAD
-//! files. (CSV rows for parts added in the app are in
-//! `desktop_team_workflows_csv.rs`.)
+//! files.
 
 use base64::Engine;
 use catalog_browser::team::TeamCatalog;
@@ -1486,7 +1485,7 @@ fn a_3d_model_link_outside_the_library_never_reaches_the_catalog() {
 }
 
 /// The desktop's library check (kicad-parts-da65): for someone who can
-/// edit, the CSV catalog folder the app reads, compared with the team
+/// edit, the local library folder the app reads, compared with the team
 /// catalog; worked out again when the team catalog changes, and nothing
 /// for someone who can only view.
 #[test]

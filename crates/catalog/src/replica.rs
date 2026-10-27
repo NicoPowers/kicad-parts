@@ -460,7 +460,6 @@ mod tests {
             actor: "users:a".into(),
             actor_name: "A".into(),
             created: String::new(),
-            source_commit: String::new(),
             sources: "{}".into(),
             summary: "{}".into(),
         }

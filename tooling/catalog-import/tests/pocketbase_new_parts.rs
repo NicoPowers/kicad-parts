@@ -601,9 +601,9 @@ fn a_new_part_whose_footprint_links_a_3d_model_outside_the_library_is_refused() 
 
 /// A new part from symbols and footprints already in our libraries
 /// (kicad-parts-37a7): each file says where it is in our libraries and the
-/// commit it was read from, and the Source records it the way a CSV import
-/// does (path, the whole file's SHA-256, the commit and, for a symbol, its
-/// byte range). The server checks what it can against the file sent.
+/// commit it was read from, and the Source records it (path, the whole
+/// file's SHA-256, the commit and, for a symbol, its byte range). The server
+/// checks what it can against the file sent.
 #[test]
 fn a_new_part_from_our_libraries_records_the_file_and_the_commit() {
     use catalog::pocketbase::LibrarySource;
@@ -725,10 +725,6 @@ fn a_new_part_from_our_libraries_records_the_file_and_the_commit() {
         assert_eq!(source["source_commit"], COMMIT);
         assert_eq!(source["file_name"], format!("{path} at 0123456789ab"));
         assert_eq!(source["byte_range"].is_array(), range, "{source}");
-        // The same shape as a CSV import's Source, so the zero-loss report
-        // reads it.
-        let read: catalog::csv_import::CadItemSource =
-            serde_json::from_value(source.clone()).unwrap();
-        assert_eq!(read.source_commit.as_deref(), Some(COMMIT));
+        assert_eq!(source["byte_sha256"].as_str().map(str::len), Some(64));
     }
 }

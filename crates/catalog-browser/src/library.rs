@@ -1,7 +1,7 @@
-//! The library check in the desktop app (kicad-parts-da65): the CSV catalog
-//! folder the app reads, compared with the team catalog, for people who can
-//! edit. Worked out again only when the team catalog or the folder changed,
-//! never per keystroke.
+//! The library check in the desktop app (kicad-parts-da65): the local
+//! library folder the app reads, compared with the team catalog, for people
+//! who can edit. Worked out again only when the team catalog or the folder
+//! changed, never per keystroke.
 
 use crate::team::TeamCatalog;
 use catalog::library_check::{Group, KnownCad, LibraryCheck, read::check_folder};
@@ -16,10 +16,9 @@ use std::time::UNIX_EPOCH;
 /// and the folder's fingerprint, when a library check was worked out.
 type Position = (String, u64, u64, Fingerprint);
 
-/// What changes when someone changes the CSV catalog folder, cheaply: the
-/// git commit checked out, and the number, total size and newest change
-/// time of the files in `database/`, `symbols/`, `footprints/` and
-/// `3d-models/`.
+/// What changes when someone changes the local library folder, cheaply:
+/// the git commit checked out, and the number, total size and newest
+/// change time of the files in `symbols/`, `footprints/` and `3d-models/`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct Fingerprint {
     head: String,
@@ -64,12 +63,10 @@ impl Cached {
                 return Ok(Some(check.clone()));
             }
         }
-        let state = team.import_state()?;
-        let check = Arc::new(check_folder(
-            root,
-            &KnownCad::from_state(&state),
-            kicad_share,
-        )?);
+        let known = KnownCad {
+            items: team.current_cad_bytes()?,
+        };
+        let check = Arc::new(check_folder(root, &known, kicad_share));
         *self.lock() = Some((position, check.clone()));
         Ok(Some(check))
     }
@@ -92,12 +89,7 @@ fn fingerprint(root: &Path) -> Fingerprint {
             .unwrap_or_default();
         found.head = format!("{}\n{}", head.trim(), branch.trim());
     }
-    for folder in [
-        "database",
-        own::SYMBOL_FOLDER,
-        own::FOOTPRINT_FOLDER,
-        own::MODEL_FOLDER,
-    ] {
+    for folder in [own::SYMBOL_FOLDER, own::FOOTPRINT_FOLDER, own::MODEL_FOLDER] {
         add_files(&root.join(folder), &mut found);
     }
     found

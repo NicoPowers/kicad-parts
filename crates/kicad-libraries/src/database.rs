@@ -88,8 +88,8 @@ pub fn dbl_json(tables: &[TablePlan], naming: &Naming) -> String {
             "password": "",
             "timeout_seconds": 10,
             // The driver's name exactly as Windows lists it. The shorter
-            // `{SQLite3}` of the CSV catalog's .kicad_dbl names no
-            // installed driver, so KiCad could not load it.
+            // `{SQLite3}` names no installed driver, so KiCad could not
+            // load it.
             "connection_string": format!(
                 "DRIVER={{{}}};DATABASE=${{CWD}}/{}",
                 crate::odbc::DRIVER,

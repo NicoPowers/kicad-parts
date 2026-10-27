@@ -13,7 +13,7 @@
 // The undo refuses a Change of kind create, which the older version cannot
 // read.
 migrate((app) => {
-  const KINDS = ["csv-import", "edit", "archive", "unarchive", "csv-review", "create"];
+  const KINDS = ["edit", "archive", "unarchive", "create"];
   const changes = app.findCollectionByNameOrId("catalog_changes");
   changes.fields.getByName("kind").values = KINDS;
   app.save(changes);
@@ -26,6 +26,6 @@ migrate((app) => {
     );
   }
   const changes = app.findCollectionByNameOrId("catalog_changes");
-  changes.fields.getByName("kind").values = ["csv-import", "edit", "archive", "unarchive", "csv-review"];
+  changes.fields.getByName("kind").values = ["edit", "archive", "unarchive"];
   app.save(changes);
 });

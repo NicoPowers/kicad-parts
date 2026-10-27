@@ -5,20 +5,15 @@
 // load this file by itself (only *.pb.js files are hooks).
 
 // The closed set of catalog_changes.kind values, shared with the
-// migration (1791800000_shared_part_details.js) and crates/catalog
+// migration (1792600000_category_changes.js) and crates/catalog
 // (ChangeKind); a test in crates/catalog keeps the three in step.
 const CHANGE_KINDS = Object.freeze({
-  csvImport: "csv-import",
   edit: "edit",
   archive: "archive",
   unarchive: "unarchive",
-  csvReview: "csv-review",
   create: "create",
   category: "category",
 });
-
-// The `source` value of rows read from the CSV catalog.
-const CSV_CATALOG_SOURCE = "csv-catalog";
 
 // Schema tags shared with crates/catalog (PART_DETAILS_SCHEMA,
 // PART_REVISION_SCHEMA and SOURCE_SCHEMA); a test there keeps them in step.
@@ -30,8 +25,8 @@ const SOURCE_SCHEMA = "kicad-parts/source/1";
 const CATEGORY_SCHEMA = "kicad-parts/category/1";
 
 // Trims the characters Rust's str::trim removes (Unicode White_Space), so
-// the server reads Symbol and Footprint references exactly as the CSV import
-// (crates/catalog) and the desktop do. JavaScript's own trim() differs: it
+// the server reads Symbol and Footprint references exactly as the desktop
+// (crates/catalog) does. JavaScript's own trim() differs: it
 // also removes U+FEFF (byte order mark) and keeps U+0085 (next line).
 const SPACE = "[\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]";
 const LEADING_SPACE = new RegExp("^" + SPACE + "+");
@@ -424,13 +419,13 @@ function editRequest(body) {
 //
 // The cad section of an edit may carry files (kicad-parts-3b8b): a symbol,
 // a footprint or a 3D model, each with the reference it is for and its
-// bytes, sent as text or base64 exactly like the blobs of a CSV import.
+// bytes, sent as text when they are UTF-8, otherwise as base64.
 // The server reads every file itself: a symbol must be one top-level
 // (symbol "NAME" ...) whose NAME is the reference's name, a footprint a
 // whole .kicad_mod whose (footprint "NAME" ...) is, and a 3D model any
 // bytes that a footprint uploaded with it names. It hashes the bytes, and
-// saves blobs and CAD item revisions in the shape, numbering and IDs of the
-// import (catalog_csv_imports.pb.js).
+// saves blobs and CAD item revisions numbered, with IDs derived from their
+// content.
 
 // Each upload role and the CAD item kind it makes.
 const UPLOAD_KINDS = Object.freeze({ symbol: "symbol", footprint: "footprint", "3d-model": "model-3d" });
@@ -451,10 +446,10 @@ const UNKNOWN_LICENSE = "unknown-needs-review";
 // The `source` of CAD item revisions an edit uploads.
 const UPLOAD_SOURCE = "edit";
 
-// The `source` of CAD item revisions read from the CSV catalog's own
-// libraries (Add part from our libraries, kicad-parts-37a7). Like a CSV
-// import's, it names the repository file, the commit it was read from, the
-// whole file's SHA-256 and, for a symbol, its byte range in the file.
+// The `source` of CAD item revisions read from our own libraries in the
+// local library folder (Add part from our libraries, kicad-parts-37a7). It
+// names the repository file, the commit it was read from, the whole file's
+// SHA-256 and, for a symbol, its byte range in the file.
 const LIBRARY_SOURCE = "library";
 
 // Where an upload says it was read from in our libraries, checked against
@@ -511,9 +506,8 @@ function uploadLibrary(upload, which, role, reference, bytes, sha256) {
 
 // The `source` of CAD item revisions copied from another of the person's
 // installed KiCad libraries (kicad-parts-bc6f): not ours and not KiCad's
-// own, so teammates may not have it. Like a download, it is CAD made in the
-// app, so a later CSV import never counts it as imported. Its Source names
-// the library's nickname and the file it was read from.
+// own, so teammates may not have it. Its Source names the library's
+// nickname and the file it was read from.
 const INSTALLED_SOURCE = "installed";
 
 // Where an upload says it was copied from in an installed library:
@@ -540,19 +534,6 @@ function uploadInstalled(upload, which, role, reference) {
     fail(`the ${role} ${reference} needs the file it was copied from, of at most 1000 characters`);
   }
   return { library: installed.library, path: installed.path };
-}
-
-// What the Source of a revision read from our libraries holds, for
-// filters: CSV imports treat such revisions as imported, not made in the app.
-const LIBRARY_SOURCE_MARK = '"source":"library"';
-
-// Whether a stored CAD item revision was read from our libraries.
-function isFromOurLibraries(revision) {
-  try {
-    return JSON.parse(revision.getString("source")).source === LIBRARY_SOURCE;
-  } catch (error) {
-    return false;
-  }
 }
 
 // What a request's hash records of an upload.
@@ -663,8 +644,8 @@ function editUploads(list) {
 }
 
 // The 3D model references of a footprint, in file order, exactly as
-// crates/kicad-integration library_file.rs model_references (and the CSV
-// catalog fixture) extract them from the file's text.
+// crates/kicad-integration library_file.rs model_references extracts them
+// from the file's text.
 function modelReferences(content) {
   const paths = [];
   const pieces = content.split("(model");
@@ -691,7 +672,7 @@ function modelReferences(content) {
 }
 
 // `relative` as a clean `/`-separated path, or null if it could escape,
-// as crates/catalog csv_import safe_relative.
+// as crates/kicad-integration library_source plain_path.
 function safeRelative(relative) {
   const drive = relative.length >= 2 && /^[A-Za-z]$/.test(relative.charAt(0)) && relative.charAt(1) === ":";
   if (relative.length === 0 || relative.charAt(0) === "/" || relative.charAt(0) === "\\" || drive) {
@@ -711,7 +692,7 @@ function safeRelative(relative) {
 }
 
 // The lexical classification of a 3D model reference, as crates/catalog
-// csv_import classify_model_reference: { scope, status, candidate }, where
+// cad_file classify_model_reference: { scope, status, candidate }, where
 // candidate is the repository path under 3d-models/ for a local reference.
 function classifyModelReference(reference) {
   const strip = (variable) => {
@@ -813,8 +794,7 @@ function isCatalogModelKey(key) {
 // in the footprint (kicad-embed://...) are fine; a ${GITPLM_PARTS}/3d-models
 // path must be a Catalog 3D model path that the Catalog has or the request
 // sends (`available`); anything else only works on one computer. Gives why
-// the footprint `reference` cannot be saved, or "". Imports are checked by
-// the import tool, not here.
+// the footprint `reference` cannot be saved, or "".
 function modelLinkProblem(reference, link, available) {
   if (link.startsWith("kicad-embed://")) {
     return "";
@@ -1191,9 +1171,9 @@ function editedManufacturerParts(parts) {
 
 // ---- What part details and part revisions may hold -------------------------
 //
-// The import route and the edit route both check every details and
-// revision document they save, so a field can never move between the two
-// kinds: Symbol and Footprint are CAD, everything else describes the part.
+// The edit and new-part routes check every details and revision document
+// they save, so a field can never move between the two kinds: Symbol and
+// Footprint are CAD, everything else describes the part.
 
 // The fields of a part revision, in the order it keeps them.
 const CAD_FIELDS = ["Symbol", "Footprint"];
@@ -1238,26 +1218,19 @@ function detailsProblem(details) {
 
 // ---- Categories ---------------------------------------------------------------
 //
-// A category is made by the CSV import, one per CSV file (g-res makes res),
-// and saved as numbered revisions like a CAD item; its current revision is
-// its newest. A part's category is the code in its part details.
+// A new team server starts with the starting categories; a superuser sets
+// up others. Each is saved as numbered revisions like a CAD item; its
+// current revision is its newest. A part's category is the code in its
+// part details.
 
-// A category code: the CSV file name without g-, such as res.
+// A category code, such as res.
 const CATEGORY_CODE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-// The category a CSV file makes, as crates/catalog category_code does.
-function categoryCode(csvFile) {
-  return csvFile.indexOf("g-") === 0 ? csvFile.substring(2) : csvFile;
-}
-
-// The label of a category difference, and the name a CSV review accepts to
-// take the CSV's category (crates/catalog CATEGORY_LABEL).
+// The label of a category difference (crates/catalog CATEGORY_LABEL).
 const CATEGORY_FIELD = "Category";
 
-// Whether a field name is Category in any case, with spaces around it
-// (crates/catalog part_details_columns refuses such a column). It is the
-// part's category in this app, never a field, so a CSV review's Category
-// always means the category.
+// Whether a field name is Category in any case, with spaces around it. It
+// is the part's category in this app, never a field.
 function isCategoryName(name) {
   return typeof name === "string" && trimSpace(name).toLowerCase() === CATEGORY_FIELD.toLowerCase();
 }
@@ -1402,7 +1375,7 @@ function categoryClues(details, revision, bytesOf) {
   return clues;
 }
 
-// The references a CAD field names, read the way the CSV import reads them:
+// The references a CAD field names, read the way the desktop reads them:
 // `;` separates them, each is trimmed like Rust's str::trim, blanks drop.
 function namedReferences(text) {
   return text
@@ -1665,7 +1638,7 @@ function changeFieldsOf(collection, changesCollectionId) {
 // Change, or "" if it keeps it. `fields` lists its Change fields as
 // { name, required, value }. `ownChangeId` is the ID of the Change this
 // transaction saved, or "" when it saved none. An optional field may stay
-// empty, as an audit entry's does for an import run that saved no Change.
+// empty.
 function changeFieldsProblem(collectionName, recordId, fields, ownChangeId) {
   for (const field of fields) {
     if (field.value === "" && !field.required) {
@@ -1783,8 +1756,7 @@ function requireMoveByOwnChange(txApp, part, moved) {
 }
 
 // A hash of a CAD item revision's content: its snapshot with the numbers of
-// its 3D model bindings left out, over key-sorted JSON (see the import
-// route). Never compare it with crates/catalog's content hash.
+// its 3D model bindings left out, over key-sorted JSON.
 function cadContent(snapshot) {
   const parsed = JSON.parse(snapshot);
   for (const model of parsed.model_references || []) {
@@ -1845,35 +1817,6 @@ function archivedRevisionWithContent(txApp, partId, content) {
 // snapshot_sha256 }: the CAD item and number give its ID, and the hash lets
 // a reader check the record it finds.
 
-// A CAD binding read from a client's snapshot, checked for shape: exactly
-// those four keys, a CAD item ID, a number from 1 and a SHA-256. `who` names
-// the binding in error messages. Returns { cadItem, number,
-// snapshotSha256, id, who }; throws BadRequestError.
-function cadItemRevisionTarget(target, who) {
-  const keys = Object.keys(target).sort().join(",");
-  if (keys !== "cad_item,kind,number,snapshot_sha256") {
-    throw new BadRequestError(`${who} must name a CAD item revision by cad_item, number and snapshot_sha256 only`);
-  }
-  const cadItem = target.cad_item;
-  const number = target.number;
-  const snapshotSha256 = target.snapshot_sha256;
-  if (typeof cadItem !== "string" || !/^[0-9a-f]{15}$/.test(cadItem)) {
-    throw new BadRequestError(`${who} names a CAD item that is not a CAD item ID`);
-  }
-  if (!Number.isInteger(number) || number < 1) {
-    throw new BadRequestError(`${who} names a revision number that is not a whole number from 1`);
-  }
-  if (typeof snapshotSha256 !== "string" || !/^[0-9a-f]{64}$/.test(snapshotSha256)) {
-    throw new BadRequestError(`${who} names a snapshot hash that is not 64 lowercase hex digits`);
-  }
-  return {
-    cadItem: cadItem,
-    number: number,
-    snapshotSha256: snapshotSha256,
-    id: deriveId("cad-item-revision", cadItem + "\n" + number),
-    who: who,
-  };
-}
 
 // Whether a stored record really is revision `number` of CAD item
 // `cadItemId`: its ID is the derived one and its snapshot matches its hash.
@@ -1913,9 +1856,9 @@ function bindingTo(cadItemId, revision) {
 }
 
 // The CAD references of a new revision, read from its Symbol and Footprint
-// fields the way the CSV import reads them (`;` separates footprint
-// choices). Each reference to the CSV catalog's own libraries
-// (`g-*`) is bound to one exact CAD item revision:
+// fields the way the desktop reads them (`;` separates footprint choices).
+// Each reference to our own libraries (`g-*`) is bound to one exact CAD
+// item revision:
 // - a reference the current revision already binds keeps its exact
 //   revision, so editing another field never moves a CAD binding (the same
 //   content under a newer number is not a change);
@@ -1926,10 +1869,10 @@ function bindingTo(cadItemId, revision) {
 //   preparedUploads) binds the new CAD item revision the file makes, or,
 //   when the file has the content of the CAD item's current revision,
 //   keeps the revision it binds now if that has the same content and
-//   otherwise binds the current one, as the import does;
+//   otherwise binds the current one;
 // - anything else is refused: an edit can only use CAD items the Catalog
 //   already has, or files sent with it.
-// Other libraries (such as KiCad's own) are external, as in the import.
+// Other libraries (such as KiCad's own) are external.
 function cadReferences(txApp, fields, currentRevision, prepared) {
   prepared = prepared || {};
   const value = (name) => {
@@ -1945,10 +1888,9 @@ function cadReferences(txApp, fields, currentRevision, prepared) {
     }
     const names = namedReferences(text);
     // KiCad gives a part one symbol, and a footprint choice listed twice
-    // is a slip; an edit may not make either. CSV-sourced CAD is kept and
-    // flagged with an import problem instead (several-symbols,
-    // repeated-footprint-choice), so a field the edit leaves as stored is
-    // not checked: an old CSV slip never blocks an unrelated CAD edit.
+    // is a slip; an edit may not make either. A field the edit leaves as
+    // stored is not checked again, so an old slip never blocks an
+    // unrelated CAD edit.
     const stored = (currentRevision.cad_fields || []).find((field) => field.name === column);
     const changed = !stored || stored.value !== text;
     if (changed && role === "symbol" && names.length > 1) {
@@ -2044,9 +1986,9 @@ function cadReferences(txApp, fields, currentRevision, prepared) {
 // footprint whose (attr ...) has exclude_from_bom. A reference that is not
 // bound to a stored CAD item revision (KiCad's own library, or a missing
 // symbol or footprint) gives no evidence. The server works it out itself for
-// every new part revision, by import, edit or CSV review; it never takes the
-// value from a client. crates/kicad-integration library_file.rs and the
-// zero-loss report read the flags the same way.
+// every new part revision, by edit or new part; it never takes the value
+// from a client. crates/kicad-integration library_file.rs reads the flags
+// the same way.
 
 // The tokens of KiCad s-expression text: "(" and ")", { text } for a
 // quoted string, and { atom } for anything else. The text holds one
@@ -2525,9 +2467,8 @@ function publishEdit(e) {
     // The new documents, serialized in the field order of crates/catalog
     // PartDetails and PartRevision, so the stored bytes are their
     // canonical JSON.
-    // Each new document is checked like an imported one, so a field can
-    // never move between the details and the revision, even if a stored
-    // document were wrong.
+    // Each new document is checked, so a field can never move between the
+    // details and the revision, even if a stored document were wrong.
     const refuse = (what, problem) => {
       if (problem) {
         throw new BadRequestError(`the new ${what} of ${request.ipn} cannot be saved: ${problem}`);
@@ -2809,9 +2750,7 @@ function publishEdit(e) {
 //
 //   1. replay the stored answer if the correlation ID was used before for
 //      the same request (409 correlation_reused for a different one);
-//   2. answer 409 ipn_taken if the Catalog already has a part with the IPN,
-//      or if a row of the latest import run of a CSV file has it
-//      (csvRowKeptWithIpn);
+//   2. answer 409 ipn_taken if the Catalog already has a part with the IPN;
 //   3. build part details 1 in the category, with exactly its fields, and
 //      revision 1 binding exact CAD item revisions: ones the Catalog
 //      already has, KiCad's own libraries (external), or ones made from the
@@ -2826,66 +2765,6 @@ function publishEdit(e) {
 // The `source` of a new part's details, revision and CAD item revisions.
 const CREATE_SOURCE = "create";
 
-// The row of the latest import run of a CSV file that has `ipn` but did not
-// become a part, as { path }, or null (kicad-parts-3b72).
-//
-// Every other row of a latest run is a part already, or names a part that
-// is (duplicate-ipn, ipn-given-to-another-part), so the "already has a
-// part" check covers those. Two kinds of row keep an IPN without a part:
-// - a row with more fields than headers (row-has-extra-fields);
-// - a row whose IPN is valid but for spaces around it (invalid-ipn), such
-//   as "RES-0003-0001 " from a spreadsheet, because the import reads IPNs
-//   exactly (crates/catalog ipn.rs).
-// Someone meant that IPN for a part, so giving it to another part in the
-// app would make two parts with one IPN once the row is fixed. Only the
-// latest run of each CSV file counts: an older run's row may be gone.
-//
-// IPNs the CSV catalog has but no import has read yet are not here: only
-// the desktop app can see those, in its own folder (see
-// MOVE_THE_CSV_CATALOG.md on giving new IPNs in one place).
-function csvRowKeptWithIpn(txApp, ipn) {
-  const kept = txApp.findRecordsByFilter(
-    "catalog_import_problems",
-    "(code = 'row-has-extra-fields' || code = 'invalid-ipn') && detail ~ {:ipn}",
-    "",
-    0,
-    0,
-    { ipn: ipn },
-  );
-  const latestRuns = {};
-  for (const problem of kept) {
-    let detail;
-    try {
-      detail = JSON.parse(problem.getString("detail"));
-    } catch (_) {
-      continue;
-    }
-    const column = Array.isArray(detail.headers) ? detail.headers.indexOf("IPN") : -1;
-    const value = column >= 0 && Array.isArray(detail.record) ? detail.record[column] : undefined;
-    if (typeof value !== "string" || trimSpace(value) !== ipn) {
-      continue;
-    }
-    const csvFile = csvFileOf(problem.getString("path"));
-    if (latestRuns[csvFile] === undefined) {
-      const found = txApp.findRecordsByFilter(
-        "catalog_audit_entries",
-        "csv_file = {:csv_file} && csv_import_number > 0",
-        "-csv_import_number",
-        1,
-        0,
-        { csv_file: csvFile },
-      );
-      latestRuns[csvFile] = found.length > 0 ? JSON.parse(found[0].getString("sources")) : null;
-    }
-    const run = latestRuns[csvFile];
-    if (run && Array.isArray(run.problems) && run.problems.indexOf(problem.id) >= 0) {
-      return { path: problem.getString("path") };
-    }
-  }
-  return null;
-}
-
-// The checked request of a new part.
 function createRequest(body) {
   const { correlationId, reason, ipn } = commonRequest(body);
   const category = body.category;
@@ -3024,21 +2903,6 @@ function publishCreate(e) {
           ipn: request.ipn,
           message: `the Catalog already has a part with the IPN ${request.ipn}; an IPN is never reused`,
           addedByYou: !!added && added.getString("kind") === CHANGE_KINDS.create && added.getString("actor") === actor.id,
-        },
-      };
-      return;
-    }
-    const keptRow = csvRowKeptWithIpn(txApp, request.ipn);
-    if (keptRow) {
-      reply = {
-        status: 409,
-        body: {
-          outcome: "ipn_taken",
-          correlationId: request.correlationId,
-          ipn: request.ipn,
-          message: `A row of ${keptRow.path} has the IPN ${request.ipn}, but the import could not make a part from it. An IPN is never reused.`,
-          addedByYou: false,
-          csvFile: keptRow.path,
         },
       };
       return;
@@ -3590,594 +3454,10 @@ function publishCategory(e) {
   return e.json(reply.status, reply.body);
 }
 
-// ---- A CSV row for another part (kicad-parts-3b72) ----------------------------
-//
-// While a team moves from the CSV catalog to the app, both can give out new
-// IPNs. So one IPN can reach two different parts: a part someone added in
-// the app, and a CSV row someone else wrote without seeing it. An import
-// must never take such a row as new values for the app's part. If it did, a
-// CSV review could turn that part into a different one.
-//
-// The rule: a CSV row may be another part when the part with its IPN was
-// added in the app (its first Change is a create), the row names none of
-// that part's MPNs, and the row is not an exact copy of the part. Then:
-// - one shared MPN is enough to count as one part, even if the other MPNs
-//   differ. A shared MPN is trusted; a generic MPN shared by two packages
-//   (LM358 in SOIC and in DIP) still counts as one part, and the CSV review
-//   of the differences is the guard (ADR 0008);
-// - a row whose part details and CAD are exactly the part's is that part,
-//   whatever its MPN: it is a copy, such as a test point with no MPN copied
-//   into g-art.csv;
-// - when the row or the part has no MPN, nothing else shows they are one
-//   part, so the row is flagged. A wrong guess overwrites a part; a wrong
-//   flag only asks a person.
-// The row may still be the same part, with a corrected or differently
-// spelled MPN (LT1763CS8#PBF against LT1763CS8#TRPBF). So the message never
-// says they differ: it says nothing shows they are one, and gives both ways
-// out.
-// A part an import made is never flagged: its IPN came from the CSV
-// catalog, which is where the row is.
-//
-// MPNs compare without regard to case or the spaces around them, as Add
-// part's MPN check does (crates/catalog-browser same_mpn). A placeholder
-// such as "-", "N/A" or "TBD" is no MPN.
-
-// The import problem code of such a row. The row is kept whole in the
-// problem, and the part is left as it is.
-const IPN_GIVEN_TO_ANOTHER_PART = "ipn-given-to-another-part";
-
-// MPN cells that say there is no MPN yet, compared in capitals.
-const PLACEHOLDER_MPNS = ["-", "--", "–", "—", "?", "N/A", "NA", "TBD", "TBC", "NONE", "NULL", "UNKNOWN"];
-
-// The MPNs of a list of manufacturer parts, as written, without blanks and
-// placeholders.
-function mpnsOf(manufacturerParts) {
-  return (Array.isArray(manufacturerParts) ? manufacturerParts : [])
-    .map((part) => (part && typeof part.mpn === "string" ? trimSpace(part.mpn) : ""))
-    .filter((mpn) => mpn !== "" && PLACEHOLDER_MPNS.indexOf(mpn.toUpperCase()) < 0);
-}
-
-// Whether a CSV row may be a different part from the stored part with its
-// IPN (see above). `part` is { firstChangeKind, manufacturerParts } of the
-// stored part, `row` is { manufacturerParts, sameDetailsAndCad }: whether
-// the row's part details and CAD are exactly the part's current ones.
-function csvRowIsAnotherPart(part, row) {
-  if (part.firstChangeKind !== CHANGE_KINDS.create || row.sameDetailsAndCad) {
-    return false;
-  }
-  const partMpns = mpnsOf(part.manufacturerParts).map((mpn) => mpn.toUpperCase());
-  return !mpnsOf(row.manufacturerParts).some((mpn) => partMpns.indexOf(mpn.toUpperCase()) >= 0);
-}
-
-// The plain message of an IPN_GIVEN_TO_ANOTHER_PART problem: which row, by
-// its IPN and MPN (row numbers differ by one between files and Excel),
-// which part has the IPN in the team catalog, why nothing shows they are
-// one part, and what to do either way. It holds nothing that changes from
-// one import to the next, because problems are stored by content.
-function anotherPartMessage(row, ipn, part) {
-  const rowMpns = mpnsOf(row.manufacturerParts);
-  const partMpns = mpnsOf(part.manufacturerParts);
-  const list = (mpns) => mpns.join(", ");
-  const theRowHas = rowMpns.length === 0 ? "has no MPN" : rowMpns.length === 1 ? `has MPN ${rowMpns[0]}` : `has MPNs ${list(rowMpns)}`;
-  const named = part.description ? `: ${part.description}` : "";
-  const why =
-    partMpns.length === 0
-      ? "That part has no MPN, and the row differs from it, so nothing shows they are one part."
-      : `That part's ${partMpns.length === 1 ? "MPN is" : "MPNs are"} ${list(partMpns)}, so nothing shows they are one part.`;
-  const ifSame =
-    partMpns.length === 0
-      ? "If it is that part, make the row match it exactly, or remove the row."
-      : `If it is that part, put that part's MPN (${partMpns[0]}) in the row, or remove the row.`;
-  return [
-    `In ${row.path}, the row with IPN ${ipn} ${theRowHas}.`,
-    `The team catalog already gave ${ipn} to a part added in the app${named}.`,
-    why,
-    "The import left that part as it is and kept the row here.",
-    "If the row is a different part, give it another IPN.",
-    ifSame,
-  ].join(" ");
-}
-
-// The IPN_GIVEN_TO_ANOTHER_PART problem of a CSV import's row, as
-// { message, detail }, or null when the row may be the part (see above).
-// `stored` is { firstChangeKind, details } of the part with the row's IPN
-// (its current part details, parsed); `row` is { ipn, path, raw_record,
-// substitutesCsvRows, manufacturerParts, sameDetailsAndCad }.
-function anotherPartProblem(stored, row) {
-  const flagged = csvRowIsAnotherPart(
-    { firstChangeKind: stored.firstChangeKind, manufacturerParts: stored.details.manufacturer_parts },
-    row,
-  );
-  if (!flagged) {
-    return null;
-  }
-  const description = (stored.details.fields || []).find((field) => field.name === "Description");
-  return {
-    message: anotherPartMessage(row, row.ipn, {
-      description: description ? description.value : "",
-      manufacturerParts: stored.details.manufacturer_parts,
-    }),
-    detail: JSON.stringify({
-      path: row.path,
-      row_number: row.rowNumber,
-      raw_record: row.rawRecord,
-      substitutes_csv_rows: row.substitutesCsvRows,
-      csv_manufacturer_parts: row.manufacturerParts,
-      part_manufacturer_parts: stored.details.manufacturer_parts,
-    }),
-  };
-}
-
-// ---- Reviewing CSV changes that were not applied ------------------------------
-//
-// POST /api/catalog/csv-reviews (see catalog_csv_reviews.pb.js): a person
-// reviews one csv-details-differ-from-edited-details or
-// csv-cad-differs-from-edited-revision import problem, taking the CSV's
-// values for the fields they name and keeping theirs for the rest. What is
-// saved is built from the problem's recorded CSV document, never from the
-// client: the client sends only field names, the number it expects, a
-// reason and a correlation ID. Taking details saves the part's next details
-// (no revision); taking Symbol or Footprint adds a revision; taking nothing
-// records that the person kept their values. Each review is one Change of
-// kind csv-review with one catalog_csv_reviews record.
-//
-// A csv-cad-differs-from-edited-cad-item problem (kicad-parts-3b8b) says the
-// CSV's file for a symbol, footprint or 3D model the part uses changed,
-// while that CAD item's current revision was made in the app. Its CSV file
-// is not stored, so it can only be kept; taking it is refused with a plain
-// message.
-
-// The import problem whose CSV file for a CAD item made in the app changed.
-const CSV_CAD_ITEM_KEPT = "csv-cad-differs-from-edited-cad-item";
-
-// The kind of each import problem a person can review.
-const CSV_REVIEW_KINDS = Object.freeze({
-  "csv-details-differ-from-edited-details": "details",
-  "csv-cad-differs-from-edited-revision": "cad",
-  [CSV_CAD_ITEM_KEPT]: "cad",
-});
-
-// The CSV document a reviewable import problem recorded (its parsed
-// detail): the CSV's part details, its part revision, or, for
-// CSV_CAD_ITEM_KEPT, its snapshot of the CAD item. A review covers its
-// SHA-256.
-function recordedCsvDocument(code, detail) {
-  if (code === CSV_CAD_ITEM_KEPT) {
-    return detail.csv_cad_item;
-  }
-  return CSV_REVIEW_KINDS[code] === "details" ? detail.details : detail.revision;
-}
-
-// The field name a person picks to take the CSV's manufacturer parts.
-const MANUFACTURER_PARTS = "Manufacturer parts";
-
-// The CSV file an import problem's path names, such as g-res for
-// database/g-res.csv.
-function csvFileOf(path) {
-  const match = /^database\/([^/]+)\.csv$/.exec(path);
-  return match ? match[1] : "";
-}
-
-function publishCsvReview(e) {
-  const kind = CHANGE_KINDS.csvReview;
-  const actor = catalogEditor(e);
-  const body = e.requestInfo().body || {};
-  const request = commonRequest(body);
-  const problemId = body.problem;
-  if (typeof problemId !== "string" || !/^[0-9a-z]{15}$/.test(problemId)) {
-    fail("problem must be the ID of an import problem");
-  }
-  const accept = body.accept;
-  if (
-    !Array.isArray(accept) ||
-    accept.length > 200 ||
-    !accept.every((name) => typeof name === "string" && name.length > 0 && name.length <= 500)
-  ) {
-    fail("accept must be a list of field names");
-  }
-  if (new Set(accept).size !== accept.length) {
-    fail("accept names a field twice");
-  }
-  const expected = body.expected;
-  if (typeof expected !== "number" || !Number.isInteger(expected) || expected < 1) {
-    fail("expected must be the number of the part's current details or revision");
-  }
-  const requestHash = $security.sha256(
-    JSON.stringify([kind, request.ipn, request.reason, problemId, accept, expected]),
-  );
-
-  let reply = null;
-  $app.runInTransaction((txApp) => {
-    const first = (collection, filter, params, sort) => {
-      const found = txApp.findRecordsByFilter(collection, filter, sort || "", 1, 0, params);
-      return found.length > 0 ? found[0] : null;
-    };
-    const prior = first("catalog_commands", "correlation_id = {:id}", { id: request.correlationId });
-    if (prior) {
-      if (prior.getString("actor") !== actor.id || prior.getString("request_hash") !== requestHash) {
-        reply = {
-          status: 409,
-          body: {
-            outcome: "correlation_reused",
-            correlationId: request.correlationId,
-            message: "this correlation ID was already used for a different command",
-          },
-        };
-        return;
-      }
-      reply = { status: prior.getInt("status"), body: JSON.parse(prior.getString("result")), replayed: true };
-      return;
-    }
-
-    const partId = deriveId("part", request.ipn);
-    const part = recordById(txApp, "catalog_parts", partId);
-    if (!part || part.getString("ipn") !== request.ipn) {
-      throw new NotFoundError(`${request.ipn} is not a part in the Catalog`);
-    }
-    const problem = recordById(txApp, "catalog_import_problems", problemId);
-    const reviewKind = problem ? CSV_REVIEW_KINDS[problem.getString("code")] : undefined;
-    if (!problem || !reviewKind || problem.getString("subject") !== request.ipn) {
-      throw new NotFoundError(`${request.ipn} has no such CSV change to review`);
-    }
-    const detail = JSON.parse(problem.getString("detail"));
-    const csvSnapshot = recordedCsvDocument(problem.getString("code"), detail);
-    if (typeof csvSnapshot !== "string") {
-      throw new Error(`import problem ${problemId} records no CSV document`);
-    }
-    const csvSha = $security.sha256(csvSnapshot);
-    const currentDetails = recordById(txApp, "catalog_part_details", part.getString("current_details"));
-    const currentRevision = recordById(txApp, "catalog_part_revisions", part.getString("current_revision"));
-
-    // The latest import run of the problem's CSV file must have found it,
-    // or the CSV has moved on since.
-    const csvFile = csvFileOf(problem.getString("path"));
-    const latest = first(
-      "catalog_audit_entries",
-      "csv_file = {:csv_file} && csv_import_number > 0",
-      { csv_file: csvFile },
-      "-csv_import_number",
-    );
-    const run = latest ? JSON.parse(latest.getString("sources")) : null;
-    if (!run || !Array.isArray(run.problems) || run.problems.indexOf(problemId) < 0) {
-      reply = {
-        status: 409,
-        body: {
-          outcome: "out_of_date",
-          correlationId: request.correlationId,
-          ipn: request.ipn,
-          message: `the CSV catalog changed after this difference was found; import ${csvFile}.csv again to see what differs now`,
-        },
-      };
-      return;
-    }
-    // The part must still be what the person read. (It may have been
-    // edited since the import found the problem: the CSV's values are
-    // still compared with what the part has now.)
-    const current = reviewKind === "details" ? currentDetails : currentRevision;
-    if (expected !== current.getInt("number")) {
-      const conflict = {
-        outcome: "conflict",
-        correlationId: request.correlationId,
-        ipn: request.ipn,
-        message: `someone else changed ${request.ipn} after you read it; read it again`,
-      };
-      if (reviewKind === "details") {
-        conflict.currentDetails = describeRecord(txApp, currentDetails);
-      } else {
-        conflict.currentRevision = describeRecord(txApp, currentRevision);
-      }
-      reply = { status: 409, body: conflict };
-      return;
-    }
-    let status;
-    let result;
-    if (first("catalog_csv_reviews", "part = {:part} && code = {:code} && csv_sha256 = {:sha}", {
-      part: partId,
-      code: problem.getString("code"),
-      sha: csvSha,
-    })) {
-      status = 422;
-      result = {
-        outcome: "noop",
-        correlationId: request.correlationId,
-        ipn: request.ipn,
-        message: "these CSV changes were already reviewed",
-      };
-    } else {
-      // Build the new document from the stored one and the CSV's recorded
-      // values for each accepted field.
-      const csv = JSON.parse(csvSnapshot);
-      let details = null;
-      let revision = null;
-      if (reviewKind === "details" && accept.length > 0) {
-        const stored = JSON.parse(currentDetails.getString("snapshot"));
-        const fields = stored.fields.map((field) => ({ name: field.name, value: field.value }));
-        let manufacturerParts = stored.manufacturer_parts;
-        let category = stored.category;
-        for (const name of accept) {
-          if (name === CATEGORY_FIELD) {
-            if (csv.category === stored.category) {
-              fail(`the CSV's ${CATEGORY_FIELD} is the same as the part's`);
-            }
-            if (!currentCategoryRevision(txApp, csv.category)) {
-              fail(`the category ${csv.category} is not in the Catalog`);
-            }
-            category = csv.category;
-            continue;
-          }
-          if (name === MANUFACTURER_PARTS) {
-            if (JSON.stringify(csv.manufacturer_parts) === JSON.stringify(stored.manufacturer_parts)) {
-              fail(`the CSV's ${MANUFACTURER_PARTS} are the same as the part's`);
-            }
-            manufacturerParts = csv.manufacturer_parts;
-            continue;
-          }
-          const index = fields.findIndex((field) => field.name === name);
-          const fromCsv = (csv.fields || []).find((field) => field.name === name);
-          if (index < 0 || !fromCsv) {
-            fail(`${name} is not a field of both the part and the CSV`);
-          }
-          if (fields[index].value === fromCsv.value) {
-            fail(`the CSV's ${name} is the same as the part's`);
-          }
-          fields[index] = { name: name, value: fromCsv.value };
-        }
-        // A new category keeps every field the part has and takes, with the
-        // CSV's values, the CSV's fields the part lacks.
-        if (category !== stored.category) {
-          for (const field of csv.fields || []) {
-            if (!fields.some((existing) => existing.name === field.name)) {
-              fields.push({ name: field.name, value: field.value });
-            }
-          }
-        }
-        const document = {
-          schema: PART_DETAILS_SCHEMA,
-          ipn: request.ipn,
-          category: category,
-          fields: fields,
-          manufacturer_parts: manufacturerParts,
-        };
-        const problemText = detailsProblem(document);
-        if (problemText) {
-          fail(`the new details of ${request.ipn} cannot be saved: ${problemText}`);
-        }
-        const snapshot = JSON.stringify(document);
-        details = { snapshot: snapshot, sha: $security.sha256(snapshot) };
-      }
-      if (problem.getString("code") === CSV_CAD_ITEM_KEPT && accept.length > 0) {
-        fail(
-          `the CSV catalog's ${detail.role} file for ${detail.reference} is not in the Catalog, because the ${detail.role} was changed in this app; to use it, choose the file in Edit part`,
-        );
-      }
-      if (reviewKind === "cad" && accept.length > 0) {
-        const stored = JSON.parse(currentRevision.getString("snapshot"));
-        let cadFields = stored.cad_fields.map((field) => ({ name: field.name, value: field.value }));
-        let references = stored.cad_references.slice();
-        for (const name of accept) {
-          if (name !== "Symbol" && name !== "Footprint") {
-            fail(`${name} is not the Symbol or the Footprint`);
-          }
-          const role = name === "Symbol" ? "symbol" : "footprint";
-          const fromCsv = (csv.cad_fields || []).find((field) => field.name === name);
-          const index = cadFields.findIndex((field) => field.name === name);
-          if (index < 0 || !fromCsv) {
-            fail(`${name} is not a field of both the part and the CSV`);
-          }
-          const csvReferences = (csv.cad_references || []).filter((reference) => reference.role === role);
-          const storedReferences = references.filter((reference) => reference.role === role);
-          if (
-            cadFields[index].value === fromCsv.value &&
-            canonicalJson(csvReferences) === canonicalJson(storedReferences)
-          ) {
-            fail(`the CSV's ${name} is the same as the part's`);
-          }
-          // A reference the CSV catalog cannot find never replaces the same
-          // reference the Catalog has (such as a symbol added in this app,
-          // which the CSV catalog's library file lacks): KiCad would lose it.
-          for (const reference of csvReferences) {
-            const ours = storedReferences.find((item) => item.reference === reference.reference);
-            if (
-              reference.target &&
-              reference.target.kind === "unresolved" &&
-              ours &&
-              ours.target &&
-              ours.target.kind === "cad-item-revision"
-            ) {
-              fail(
-                `the CSV catalog does not have the ${role} ${reference.reference}, which the Catalog has; keep the current ${role}`,
-              );
-            }
-          }
-          // Each CAD item revision the CSV named must be stored and be what
-          // the problem recorded.
-          for (const reference of csvReferences) {
-            const target = reference.target;
-            if (target && target.kind === "cad-item-revision") {
-              const record = recordById(
-                txApp,
-                "catalog_cad_item_revisions",
-                deriveId("cad-item-revision", target.cad_item + "\n" + target.number),
-              );
-              if (
-                !record ||
-                !isCadItemRevision(record, target.cad_item, target.number) ||
-                record.getString("snapshot_sha256") !== target.snapshot_sha256
-              ) {
-                fail(`the CSV's ${name} names a CAD item revision the Catalog does not have`);
-              }
-            }
-          }
-          cadFields[index] = { name: name, value: fromCsv.value };
-          references = references.filter((reference) => reference.role !== role).concat(csvReferences);
-        }
-        // References in the order the fields name them: symbol, then
-        // footprint.
-        references.sort((a, b) => (a.role === b.role ? a.ordinal - b.ordinal : a.role === "symbol" ? -1 : 1));
-        const document = {
-          schema: PART_REVISION_SCHEMA,
-          ipn: request.ipn,
-          cad_fields: cadFields,
-          cad_references: references,
-        };
-        // Excluded from BOM follows the CAD the new revision binds, read by
-        // the server from the stored bytes (kicad-parts-ccc0).
-        if (excludedFromBom(document, storedBomMarks(txApp))) {
-          document.excluded_from_bom = true;
-        }
-        const problemText = revisionProblem(document);
-        if (problemText) {
-          fail(`the new revision of ${request.ipn} cannot be saved: ${problemText}`);
-        }
-        const archived = archivedRevisionWithContent(
-          txApp,
-          partId,
-          partRevisionContent(document, storedCadContent(txApp)),
-        );
-        if (archived > 0) {
-          fail(
-            `this symbol and footprint are those of archived revision ${archived} of ${request.ipn}; unarchive revision ${archived} instead of saving them again`,
-          );
-        }
-        const snapshot = JSON.stringify(document);
-        revision = { snapshot: snapshot, sha: $security.sha256(snapshot) };
-      }
-
-      const record = (name, id) => {
-        const made = new Record(txApp.findCollectionByNameOrId(name));
-        made.set("id", id);
-        return made;
-      };
-      const last = first("catalog_changes", "seq > 0", {}, "-seq");
-      const seq = last ? last.getInt("seq") + 1 : 1;
-      const changeId = deriveId("change", request.correlationId);
-      const source = (previous) =>
-        JSON.stringify({
-          schema: SOURCE_SCHEMA,
-          source: kind,
-          problem: problemId,
-          previous: { id: previous.id, number: previous.getInt("number") },
-        });
-      const detailsNumber = details ? currentDetails.getInt("number") + 1 : null;
-      const newest = newestRevision(txApp, partId);
-      const revisionNumber = revision ? newest.getInt("number") + 1 : null;
-      const summary = JSON.stringify({
-        ipn: request.ipn,
-        problem: problemId,
-        accepted: accept,
-        details: detailsNumber,
-        revision: revisionNumber,
-      });
-      const change = record("catalog_changes", changeId);
-      change.set("seq", seq);
-      change.set("kind", kind);
-      change.set("reason", request.reason);
-      change.set("correlation_id", request.correlationId);
-      change.set("actor", actor.id);
-      change.set("actor_name", actor.name);
-      change.set("sources", JSON.stringify({ parts: [request.ipn] }));
-      change.set("summary", summary);
-      txApp.save(change);
-
-      let savedDetails = null;
-      if (details) {
-        const id = deriveId("part-details", partId + "\n" + detailsNumber);
-        const made = record("catalog_part_details", id);
-        made.set("part", partId);
-        made.set("number", detailsNumber);
-        made.set("predecessor", currentDetails.id);
-        made.set("change", changeId);
-        made.set("snapshot", details.snapshot);
-        made.set("snapshot_sha256", details.sha);
-        made.set("source", source(currentDetails));
-        txApp.save(made);
-        part.set("current_details", id);
-        part.set("current_details_number", detailsNumber);
-        savedDetails = { id: id, number: detailsNumber, snapshotSha256: details.sha };
-      }
-      let savedRevision = null;
-      if (revision) {
-        const id = deriveId("part-revision", partId + "\n" + revisionNumber);
-        const made = record("catalog_part_revisions", id);
-        made.set("part", partId);
-        made.set("number", revisionNumber);
-        made.set("predecessor", newest.id);
-        made.set("change", changeId);
-        made.set("snapshot", revision.snapshot);
-        made.set("snapshot_sha256", revision.sha);
-        made.set("source", source(currentRevision));
-        made.set("cad_item_revisions", boundCadItemRevisions(JSON.parse(revision.snapshot)));
-        txApp.save(made);
-        part.set("current_revision", id);
-        part.set("current_revision_number", revisionNumber);
-        savedRevision = { id: id, number: revisionNumber, snapshotSha256: revision.sha };
-      }
-      if (details || revision) {
-        txApp.save(part);
-      }
-
-      const review = record("catalog_csv_reviews", deriveId("csv-review", request.correlationId));
-      review.set("part", partId);
-      review.set("problem", problemId);
-      review.set("code", problem.getString("code"));
-      review.set("csv_sha256", csvSha);
-      review.set("accepted", JSON.stringify(accept));
-      review.set("change", changeId);
-      review.set("seq", seq);
-      txApp.save(review);
-
-      const auditEntryId = deriveId("audit-entry", request.correlationId);
-      const audit = record("catalog_audit_entries", auditEntryId);
-      audit.set("action", "catalog." + kind);
-      audit.set("actor", actor.id);
-      audit.set("actor_name", actor.name);
-      audit.set("change", changeId);
-      audit.set("reason", request.reason);
-      audit.set("correlation_id", request.correlationId);
-      audit.set("summary", summary);
-      txApp.save(audit);
-
-      status = 200;
-      result = {
-        outcome: "applied",
-        correlationId: request.correlationId,
-        ipn: request.ipn,
-        changeId: changeId,
-        seq: seq,
-        auditEntryId: auditEntryId,
-        accepted: accept,
-        details: savedDetails,
-        revision: savedRevision,
-      };
-    }
-    const ledger = new Record(txApp.findCollectionByNameOrId("catalog_commands"));
-    ledger.set("correlation_id", request.correlationId);
-    ledger.set("actor", actor.id);
-    ledger.set("request_hash", requestHash);
-    ledger.set("status", status);
-    ledger.set("result", JSON.stringify(result));
-    txApp.save(ledger);
-    reply = { status: status, body: result };
-  });
-
-  if (reply.replayed) {
-    e.response.header().set("X-Collab-Replayed", "true");
-  }
-  return e.json(reply.status, reply.body);
-}
-
 module.exports = {
   CHANGE_KINDS: CHANGE_KINDS,
-  CSV_CATALOG_SOURCE: CSV_CATALOG_SOURCE,
-  PART_DETAILS_SCHEMA: PART_DETAILS_SCHEMA,
-  PART_REVISION_SCHEMA: PART_REVISION_SCHEMA,
-  SOURCE_SCHEMA: SOURCE_SCHEMA,
-  LIBRARY_SOURCE_MARK: LIBRARY_SOURCE_MARK,
-  isFromOurLibraries: isFromOurLibraries,
   CATEGORY_SCHEMA: CATEGORY_SCHEMA,
-  categoryCode: categoryCode,
   categoryDocument: categoryDocument,
-  currentCategoryRevision: currentCategoryRevision,
   publishEdit: publishEdit,
   publishCreate: publishCreate,
   modelReferences: modelReferences,
@@ -4187,20 +3467,10 @@ module.exports = {
   publishCategory: publishCategory,
   setUpStartingCategories: setUpStartingCategories,
   SETUP_CORRELATION_ID: SETUP_CORRELATION_ID,
-  publishCsvReview: publishCsvReview,
-  excludedFromBom: excludedFromBom,
-  storedBomMarks: storedBomMarks,
-  bomMark: bomMark,
-  blobBytes: blobBytes,
   bytesText: bytesText,
+  bomMark: bomMark,
   symbolSaysNotInBom: symbolSaysNotInBom,
   footprintExcludedFromBom: footprintExcludedFromBom,
-  CSV_REVIEW_KINDS: CSV_REVIEW_KINDS,
-  IPN_GIVEN_TO_ANOTHER_PART: IPN_GIVEN_TO_ANOTHER_PART,
-  csvRowIsAnotherPart: csvRowIsAnotherPart,
-  anotherPartMessage: anotherPartMessage,
-  anotherPartProblem: anotherPartProblem,
-  recordedCsvDocument: recordedCsvDocument,
   archiveState: archiveState,
   recordById: recordById,
   NUMBERED_RECORDS: NUMBERED_RECORDS,
@@ -4216,15 +3486,6 @@ module.exports = {
   refuseProgrammingError: refuseProgrammingError,
   newestRevision: newestRevision,
   newestNotArchived: newestNotArchived,
-  cadContent: cadContent,
-  partRevisionContent: partRevisionContent,
-  storedCadContent: storedCadContent,
-  archivedRevisionWithContent: archivedRevisionWithContent,
-  detailsProblem: detailsProblem,
-  revisionProblem: revisionProblem,
-  describeRecord: describeRecord,
-  cadItemRevisionTarget: cadItemRevisionTarget,
-  isCadItemRevision: isCadItemRevision,
   trimSpace: trimSpace,
   isReservedName: isReservedName,
   catalogEditor: catalogEditor,
@@ -4233,6 +3494,5 @@ module.exports = {
   collectionChangeProblem: collectionChangeProblem,
   canonicalJson: canonicalJson,
   deriveId: deriveId,
-  sha256Bytes: sha256Bytes,
   base64Decode: base64Decode,
 };

@@ -27,8 +27,8 @@
 // 3d-model), the reference it is for (LIB:NAME in a g- library, or the
 // 3d-models/... path a footprint sent with it names), the name of the file
 // it came from, the KiCad (version ...) of the file a symbol came from, and
-// its bytes, as text (symbols and footprints always) or base64, like the
-// blobs of a CSV import. The server reads each file itself (see
+// its bytes, as text (symbols and footprints always) or base64. The server
+// reads each file itself (see
 // catalog_lib.js preparedUploads): a symbol is exactly one (symbol "NAME"
 // ...) whose NAME is the reference's name, a footprint a whole .kicad_mod
 // named like the reference. A file whose content is the CAD item's current
@@ -62,7 +62,7 @@
 // There is no restore route: an earlier revision is never copied back
 // (kicad-parts-bd76; a bad revision will be archived instead).
 //
-// A request may be at most 32 MiB, like an import (EDIT_BODY_LIMIT in
+// A request may be at most 32 MiB (EDIT_BODY_LIMIT in
 // crates/catalog/src/pocketbase.rs refuses a bigger one before sending).
 const EDIT_BODY_LIMIT = 32 * 1024 * 1024;
 routerAdd(

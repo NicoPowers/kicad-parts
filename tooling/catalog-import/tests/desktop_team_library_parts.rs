@@ -3,9 +3,7 @@
 //! through catalog-browser against a disposable PocketBase. Our libraries
 //! are a throwaway git repo of the sample library, in which an engineer
 //! drew a capacitor symbol and a footprint with its 3D model by hand in
-//! KiCad. The team starts with the sample resistors and capacitors. (CSV
-//! imports that name the added items are in
-//! `desktop_team_library_parts_csv.rs`.)
+//! KiCad. The team starts with the sample resistors and capacitors.
 
 use catalog::pocketbase::read_back;
 use catalog_browser::team::TeamCatalog;

@@ -7,9 +7,8 @@
 //! own disposable PocketBase on 127.0.0.1 with the sample library's
 //! resistors; the repository is only read.
 //!
-//! The CSV review and remembered-match cases need more setup, so they live
-//! with their own guard tests: `pocketbase_csv_reviews.rs` and
-//! `pocketbase_part_categories.rs`.
+//! The remembered-match cases need more setup, so they live with their own
+//! guard tests in `pocketbase_part_categories.rs`.
 
 use catalog::PartRevision;
 use catalog::pocketbase::{
@@ -29,7 +28,7 @@ const OTHER: &str = "RES-0000-1000";
 /// Every field, in every collection, that names a Change. The guards find
 /// these in the schema themselves; this list makes a new one visible in
 /// review, because the test below fails until it is added here.
-const CHANGE_FIELDS: [(&str, &str); 12] = [
+const CHANGE_FIELDS: [(&str, &str); 11] = [
     ("catalog_archive_entries", "change"),
     ("catalog_audit_entries", "change"),
     ("catalog_blobs", "first_change"),
@@ -38,7 +37,6 @@ const CHANGE_FIELDS: [(&str, &str); 12] = [
     ("catalog_categories", "first_change"),
     ("catalog_category_matches", "change"),
     ("catalog_category_revisions", "change"),
-    ("catalog_csv_reviews", "change"),
     ("catalog_part_details", "change"),
     ("catalog_part_revisions", "change"),
     ("catalog_parts", "first_change"),
@@ -406,8 +404,8 @@ fn server_code_must_name_the_change_saved_in_its_own_transaction() {
     }
     assert_eq!(team.read(), before, "nothing was written");
 
-    // An empty Change field passes only where the field is optional: an
-    // audit entry of an import run that saved no Change.
+    // An empty Change field passes only where the field is optional, as on
+    // an audit entry.
     team.saved(json!({ "records": [{
         "collection": "catalog_audit_entries",
         "fields": {

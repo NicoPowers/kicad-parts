@@ -4,8 +4,10 @@ use crate::hash::sha256_hex;
 use crate::ids::{BlobId, CadItemId};
 use serde::{Deserialize, Serialize};
 
-/// The schema tag of [`CadItemDetails`].
-pub const CAD_ITEM_DETAILS_SCHEMA: &str = "kicad-parts/cad-item-details/1";
+/// The schema tag of [`CadItemDetails`]. Only the team server writes them;
+/// a test keeps this and catalog_lib.js in step.
+#[cfg(test)]
+pub(crate) const CAD_ITEM_DETAILS_SCHEMA: &str = "kicad-parts/cad-item-details/1";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -57,8 +59,8 @@ impl CadItem {
 
 /// The stated terms under which a CAD item revision may be used and shared.
 ///
-/// The CSV catalog states no license for any CAD item, so every imported
-/// revision says `unknown-needs-review` explicitly.
+/// Downloads and libraries rarely state a license the app can read, so
+/// every revision says `unknown-needs-review` explicitly.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum License {
@@ -135,21 +137,6 @@ impl CadItemDetails {
 
     pub fn sha256(&self) -> String {
         sha256_hex(self.canonical_json())
-    }
-
-    /// The SHA-256 of this snapshot with the numbers of its 3D model
-    /// bindings left out. Two revisions with the same content hash have the
-    /// same CAD content and differ at most in which revision numbers they
-    /// name, which is not a change. For a symbol or 3D model it is a hash of
-    /// the whole snapshot.
-    pub fn content_sha256(&self) -> String {
-        let mut content = self.clone();
-        for model in &mut content.model_references {
-            if let ModelTarget::CadItemRevision { number, .. } = &mut model.target {
-                *number = 0;
-            }
-        }
-        content.sha256()
     }
 }
 

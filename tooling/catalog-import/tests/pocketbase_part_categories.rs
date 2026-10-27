@@ -2,8 +2,7 @@
 //! (seed kicad-parts-ae44): a part's category is part of its details, so
 //! changing it in an edit keeps the IPN and every field and adds the new
 //! category's fields; the person's choice is remembered with the part's
-//! clues, and nothing else ever makes a remembered match. (Categories made
-//! by CSV imports are in `pocketbase_part_categories_csv.rs`.)
+//! clues, and nothing else ever makes a remembered match.
 //!
 //! Each test starts its own disposable PocketBase on 127.0.0.1 with the
 //! sample library's resistors and capacitors; the repository is only read.

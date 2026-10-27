@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// How one team's generated libraries are named: every nickname starts
 /// with the team's code and a dash, such as `MA-Parts` and
 /// `MA-Resistor_SMD`. Each team on a computer gets its own names, and a
-/// generated library never clashes with the editable `g-` libraries of the
-/// CSV catalog (ADR 0011) or the person's hand-made `MA_` ones. A
+/// generated library never clashes with our editable `g-` libraries
+/// (ADR 0011) or the person's hand-made `MA_` ones. A
 /// footprint library's nickname is saved in every board that uses it, so
 /// a team's code never changes. This is the one place the names are made.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1106,12 +1106,11 @@ mod tests {
         assert_eq!(current_number(&[], &BTreeSet::new()), None);
     }
 
-    /// What a schematic shows beside the symbol is what the CSV catalog's
-    /// own KiCad library showed: a crystal's frequency, a trimmer's
-    /// resistance, an LED's colour, or else the Value field; and when that
-    /// is blank, the MPN, then the IPN, so it is never empty.
+    /// What a schematic shows beside the symbol: a crystal's frequency, a
+    /// trimmer's resistance, an LED's colour, or else the Value field; and
+    /// when that is blank, the MPN, then the IPN, so it is never empty.
     #[test]
-    fn the_value_follows_the_csv_catalogs_own_kicad_library() {
+    fn the_value_shows_what_matters_for_the_category() {
         let details = |category: &str, fields: &[(&str, &str)], mpn: &str| PartDetails {
             schema: String::new(),
             ipn: "OSC-0001-0256".to_owned(),

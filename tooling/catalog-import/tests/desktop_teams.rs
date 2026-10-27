@@ -599,7 +599,7 @@ fn one_list_holds_both_teams_and_each_edit_goes_to_its_own_server() {
     });
 
     // Both teams' parts are in one list: the same IPN once per team, in
-    // team order. The sample library has no CSV catalog, so every row is a
+    // team order. Every row is a
     // team's.
     let rows = list(&browser, &teams, IPN);
     let both: Vec<&str> = rows

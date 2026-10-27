@@ -768,12 +768,13 @@ impl TeamCatalog {
         Some((who, checkpoint, catch_ups))
     }
 
-    /// What an importer reads from the team catalog: each CAD item's
-    /// current revision and the bytes of its newest imported one, and the
-    /// latest import runs. For the library check.
-    pub(crate) fn import_state(&self) -> Result<catalog::pocketbase::ImportState, String> {
+    /// The SHA-256 of the bytes of each CAD item's current revision, by
+    /// CAD item ID, for the library check.
+    pub(crate) fn current_cad_bytes(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, String> {
         let client = self.client()?;
-        catalog::pocketbase::read_import_state(&client).map_err(|error| {
+        catalog::pocketbase::read_current_cad_bytes(&client).map_err(|error| {
             format!(
                 "The team catalog could not be read because {}.",
                 plain_reason(&error)

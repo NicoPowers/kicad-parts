@@ -1,17 +1,15 @@
 //! Files someone chooses in the app to use as a part's symbol, footprint or
 //! 3D model, read into the uploads an edit sends (kicad-parts-3b8b).
 //!
-//! They are read the way the CSV import reads the CSV catalog's files
-//! ([`crate::csv_import`]): a symbol is the exact bytes of one top-level
-//! `(symbol ...)` entry of a `.kicad_sym`, with the library's
-//! `(version ...)`; a footprint is a whole `.kicad_mod`; a 3D model is a
-//! whole file. The team server reads and checks every file again and never
-//! trusts this reading.
+//! A symbol is the exact bytes of one top-level `(symbol ...)` entry of a
+//! `.kicad_sym`, with the library's `(version ...)`; a footprint is a whole
+//! `.kicad_mod`; a 3D model is a whole file. The team server reads and
+//! checks every file again and never trusts this reading.
 
-use crate::csv_import::classify_model_reference;
 use crate::pocketbase::{CadUpload, UploadRole};
 use kicad_integration::LibRef;
 use kicad_integration::library_file::{FootprintFile, SymbolLibrary, SymbolLookup};
+use kicad_integration::library_source::{ModelLink, SourceProfile, join, own, plain_path};
 
 /// The symbols of a `.kicad_sym` file.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,6 +114,26 @@ pub fn symbol_upload(
     })
 }
 
+/// The repository path under our model folder that a 3D model `reference`
+/// names, such as `3d-models/g-Package_SO.3dshapes/SOIC-8.step` for
+/// `${GITPLM_PARTS}/3d-models/g-Package_SO.3dshapes/SOIC-8.step`; `None`
+/// for a link anywhere else, or one that could leave the folder. The team
+/// server reads links the same way (catalog_lib.js classifyModelReference).
+/// `${GITPLM_3DMODELS}` is an older name for our model folder.
+fn model_path(reference: &str) -> Option<String> {
+    match SourceProfile::own().model_link(reference) {
+        ModelLink::InRepo {
+            path,
+            in_model_folder: true,
+        } => return Some(path),
+        ModelLink::InRepo { .. } | ModelLink::Unsafe => return None,
+        ModelLink::Elsewhere => {}
+    }
+    let rest = reference.strip_prefix("${GITPLM_3DMODELS}")?;
+    let rest = rest.strip_prefix('/').or_else(|| rest.strip_prefix('\\'))?;
+    plain_path(rest).map(|clean| join(own::MODEL_FOLDER, &clean))
+}
+
 /// Reads a `.kicad_mod` file: its name and 3D model references.
 pub fn read_footprint_file(bytes: &[u8]) -> Result<FootprintFileInfo, String> {
     let text = kicad_text(bytes)?;
@@ -125,13 +143,11 @@ pub fn read_footprint_file(bytes: &[u8]) -> Result<FootprintFileInfo, String> {
         .name
         .filter(|name| !name.is_empty())
         .ok_or_else(|| "The footprint in the file has no name.".to_owned())?;
-    // The same reading the server and the CSV catalog fixture use.
+    // The same reading the server uses.
     let models = kicad_integration::library_file::model_references(text)
         .into_iter()
         .map(|reference| ModelFileReference {
-            key: classify_model_reference(&reference)
-                .candidate
-                .filter(|key| is_catalog_model_key(key)),
+            key: model_path(&reference).filter(|key| is_catalog_model_key(key)),
             reference,
         })
         .collect();

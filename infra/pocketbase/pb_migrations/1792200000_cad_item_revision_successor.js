@@ -3,7 +3,7 @@
 // At most one successor per CAD item revision (seed kicad-parts-7828).
 //
 // A unique index on catalog_cad_item_revisions (predecessor), for
-// revisions that have one. Importers find each CAD item's current revision
+// revisions that have one. The library check finds each CAD item's current revision
 // as the one no revision names as its predecessor
 // (catalog_cad_item_revisions_via_predecessor.id = ""); without an index
 // SQLite compares every revision with every other, which took about 19 s

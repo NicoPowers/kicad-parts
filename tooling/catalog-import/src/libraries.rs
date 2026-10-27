@@ -1,15 +1,14 @@
 //! Writing the KiCad libraries (`crates/kicad-libraries`) from a
-//! disposable team server, as `catalog-import kicad-libraries` and the
-//! full-catalog proof do.
+//! disposable team server, as `catalog-import kicad-libraries` does.
 
 use catalog::pocketbase::CatalogReadback;
 use kicad_libraries::{Naming, Outcome, Team};
 use std::path::Path;
 
 /// The team ID the libraries of a disposable team server record. Every
-/// disposable team server is made from the same CSV catalog, so they count
-/// as one team: writing again updates the same folder instead of refusing
-/// it as another team's.
+/// disposable team server is made from the same sample library, so they
+/// count as one team: writing again updates the same folder instead of
+/// refusing it as another team's.
 pub const DISPOSABLE_TEAM: &str = "disposable-local-team-server";
 
 /// The team of a disposable team server, named by `naming`.

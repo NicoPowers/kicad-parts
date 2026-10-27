@@ -2,7 +2,6 @@
 //! against a disposable PocketBase with the sample library's resistors:
 //! sign-in, history and differences, edits, a conflict resolved by saving
 //! on top, read-only members and changes by others arriving by themselves.
-//! (CSV changes that were not applied are in `desktop_team_csv.rs`.)
 
 use catalog::pocketbase::{EditCommand, read_back, submit_edit};
 use catalog_browser::team::TeamCatalog;

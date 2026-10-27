@@ -3,8 +3,7 @@
 //! saved in the import's shape, numbering and IDs; a file with the content
 //! of the CAD item's current revision adds nothing; other parts that use the
 //! CAD item keep their exact binding. The server reads every file itself and
-//! refuses, plainly, one that is wrong or not used. (CSV imports afterwards
-//! are in `pocketbase_uploads_csv.rs`.)
+//! refuses, plainly, one that is wrong or not used.
 //!
 //! Each test starts its own disposable PocketBase on 127.0.0.1 with the
 //! sample library's resistors; the repository is only read.

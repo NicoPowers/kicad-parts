@@ -2,8 +2,7 @@
 
 // Categories and remembered matches (seed kicad-parts-ae44).
 //
-// A category is the only grouping of parts people see. The CSV import makes
-// one per CSV file (database/g-res.csv makes res). Each change to a category
+// A category is the only grouping of parts people see. Each change to a category
 // saves its next numbered revision in catalog_category_revisions, never
 // changed afterwards, in a Change with a reason; a category's current
 // revision is its newest. A revision's snapshot is canonical JSON
@@ -17,7 +16,6 @@
 // Each time a signed-in editor changes a part's category, the clues that led
 // to it (the footprint family, the reference letter and the manufacturer)
 // are kept in catalog_category_matches, so the guess gets better with use.
-// An import never makes one.
 //
 // Part details saved before this change have no category and cannot be
 // given one without guessing, so this migration refuses to start on such
@@ -76,7 +74,7 @@ migrate((app) => {
       { name: "change", type: "relation", collectionId: changes.id, maxSelect: 1, required: true },
       { name: "snapshot", type: "text", required: true, max: DOCUMENT },
       sha256("snapshot_sha256"),
-      // Where it came from, such as the CSV file and its header line.
+      // Where it came from, such as the team server's setup.
       { name: "source", type: "text", required: true, max: DOCUMENT },
       { name: "created", type: "autodate", onCreate: true, onUpdate: false },
     ],

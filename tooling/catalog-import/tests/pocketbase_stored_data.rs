@@ -20,15 +20,13 @@ use std::path::{Path, PathBuf};
 const IPN: &str = "RES-0000-0470";
 
 /// Every catalog migration, newest first.
-const CATALOG_MIGRATIONS: [&str; 13] = [
+const CATALOG_MIGRATIONS: [&str; 11] = [
     "1792700000_starting_categories.js",
     "1792600000_category_changes.js",
     "1792500000_team_settings.js",
     "1792400000_new_parts.js",
     "1792300000_categories.js",
     "1792200000_cad_item_revision_successor.js",
-    "1792100000_uncommitted_changes.js",
-    "1792000000_csv_reviews.js",
     "1791900000_archived_revisions.js",
     "1791800000_shared_part_details.js",
     "1791700000_cad_item_revision_numbers.js",
@@ -160,7 +158,7 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_data() {
     };
     refuses("8", "saved more than its starting categories");
     set_aside_migration(&options, "1792700000_starting_categories.js");
-    refuses("7", "categories set up without a CSV file");
+    refuses("7", "categories set up by a superuser or its setup");
     set_aside_migration(&options, "1792600000_category_changes.js");
     refuses("6", "team has a code");
     set_aside_migration(&options, "1792500000_team_settings.js");
@@ -168,9 +166,9 @@ fn the_catalog_migrations_roll_back_and_refuse_to_undo_saved_data() {
     set_aside_migration(&options, "1792400000_new_parts.js");
     refuses("4", "has categories");
     // With that step set aside, the older undos still refuse their own
-    // data: here the archived revision, after three steps this data allows.
+    // data: here the archived revision, after one step this data allows.
     set_aside_migration(&options, "1792300000_categories.js");
-    refuses("4", "has archived revisions");
+    refuses("2", "has archived revisions");
     let database = rusqlite::Connection::open_with_flags(
         options.data_dir.join("data.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

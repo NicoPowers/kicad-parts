@@ -1,6 +1,6 @@
 //! Every entry of the KiCad libraries made from the whole sample library
 //! (fixtures/sample-library), checked by the installed KiCad 10
-//! (kicad-parts-357b; kicad-parts-fbc2 moved it off the CSV catalog):
+//! (kicad-parts-357b):
 //!
 //! - kicad-cli draws every generated symbol and every generated footprint;
 //! - a schematic places every database library entry, each saved with an

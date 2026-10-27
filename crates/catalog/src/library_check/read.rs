@@ -1,17 +1,14 @@
-//! Gathers the library check's inputs: the CSV catalog's own libraries and
-//! the symbols and footprints its CSV files name, from a CSV catalog
-//! folder, and the footprints KiCad's own libraries have. Only reads.
+//! Gathers the library check's inputs: our own libraries in the local
+//! library folder, and the footprints KiCad's own libraries have. Only
+//! reads.
 //!
 //! Libraries are found through a library source profile: our own layout,
-//! [`SourceProfile::own`], for the CSV catalog folder.
+//! [`SourceProfile::own`], for the local library folder.
 
-use super::{CheckInputs, CsvReference, KnownCad, Libraries, LibraryCheck, LibraryFootprint};
-use super::{LibrarySymbol, Today, check};
-use crate::cad_item::CadItemKind;
-use crate::csv_import::{is_link, parse_csv};
+use super::{CheckInputs, KnownCad, Libraries, LibraryCheck, LibraryFootprint};
+use super::{LibrarySymbol, check};
 use crate::download::model_links;
 use crate::hash::sha256_hex;
-use kicad_integration::footprint_choices;
 use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_file::{Sexp, SymbolLibrary};
 use kicad_integration::library_source::{SourceProfile, join, native_path};
@@ -19,47 +16,42 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Runs the library check on the CSV catalog under `root` against what
-/// the Catalog has (`known`), with KiCad's own footprints from
-/// `kicad_share` (KiCad's data folder) when it is known.
-pub fn check_folder(
-    root: &Path,
-    known: &KnownCad,
-    kicad_share: Option<&Path>,
-) -> Result<LibraryCheck, String> {
-    check_folder_with(root, known, kicad_share, super::today())
-}
-
-/// [`check_folder`] with `today` in place of today's CSV catalog built into
-/// the program.
-pub fn check_folder_with(
-    root: &Path,
-    known: &KnownCad,
-    kicad_share: Option<&Path>,
-    today: &Today,
-) -> Result<LibraryCheck, String> {
+/// Runs the library check on our own libraries in the local library folder
+/// `root` against what the Catalog has (`known`), with KiCad's own
+/// footprints from `kicad_share` (KiCad's data folder) when it is known.
+pub fn check_folder(root: &Path, known: &KnownCad, kicad_share: Option<&Path>) -> LibraryCheck {
     let source = SourceProfile::own();
-    let mut libraries = read_source_libraries(root, &source);
-    let csv = read_csv_references(root, &mut libraries.unreadable);
+    let libraries = read_source_libraries(root, &source);
     let kicad = kicad_share.map(|share| kicad_footprints(share, &source, &libraries));
-    Ok(check(CheckInputs {
+    check(CheckInputs {
         libraries: &libraries,
         known,
-        csv: &csv,
         kicad_footprints: kicad.as_ref(),
-        today,
-    }))
+    })
 }
 
 /// Why a link is not followed, as an unreadable file says it.
-const LINK: &str =
-    "it is a link, which the library check does not follow (the import refuses links too)";
+const LINK: &str = "it is a link, which the library check does not follow";
+
+/// Whether `metadata` is of a link or (on Windows) any reparse point, which
+/// the library check never passes through.
+#[cfg(windows)]
+fn is_link(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_link(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
 
 /// Reads every symbol of `symbols/g-*.kicad_sym`, every footprint of
 /// `footprints/g-*.pretty` and the name of every file under `3d-models/`.
 /// A missing folder has nothing in it; a file that cannot be read, and a
-/// link (never followed, as the import refuses links), is listed in
-/// [`Libraries::unreadable`].
+/// link (never followed), is listed in [`Libraries::unreadable`].
 pub fn read_libraries(root: &Path) -> Libraries {
     read_source_libraries(root, &SourceProfile::own())
 }
@@ -68,8 +60,8 @@ pub fn read_libraries(root: &Path) -> Libraries {
 /// made for it (such as our `g-` libraries): every symbol of each
 /// `.kicad_sym` symbol library, every footprint of each footprint library,
 /// and the name of every file in its model folders. A missing folder has
-/// nothing in it; a file that cannot be read, and a link (never followed,
-/// as the import refuses links), is listed in [`Libraries::unreadable`].
+/// nothing in it; a file that cannot be read, and a link (never followed),
+/// is listed in [`Libraries::unreadable`].
 pub fn read_source_libraries(root: &Path, source: &SourceProfile) -> Libraries {
     let mut libraries = Libraries::default();
     let unreadable = &mut libraries.unreadable;
@@ -161,55 +153,6 @@ pub fn read_source_libraries(root: &Path, source: &SourceProfile) -> Libraries {
     libraries
 }
 
-/// Every symbol and footprint the CSV files (`database/g-*.csv`) name in
-/// their Symbol and Footprint columns, one footprint choice (or symbol)
-/// each. A CSV file that cannot be read, or a link, is added to
-/// `unreadable` and the rest is read.
-pub fn read_csv_references(
-    root: &Path,
-    unreadable: &mut Vec<(String, String)>,
-) -> Vec<CsvReference> {
-    let mut references = BTreeSet::new();
-    for (path, file) in entries(root, "database", unreadable) {
-        let name = file_name(&path);
-        let is_csv_file = name.starts_with("g-") && name.ends_with(".csv");
-        if !is_csv_file || !path.is_file() {
-            continue;
-        }
-        let table = match fs::read(&path) {
-            Ok(bytes) => parse_csv(&file, &bytes).map_err(|error| error.0),
-            Err(error) => Err(error.to_string()),
-        };
-        let table = match table {
-            Ok(table) => table,
-            Err(why) => {
-                unreadable.push((file, why));
-                continue;
-            }
-        };
-        for (kind, column) in [
-            (CadItemKind::Symbol, "Symbol"),
-            (CadItemKind::Footprint, "Footprint"),
-        ] {
-            let Some(index) = table.headers.iter().position(|header| header == column) else {
-                continue;
-            };
-            for record in &table.records {
-                let value = record.fields.get(index).map(String::as_str).unwrap_or("");
-                // Like the import, a value naming several (`;`) names each.
-                for reference in footprint_choices(value) {
-                    references.insert(CsvReference {
-                        file: file.clone(),
-                        kind,
-                        reference: reference.to_owned(),
-                    });
-                }
-            }
-        }
-    }
-    references.into_iter().collect()
-}
-
 /// The footprints outside `source`'s own libraries that the symbols name
 /// and that KiCad's data folder `share` has
 /// (`footprints/<library>.pretty/<name>.kicad_mod`).
@@ -256,14 +199,14 @@ pub fn read_library_file(root: &Path, relative: &str) -> Result<Vec<u8>, String>
     };
     if !parts.iter().all(plain) {
         return Err(format!(
-            "{relative} is not a path inside the CSV catalog folder."
+            "{relative} is not a path inside the local library folder."
         ));
     }
     let mut path = root.to_path_buf();
     for (index, part) in parts.iter().enumerate() {
         path.push(part);
         let metadata = fs::symlink_metadata(&path)
-            .map_err(|_| format!("{relative} is not in the CSV catalog folder."))?;
+            .map_err(|_| format!("{relative} is not in the local library folder."))?;
         if is_link(&metadata) {
             return Err(format!("{relative} could not be read: {LINK}."));
         }

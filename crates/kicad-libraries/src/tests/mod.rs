@@ -53,7 +53,7 @@ pub fn clear_read_only(folder: &Path) {
     }
 }
 
-/// A symbol entry as the CSV import stores one: the exact bytes of one
+/// A symbol entry as the Catalog stores one: the exact bytes of one
 /// `(symbol ...)`, units included.
 pub fn symbol_bytes(name: &str, body: &str) -> Vec<u8> {
     format!(
@@ -147,7 +147,6 @@ impl Fixture {
             actor: String::new(),
             actor_name: String::new(),
             created: String::new(),
-            source_commit: String::new(),
             sources: String::new(),
             summary: String::new(),
         });

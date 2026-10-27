@@ -194,7 +194,7 @@ pub fn discover(options: &DiscoveryOptions) -> Discovery {
 /// KiCad's bundled data folder (holding `symbols/` and `footprints/`) of
 /// the newest KiCad install found in `locations`, without running
 /// kicad-cli. For tools that only read KiCad's libraries, such as the
-/// library check of the CSV import.
+/// Libraries browser.
 pub fn installed_share_dir(locations: &SearchLocations) -> Option<PathBuf> {
     let roots = match locations {
         SearchLocations::Standard => standard_roots(),

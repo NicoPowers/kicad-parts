@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 pub const PART_DETAILS_SCHEMA: &str = "kicad-parts/part-details/3";
 /// The schema tag of [`PartRevision`].
 pub const PART_REVISION_SCHEMA: &str = "kicad-parts/part-revision/1";
-/// The CSV columns whose values are CAD references, in the order a part
-/// revision keeps them. Every other describing column is part details.
+/// The fields whose values are CAD references, in the order a part
+/// revision keeps them. Every other field is part details.
 pub const CAD_COLUMNS: [&str; 2] = ["Symbol", "Footprint"];
 
 /// What a part is: its category, every field that describes it and its
@@ -63,9 +63,8 @@ impl PartDetails {
 pub struct PartRevision {
     pub schema: String,
     pub ipn: String,
-    /// The Symbol and Footprint fields exactly as the source wrote them
-    /// (blanks included, footprint choices separated by `;`), in source
-    /// order. A CSV file without such a column has no entry for it.
+    /// The Symbol and Footprint fields exactly as they were saved (blanks
+    /// included, footprint choices separated by `;`).
     pub cad_fields: Vec<DetailField>,
     /// The exact CAD this revision uses, one entry per symbol or footprint
     /// reference in source order.
@@ -151,10 +150,11 @@ pub enum CadReferenceTarget {
         number: u32,
         snapshot_sha256: String,
     },
-    /// A library outside the CSV catalog, such as KiCad's bundled `Device`
+    /// A library outside our own, such as KiCad's bundled `Device`
     /// library. Library Sources will own these.
     External,
-    /// A local reference that did not resolve; an import problem says why.
+    /// A reference to our own libraries that did not resolve when it was
+    /// saved, with why.
     Unresolved { status: String },
 }
 

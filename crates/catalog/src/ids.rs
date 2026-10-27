@@ -3,8 +3,8 @@
 //! Every Catalog identity is derived from what the record *is*, never from
 //! when it was stored: `derive_id(kind, key)` is the first
 //! [`ID_LENGTH`] hex digits of `SHA-256("kicad-parts:<kind>:v1\n<key>")`.
-//! The result is a valid PocketBase record ID, and the protected import
-//! route recomputes it with the same rule (`infra/pocketbase/pb_hooks/
+//! The result is a valid PocketBase record ID, and the protected routes
+//! recompute it with the same rule (`infra/pocketbase/pb_hooks/
 //! catalog_lib.js`), so a client and the server can never disagree about
 //! which record an IPN or a CAD item maps to.
 
@@ -14,9 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Characters in every derived ID (60 bits). Before reusing a stored record
-/// found by a derived ID, the import route compares its content hash or key
-/// with the request and answers `id_collision` on a mismatch, so a
-/// collision is refused rather than merged.
+/// found by a derived ID, the routes compare its content hash or key with
+/// the request, so a collision is refused rather than merged.
 pub const ID_LENGTH: usize = 15;
 
 /// The first [`ID_LENGTH`] hex digits of `SHA-256("kicad-parts:<kind>:v1\n<key>")`.
@@ -80,14 +79,6 @@ derived_id!(
     /// A Change, from the correlation ID of the command that created it.
     ChangeId
 );
-derived_id!(
-    /// The audit entry of one import run, from its correlation ID.
-    AuditEntryId
-);
-derived_id!(
-    /// An import problem, from its code, subject, location and detail.
-    ImportProblemId
-);
 
 impl PartId {
     pub fn for_ipn(ipn: &Ipn) -> Self {
@@ -140,21 +131,6 @@ impl ChangeId {
     }
 }
 
-impl AuditEntryId {
-    pub fn new(correlation_id: &str) -> Self {
-        Self(derive_id("audit-entry", correlation_id))
-    }
-}
-
-impl ImportProblemId {
-    pub fn new(code: &str, subject: &str, location: &str, detail: &str) -> Self {
-        Self(derive_id(
-            "import-problem",
-            &format!("{code}\n{subject}\n{location}\n{}", sha256_hex(detail)),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,8 +168,8 @@ mod tests {
             PartDetailsId::new(&id, 1).as_str(),
             PartRevisionId::new(&id, 1).as_str()
         );
-        // CAD item revisions are numbered like part revisions; the route
-        // derives the same key (catalog_csv_imports.pb.js). Pinned, like the
+        // CAD item revisions are numbered like part revisions; the routes
+        // derive the same key (catalog_lib.js). Pinned, like the
         // part ID above, so a change made to both Rust and the server is
         // caught too.
         let cad_item = CadItemId::new(

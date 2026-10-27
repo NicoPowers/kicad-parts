@@ -36,7 +36,7 @@ pub enum DifferenceKind {
 }
 
 /// The label of a category difference, and the name of the category
-/// choice in an edit and in a CSV review.
+/// choice in an edit.
 pub const CATEGORY_LABEL: &str = "Category";
 
 /// Every difference from `before` to `after`: the category first, then

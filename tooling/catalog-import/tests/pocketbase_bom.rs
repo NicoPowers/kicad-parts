@@ -2,8 +2,7 @@
 //! (kicad-parts-ccc0): the server works it out from the stored bytes of the
 //! CAD item revisions a new revision binds, and an existing revision never
 //! changes. Each test starts its own disposable PocketBase on 127.0.0.1;
-//! the repository is only read. (CSV imports and CSV reviews are in
-//! `pocketbase_bom_csv.rs`.)
+//! the repository is only read.
 
 use catalog::PartRevision;
 use catalog::pocketbase::{CatalogReadback, EditCommand, read_back, submit_edit};
@@ -160,7 +159,7 @@ routerAdd("POST", "/api/test/bom-mark", (e) => {
 "#;
 
 #[test]
-fn the_server_reads_bom_flags_exactly_as_the_importer_does() {
+fn the_server_reads_bom_flags_exactly_as_the_desktop_does() {
     use kicad_integration::library_file::{
         footprint_says_excluded_from_bom, symbol_entries_say_not_in_bom,
     };

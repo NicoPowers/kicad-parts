@@ -16,10 +16,10 @@
 // docs/operations/TRY_THE_TEAM_CATALOG.md. Its undo likewise refuses data
 // with saved part details.
 //
-// The Change kinds become csv-import and edit (restores were removed in
+// The only Change kind becomes edit (restores were removed in
 // kicad-parts-9296).
 migrate((app) => {
-  const KINDS = ["csv-import", "edit"];
+  const KINDS = ["edit"];
   if (app.findAllRecords("catalog_part_revisions").length > 0) {
     throw new Error(
       "this team server's data was saved before part details were kept apart from revisions, " +
@@ -92,6 +92,6 @@ migrate((app) => {
   app.save(details);
   app.delete(details);
   const changes = app.findCollectionByNameOrId("catalog_changes");
-  changes.fields.getByName("kind").values = ["csv-import", "edit", "restore"];
+  changes.fields.getByName("kind").values = ["edit", "restore"];
   app.save(changes);
 });

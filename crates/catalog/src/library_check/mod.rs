@@ -1,15 +1,14 @@
-//! The library check (kicad-parts-da65): compares the CSV catalog's own
-//! libraries (`symbols/g-*.kicad_sym`, `footprints/g-*.pretty`,
+//! The library check (kicad-parts-da65): compares our own libraries in the
+//! local library folder (`symbols/g-*.kicad_sym`, `footprints/g-*.pretty`,
 //! `3d-models/**`, read through the default library source profile,
-//! [`SourceProfile::own`]) with the Catalog, and says what is in them but not in the
-//! Catalog yet (made by hand in KiCad), which symbols name a footprint
-//! nobody has, and which 3D model links work only on one computer or name a
-//! missing file.
+//! [`SourceProfile::own`]) with the Catalog, and says what is in them but
+//! not in the Catalog yet (made by hand in KiCad), which symbols name a
+//! footprint nobody has, and which 3D model links work only on one computer
+//! or name a missing file.
 //!
-//! [`check`] is one pure function over plain inputs, so the CSV import and
-//! the desktop app say the same thing; [`read`] gathers those inputs from a
-//! CSV catalog folder, the team catalog's import state and KiCad's own
-//! libraries.
+//! [`check`] is one pure function over plain inputs; [`read`] gathers those
+//! inputs from the local library folder, the Catalog's CAD items and
+//! KiCad's own libraries.
 //!
 //! A 3D model link is judged like this (`${GITPLM_PARTS}/3d-models` is our
 //! library):
@@ -25,40 +24,26 @@
 //!   as `${GITPLM_3DMODELS}` or `${KIPRJMOD}`): a problem, because it only
 //!   works on one computer.
 //!
-//! A problem is an error (to fix) only for a footprint that is new or
-//! changed since the last import: with bytes that are not those of its
-//! newest imported revision, or not in the Catalog while a row of a CSV
-//! file imported before uses it. The same problem on a footprint the
-//! Catalog has unchanged is clean-up, so today's CSV catalog still imports.
-//! A CSV file never imported has no last import to compare with: its first
-//! import takes the footprints it uses as they are only while their bytes
-//! are those of today's CSV catalog and only today's CSV files use them
-//! ([`today`]), so their old
-//! problems are clean-up and today's CSV files import one by one; a
-//! footprint drawn or changed since is judged like any new one, so a new or
-//! renamed CSV file cannot bring a bad link in. On a footprint that no part uses and the Catalog does not
-//! have, a problem is a warning until something brings the footprint in.
+//! A problem is an error (to fix) on a footprint whose bytes differ from
+//! the Catalog's current revision of it: adding it to a part would bring
+//! the problem in. The same problem on a footprint the Catalog has
+//! unchanged is clean-up. On a footprint the Catalog does not have, a
+//! problem is a warning until a part uses the footprint.
 
-mod baseline;
 pub mod read;
-mod today;
-
-pub use baseline::{Today, today};
 
 #[cfg(test)]
 mod tests;
 
 use crate::cad_item::CadItemKind;
 use crate::ids::CadItemId;
-use kicad_integration::lib_table::TableKind;
 use kicad_integration::library_source::{self, SourceProfile};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// How much a finding matters.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Severity {
-    /// Must be fixed: it stops an import of the footprint, and Add part or
-    /// Edit part with it.
+    /// Must be fixed: it stops Add part or Edit part with it.
     Error,
     /// Someone should look at it.
     Warning,
@@ -71,12 +56,9 @@ pub enum Severity {
 /// What a finding is about.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum FindingKind {
-    /// A symbol, footprint or 3D model in our libraries that no part uses
-    /// and the Catalog does not have.
+    /// A symbol, footprint or 3D model in our libraries that the Catalog
+    /// does not have.
     NotInCatalog,
-    /// A CSV row names a symbol or footprint its library does not have,
-    /// and the library has one with a similar name.
-    SimilarName,
     /// A symbol's own Footprint names a footprint that neither our
     /// libraries nor KiCad's have.
     SymbolFootprint,
@@ -96,7 +78,6 @@ impl FindingKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NotInCatalog => "not-in-catalog",
-            Self::SimilarName => "similar-name",
             Self::SymbolFootprint => "symbol-footprint",
             Self::SharedModel => "shared-model",
             Self::MissingModel => "missing-model",
@@ -143,9 +124,8 @@ pub struct Finding {
     /// repository path for a 3D model, such as
     /// `3d-models/g-Diode_SMD.3dshapes/D_SOD-923.step`.
     pub item: String,
-    /// The repository file it is in, such as `symbols/g-ics.kicad_sym`,
-    /// `footprints/g-Crystal.pretty/Abracon_ABS07L.kicad_mod` or
-    /// `database/g-ics.csv`.
+    /// The repository file it is in, such as `symbols/g-ics.kicad_sym` or
+    /// `footprints/g-Crystal.pretty/Abracon_ABS07L.kicad_mod`.
     pub file: String,
     /// What is wrong and what to do, in plain words.
     pub message: String,
@@ -206,92 +186,9 @@ impl LibraryCheck {
             .iter()
             .filter(move |finding| finding.group() == group)
     }
-
-    /// The errors about one of `files` (repository paths), such as the
-    /// files one import reads: these stop it.
-    pub fn errors_in<'a>(&'a self, files: &BTreeSet<&str>) -> Vec<&'a Finding> {
-        self.in_group(Group::ToFix)
-            .filter(|finding| files.contains(finding.file.as_str()))
-            .collect()
-    }
-
-    /// Why an import that reads `files` must stop before it sends
-    /// anything, in plain words, or `None` when no error is in them. Like
-    /// the commit-first rule, only the files the import uses count, so
-    /// other work in the libraries never blocks it.
-    pub fn import_refusal(&self, files: &BTreeSet<&str>) -> Option<String> {
-        let errors = self.errors_in(files);
-        let (found, them) = match errors.len() {
-            0 => return None,
-            1 => ("a problem".to_owned(), "it"),
-            count => (format!("{count} problems"), "them"),
-        };
-        let mut text = format!(
-            "The library check found {found} in files this import uses, so nothing was sent. Fix {them} in KiCad, commit, and import again:"
-        );
-        for error in errors {
-            text.push_str(&format!("\n- {}: {}", error.file, error.message));
-        }
-        Some(text)
-    }
-
-    /// One line saying how many findings each group has, such as
-    /// `Library check: 1 to fix, 22 not in the Catalog yet, 2 worth a look,
-    /// 36 to clean up.`; `Library check: nothing found.` when there are
-    /// none.
-    pub fn summary(&self) -> String {
-        let parts: Vec<String> = [
-            (Group::ToFix, "to fix"),
-            (Group::NotInCatalog, "not in the Catalog yet"),
-            (Group::WorthALook, "worth a look"),
-            (Group::CleanUp, "to clean up"),
-        ]
-        .into_iter()
-        .filter_map(|(group, words)| {
-            let count = self.count(group);
-            (count > 0).then(|| format!("{count} {words}"))
-        })
-        .collect();
-        if parts.is_empty() {
-            "Library check: nothing found.".to_owned()
-        } else {
-            format!("Library check: {}.", parts.join(", "))
-        }
-    }
-
-    /// The check as the CSV import prints it: the summary, then what to
-    /// fix, what is worth a look, the list of what is not in the Catalog
-    /// yet, and how many old problems are left to clean up.
-    pub fn report(&self) -> String {
-        let mut lines = vec![self.summary()];
-        for group in [Group::ToFix, Group::WorthALook] {
-            if self.count(group) > 0 {
-                lines.push(format!("{}:", group.title()));
-                for finding in self.in_group(group) {
-                    lines.push(format!("  {}: {}", finding.file, finding.message));
-                }
-            }
-        }
-        if self.count(Group::NotInCatalog) > 0 {
-            lines.push(format!("{}:", Group::NotInCatalog.title()));
-            for finding in self.in_group(Group::NotInCatalog) {
-                lines.push(format!("  {} ({})", finding.item, finding.file));
-            }
-        }
-        let clean_up = self.count(Group::CleanUp);
-        if clean_up > 0 {
-            lines.push(format!(
-                "Clean-up: {clean_up} old {} that {} there before this import; the desktop app lists them.",
-                if clean_up == 1 { "problem" } else { "problems" },
-                if clean_up == 1 { "was" } else { "were" }
-            ));
-        }
-        lines.join("\n")
-    }
 }
 
-/// The symbols, footprints and 3D models of the CSV catalog's own (`g-`)
-/// libraries.
+/// The symbols, footprints and 3D models of our own (`g-`) libraries.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Libraries {
     pub symbols: Vec<LibrarySymbol>,
@@ -345,46 +242,20 @@ impl LibraryFootprint {
     }
 }
 
-/// A symbol or footprint a CSV row names.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct CsvReference {
-    /// The CSV file, such as `database/g-ics.csv`.
-    pub file: String,
-    /// [`CadItemKind::Symbol`] or [`CadItemKind::Footprint`].
-    pub kind: CadItemKind,
-    /// `LIBRARY:NAME`, one footprint choice each.
-    pub reference: String,
-}
-
-/// What the Catalog has, as the library check needs it.
+/// What the Catalog has, as the library check needs it: for each CAD item,
+/// by CAD item ID, the SHA-256 of the bytes of its current revision
+/// ([`crate::pocketbase::read_current_cad_bytes`]).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct KnownCad {
-    /// For each CAD item the Catalog has, by CAD item ID, the SHA-256 of
-    /// the bytes of its current revision and of its newest imported one.
-    pub items: BTreeMap<String, BTreeSet<String>>,
-    /// The CSV files imported at least once, such as `database/g-res.csv`.
-    /// A file not imported yet has no last import to compare with.
-    pub imported_csv_files: BTreeSet<String>,
+    pub items: BTreeMap<String, String>,
 }
 
 impl KnownCad {
-    /// What the import state read from the team catalog says.
-    pub fn from_state(state: &crate::pocketbase::ImportState) -> Self {
-        Self {
-            items: state.cad_item_bytes.clone(),
-            imported_csv_files: state
-                .latest_imports
-                .iter()
-                .map(|run| format!("database/{}.csv", run.csv_file))
-                .collect(),
-        }
-    }
-
     fn has(&self, kind: CadItemKind, key: &str) -> bool {
         self.items.contains_key(CadItemId::new(kind, key).as_str())
     }
 
-    fn bytes_of(&self, kind: CadItemKind, key: &str) -> Option<&BTreeSet<String>> {
+    fn bytes_of(&self, kind: CadItemKind, key: &str) -> Option<&String> {
         self.items.get(CadItemId::new(kind, key).as_str())
     }
 }
@@ -394,35 +265,22 @@ impl KnownCad {
 pub struct CheckInputs<'a> {
     pub libraries: &'a Libraries,
     pub known: &'a KnownCad,
-    pub csv: &'a [CsvReference],
     /// KiCad's own footprints (`LIBRARY:NAME`) that symbols name, when
     /// KiCad's libraries were found; `None` leaves symbols naming a
     /// footprint outside our libraries unchecked.
     pub kicad_footprints: Option<&'a BTreeSet<String>>,
-    /// Today's CSV catalog ([`today`]): its footprints' bytes and its CSV
-    /// files.
-    pub today: &'a Today,
 }
 
-/// Compares the CSV catalog's own libraries with the Catalog. The same
-/// inputs always give the same findings, in the same order.
+/// Compares our own libraries with the Catalog. The same inputs always
+/// give the same findings, in the same order.
 pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
     let CheckInputs {
         libraries,
         known,
-        csv,
         kicad_footprints,
-        today,
     } = inputs;
     let own = SourceProfile::own();
     let mut findings = Vec::new();
-    // Each symbol and footprint the CSV files name, with the files.
-    let mut used: BTreeMap<(CadItemKind, &str), BTreeSet<&str>> = BTreeMap::new();
-    for reference in csv {
-        used.entry((reference.kind, reference.reference.as_str()))
-            .or_default()
-            .insert(reference.file.as_str());
-    }
     let footprint_names: BTreeSet<String> = libraries
         .footprints
         .iter()
@@ -433,10 +291,7 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
     for symbol in &libraries.symbols {
         let reference = symbol.reference();
         // A power symbol (GND, VCC...) never becomes a part.
-        if !symbol.power
-            && !used.contains_key(&(CadItemKind::Symbol, reference.as_str()))
-            && !known.has(CadItemKind::Symbol, &reference)
-        {
+        if !symbol.power && !known.has(CadItemKind::Symbol, &reference) {
             findings.push(not_in_catalog(&reference, symbol.file.clone(), "part"));
         }
         let footprint = symbol.footprint.trim();
@@ -465,26 +320,12 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
     let mut linked_models: BTreeSet<String> = BTreeSet::new();
     for footprint in &libraries.footprints {
         let reference = footprint.reference();
-        let files = used.get(&(CadItemKind::Footprint, reference.as_str()));
-        let in_csv = files.is_some();
-        let imported_file_uses_it = files.is_some_and(|files| {
-            files
-                .iter()
-                .any(|file| known.imported_csv_files.contains(*file))
-        });
-        // Still as today's CSV catalog had it, byte for byte, and used only
-        // by today's CSV files: an old problem, not a new one.
-        let as_today = today.footprints.get(&footprint.file) == Some(&footprint.sha256)
-            && files.is_some_and(|files| files.iter().all(|file| today.csv_files.contains(*file)));
         let state = match known.bytes_of(CadItemKind::Footprint, &reference) {
-            Some(bytes) if bytes.contains(&footprint.sha256) => FootprintState::Unchanged,
+            Some(bytes) if *bytes == footprint.sha256 => FootprintState::Unchanged,
             Some(_) => FootprintState::Changed,
-            None if imported_file_uses_it => FootprintState::New,
-            None if in_csv && as_today => FootprintState::BeforeFirstImport,
-            None if in_csv => FootprintState::New,
             None => FootprintState::Unused,
         };
-        if !in_csv && !known.has(CadItemKind::Footprint, &reference) {
+        if state == FootprintState::Unused {
             findings.push(not_in_catalog(&reference, footprint.file.clone(), "part"));
         }
         for link in &footprint.models {
@@ -502,56 +343,6 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
     for model in &libraries.models {
         if !linked_models.contains(model) && !known.has(CadItemKind::Model3d, model) {
             findings.push(not_in_catalog(model, model.clone(), "footprint"));
-        }
-    }
-
-    // A CSV row naming something its library lacks, when a similar name is
-    // there.
-    let symbol_names: BTreeSet<String> = libraries
-        .symbols
-        .iter()
-        .map(LibrarySymbol::reference)
-        .collect();
-    let mut suggested: BTreeSet<(&str, &str)> = BTreeSet::new();
-    for reference in csv {
-        let (names, table) = match reference.kind {
-            CadItemKind::Symbol => (&symbol_names, TableKind::Symbol),
-            CadItemKind::Footprint => (&footprint_names, TableKind::Footprint),
-            CadItemKind::Model3d => continue,
-        };
-        let Some((library, name)) = reference.reference.split_once(':') else {
-            continue;
-        };
-        if !own.is_own_name(library) || names.contains(&reference.reference) {
-            continue;
-        }
-        let Some(library_file) = own.library_path(table, library) else {
-            continue;
-        };
-        if !suggested.insert((reference.file.as_str(), reference.reference.as_str())) {
-            continue;
-        }
-        let candidates = names
-            .iter()
-            .filter_map(|known| known.split_once(':'))
-            .filter(|(known_library, _)| *known_library == library)
-            .map(|(_, known_name)| known_name);
-        if let Some(similar) = similar_name(name, candidates) {
-            let kind = match reference.kind {
-                CadItemKind::Symbol => "symbol",
-                _ => "footprint",
-            };
-            findings.push(Finding {
-                severity: Severity::Warning,
-                kind: FindingKind::SimilarName,
-                item: reference.reference.clone(),
-                file: reference.file.clone(),
-                message: format!(
-                    "{} names the {kind} {}, which {} does not have. Did you mean {library}:{similar}?",
-                    reference.file,
-                    reference.reference, library_file
-                ),
-            });
         }
     }
 
@@ -581,22 +372,14 @@ pub fn check(inputs: CheckInputs<'_>) -> LibraryCheck {
     }
 }
 
-/// Where a footprint stands against the last import.
+/// Where a footprint stands against the Catalog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FootprintState {
-    /// Not in the Catalog, only CSV files never imported use it, its bytes
-    /// are still today's CSV catalog's, and only today's CSV files use it:
-    /// their first import takes it as it is.
-    BeforeFirstImport,
-    /// The Catalog has these bytes.
+    /// The Catalog's current revision has these bytes.
     Unchanged,
     /// The Catalog has the footprint with other bytes.
     Changed,
-    /// Not in the Catalog, and a CSV row uses it: a row of a file imported
-    /// before, or of a file never imported when the footprint is not as
-    /// today's CSV catalog had it. The next import brings it in.
-    New,
-    /// Not in the Catalog and no part uses it.
+    /// Not in the Catalog, so no part uses it.
     Unused,
 }
 
@@ -606,7 +389,7 @@ fn not_in_catalog(item: &str, file: String, user: &str) -> Finding {
         kind: FindingKind::NotInCatalog,
         item: item.to_owned(),
         file,
-        message: format!("No {user} uses it, and the Catalog does not have it yet."),
+        message: format!("No {user} uses it yet: the Catalog does not have it."),
     }
 }
 
@@ -637,8 +420,7 @@ impl ModelLink {
 
 /// Judges one 3D model link of the footprint `name` in `library` (such as
 /// `g-Crystal`), through our layout, the default library source profile:
-/// only a `${GITPLM_PARTS}/3d-models/...` path counts as our library, read
-/// as the import reads it.
+/// only a `${GITPLM_PARTS}/3d-models/...` path counts as our library.
 pub fn judge_model_link(library: &str, name: &str, link: &str) -> ModelLink {
     judge_model_link_in(&SourceProfile::own(), library, name, link)
 }
@@ -756,11 +538,7 @@ fn model_finding(
     let (severity, message) = match state {
         FootprintState::Changed => (
             Severity::Error,
-            format!("{problem} The footprint changed since the last import."),
-        ),
-        FootprintState::New => (
-            Severity::Error,
-            format!("{problem} A CSV row uses the footprint, so the next import would add it."),
+            format!("{problem} The footprint differs from the Catalog's."),
         ),
         FootprintState::Unused => (
             Severity::Warning,
@@ -769,10 +547,6 @@ fn model_finding(
         FootprintState::Unchanged => (
             Severity::CleanUp,
             format!("{problem} The Catalog already has the footprint like this."),
-        ),
-        FootprintState::BeforeFirstImport => (
-            Severity::CleanUp,
-            format!("{problem} It was like this before the first import."),
         ),
     };
     Some(Finding {
@@ -821,65 +595,4 @@ pub fn chosen_footprint_problems(
         }
     }
     problems
-}
-
-/// The name in `candidates` most like `name`: one contains the other
-/// (ignoring case, the shorter at least 3 characters long), or they are at
-/// most 2 edits apart with the same digits in the same order (a changed or
-/// added digit names another part or package, such as R_0402 and R_0603,
-/// not a typo). The closest wins, then the first in name order.
-pub fn similar_name<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
-    let wanted = name.to_lowercase();
-    let mut best: Option<(usize, &str)> = None;
-    for candidate in candidates {
-        let lower = candidate.to_lowercase();
-        if lower == wanted && candidate == name {
-            continue;
-        }
-        let distance = edit_distance(&wanted, &lower);
-        let (short, long) = if wanted.len() <= lower.len() {
-            (&wanted, &lower)
-        } else {
-            (&lower, &wanted)
-        };
-        let contains = short.chars().count() >= 3 && long.contains(short.as_str());
-        let digits = |text: &str| {
-            text.chars()
-                .filter(char::is_ascii_digit)
-                .collect::<String>()
-        };
-        let typo = distance <= 2 && digits(&wanted) == digits(&lower);
-        if !typo && !contains {
-            continue;
-        }
-        let better = match best {
-            None => true,
-            Some((kept, kept_name)) => {
-                distance < kept || (distance == kept && candidate < kept_name)
-            }
-        };
-        if better {
-            best = Some((distance, candidate));
-        }
-    }
-    best.map(|(_, candidate)| candidate)
-}
-
-/// The Levenshtein distance between `a` and `b`, by character.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut current = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != *cb);
-            current.push(
-                (previous[j] + cost)
-                    .min(previous[j + 1] + 1)
-                    .min(current[j] + 1),
-            );
-        }
-        previous = current;
-    }
-    previous[b.len()]
 }
