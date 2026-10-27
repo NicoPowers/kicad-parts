@@ -16,7 +16,7 @@ cargo build --locked -p kicad-parts-desktop --features custom-protocol
 Start a team server and open the app:
 
 ```bash
-cargo run --locked -p catalog-import -- local-team-server --desktop
+cargo run --locked -p local-team -- server --desktop
 ```
 
 The team server starts with the 21 starting categories and the 16 made-up parts of the [sample library](fixtures/sample-library/README.md). The app uses that library as its local library folder. The console prints three accounts and their passwords, which are new each time. Sign in at the top right of the app. Close the app to stop the server and delete its data.

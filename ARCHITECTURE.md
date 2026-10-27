@@ -32,7 +32,7 @@ Every write goes through a protected route on the team server, in one transactio
 | `infra/pocketbase` | The team server: migrations, hooks (the protected routes and write guards) and their JavaScript tests. |
 | `fixtures/sample-library` | A small made-up KiCad library and its parts, for tests, journeys and trying the app. |
 | `fixtures/category-guess` | The clues of 178 parts the category guess is measured on. |
-| `tooling/catalog-import` | Starts a disposable local team server from the sample library, and writes KiCad libraries without the app. Its tests run the routes and the use cases against real team servers. |
+| `tooling/local-team` | Starts a disposable local team server from the sample library, and writes KiCad libraries without the app. Its tests run the routes and the use cases against real team servers. |
 | `tooling/sample-library` | Reads the sample library, makes throwaway git repos of it, and adds its parts to a team server. |
 | `tooling/native-services` | Fetches pinned PocketBase and MinIO builds and runs them windowless on 127.0.0.1 for tests. |
 | `tooling/gate.sh` | Every check a change must pass, timed. |

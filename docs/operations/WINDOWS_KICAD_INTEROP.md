@@ -10,7 +10,7 @@ So our code never lets kicad-cli use your settings in `%APPDATA%\kicad` or your 
 
 - **The desktop app** uses `kicad-cli-settings` in its cache folder, next to `previews`.
 - **The real-KiCad tests** in `real_kicad.rs` use `kicad-parts-tests\kicad-cli-settings` in the temporary folder.
-- **The catalog-browser, catalog-import and journey tests** use `cache\kicad-cli-settings` in their temporary data folder.
+- **The catalog-browser, local-team and journey tests** use `cache\kicad-cli-settings` in their temporary data folder.
 
 kicad-cli fills that folder with default settings. Previews look the same as with your settings. kicad-cli writes nothing under `Documents\KiCad`, so we leave `KICAD_DOCUMENTS_HOME` unset.
 
@@ -33,7 +33,7 @@ When a check can be automated with `kicad-cli`, such as parsing, upgrading, or e
 
 ## KiCad libraries made from the team catalog
 
-The desktop app writes each team's KiCad libraries from the team catalog into `kicad-libraries\<team code>` in its data folder (kicad-parts-f397). `tooling/catalog-import/tests/kicad_libraries.rs` already checks them with the installed KiCad 10, in a folder whose name is not plain ASCII:
+The desktop app writes each team's KiCad libraries from the team catalog into `kicad-libraries\<team code>` in its data folder (kicad-parts-f397). `tooling/local-team/tests/kicad_libraries.rs` already checks them with the installed KiCad 10, in a folder whose name is not plain ASCII:
 
 - `kicad-cli sym export svg` and `fp export svg` draw every generated symbol and footprint.
 - `kicad-cli sch erc` finds every entry of the database library through the SQLite3 ODBC driver: current, older, archived, and current again after an archive. The schematic saves each entry's exact symbol, and KiCad finds no difference; it tells a wrong copy apart and reports an entry that does not exist.
@@ -42,7 +42,7 @@ The desktop app writes each team's KiCad libraries from the team catalog into `k
 
 Only KiCad's editors can show the rest. Use KiCad settings you can throw away, or note what you change.
 
-1. **Make the libraries.** Start the team server with `cargo run --locked -p catalog-import -- local-team-server --desktop --team-code MA` and sign in. Open the KiCad settings at the top right. Under **KiCad libraries**, wait for "Up to date". The libraries are deleted when the command stops, so keep it running.
+1. **Make the libraries.** Start the team server with `cargo run --locked -p local-team -- server --desktop --team-code MA` and sign in. Open the KiCad settings at the top right. Under **KiCad libraries**, wait for "Up to date". The libraries are deleted when the command stops, so keep it running.
 2. **Add them to KiCad.** Copy the symbol libraries. In KiCad, choose **Preferences > Manage Symbol Libraries**, right-click the table on the **Global Libraries** tab, and choose **Paste**. Check that `MA-Parts` and the `MA-` symbol libraries, such as `MA-res-20241209`, appear, with **Show** cleared for the symbol libraries. Choose **OK**. Paste the footprint libraries the same way in **Manage Footprint Libraries**. If pasting does nothing, add each library by hand with the nickname and path shown, and note it.
 3. **Place a part.** In the schematic editor, open **Add Symbol**. Check that each category is one group, such as `MA-Parts - Resistors`, and that the `MA-` symbol libraries are not listed. Place `RES-0000-0470_v1`. Check its fields: IPN `RES-0000-0470` without `_v1`, Revision `1`, Value, Manufacturer, MPN and Datasheet. Check that its footprint is `MA-Resistor_SMD:R_0603_1608Metric_v1`.
 4. **Look at the footprint and model.** Update the board from the schematic. Check the footprint's pads, and that its 3D model shows in the 3D viewer.

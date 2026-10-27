@@ -18,7 +18,7 @@ You need KiCad 10 installed for the symbol and footprint previews.
 ## Start it
 
 ```
-cargo run --locked -p catalog-import -- local-team-server --desktop
+cargo run --locked -p local-team -- server --desktop
 ```
 
 The command:
@@ -68,7 +68,7 @@ The accounts are:
 21. Each revision of a part is its own entry, such as `RES-0000-0470_v2`, so a design never switches to newer CAD by itself. The IPN field and the BOM keep the plain IPN, and the revision has its own field. KiCad shows each category as one group, such as `MA-Parts - Resistors`. Older revisions are under **Older revisions**, and archived ones under **Archived revisions**. Symbols and footprints get revision names too, such as `R_US_v2`. A symbol or footprint from KiCad's own libraries stays a link to KiCad's library.
 22. To add the libraries to KiCad once, follow **Add them to KiCad once**. Choose **Copy** beside **Symbol libraries**. In KiCad, choose **Preferences > Manage Symbol Libraries**, right-click the table on the **Global Libraries** tab, choose **Paste**, then **OK**. Do the same with the footprint libraries in **Manage Footprint Libraries**. When the app names new libraries, copy and paste again. KiCad reads the parts through the SQLite3 ODBC driver; the app says whether it is installed. On KiCad 10.0.7 and later, until KiCad fixes [issue 25870](https://gitlab.com/kicad/code/kicad/-/work_items/25870), kicad-cli ERC (for example in CI) can wrongly say that parts using KiCad's own symbols don't match the library. Desktop KiCad corrects itself within seconds.
 23. New parts and revisions reach KiCad within about 10 seconds: close and open the **Add Symbol** window. A new category, or a change to a category's fields, needs KiCad to restart; the app says so while an older KiCad is still running. The generated files are read-only. If one was changed anyway, the app names it and keeps it; delete it and update again to write it from the team catalog. KiCad still lets you save a new footprint into a generated footprint library, because it checks the folder, not the files. The app names such a file and leaves it alone, but no one else on the team gets it.
-24. With `--desktop`, the libraries are in the command's own folder and are deleted when it stops. Your own app keeps them in `%LOCALAPPDATA%\org.kicadparts.desktop\kicad-libraries`. To make them without the app, run `cargo run --locked -p catalog-import -- kicad-libraries --team-code MA <folder>`.
+24. With `--desktop`, the libraries are in the command's own folder and are deleted when it stops. Your own app keeps them in `%LOCALAPPDATA%\org.kicadparts.desktop\kicad-libraries`. To make them without the app, run `cargo run --locked -p local-team -- kicad-libraries --team-code MA <folder>`.
 
 ## Stop it
 

@@ -20,6 +20,6 @@ The app is a proof of concept with no users, so nothing had to move or stay comp
 
 - Making the team's linked library repo its local library folder, and loosening the team server's `g-` naming rule for client libraries, belong to kicad-parts-ff3c.
 - ADR 0001's import oracle, ADR 0011's import half, ADR 0019's CSV rows and marks, ADR 0022's import and pilots, and ADR 0023's CSV leftovers no longer apply.
-- `catalog-import` keeps its name, though it imports nothing now: it starts local team servers and writes KiCad libraries.
+- `catalog-import` keeps its name, though it imports nothing now: it starts local team servers and writes KiCad libraries. (Later, kicad-parts-2160 renamed it `local-team`, with the commands `local-team server` and `local-team kicad-libraries`.)
 
 Mulch records: the records of kicad-parts-e257.
