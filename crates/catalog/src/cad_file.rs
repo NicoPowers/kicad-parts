@@ -318,6 +318,17 @@ pub fn category_footprint_library(code: &str) -> Option<&'static str> {
     Some(library)
 }
 
+/// The symbol library of the category `code`, such as `g-res` for
+/// resistors: our symbols are grouped by category. Blank for no category.
+/// Add part offers the same (apps/desktop-ui add_part.rs).
+pub fn category_symbol_library(code: &str) -> String {
+    if code.is_empty() {
+        String::new()
+    } else {
+        format!("g-{code}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

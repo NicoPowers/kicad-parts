@@ -142,9 +142,8 @@ fn the_desktop_uses_files_and_keeps_other_parts_on_their_revision() {
     );
     // A symbol library with two symbols: the first is chosen (none is named
     // like the current symbol) and the library is the current one. When the
-    // current symbol is KiCad's own, only a part imported from a CSV file
-    // gets a library (its file's, desktop_team_files_csv.rs); a part added
-    // in the app gets none, and the person types one.
+    // current symbol is KiCad's own, the library is the one of the part's
+    // category, as Add part offers it.
     let reading = team
         .read_file(read_request(
             FileKind::Symbol,
@@ -166,7 +165,7 @@ fn the_desktop_uses_files_and_keeps_other_parts_on_their_revision() {
         .unwrap();
     assert_eq!(
         (reading.chosen.as_str(), reading.library.as_str()),
-        ("R_Second", "")
+        ("R_Second", "g-res")
     );
     let error = team
         .read_file(read_request(FileKind::Symbol, "x.kicad_sym", b"hello", ""))

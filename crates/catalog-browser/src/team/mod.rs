@@ -1110,10 +1110,8 @@ impl TeamCatalog {
                 let chosen = current_name
                     .filter(|name| file.names.contains(name))
                     .unwrap_or_else(|| file.names[0].clone());
-                let library = match current_library {
-                    Some(library) => library,
-                    None => self.csv_file_of(&request.ipn)?.unwrap_or_default(),
-                };
+                let library =
+                    current_library.unwrap_or_else(|| self.category_symbol_library(&request.ipn));
                 Ok(TeamFileReading {
                     names: file.names,
                     chosen,
@@ -1153,27 +1151,14 @@ impl TeamCatalog {
         }
     }
 
-    /// The CSV file `ipn` was first imported from, such as `g-res`, if it
-    /// came from the CSV catalog.
-    fn csv_file_of(&self, ipn: &str) -> Result<Option<String>, String> {
-        let client = self.client()?;
-        let fail = |error: CollabError| {
-            format!(
-                "The team catalog could not be checked because {}.",
-                plain_reason(&error)
-            )
-        };
-        let Some(part) = part_by_ipn(&client, ipn).map_err(fail)? else {
-            return Ok(None);
-        };
-        let revisions = part_revisions(&client, &part.id).map_err(fail)?;
-        Ok(revisions.first().and_then(|revision| {
-            serde_json::from_str::<serde_json::Value>(&revision.source)
-                .ok()?
-                .get("csv_file")?
-                .as_str()
-                .map(str::to_owned)
-        }))
+    /// The symbol library of the part `ipn`'s category, such as `g-res`,
+    /// as Add part offers it; blank for a part without a category.
+    fn category_symbol_library(&self, ipn: &str) -> String {
+        self.current_parts()
+            .into_iter()
+            .find(|(details, _)| details.ipn == ipn)
+            .map(|(details, _)| catalog::cad_file::category_symbol_library(&details.category))
+            .unwrap_or_default()
     }
 
     fn published(
