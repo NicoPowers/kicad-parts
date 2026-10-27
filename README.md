@@ -30,7 +30,7 @@ Run the gate from the repository root once, at the end. It builds what changed, 
 tooling/gate.sh
 ```
 
-It writes one line per check to `target/gate/summary.txt`, and each check's output to `target/gate/<check>.txt`. It takes about 5 minutes. On macOS and Linux it skips the journeys, which need WebView2 on Windows, and says so. These are the checks it runs, if you want to run one by hand:
+It writes one line per check to `target/gate/summary.txt`, and each check's output to `target/gate/<check>.txt`. It takes about 4 minutes. On macOS and Linux it skips the journeys, which need WebView2 on Windows, and says so. These are the checks it runs, if you want to run one by hand:
 
 ```bash
 cargo fmt --all --check

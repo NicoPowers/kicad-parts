@@ -32,23 +32,20 @@ Six is the default: eight saved only 10 s more. The runner uses at most a quarte
 
 ## Gate steps
 
-One run of `tooling/gate.sh` on 2026-10-26, after a change to `tooling/afk`. The steps in group 3 run side by side; the others run one after the other.
+One run of `tooling/gate.sh` on 2026-10-26, after seed kicad-parts-e257 removed the CSV catalog and its pilots. The steps in group 3 run side by side; the others run one after the other.
 
 | Group | Step | Time |
 |---|---|---|
 | 1. Lint | fmt | 1 s |
-| | clippy | 23 s |
-| | clippy for wasm | 7 s |
-| 2. Build | journey app | 3 s |
-| | Rust tests (`nextest run --no-run`) | 65 s |
-| | csv-catalog-fixture | 2 s |
-| 3. Side by side | Rust tests (914 tests) | 75 s |
-| | JavaScript tests | 3 s |
-| | CSV fixture check | 1 s |
-| | 21 pilots, one after the other | 73 s |
-| | full pilot | 71 s |
-| | `ml doctor` | 9 s |
-| 4. Alone | journeys | 109 s |
-| | **Total** | **4 min 48 s** |
+| | clippy | 5 s |
+| | clippy for wasm | 3 s |
+| 2. Build | journey app | 21 s |
+| | Rust tests (`nextest run --no-run`) | 34 s |
+| 3. Side by side | Rust tests (764 tests) | 61 s |
+| | doc tests | 13 s |
+| | JavaScript tests | 0 s |
+| | `ml doctor` | 2 s |
+| 4. Alone | journeys (136 tests) | 118 s |
+| | **Total** | **4 min 4 s** |
 
 The Rust test build takes most of group 2 only when Rust code changed. With nothing changed it takes a few seconds.
