@@ -1,0 +1,63 @@
+//! Reading the Catalog for the KiCad libraries (kicad-parts-f397) while
+//! someone saves: every CAD item read has its first Change read too, so the
+//! libraries never name an item by a guess and rename it on the next
+//! update. A proxy on 127.0.0.1 saves a Change just before the CAD items
+//! are read; a disposable PocketBase on 127.0.0.1 has the sample library's
+//! resistors.
+
+mod support;
+
+use catalog::pocketbase::{read_back, read_revisions};
+use collaboration::PocketBaseClient;
+use local_team::services;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
+use support::proxy::Proxy;
+
+#[test]
+fn every_cad_item_read_has_its_first_change() {
+    let root = services::repository_root();
+    let state = tempfile::tempdir().unwrap();
+    let (server, admin, _superuser) = services::start(&root, state.path()).unwrap();
+    sample_library::seed(&admin, &["res"]).unwrap();
+    let viewer = services::add_member(&admin, "Vic Viewer", "vic@example.test", false).unwrap();
+    let before = read_back(&admin).unwrap();
+    let items_before = before.cad_items.len();
+
+    // Just before the CAD items are read, someone adds the capacitors, with
+    // CAD items the Catalog did not have: new Changes and new CAD items.
+    let saved = Arc::new(Mutex::new(false));
+    let marked = saved.clone();
+    let hook_admin = admin.clone();
+    let proxy = Proxy::start(
+        server.url(),
+        "/api/collections/catalog_cad_items/records",
+        1,
+        Box::new(move || {
+            sample_library::seed(&hook_admin, &["cap"]).unwrap();
+            *marked.lock().unwrap() = true;
+        }),
+    );
+    let reader = PocketBaseClient::new(&proxy.url)
+        .authenticate("users", &viewer.email, &viewer.password)
+        .unwrap();
+    let readback = read_revisions(&reader).unwrap();
+    assert!(*saved.lock().unwrap(), "the save ran during the reading");
+    assert!(
+        readback.cad_items.len() > items_before,
+        "the reading has the new CAD items"
+    );
+    let changes: BTreeSet<&str> = readback
+        .changes
+        .iter()
+        .map(|change| change.id.as_str())
+        .collect();
+    for item in &readback.cad_items {
+        assert!(
+            changes.contains(item.first_change.as_str()),
+            "{} was read without its first Change",
+            item.key
+        );
+    }
+    server.stop();
+}

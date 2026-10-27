@@ -10,7 +10,7 @@
 // - temporary folders (data dirs, fake kicad-cli copies, library copies):
 //   harness.mjs names them after the spec's number, which no two specs
 //   share (checked in checkSpecNumbers).
-// - team servers: catalog-import picks a free port and its own data dir.
+// - team servers: local-team picks a free port and its own data dir.
 // - evidence: each spec has its own JOURNEY_OUT until the merge.
 
 import { spawn } from 'node:child_process';

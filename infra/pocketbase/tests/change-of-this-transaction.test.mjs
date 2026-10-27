@@ -2,7 +2,7 @@
 // names the Change saved in its own transaction (catalog_lib.js,
 // kicad-parts-2707). The rules need no PocketBase: fake apps stand in for a
 // transaction and for the committed database. The integration tests in
-// tooling/catalog-import/tests/pocketbase_change_guards.rs check the same
+// tooling/local-team/tests/pocketbase_change_guards.rs check the same
 // rules through a real team server.
 // Run: npm run js-tests --prefix apps/desktop/journeys
 

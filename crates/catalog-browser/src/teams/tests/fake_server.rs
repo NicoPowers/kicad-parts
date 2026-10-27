@@ -2,7 +2,7 @@
 //! account and auth-refresh, the way PocketBase does. Everything else,
 //! live updates included, gets 404, so a session's follower keeps
 //! reconnecting. It is enough to test the list of teams and their kept
-//! sign-ins without starting PocketBase; tooling/catalog-import's
+//! sign-ins without starting PocketBase; tooling/local-team's
 //! desktop_teams test does the rest against real servers.
 
 use base64::Engine;

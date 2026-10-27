@@ -798,7 +798,7 @@ async function waitForDrawnImages(browser, section, timeout) {
 }
 
 /**
- * Starts `catalog-import local-team-server --json`: a disposable PocketBase
+ * Starts `local-team server --json`: a disposable PocketBase
  * on 127.0.0.1 with three accounts, the starting categories and the sample
  * library's parts. With `teamCode`, the team has that code from the start.
  * It runs windowless in a kill-on-close job and stops when its input
@@ -810,10 +810,10 @@ export async function startTeamServer({ teamCode } = {}) {
     repoRoot,
     'target',
     'debug',
-    process.platform === 'win32' ? 'catalog-import.exe' : 'catalog-import',
+    process.platform === 'win32' ? 'local-team.exe' : 'local-team',
   );
   assert.ok(fs.existsSync(exe), `build it first: ${exe}`);
-  const args = ['local-team-server', '--json', ...(teamCode ? ['--team-code', teamCode] : [])];
+  const args = ['server', '--json', ...(teamCode ? ['--team-code', teamCode] : [])];
   const child = spawn(exe, args, {
     cwd: repoRoot,
     stdio: ['pipe', 'pipe', 'inherit'],

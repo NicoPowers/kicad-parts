@@ -47,7 +47,7 @@ export function buildForJourneys({ repoRoot, hiddenDesktop }) {
   }
   run('cargo', ['build', '--locked', '-p', 'kicad-parts-desktop', '--features', 'custom-protocol'], repoRoot, repoRoot);
   run('cargo', ['build', '--locked', '-p', 'fake-kicad-cli'], repoRoot, repoRoot);
-  run('cargo', ['build', '--locked', '-p', 'catalog-import'], repoRoot, repoRoot);
+  run('cargo', ['build', '--locked', '-p', 'local-team'], repoRoot, repoRoot);
   if (hiddenDesktop) run('cargo', ['build', '--locked', '-p', 'journey-desktop'], repoRoot, repoRoot);
 }
 

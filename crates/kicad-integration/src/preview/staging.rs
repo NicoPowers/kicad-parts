@@ -9,7 +9,7 @@
 //! systems other than Windows, where files cannot be opened without
 //! sharing, only folders older than a day are deleted.
 //!
-//! The same pattern keeps local team server data in `tooling/catalog-import`
+//! The same pattern keeps local team server data in `tooling/local-team`
 //! (`run_folder.rs`).
 
 use std::fs::{self, File, OpenOptions};

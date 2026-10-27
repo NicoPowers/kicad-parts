@@ -546,27 +546,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "catalog-import"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "catalog",
- "catalog-browser",
- "collaboration",
- "desktop-contract",
- "kicad-integration",
- "kicad-libraries",
- "native-services",
- "rusqlite",
- "sample-library",
- "serde",
- "serde_json",
- "tempfile",
- "windows-sys 0.61.2",
- "zip",
-]
-
-[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2751,6 +2730,27 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
+name = "local-team"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "catalog",
+ "catalog-browser",
+ "collaboration",
+ "desktop-contract",
+ "kicad-integration",
+ "kicad-libraries",
+ "native-services",
+ "rusqlite",
+ "sample-library",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "windows-sys 0.61.2",
+ "zip",
+]
 
 [[package]]
 name = "lock_api"

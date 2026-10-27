@@ -163,7 +163,7 @@ check clippy cargo clippy --workspace --all-targets --locked -- -D warnings
 check clippy-wasm cargo clippy -p kicad-parts-desktop-ui --target wasm32-unknown-unknown --locked -- -D warnings
 report fmt clippy clippy-wasm
 
-# 2. Build. catalog-import is part of the journey app build.
+# 2. Build. local-team is part of the journey app build.
 check build-journey-app node apps/desktop/journeys/run-journeys.mjs --build-only
 check build-rust-tests build_rust_tests
 report build-journey-app build-rust-tests

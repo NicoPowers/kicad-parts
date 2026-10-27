@@ -1,7 +1,7 @@
 //! Each team's parts file (kicad-parts-ed46): when the
 //! list of teams shows them, and when it deletes them. The stand-in server
 //! never catches up, so these tests write the file themselves; the
-//! desktop_teams test in tooling/catalog-import has the app write it,
+//! desktop_teams test in tooling/local-team has the app write it,
 //! against real servers.
 
 use super::*;
