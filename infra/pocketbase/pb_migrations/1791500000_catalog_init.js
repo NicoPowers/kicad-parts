@@ -47,7 +47,6 @@ migrate((app) => {
       // "<auth collection>:<record id>", because a superuser is not a users
       // record.
       { name: "actor", type: "text", required: true, max: 200 },
-      { name: "source_commit", type: "text", max: 100 },
       // JSON of where what it saved came from, such as the files a new
       // part was made from.
       { name: "sources", type: "text", required: true, max: DOCUMENT },
