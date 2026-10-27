@@ -2,14 +2,6 @@
 # system-wide core.autocrlf setting.
 * text=auto eol=lf
 
-# The CSV catalog fixture hashes these catalog inputs byte for byte, and some
-# were committed with CRLF. Never convert their line endings.
-/database/** -text
-/symbols/** -text
-/footprints/** -text
-/3d-models/** -text
-/design-blocks/** -text
-
 .seeds/issues.jsonl merge=union
 .seeds/templates.jsonl merge=union
 .seeds/plans.jsonl merge=union

@@ -1,9 +1,0 @@
-[submodule "libs/kicad-footprints"]
-	path = libs/kicad-footprints
-	url = https://gitlab.com/kicad/libraries/kicad-footprints.git
-[submodule "libs/kicad-symbols"]
-	path = libs/kicad-symbols
-	url = https://gitlab.com/kicad/libraries/kicad-symbols.git
-[submodule "libs/kicad-library-utils"]
-	path = libs/kicad-library-utils
-	url = https://gitlab.com/kicad/libraries/kicad-library-utils.git

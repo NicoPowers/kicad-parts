@@ -1,13 +1,4 @@
-.~lock*.csv#
-*.bak
-# database/parts.sqlite is a committed, frozen SQLite copy of the CSV catalog,
-# read by the CSV catalog fixture; ignore any other generated copies.
-parts.sqlite
-!/database/parts.sqlite
 secrets.env
-secrets.env
-__pycache__/
-logs/
 # Rust workspace build output
 /target/
 # Disposable AFK runtime state and evidence bundles
