@@ -1,5 +1,5 @@
-# GitPLM Parts Project
-This repository has been forked from [git-plm/parts](https://github.com/git-plm/parts).  Check it out for excellent info on IPN numbering schemes.  All that info has been stripped out in this fork to focus on the KiCad parts database and its day-to-day usage.
+# KiCad Parts
+A desktop app for hardware engineers who design in KiCad 10. Each team keeps its parts on its own team server. The app lists, edits and adds the team's parts, and writes the team's KiCad libraries. It started as a fork of [git-plm/parts](https://github.com/git-plm/parts), which explains the IPN numbering scheme it uses.
 
 ## Try the desktop app
 The app (Rust and Tauri, in `apps/`, `crates/` and `tooling/`) is a prototype. Each team keeps its parts on its own team server. To try it, you start a team server that runs only on your computer, so nothing in the repository changes. You need Rust, [trunk](https://trunkrs.dev/) and KiCad 10.
@@ -59,15 +59,6 @@ cargo test --locked -p <crate> <part of the test name>
 With cargo-nextest on your PATH (the gate downloads it into `target/tools/nextest/`), `cargo nextest run -p <crate> -E 'test(<part of the name>)'` does the same and runs tests side by side.
 
 The journeys run 6 at a time by default. Add `-- --workers=1` to run them one at a time. Timings are in [Test times](docs/operations/TEST_TIMES.md).
-
-## API credentials (optional)
-Some scripts use DigiKey and Mouser APIs. To use them, copy the example secrets file and add your keys:
-
-```bash
-cp secrets.env.example secrets.env
-```
-
-Then edit `secrets.env` and replace the placeholders with your DigiKey client ID/secret and Mouser API key. Do not commit `secrets.env`; it is gitignored.
 
 ## Part numbers
 The IPN (Internal Part Number) format is specified in [this document](partnumbers.md).
