@@ -1627,7 +1627,7 @@ pub fn download_blob(client: &PocketBaseClient, blob: &StoredBlob) -> CollabResu
     Ok(bytes)
 }
 
-/// Standard base64 with padding, as the import route decodes it.
+/// Standard base64 with padding, as the team server's routes decode it.
 pub fn base64(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)

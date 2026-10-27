@@ -5,7 +5,7 @@
 //! pins down only what the glossary leaves to the implementation:
 //!
 //! - A **part** is identified by a [`PartId`] derived from its [`Ipn`], so
-//!   every import of the same IPN finds the same part. The IPN never
+//!   every save for the same IPN finds the same part. The IPN never
 //!   changes.
 //! - A part's [`PartDetails`] (what it is: its describing fields and
 //!   manufacturer parts) are shared by every revision. Each change saves

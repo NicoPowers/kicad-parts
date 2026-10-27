@@ -115,7 +115,7 @@ fn request(kind: PreviewKind, team_revision: Option<u32>) -> PreviewRequest {
     PreviewRequest {
         ipn: IPN.into(),
         kind,
-        field: Some(field.into()),
+        field: field.into(),
         team_revision,
         selection: Some(1),
     }
@@ -288,7 +288,7 @@ fn team_previews_show_the_stored_revision_after_the_local_library_changes() {
     // A revision this app never fetched cannot be looked up at all.
     let unknown = ready(fresh.preview_request(
         &PreviewRequest {
-            field: Some(SYMBOL.into()),
+            field: SYMBOL.into(),
             ..request(PreviewKind::Symbol, Some(revision + 1))
         },
         Some(&team),

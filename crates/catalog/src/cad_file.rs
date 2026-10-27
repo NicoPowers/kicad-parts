@@ -68,7 +68,7 @@ pub fn read_symbol_file(bytes: &[u8]) -> Result<SymbolFile, String> {
 
 /// The upload of the symbol named `name` in a `.kicad_sym` file, for
 /// `reference` (`LIB:NAME`, whose name must be `name`): the exact bytes of
-/// its entry and the library's version, as the import stores a symbol.
+/// its entry and the library's version, as the Catalog stores a symbol.
 pub fn symbol_upload(
     bytes: &[u8],
     name: &str,

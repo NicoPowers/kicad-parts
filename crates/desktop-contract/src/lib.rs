@@ -265,8 +265,7 @@ pub struct PreviewRequest {
     pub kind: PreviewKind,
     /// The Symbol or Footprint field value to preview, such as the team
     /// catalog's current revision's.
-    #[serde(default)]
-    pub field: Option<String>,
+    pub field: String,
     /// Draw what this revision of the part in the team catalog uses, from
     /// the stored bytes of its exact CAD item revision.
     #[serde(default)]
@@ -381,7 +380,6 @@ pub enum PreviewProblemReason {
     ExportFailed,
     /// The name cannot be passed to kicad-cli (it begins with `-`).
     Unexportable,
-    UnknownPart,
     Internal,
 }
 

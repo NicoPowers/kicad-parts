@@ -721,7 +721,7 @@ pub fn AddPartView(
                         PreviewRequest {
                             ipn: "new part".into(),
                             kind: PreviewKind::Footprint,
-                            field: Some(reference),
+                            field: reference,
                             team_revision: None,
                             selection: None,
                         },

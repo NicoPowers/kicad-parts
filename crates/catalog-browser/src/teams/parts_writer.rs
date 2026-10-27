@@ -5,8 +5,7 @@
 //! It writes only while the team's parts match its server: the session is
 //! live and has caught up. It writes after each catch-up and after live
 //! changes, once the parts have stayed the same for a few seconds, so a
-//! burst of changes from a teammate or an import makes one write, not one
-//! per change. Searching changes nothing, so it never writes. While live,
+//! burst of changes from a teammate makes one write, not one per change. Searching changes nothing, so it never writes. While live,
 //! it also writes again now and then, so the "as of" time stays close.
 //!
 //! Signing out and removing the team delete the file. Each write and each

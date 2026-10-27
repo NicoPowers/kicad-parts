@@ -94,8 +94,8 @@ impl TeamCatalog {
     /// current ones.
     ///
     /// Searching asks for these on every keystroke, so they are made again
-    /// only when the team catalog moved on (a new Change, a finished import
-    /// or another session), and reading them makes no request.
+    /// only when the team catalog moved on (a new Change, a catch-up or
+    /// another session), and reading them makes no request.
     pub fn last_known_parts(&self, team: &str, label: &str) -> Option<Arc<KnownParts>> {
         let source = self.source();
         // The version is read before the values: values newer than their

@@ -541,7 +541,7 @@ impl CatalogBrowser {
             &PreviewRequest {
                 ipn: ipn.to_owned(),
                 kind,
-                field: Some(field.to_owned()),
+                field: field.to_owned(),
                 team_revision: None,
                 selection: None,
             },
@@ -745,7 +745,7 @@ impl CatalogBrowser {
                      revision this part uses."
                 );
                 let request = PreviewRequest {
-                    field: Some(reference),
+                    field: reference,
                     ..request.clone()
                 };
                 return self.local_preview(&request, install, Some(note));
@@ -773,7 +773,7 @@ impl CatalogBrowser {
             }
             TeamCad::Library { reference, .. } => {
                 let request = PreviewRequest {
-                    field: Some(reference),
+                    field: reference,
                     ..request.clone()
                 };
                 return self.local_preview(&request, install, None);
@@ -810,7 +810,7 @@ impl CatalogBrowser {
             ),
             Err(PreviewError::StoredBytes(message)) => {
                 let request = PreviewRequest {
-                    field: Some(reference.clone()),
+                    field: reference.clone(),
                     ..request.clone()
                 };
                 let note = self.fallback_note(kind, &stored, install, &message);
@@ -858,15 +858,7 @@ impl CatalogBrowser {
         note: Option<String>,
     ) -> PreviewOutcome {
         let (ipn, kind) = (request.ipn.as_str(), request.kind);
-        let Some(field) = &request.field else {
-            return problem(
-                kind,
-                PreviewProblemReason::UnknownPart,
-                None,
-                format!("Part {ipn} is not in the catalog."),
-            );
-        };
-        let field = Some(field.trim().to_owned()).filter(|field| !field.is_empty());
+        let field = Some(request.field.trim().to_owned()).filter(|field| !field.is_empty());
         // Footprint fields may list `;`-separated alternatives; symbol
         // fields hold exactly one reference.
         let choices = match (kind, field.as_deref()) {

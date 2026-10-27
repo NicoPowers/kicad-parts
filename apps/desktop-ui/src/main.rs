@@ -209,7 +209,7 @@ fn App() -> impl IntoView {
 
     // The library check, for people who can edit: worked out by the app
     // once per change of the team catalog (who is signed in, a new Change
-    // or a finished import), never per keystroke.
+    // or a catch-up), never per keystroke.
     let check_team = list_teams.library_check.team;
     let check_position = Memo::new(move |_| {
         let team = check_team.get()?;
@@ -1057,7 +1057,7 @@ fn PartPanel(
         symbol.set(Load::Loading);
         footprint.set(Load::Loading);
         let (team_revision, symbol_field, footprint_field) = match source {
-            Some((revision, symbol, footprint)) => (Some(revision), Some(symbol), Some(footprint)),
+            Some((revision, symbol, footprint)) => (Some(revision), symbol, footprint),
             // Wait for its team revision while the team can be read, so the
             // part never shows "not in the catalog" first. Offline, or if
             // it cannot be read, draw its list row's symbol and footprint.
@@ -1076,8 +1076,8 @@ fn PartPanel(
                 };
                 (
                     None,
-                    Some(symbol.unwrap_or_default()),
-                    Some(footprint.unwrap_or_default()),
+                    symbol.unwrap_or_default(),
+                    footprint.unwrap_or_default(),
                 )
             }
         };
@@ -1688,9 +1688,7 @@ fn PreviewProblemView(problem: PreviewProblem) -> impl IntoView {
             format!("kicad-cli cannot export this {noun}"),
             format!("Rename the {noun} in its library so the name does not begin with '-'."),
         ),
-        PreviewProblemReason::UnknownPart | PreviewProblemReason::Internal => {
-            (format!("The {noun} preview failed"), String::new())
-        }
+        PreviewProblemReason::Internal => (format!("The {noun} preview failed"), String::new()),
     };
     // A missing assignment is not an error, and a KiCad problem is already
     // announced by the panel at the top; neither needs another alert.

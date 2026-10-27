@@ -124,8 +124,8 @@ pub const EXCLUDE_FROM_BOM: &str = "Exclude from BOM";
 /// The place of the Symbol column in a row.
 pub const SYMBOL_COLUMN: usize = 3;
 
-/// Category fields shown on the schematic when a part is placed, as
-/// `database/#gplm.kicad_dbl` shows them. Other category fields are only
+/// Category fields shown on the schematic when a part is placed: a
+/// regulator shows its voltage and current. Other category fields are only
 /// listed in the chooser.
 const SHOWN_ON_ADD: [(&str, &str); 2] = [("reg", "Voltage"), ("reg", "Current")];
 
@@ -990,8 +990,8 @@ fn link(
 }
 
 /// The categories whose value, the text a schematic shows beside the
-/// symbol, is a field other than `Value`, as `database/#gplm.kicad_dbl`
-/// maps them: a crystal shows its frequency, not its MPN.
+/// symbol, is a field other than `Value`: a variable resistor shows its
+/// resistance, an LED its color and a crystal its frequency, not the MPN.
 const VALUE_FIELDS: [(&str, &str); 3] = [
     ("rvr", "Resistance"),
     ("opt", "Color"),
