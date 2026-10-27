@@ -389,7 +389,7 @@ describe('team catalog: the part list stays put when a teammate saves', () => {
       teammateToken,
       'RES-0000-1800',
       { Description: 'RES 180 OHM 1% 1/10W 0603' },
-      'Back to the CSV',
+      'Back to the old MPN',
       { mpn: 'RC0603FR-0718KL' },
     );
     await waitForText(browser, '#result-count', '1 matching part');

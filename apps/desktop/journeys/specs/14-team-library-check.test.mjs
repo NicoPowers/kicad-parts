@@ -3,8 +3,7 @@
 // it yet) and changed a footprint the Catalog has to link a 3D model on
 // their own drive. Signed in as someone who can edit, a short line under
 // the search box says so; it opens the Library check view, grouped as To
-// fix and Not in the Catalog yet. (Clean-up lists only old problems of the
-// CSV catalog, and Did you mean only names in its CSV files.)
+// fix and Not in the Catalog yet.
 // Choosing a part closes it; someone who can only view sees no line.
 
 import assert from 'node:assert/strict';

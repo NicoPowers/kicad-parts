@@ -163,9 +163,7 @@ describe('one part list over several teams', () => {
     assert.equal(await (await browser.$('label[for="group-by"]')).getText(), 'Group by');
     assert.equal(await (await browser.$('#group-by')).getValue(), 'category');
     await choose('group-by', 'team');
-    // One section per team, in the order of the Teams menu. The sample
-    // library has no CSV files, so there is no section of their parts.
-    // Each team's section is named by its code once the team's settings
+    // One section per team, in the order of the Teams menu. Each team's section is named by its code once the team's settings
     // are read.
     await browser.waitUntil(
       async () => (await sections()).map((section) => section.replace(/ \(.*/, '')).join() === 'AC,BE',

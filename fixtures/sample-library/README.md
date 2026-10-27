@@ -1,8 +1,8 @@
 # The sample library
 
-A small, made-up KiCad 10 library for tests. Every test of a feature that
-stays after the CSV catalog goes (kicad-parts-e257) reads this library, never
-`database/`, `symbols/`, `footprints/` or `3d-models/`.
+A small, made-up KiCad 10 library for tests, journeys and trying the app.
+Tests and journeys use it as the local library folder and as a linked
+library repo, and add its parts to their team servers.
 
 It is laid out like a library repo, so a test can link it to a team as a
 client's repo:

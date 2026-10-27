@@ -1,5 +1,7 @@
 # Edits made in the app win over CSV imports
 
+Superseded by ADR 0024 (2026-10-26): the CSV import is gone, so nothing imports over an edit.
+
 A CSV import never overwrites an edit made in the app, so a later import can't quietly undo someone's work. A part's details follow the CSV only while its current details came from an import, and the same goes for its CAD. When the CSV disagrees with an edit, the import records an import problem. A person can then accept the CSV's values field by field in a CSV review. Decided 2026-10-10.
 
 ## Consequences

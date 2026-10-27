@@ -1,5 +1,7 @@
 # A library source profile says where a repo keeps its libraries
 
+Amended by ADR 0024 (2026-10-26): the import and the pilots are gone; our layout is read from the local library folder.
+
 The person designs for many clients, and each client is a team with a library repo (ADR 0021). Each client's repo is laid out its own way. Models sit next to footprints or in a folder of their own, lib tables are in the repo or not, path variables have the client's own names, and some have a `.kicad_dbl`. Later work browses, checks, writes and imports these libraries (kicad-parts-02fb, kicad-parts-ff3c, kicad-parts-92cb). So the app keeps, for each repo, a library source profile: where its libraries, 3D models and path variables are. Decided 2026-10-24 by best judgement (kicad-parts-e9a3, which took over kicad-parts-e83f), and changed the same day after review.
 
 - **The profile.** For one repo at one commit: its symbol libraries and footprint libraries (nickname and path in the repo), its model folders, its path variables (name and the repo folder each points to) and its `.kicad_dbl` files. Paths are repo paths with `/`, matched with exact case, so a profile means the same on Windows, macOS and Linux. The type is `SourceProfile` in `crates/kicad-integration/src/library_source.rs`, which also holds the only helpers that turn repo paths into plain paths and paths on this computer.

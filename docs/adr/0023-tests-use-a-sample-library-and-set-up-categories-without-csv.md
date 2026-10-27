@@ -1,5 +1,7 @@
 # Tests use a sample library and set up categories without a CSV file
 
+Amended by ADR 0024 (2026-10-26): the CSV catalog is gone, and a new team server starts with the starting categories.
+
 The CSV catalog (`database/g-*.csv`, `#gplm.kicad_dbl`, `symbols/`, `footprints/`, `3d-models/`) is about to be deleted (kicad-parts-e257). Until now most tests and journeys read it, so deleting it would break tests of features that stay. Decided 2026-10-26 by best judgement (kicad-parts-fbc2).
 
 - **A sample library.** `fixtures/sample-library` holds a small made-up library: 6 symbol libraries, 4 footprint libraries, 2 of our own 3D models, lib tables, and `parts.toml` with 7 categories and 16 parts. Every file is real KiCad 10, saved by `kicad-cli`. Each part is there for a reason, which the folder's README lists. It sits beside `fixtures/import`, the repo's other fixture folder, not in a new `tests/fixtures`.

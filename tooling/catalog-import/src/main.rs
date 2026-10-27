@@ -448,13 +448,7 @@ mod tests {
         assert_eq!(options(""), Some(Then::WaitForEnter));
         assert_eq!(options("--json"), Some(Then::PrintJson));
         assert_eq!(options("--desktop"), Some(Then::OpenDesktop));
-        for refused in [
-            "--json --desktop",
-            "--other",
-            "g-res",
-            "--sample",
-            "--csv g-res",
-        ] {
+        for refused in ["--json --desktop", "--other", "g-res", "--sample"] {
             assert!(options(refused).is_none(), "{refused}");
         }
     }
@@ -496,13 +490,7 @@ mod tests {
                 PathBuf::from("out")
             ))
         );
-        for refused in [
-            "",
-            "--csv g-res out",
-            "a b",
-            "--server http://x out",
-            "--json out",
-        ] {
+        for refused in ["", "a b", "--server http://x out", "--json out"] {
             assert_eq!(options(refused), None, "{refused}");
         }
     }

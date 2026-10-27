@@ -29,7 +29,7 @@ What a part is: its category, description, value, datasheet and manufacturer par
 _Avoid_: semantic change, attributes
 
 **Supplier data**:
-Supplier part numbers and prices. They belong to Procurement and never create a revision; the Catalog only keeps them as part of what each CSV import read.
+Supplier part numbers and prices. They belong to Procurement and never create a revision.
 _Avoid_: Operational Fact
 
 **Revision**:
@@ -45,7 +45,7 @@ A revision hidden from the app and set apart in KiCad's part chooser, under Arch
 _Avoid_: withdrawn, deleted, retired, obsolete, restore
 
 **Change**:
-One saved update with a reason, such as an import, an edit, an archive or a CSV review. It can change part details and add or archive revisions of several parts and CAD items at once.
+One saved update with a reason, such as an edit, a new part, an archive or the starting categories. It can change part details and add or archive revisions of several parts and CAD items at once.
 _Avoid_: Change Set, commit, batch, transaction
 
 **Audit entry**:
@@ -55,8 +55,12 @@ _Avoid_: Audit Event, log entry
 ### Grouping and sourcing
 
 **Category**:
-A group of similar parts that share the same fields, such as resistors. It is the only grouping people see: KiCad's part chooser shows one group per category, and the symbols the team makes are grouped the same way. Footprints are grouped by package instead, because one package serves many categories, and each 3D model goes with its footprint. Each CSV file of the CSV catalog makes one category when it is imported; the team server's administrator can also set up a category without a CSV file. A part's category is part of its details, so changing it never changes the part's IPN. A supplier's category is only a suggestion until someone confirms it.
+A group of similar parts that share the same fields, such as resistors. It is the only grouping people see: KiCad's part chooser shows one group per category, and the symbols the team makes are grouped the same way. Footprints are grouped by package instead, because one package serves many categories, and each 3D model goes with its footprint. A new team starts with the starting categories; the team server's administrator can set up more. A part's category is part of its details, so changing it never changes the part's IPN. A supplier's category is only a suggestion until someone confirms it.
 _Avoid_: Catalog Category, type, class, IPN prefix
+
+**Starting categories**:
+The categories every new team starts with, such as resistors and capacitors, each with its fields and the clues that guess it.
+_Avoid_: default categories, built-in categories
 
 **Remembered match**:
 A clue that a person confirmed for a category when they chose a part's category, such as its footprint family or manufacturer. The category guess for new parts uses them; nothing else makes one.
@@ -77,7 +81,7 @@ A KiCad library that someone added to KiCad on their own computer, listed in the
 _Avoid_: user library, personal library, third-party library
 
 **Source**:
-Where a revision's data came from, such as a CSV file and row, the file someone chose in the app, the files someone downloaded for a new part and the site they came from, the file in our libraries and the commit it was read from, or the installed library and file a CAD item was copied from. The app records that commit; the team server checks the bytes it stores, not the commit. A copy from an installed library counts as made in the app, so an import never replaces it.
+Where a revision's data came from, such as the file someone chose in the app, the files someone downloaded for a new part and the site they came from, the file in our libraries and the commit it was read from, or the installed library and file a CAD item was copied from. The app records that commit; the team server checks the bytes it stores, not the commit.
 _Avoid_: Provenance, origin
 
 **License**:
@@ -94,26 +98,23 @@ _Avoid_: Qualification, approval, sign-off
 A setting that blocks changes to a part or CAD item. To change it, someone must remove the protection and give a reason.
 _Avoid_: Engineering Protection, lock, freeze
 
-### Importing
+### Our libraries
 
-**CSV catalog**:
-The original CSV files and CAD libraries this product imports from. Engineers may still draw symbols and footprints in KiCad in its libraries; the library check finds them.
-_Avoid_: Legacy Catalog, old database, source of truth
-
-**Import problem**:
-Something an import could not handle, such as a missing symbol. The import records it instead of dropping it.
-_Avoid_: Import Diagnostic, warning, error
+**Local library folder**:
+The folder on this computer holding our own KiCad libraries, which the library check, Add part from our libraries and the 3D view read. Until a team's linked library repo becomes it, none is set unless someone chooses one.
+_Avoid_: catalog root, CSV catalog folder, library path
 
 **Library check**:
-A comparison of the CSV catalog's libraries with the Catalog: what is in them but not in the Catalog yet, and which 3D model links work only on one computer or name a missing file. Its errors stop an import, and Add part or Edit part, until they are fixed; old problems of footprints the Catalog already has unchanged are only clean-up.
+A comparison of the local library folder's libraries with the Catalog: what is in them but not in the Catalog yet, and which 3D model links work only on one computer or name a missing file. Its errors stop Add part or Edit part with those items until they are fixed; old problems of footprints the Catalog has unchanged are only clean-up.
 _Avoid_: lint, audit, validation
 
-**CSV review**:
-A person's answer to new CSV values that an import did not apply because the part, or a symbol or footprint it uses, was edited in this app: they accept some of the CSV's values and keep the rest, or keep all the current values. It covers what the CSV said, so the app does not ask again about the same CSV values; it asks again when the CSV changes.
-_Avoid_: merge, sync, override
+### Removed terms
+
+**CSV catalog**, **CSV review**, **Import problem**, **Import run**:
+Removed on 2026-10-26 with the CSV files the product once imported from (ADR 0024). Do not use them for new work.
 
 ### Testing
 
 **Sample library**:
-A small made-up library in `fixtures/sample-library`: real KiCad 10 symbols, footprints and 3D models, and the parts that use them. Tests and journeys use it instead of the CSV catalog, and set up team servers from it without a CSV import.
+A small made-up library in `fixtures/sample-library`: real KiCad 10 symbols, footprints and 3D models, and the parts that use them. Tests and journeys use it as the local library folder, and add its parts to their team servers.
 _Avoid_: test catalog, demo data, mock library

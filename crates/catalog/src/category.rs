@@ -120,7 +120,7 @@ pub struct StartingCategory {
 }
 
 /// The 21 categories a new team server starts with, with their fields and
-/// the rules each starts with. They were the CSV catalog's categories. `U`
+/// the rules each starts with. They came from the old CSV catalog. `U`
 /// is in no list: it says only that a part is a chip. A team's own parts
 /// are the examples the guess learns from, so they need no rules.
 ///
@@ -472,8 +472,7 @@ mod tests {
         assert_eq!(unknown.name, "misc-2");
         assert_eq!(unknown.ipn_prefix, "");
         assert_eq!(unknown.rules, CategoryRules::default());
-        // Every code in the table is unique and is the code of a CSV file
-        // name, and no table names U.
+        // Every code in the table is unique, and no table names U.
         let mut codes: Vec<&str> = STARTING_CATEGORIES.iter().map(|start| start.code).collect();
         codes.sort_unstable();
         codes.dedup();

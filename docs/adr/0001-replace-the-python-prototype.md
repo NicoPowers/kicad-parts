@@ -1,5 +1,7 @@
 # Replace the Python prototype with a Rust, Tauri and Leptos app
 
+Amended by ADR 0024 (2026-10-26): the CSV catalog, its fixture and the zero-loss check are gone.
+
 The first version of this product was a Python and PyQt prototype. We rebuilt it in Rust, with Tauri for the desktop app and Leptos for its screens, instead of porting the prototype feature by feature. The CSV catalog and its CAD files are inputs to a checked import, not behaviour the new app has to copy.
 
 ## Considered options

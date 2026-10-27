@@ -31,7 +31,7 @@ fn commit_holding_with(
     files: &[(&str, &[u8])],
 ) -> Result<String, String> {
     let not_a_repository = || {
-        "The local library folder is not the top folder of a git repository, so the Catalog cannot record which commit the files came from. Add the part from a checkout of the CSV catalog.".to_owned()
+        "The local library folder is not the top folder of a git repository, so the Catalog cannot record which commit the files came from. Add the part from a checkout of the team's library repo.".to_owned()
     };
     let top = match git(program, root, &["rev-parse", "--show-toplevel"])? {
         Ok(top) => top,
@@ -94,7 +94,7 @@ fn commit_holding_with(
         .any(|(path, bytes)| converts_line_endings(program, root, path, bytes))
     {
         problem.push_str(
-            " This repository changes line endings when files are committed (git's core.autocrlf), so a file with Windows line endings never matches its commit. Add \"/symbols/** -text\", \"/footprints/** -text\" and \"/3d-models/** -text\" to .gitattributes, as the CSV catalog's repository does, then commit the files again.",
+            " This repository changes line endings when files are committed (git's core.autocrlf), so a file with Windows line endings never matches its commit. Add \"/symbols/** -text\", \"/footprints/** -text\" and \"/3d-models/** -text\" to .gitattributes, then commit the files again.",
         );
     }
     Err(problem)

@@ -1,5 +1,7 @@
 # One part list over every team
 
+Amended by ADR 0024 (2026-10-26): the CSV catalog is gone, so the list holds only team parts.
+
 The person designs for many clients in one day, and each client is its own team on its own team server (ADR 0018). Switching the part list from team to team got in the way. So the part list now shows every signed-in team's parts at once, with one search over all of them. No team is "the shown team" any more. Decided 2026-10-18 by the user, built 2026-10-23 (kicad-parts-8a71).
 
 - **A part is its team and its IPN.** Two teams may both have RES-0000-0470, and each is its own row. Selection, list focus, previews, Edit part, archive and CSV reviews all name the part by its team's server address and its IPN.

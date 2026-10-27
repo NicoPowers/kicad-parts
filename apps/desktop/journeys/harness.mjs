@@ -17,8 +17,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(here, '../../..');
 /**
  * The sample library (fixtures/sample-library, kicad-parts-fbc2): every
- * journey reads it as our own libraries, never the repository's CSV
- * catalog. Its parts.toml is what `startTeamServer` gives a team.
+ * journey reads it as our own libraries. Its parts.toml is what
+ * `startTeamServer` gives a team.
  */
 export const sampleLibrary = path.join(repoRoot, 'fixtures', 'sample-library');
 export const outDir = process.env.JOURNEY_OUT ?? path.join(repoRoot, 'target', 'journeys', 'latest');

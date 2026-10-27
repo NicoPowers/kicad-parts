@@ -71,10 +71,6 @@ fn fixture() -> Fixture {
     let root = dir.path().to_path_buf();
     let catalog = root.join("catalog");
     write(
-        &catalog.join("database").join("g-res.csv"),
-        "IPN,MPN,Description,Symbol,Footprint\nRES-1,RC1,Resistor one,g-pas:R_US,g-Resistor_SMD:R_0603\n",
-    );
-    write(
         &catalog.join("symbols").join("g-pas.kicad_sym"),
         &library(&[
             symbol("R_US", "R", "R_*", "g-Resistor_SMD:R_0603", &["1", "2"]),

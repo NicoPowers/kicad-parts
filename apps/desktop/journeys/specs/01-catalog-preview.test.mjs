@@ -47,8 +47,7 @@ describe('catalog search with exact KiCad previews', () => {
   it("opens on the team's parts with KiCad 10 detected", async () => {
     await waitForText(browser, '#result-count', '16 matching parts');
     await waitForText(browser, '.kicad-settings > .kicad-badge-ready', /^KiCad 10\.\d+\.\d+$/);
-    // The sample library has no CSV files, so the header says nothing of
-    // them.
+    // With one team, the header has no summary line.
     assert.equal(await browser.execute(() => document.querySelector('.catalog-summary')), null);
     assert.equal(await textOf(browser, '.empty-state h2'), 'No part selected');
     // The headings people see; a closed header menu shows none of its own.

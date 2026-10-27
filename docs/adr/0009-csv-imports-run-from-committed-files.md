@@ -1,5 +1,7 @@
 # CSV imports run only from committed files, and each run records what the CSV said
 
+Superseded by ADR 0024 (2026-10-26): the CSV import is gone.
+
 The import refuses files that differ from the last commit, because "commit first" is one rule that is easy to explain. It also refuses a checkout older than the latest import run. Each run records the files it read with their hashes, the bytes of every row, and where each part ended up. So the latest run always holds what the CSV says now, and `tooling/catalog-import/src/zero_loss.rs` can rebuild the CSV from it. Decided 2026-10-10.
 
 ## Consequences

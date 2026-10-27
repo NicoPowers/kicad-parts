@@ -219,8 +219,8 @@ describe('team catalog: add a part from our libraries', () => {
       document.querySelector('.part-fields').scrollTop = 0;
     });
     await assertAccessible(browser, '63-team-add-part-from-library');
-    // The commit ID changes with every change to the CSV catalog's files,
-    // and is checked above, so it is blanked out: each time it appears, its
+    // The commit ID changes with every commit to the repository, and is
+    // checked above, so it is blanked out: each time it appears, its
     // text goes in a span of its own for the screenshot.
     const commit = head.slice(0, 12);
     const wrapped = await browser.execute((id) => {
